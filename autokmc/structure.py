@@ -299,7 +299,7 @@ def build_surface(
     center_slab: bool = True,
     orthogonalise: bool = True,
     n_freeze_layers: int = 2,
-    composition_seed: int = 42,
+    composition_seed: int = 69,
     calculator=None,
     fmax: float = 0.05,
     logfile: Optional[str] = None,
