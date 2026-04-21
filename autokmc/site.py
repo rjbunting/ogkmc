@@ -280,6 +280,115 @@ def _iso_prefilter_key(g: nx.Graph) -> tuple:
 
 
 # ---------------------------------------------------------------------------
+# Adaptive probe grid
+# ---------------------------------------------------------------------------
+
+def _adaptive_probe_grid(
+    surf_pos: np.ndarray,
+    surf_rcov: np.ndarray,
+    anchor_rcov_list: list[float],
+    bond_factor: float,
+    grid_spacing: float,
+    surf_z_max: float,
+    cell: np.ndarray,
+) -> np.ndarray:
+    """Generate a probe grid adapted to local covalent radii.
+
+    Instead of a uniform rectangular grid, probe points are placed on
+    hemispherical shells centred on each surface atom.  For every
+    (surface atom *s*, anchor covalent radius *r_a*) pair two shells are
+    sampled:
+
+    * **ideal shell** at radius  ``r_a + r_s``   (the expected bond length)
+    * **cutoff shell** at radius ``bond_factor * (r_a + r_s)``
+
+    The angular spacing of each shell is chosen so that the arc-length
+    between adjacent sample points is approximately *grid_spacing*.
+
+    Points below ``surf_z_max + min(anchor_rcov) * 0.5`` are discarded.
+    All surviving points are PBC-wrapped into the primary cell and
+    spatially deduplicated with tolerance ``grid_spacing / 2`` using a
+    ``cKDTree``.
+
+    Parameters
+    ----------
+    surf_pos : (S, 3) ndarray
+    surf_rcov : (S,) ndarray
+    anchor_rcov_list : list of float
+        Covalent radii of adsorbate atoms that may act as the grid anchor.
+    bond_factor : float
+    grid_spacing : float
+        Target arc-length spacing between probe points (Å).
+    surf_z_max : float
+        Maximum z-coordinate of the top surface layer.
+    cell : (3, 3) ndarray
+
+    Returns
+    -------
+    grid_pts : (G, 3) ndarray
+        Deduplicated probe positions PBC-wrapped into the primary cell.
+    """
+    from scipy.spatial import cKDTree
+
+    cell_inv = np.linalg.inv(cell)
+    z_min = surf_z_max + min(anchor_rcov_list) * 0.5
+
+    raw: list[np.ndarray] = []
+
+    for si in range(len(surf_pos)):
+        ps  = surf_pos[si]
+        rs  = float(surf_rcov[si])
+
+        for r_a in anchor_rcov_list:
+            r_a = float(r_a)
+            d_ideal  = r_a + rs
+            d_cutoff = bond_factor * d_ideal
+
+            for radius in (d_ideal, d_cutoff):
+                # Angular spacing: arc-length ~ grid_spacing
+                n_theta = max(2, int(np.ceil((np.pi / 2) * radius / grid_spacing)))
+                for i_t in range(n_theta + 1):
+                    theta = (np.pi / 2) * i_t / n_theta   # 0 = top, π/2 = equator
+                    rho   = radius * np.sin(theta)         # xy-plane offset
+                    dz    = radius * np.cos(theta)
+                    z     = ps[2] + dz
+                    if z < z_min:
+                        continue
+                    n_phi = max(1, int(np.ceil(2 * np.pi * rho / grid_spacing))) \
+                            if rho > 1e-6 else 1
+                    for i_p in range(n_phi):
+                        phi = 2 * np.pi * i_p / n_phi
+                        pt = np.array([
+                            ps[0] + rho * np.cos(phi),
+                            ps[1] + rho * np.sin(phi),
+                            z,
+                        ])
+                        # PBC-wrap xy into primary cell via fractional coords
+                        frac = pt @ cell_inv
+                        frac[:2] = frac[:2] % 1.0
+                        raw.append(frac @ cell)
+
+    if not raw:
+        return np.empty((0, 3))
+
+    pts = np.array(raw)
+
+    # Spatial deduplication with tolerance grid_spacing / 2
+    tol  = grid_spacing / 2.0
+    tree = cKDTree(pts)
+    used = np.zeros(len(pts), dtype=bool)
+    keep: list[int] = []
+    for i in range(len(pts)):
+        if used[i]:
+            continue
+        keep.append(i)
+        for j in tree.query_ball_point(pts[i], tol):
+            used[j] = True
+
+    return pts[keep]
+
+
+# ---------------------------------------------------------------------------
 # Single-atom site finding
 # ---------------------------------------------------------------------------
 
@@ -304,22 +413,22 @@ def _find_sites_single(surface_graph: nx.Graph, reactant: Reactant,
     d_min = r_cov_ads * 0.5
     d_max = bond_factor * (r_cov_ads + surf_rcov.max())
 
-    # Build grid
-    a_len = np.linalg.norm(cell[0]); b_len = np.linalg.norm(cell[1])
-    fa = np.linspace(0, 1, max(1, int(np.ceil(a_len / grid_spacing))), endpoint=False)
-    fb = np.linspace(0, 1, max(1, int(np.ceil(b_len / grid_spacing))), endpoint=False)
-    gz = np.arange(surf_z_max + d_min, surf_z_max + d_max + grid_spacing, grid_spacing)
-    gfa, gfb, ggz = np.meshgrid(fa, fb, gz, indexing="ij")
-    probe_xy  = gfa.ravel()[:, None] * cell[0, :2] + gfb.ravel()[:, None] * cell[1, :2]
-    probe_pts = np.hstack([probe_xy, ggz.ravel()[:, None]])
+    # ── Adaptive probe grid ────────────────────────────────────────────────
+    # Points are placed on hemispherical shells centred on each surface atom
+    # at radii tuned to (r_ads + r_surf) rather than a flat uniform grid.
+    probe_pts = _adaptive_probe_grid(
+        surf_pos, surf_rcov, [r_cov_ads],
+        bond_factor, grid_spacing, surf_z_max, cell,
+    )
 
-    # Distance matrix
+    # Distance matrix between probe points and surface atoms (with PBC)
     cell_inv = np.linalg.inv(cell)
-    dv = surf_pos[None] - probe_pts[:, None]
+    dv    = surf_pos[None] - probe_pts[:, None]
     dfrac = dv @ cell_inv
     dfrac[:, :, :2] -= np.round(dfrac[:, :, :2])
     d_mat = np.sqrt(((dfrac @ cell) ** 2).sum(axis=2))
 
+    # Keep only points within the bonding z-window
     keep = (d_mat.min(axis=1) >= d_min) & (d_mat.min(axis=1) <= d_max)
     probe_pts = probe_pts[keep]; d_mat = d_mat[keep]
 
@@ -362,19 +471,31 @@ def _find_sites_single(surface_graph: nx.Graph, reactant: Reactant,
             class_keys.append(fkey)
             iso_ids.append(len(class_reps) - 1)
 
-    # Geometric optimisation
+    # Geometric optimisation — one representative per iso-class only
     surf_idx_to_local = {int(surf_indices[k]): k for k in range(len(surf_indices))}
     z_lo = float(surf_z_max) + d_min
     z_hi = float(surf_z_max) + d_max
-    opt_pts: list[np.ndarray] = []
-    for pt0, conn in zip(unique_pts, unique_conns):
-        lids = [surf_idx_to_local[g] for g in sorted(conn)]
+
+    # Find the index of the first member of each iso-class
+    iso_ids_arr = np.array(iso_ids)
+    n_classes   = int(iso_ids_arr.max()) + 1 if len(iso_ids_arr) else 0
+    class_rep_idx = {cid: int(np.where(iso_ids_arr == cid)[0][0])
+                     for cid in range(n_classes)}
+
+    # Optimise one representative per class, then copy to all members
+    class_opt_pts: dict[int, np.ndarray] = {}
+    for cid, rep_i in class_rep_idx.items():
+        pt0  = unique_pts[rep_i]
+        conn = unique_conns[rep_i]
+        lids       = [surf_idx_to_local[g] for g in sorted(conn)]
         conn_pos   = surf_pos[lids]
         bond_tgts  = bond_targets_all[lids]
         nb_lids    = [k for k in range(len(surf_indices)) if k not in lids]
         nonbond    = surf_pos[nb_lids] if nb_lids else np.empty((0, 3))
-        opt_pts.append(_opt_single(pt0, conn_pos, bond_tgts, nonbond,
-                                   cell, z_lo, z_hi))
+        class_opt_pts[cid] = _opt_single(pt0, conn_pos, bond_tgts, nonbond,
+                                         cell, z_lo, z_hi)
+
+    opt_pts = [class_opt_pts[cid] for cid in iso_ids]
 
     return opt_pts, unique_conns, iso_ids, class_reps, surf_rcov, surf_idx_to_local, bond_targets_all
 
@@ -383,9 +504,31 @@ def _find_sites_single(surface_graph: nx.Graph, reactant: Reactant,
 # Multi-atom site finding
 # ---------------------------------------------------------------------------
 
+def _auto_n_orientations(ads_pos: np.ndarray, grid_spacing: float) -> int:
+    """Compute SO(3) sample count consistent with *grid_spacing*.
+
+    A rotation by angle δ displaces the furthest adsorbate atom (at radius
+    *R_max* from the molecular centroid) by ``R_max × δ``.  Requiring
+    ``δ ≤ grid_spacing / R_max`` to not miss any connectivity transition
+    gives::
+
+        N ≈ (π × R_max / grid_spacing)²
+
+    This ties orientation density to the same length-scale as the position
+    grid: larger molecules automatically receive more orientations, and
+    tightening *grid_spacing* consistently increases both.
+    Returns 1 for atomic / zero-extent adsorbates.
+    """
+    centroid = ads_pos.mean(axis=0)
+    r_max = float(np.linalg.norm(ads_pos - centroid, axis=1).max())
+    if r_max < 1e-6:
+        return 1
+    return max(1, int(np.ceil((np.pi * r_max / grid_spacing) ** 2)))
+
+
 def _find_sites_multi(surface_graph: nx.Graph, reactant: Reactant,
                        bond_factor: float, grid_spacing: float,
-                       n_orientations: int, verbose: bool) -> tuple:
+                       n_orientations: int | None, verbose: bool) -> tuple:
     """Returns (opt_positions_list, unique_conns, iso_ids, class_reps).
 
     Optimisations applied
@@ -418,6 +561,15 @@ def _find_sites_multi(surface_graph: nx.Graph, reactant: Reactant,
     ads_rcov  = np.array([d["covalent_radius"] for _, d in ads_nodes])
     N_ads     = len(ads_pos)
 
+    # Auto-compute orientations from molecule extent and grid_spacing if not given
+    if n_orientations is None:
+        n_orientations = _auto_n_orientations(ads_pos, grid_spacing)
+        if verbose:
+            centroid = ads_pos.mean(axis=0)
+            r_max = float(np.linalg.norm(ads_pos - centroid, axis=1).max())
+            print(f"  [multi] n_orientations auto={n_orientations} "
+                  f"(R_max={r_max:.3f} Å, grid_spacing={grid_spacing:.3f} Å)")
+
     surf_z_max = surf_pos[:, 2].max()
 
     # Pre-compute per-(ads_atom, surf_atom) bonding cutoffs: (N_ads, S)
@@ -433,19 +585,19 @@ def _find_sites_multi(surface_graph: nx.Graph, reactant: Reactant,
     # Sample SO(3) rotations once  →  (n_orient, 3, 3)
     rot_mats = _sample_so3(n_orientations)
 
-    # ── Grid for anchor placement ──────────────────────────────────────────
-    a_len = np.linalg.norm(cell[0]); b_len = np.linalg.norm(cell[1])
-    fa = np.linspace(0, 1, max(1, int(np.ceil(a_len / grid_spacing))), endpoint=False)
-    fb = np.linspace(0, 1, max(1, int(np.ceil(b_len / grid_spacing))), endpoint=False)
-    gz = np.arange(surf_z_max + d_min_global, surf_z_max + d_max_global + grid_spacing,
-                   grid_spacing)
-    gfa, gfb, ggz = np.meshgrid(fa, fb, gz, indexing="ij")
-    grid_xy  = gfa.ravel()[:, None] * cell[0, :2] + gfb.ravel()[:, None] * cell[1, :2]
-    grid_pts = np.hstack([grid_xy, ggz.ravel()[:, None]])   # (G, 3)
+    # ── Adaptive probe grid (replaces uniform xy+z grid) ──────────────────
+    # One combined grid covers all anchor cov radii: for each surface atom and
+    # each distinct anchor cov radius, shells at the ideal and cutoff bond
+    # distances are sampled.  This ensures anchor positions are always placed
+    # at physically meaningful distances regardless of which atom anchors.
+    grid_pts = _adaptive_probe_grid(
+        surf_pos, surf_rcov, list(ads_rcov),
+        bond_factor, grid_spacing, surf_z_max, cell,
+    )
 
     # ── Strategy 2: KD-tree xy pre-filter ─────────────────────────────────
-    # Build a tiled copy of surface atom xy positions to handle PBC neighbours
-    # in a simple way: tile ±1 images in x and y.
+    # (still applied on top of the adaptive grid to handle the tiled-image
+    #  case and any residual out-of-range points)
     cell_x = float(cell[0, 0]); cell_y = float(cell[1, 1])
     tile_offsets = np.array([[dx * cell_x, dy * cell_y]
                               for dx in (-1, 0, 1) for dy in (-1, 0, 1)])
@@ -529,16 +681,28 @@ def _find_sites_multi(surface_graph: nx.Graph, reactant: Reactant,
             class_keys.append(fkey)
             iso_ids.append(len(class_reps) - 1)
 
-    # Geometric optimisation (6 DOF per site)
+    # Geometric optimisation (6 DOF) — one representative per iso-class only
     surf_idx_to_local = {int(surf_indices[k]): k for k in range(len(surf_indices))}
-    opt_positions: list[np.ndarray] = []
-    for conn, anchor_idx, anchor0, rv0 in zip(
-            unique_conns, unique_anchors, unique_anchor_pos, unique_rotvec):
-        rel_pos = ads_pos - ads_pos[anchor_idx]
-        opt_ads = _opt_multi(anchor0, rv0, anchor_idx, rel_pos, ads_rcov,
-                             conn, surf_pos, surf_rcov, surf_idx_to_local,
-                             cell, z_lo, z_hi)
-        opt_positions.append(opt_ads)   # (N_ads, 3)
+
+    iso_ids_arr = np.array(iso_ids)
+    n_classes   = int(iso_ids_arr.max()) + 1 if len(iso_ids_arr) else 0
+    class_rep_idx = {cid: int(np.where(iso_ids_arr == cid)[0][0])
+                     for cid in range(n_classes)}
+
+    class_opt_pos: dict[int, np.ndarray] = {}
+    for cid, rep_i in class_rep_idx.items():
+        conn       = unique_conns[rep_i]
+        anchor_idx = unique_anchors[rep_i]
+        anchor0    = unique_anchor_pos[rep_i]
+        rv0        = unique_rotvec[rep_i]
+        rel_pos    = ads_pos - ads_pos[anchor_idx]
+        class_opt_pos[cid] = _opt_multi(
+            anchor0, rv0, anchor_idx, rel_pos, ads_rcov,
+            conn, surf_pos, surf_rcov, surf_idx_to_local,
+            cell, z_lo, z_hi,
+        )
+
+    opt_positions = [class_opt_pos[cid] for cid in iso_ids]
 
     return opt_positions, unique_conns, iso_ids, class_reps
 
@@ -893,7 +1057,7 @@ def find_adsorption_sites(
     *,
     bond_factor: float = 1.1,
     grid_spacing: float = 0.4,
-    n_orientations: int = 200,
+    n_orientations: int | None = None,
     calculator: Any = None,
     slab: Any = None,
     n_freeze_layers: int = 2,
@@ -916,9 +1080,12 @@ def find_adsorption_sites(
         Bonding cutoff multiplier.  Default 1.1.
     grid_spacing : float
         Surface grid spacing (Å).  Default 0.4 Å.
-    n_orientations : int
+    n_orientations : int or None
         Number of random SO(3) orientations for multi-atom adsorbates.
-        Default 200.
+        ``None`` (default) auto-computes the count from *grid_spacing* and
+        the molecule's geometric extent: ``N = ceil((π × R_max / grid_spacing)²)``,
+        where *R_max* is the furthest atom distance from the molecular centroid.
+        Pass an explicit integer to override.
     calculator : ASE calculator or None
         When provided (together with *slab*), one representative per
         iso-class is structurally relaxed with this calculator.
