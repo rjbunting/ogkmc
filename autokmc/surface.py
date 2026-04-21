@@ -4,7 +4,7 @@ autokmc.surface
 Utilities for identifying surface atoms in two geometries:
 
 * :func:`find_surface_atoms_raycasting`
-    Top-surface slab classification via PBC-safe mesh ray-casting.
+    Top-surface slab classification via atom-adaptive PBC-safe ray-casting.
 
 * :func:`find_surface_atoms_convexhull`
     Nanoparticle surface classification via convex-hull signed distance.
@@ -14,8 +14,9 @@ Utilities for identifying surface atoms in two geometries:
     and dispatches to the appropriate method.
 
 * :func:`tag_surface_atoms`
-    Writes the surface flag into ``atoms.arrays["surface"]`` (int8, 0/1)
-    so it is preserved as a column in ``.extxyz`` output.
+    Writes atom-type codes into ``atoms.arrays["surface"]`` (int8) so they
+    are preserved as a column in ``.extxyz`` output.
+    Encoding: 0 = bulk, 1 = surface, 2 = adsorbate.
 """
 
 from __future__ import annotations
@@ -32,18 +33,26 @@ from scipy.spatial import ConvexHull
 # ---------------------------------------------------------------------------
 
 def tag_surface_atoms(atoms: Atoms, surface_mask: np.ndarray) -> None:
-    """Store a per-atom surface flag in ``atoms.arrays["surface"]``.
+    """Store per-atom type codes in ``atoms.arrays["surface"]``.
 
-    Written as ``int8`` (0 = bulk, 1 = surface) so it appears as a plain
-    integer column when the structure is saved with :func:`ase.io.write`
-    to an ``.extxyz`` file.
+    Encoding (int8):
+
+    * ``0`` – bulk
+    * ``1`` – surface
+    * ``2`` – adsorbate
+
+    Written as ``int8`` so it appears as a plain integer column when the
+    structure is saved with :func:`ase.io.write` to an ``.extxyz`` file.
 
     Parameters
     ----------
     atoms:
         The :class:`~ase.Atoms` object to annotate **in-place**.
     surface_mask:
-        Boolean array of length ``len(atoms)``.
+        Boolean array of length ``len(atoms)``.  ``True`` → surface (1),
+        ``False`` → bulk (0).  Pass an all-True mask to mark every atom
+        as surface, or build the int8 array manually and assign it directly
+        to ``atoms.arrays["surface"]`` for adsorbate (2) labelling.
     """
     atoms.arrays["surface"] = surface_mask.astype(np.int8)
 
@@ -89,14 +98,13 @@ def has_pbc_connectivity(atoms: Atoms, nl_mult: float = 1.1) -> bool:
 
 def find_surface_atoms(
     atoms: Atoms,
-    lattice_constant: float,
     *,
-    nl_mult: float = 1.1,
+    nl_mult: float = 1.0,
     # ray-casting kwargs
     surf_radius_factor: float = 1.0,
-    mesh_spacing_factor: float = 0.25,
     which: str = "top",
-    chunk_size: int = 4096,
+    coverage_threshold: float = 0.7,
+    n_disc_sample: int = 10,
     # convex-hull kwargs
     hull_tol_factor: float = 0.5,
     return_diagnostics: bool = False,
@@ -114,11 +122,9 @@ def find_surface_atoms(
     Parameters
     ----------
     atoms : Atoms
-    lattice_constant : float
-        FCC lattice constant *a* in Å (used for mesh spacing in ray-casting).
     nl_mult : float
         Neighbour-list multiplier for the PBC-connectivity test.
-    surf_radius_factor, mesh_spacing_factor, which, chunk_size :
+    surf_radius_factor, which, coverage_threshold, n_disc_sample :
         Forwarded to :func:`find_surface_atoms_raycasting`.
     hull_tol_factor, return_diagnostics :
         Forwarded to :func:`find_surface_atoms_convexhull`.
@@ -139,11 +145,11 @@ def find_surface_atoms(
 
     if pbc:
         surface_mask, surface_indices = find_surface_atoms_raycasting(
-            atoms, lattice_constant,
+            atoms,
             surf_radius_factor=surf_radius_factor,
-            mesh_spacing_factor=mesh_spacing_factor,
             which=which,
-            chunk_size=chunk_size,
+            coverage_threshold=coverage_threshold,
+            n_disc_sample=n_disc_sample,
         )
         if tag_atoms:
             tag_surface_atoms(atoms, surface_mask)
@@ -151,7 +157,7 @@ def find_surface_atoms(
 
     else:
         result = find_surface_atoms_convexhull(
-            atoms, lattice_constant,
+            atoms,
             hull_tol_factor=hull_tol_factor,
             return_diagnostics=return_diagnostics,
         )
@@ -162,46 +168,48 @@ def find_surface_atoms(
 
 
 # ---------------------------------------------------------------------------
-# Method 1: PBC-safe mesh ray-casting  (slabs)
+# Method 1: Atom-adaptive PBC-safe ray-casting  (slabs)
 # ---------------------------------------------------------------------------
 
 def find_surface_atoms_raycasting(
     atoms: Atoms,
-    lattice_constant: float,
     *,
     surf_radius_factor: float = 1.0,
-    mesh_spacing_factor: float = 0.25,
     which: str = "top",
-    chunk_size: int = 4096,
+    coverage_threshold: float = 0.5,
+    n_disc_sample: int = 5,
 ):
-    """Classify surface atoms by PBC-safe mesh ray-casting.
+    """Classify surface atoms by per-atom disc-coverage ray-casting.
 
-    A fine 2-D grid of vertical rays is cast over the *xy* plane of the
-    periodic cell.  For each ray, the atom with the extreme *z* coordinate
-    whose PBC-wrapped xy-distance to the ray is within its covalent radius
-    (scaled by ``surf_radius_factor``) is recorded as a surface atom.
+    For each atom a small grid of rays is sampled uniformly over its capture
+    disc (a circle of radius ``surf_radius_factor * r_cov`` centred on its
+    projected *xy* position).  The atom is classified as a surface atom if
+    it wins at least ``coverage_threshold`` fraction of those rays — i.e. it
+    is the highest-*z* atom within capture range of at least that fraction of
+    the disc.
 
-    Using per-atom covalent radii makes the capture radius physically
-    meaningful for multi-element systems (e.g. Cu–Pd alloys): a Pd atom
-    gets a wider capture radius than a Cu atom.
+    This cleanly handles close-packed surfaces such as FCC(111): a top-layer
+    atom wins nearly all its disc rays, while a sub-surface atom only wins
+    rays that slip through the tiny inter-atom gaps, giving a coverage close
+    to zero.
 
     Parameters
     ----------
     atoms : Atoms
         Slab with an orthogonal or non-orthogonal periodic cell.
-    lattice_constant : float
-        Used **only** for mesh spacing (``a * mesh_spacing_factor``).
-        The capture radius comes from covalent radii, not from this value.
     surf_radius_factor : float
-        Per-atom xy capture radius = ``surf_radius_factor * r_cov(element)``.
-        Default 1.0 (one full covalent radius).
-    mesh_spacing_factor : float
-        Mesh spacing = ``lattice_constant * mesh_spacing_factor``.
-        Default 0.25.
+        Per-atom capture radius = ``surf_radius_factor * r_cov(element)``.
+        Default 1.0.
     which : {"top", "bottom", "both"}
         Which vacuum face to classify.  Default ``"top"``.
-    chunk_size : int
-        Mesh rows per NumPy batch (memory–speed trade-off).  Default 4096.
+    coverage_threshold : float
+        Minimum fraction of disc rays an atom must win to be labelled
+        surface.  Default 0.5 (must win at least half its disc).
+    n_disc_sample : int
+        Side length of the square grid used to sample each atom's disc.
+        A ``n_disc_sample × n_disc_sample`` grid is filtered to the
+        inscribed circle, giving roughly ``0.78 * n_disc_sample²`` rays
+        per atom.  Default 5 (≈ 19 rays/atom).
 
     Returns
     -------
@@ -214,59 +222,79 @@ def find_surface_atoms_raycasting(
     pos      = atoms.get_positions()          # (N, 3)
     cell     = np.array(atoms.get_cell())     # (3, 3)
     cell_inv = np.linalg.inv(cell)
-
-    mesh_spacing = lattice_constant * mesh_spacing_factor
+    N        = len(atoms)
 
     # Per-atom capture radius from covalent radii
     atomic_numbers = atoms.get_atomic_numbers()
     surf_radii = ASE_COVALENT_RADII[atomic_numbers] * surf_radius_factor  # (N,)
 
-    # 2-D mesh grid spanning the in-plane cell vectors
-    a_len = np.linalg.norm(cell[0])
-    b_len = np.linalg.norm(cell[1])
-    na    = max(1, int(np.ceil(a_len / mesh_spacing)))
-    nb    = max(1, int(np.ceil(b_len / mesh_spacing)))
-    fa    = np.linspace(0.0, 1.0, na, endpoint=False)
-    fb    = np.linspace(0.0, 1.0, nb, endpoint=False)
-    gfa, gfb = np.meshgrid(fa, fb, indexing="ij")
-    # Cartesian xy of mesh points (ignore z component of cell vectors)
-    mesh_xy = (gfa.ravel()[:, np.newaxis] * cell[0, :2]
-               + gfb.ravel()[:, np.newaxis] * cell[1, :2])  # (N_mesh, 2)
+    # Build a unit-disc sample pattern (normalised to [-1, 1]²)
+    g = np.linspace(-1.0, 1.0, n_disc_sample)
+    gx, gy = np.meshgrid(g, g)
+    unit_pts = np.stack([gx.ravel(), gy.ravel()], axis=1)          # (n², 2)
+    unit_pts = unit_pts[(unit_pts ** 2).sum(axis=1) <= 1.0]        # (K, 2) in disc
+    K = len(unit_pts)
 
-    # Fractional xy of all atoms for PBC wrapping
-    frac_xy = (pos @ cell_inv)[:, :2]   # (N, 2)
+    # Each atom i contributes K rays: pos[i,:2] + surf_radii[i] * unit_pts
+    # Shape: (N, K, 2) → (N*K, 2)
+    rays_xy = (pos[:, np.newaxis, :2]
+               + surf_radii[:, np.newaxis, np.newaxis] * unit_pts[np.newaxis, :, :])
+    rays_xy    = rays_xy.reshape(-1, 2)                            # (N*K, 2)
 
-    n_mesh = len(mesh_xy)
-    z_vals = pos[:, 2]
-    surface_atom_set: set[int] = set()
+    # Convert ray origins to fractional coordinates (for PBC wrapping)
+    rays_frac  = rays_xy @ cell_inv[:2, :2]                        # (N*K, 2)
 
-    for start in range(0, n_mesh, chunk_size):
-        chunk      = mesh_xy[start : start + chunk_size]          # (C, 2)
-        chunk_frac = chunk @ cell_inv[:2, :2]                      # (C, 2)
+    # Fractional xy of all atoms
+    atom_frac  = (pos @ cell_inv)[:, :2]                           # (N, 2)
+    z_vals     = pos[:, 2]
 
-        # PBC-wrapped fractional delta → Cartesian xy distance
-        dfrac   = frac_xy[np.newaxis, :, :] - chunk_frac[:, np.newaxis, :]  # (C, N, 2)
-        dfrac  -= np.round(dfrac)
-        dxy     = dfrac @ cell[:2, :2]                             # (C, N, 2)
+    n_rays = len(rays_xy)
+
+    # Internal chunk size: process rays in batches to bound peak memory.
+    # 4096 rays × N atoms stays well under ~100 MB for typical slab sizes.
+    _CHUNK = 4096
+
+    # wins_top[i] / wins_bot[i] = number of disc rays atom i won
+    wins_top = np.zeros(N, dtype=np.int32)
+    wins_bot = np.zeros(N, dtype=np.int32)
+
+    for start in range(0, n_rays, _CHUNK):
+        sl         = slice(start, start + _CHUNK)
+        chunk_frac = rays_frac[sl]                                 # (C, 2)
+
+        # PBC-wrapped fractional delta → Cartesian xy distance  (C, N, 2)
+        dfrac  = atom_frac[np.newaxis, :, :] - chunk_frac[:, np.newaxis, :]
+        dfrac -= np.round(dfrac)
+        dxy    = dfrac @ cell[:2, :2]                              # (C, N, 2)
         xy_dist = np.sqrt((dxy ** 2).sum(axis=2))                  # (C, N)
 
-        # Per-atom capture radius broadcast across mesh rows
+        # Atom j is a candidate for ray c if xy_dist[c,j] <= surf_radii[j]
         within  = xy_dist <= surf_radii[np.newaxis, :]             # (C, N)
         has_any = within.any(axis=1)                               # (C,)
+        valid   = np.where(has_any)[0]                             # indices into chunk
 
-        if which in ("top", "both"):
-            z_top    = np.where(within, z_vals[np.newaxis, :], -np.inf)
-            best_top = np.argmax(z_top, axis=1)                    # (C,)
-            surface_atom_set.update(int(best_top[i]) for i in np.where(has_any)[0])
+        if which in ("top", "both") and valid.size:
+            z_top    = np.where(within[valid], z_vals[np.newaxis, :], -np.inf)
+            best_top = np.argmax(z_top, axis=1)                    # (valid,)
+            np.add.at(wins_top, best_top, 1)
 
-        if which in ("bottom", "both"):
-            z_bot    = np.where(within, z_vals[np.newaxis, :], np.inf)
-            best_bot = np.argmin(z_bot, axis=1)                    # (C,)
-            surface_atom_set.update(int(best_bot[i]) for i in np.where(has_any)[0])
+        if which in ("bottom", "both") and valid.size:
+            z_bot    = np.where(within[valid], z_vals[np.newaxis, :], np.inf)
+            best_bot = np.argmin(z_bot, axis=1)                    # (valid,)
+            np.add.at(wins_bot, best_bot, 1)
 
-    surface_indices = np.array(sorted(surface_atom_set), dtype=int)
-    surface_mask    = np.zeros(len(atoms), dtype=bool)
-    surface_mask[surface_indices] = True
+    # Coverage fraction: wins / K  (rays that hit nothing don't count against)
+    # We use K as the denominator — an atom that wins > coverage_threshold*K is surface.
+    threshold_count = coverage_threshold * K
+
+    if which == "top":
+        surface_mask = wins_top >= threshold_count
+    elif which == "bottom":
+        surface_mask = wins_bot >= threshold_count
+    else:  # "both"
+        surface_mask = (wins_top >= threshold_count) | (wins_bot >= threshold_count)
+
+    surface_indices = np.where(surface_mask)[0].astype(int)
     return surface_mask, surface_indices
 
 
@@ -276,7 +304,6 @@ def find_surface_atoms_raycasting(
 
 def find_surface_atoms_convexhull(
     atoms: Atoms,
-    lattice_constant: float,
     *,
     hull_tol_factor: float = 0.5,
     return_diagnostics: bool = False,
@@ -294,8 +321,6 @@ def find_surface_atoms_convexhull(
     ----------
     atoms : Atoms
         Nanoparticle (finite, non-periodic structure).
-    lattice_constant : float
-        Retained for API compatibility; not used internally.
     hull_tol_factor : float
         Per-atom tolerance = ``hull_tol_factor * r_cov(element)``.
         Default 0.5 (~0.64 Å for Cu).  Further scaled by local curvature
@@ -333,17 +358,16 @@ def find_surface_atoms_convexhull(
     signed_all    = eq[:, :3] @ pos.T + eq[:, 3:4]                # (F, N)
     nearest_facet = np.argmax(signed_all, axis=0)                  # (N,)
 
-    K_NEAR      = min(5, len(normals) - 1)
-    nn_dot      = normals @ normals.T                              # (F, F)
+    K_NEAR         = min(5, len(normals) - 1)
+    nn_dot         = normals @ normals.T                           # (F, F)
     np.fill_diagonal(nn_dot, -2.0)
-    knn_vals    = np.sort(nn_dot, axis=1)[:, -K_NEAR:]            # (F, K)
-    curvature_f = (1.0 - knn_vals).mean(axis=1)                   # (F,)
-    c_min, c_max = curvature_f.min(), curvature_f.max()
+    knn_vals       = np.sort(nn_dot, axis=1)[:, -K_NEAR:]         # (F, K)
+    curvature_f    = (1.0 - knn_vals).mean(axis=1)                # (F,)
+    c_min, c_max   = curvature_f.min(), curvature_f.max()
     curvature_norm = (
         (curvature_f - c_min) / (c_max - c_min)
         if c_max > c_min else np.zeros_like(curvature_f)
     )
-    # hull_tol_base (N,) * scalar factor → (N,)
     hull_tol_per_atom = hull_tol_base * (1.0 + curvature_norm[nearest_facet])
 
     dist_surface_mask = signed_dist > -hull_tol_per_atom           # (N,)
