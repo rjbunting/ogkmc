@@ -260,6 +260,26 @@ def _opt_multi(anchor0: np.ndarray, rotvec0: np.ndarray,
 
 
 # ---------------------------------------------------------------------------
+# Isomorphism pre-filter key
+# ---------------------------------------------------------------------------
+
+def _iso_prefilter_key(g: nx.Graph) -> tuple:
+    """Cheap structural fingerprint used to skip full VF2 matching.
+
+    Two graphs with different keys are definitely non-isomorphic.
+    Graphs with the same key still need full VF2 verification.
+    """
+    elem_counts = tuple(sorted(
+        (d["element"], deg)
+        for _, d, deg in (
+            (n, g.nodes[n], g.degree(n)) for n in g.nodes()
+        )
+    ))
+    deg_seq = tuple(sorted(g.degree(n) for n in g.nodes()))
+    return (g.number_of_nodes(), g.number_of_edges(), deg_seq, elem_counts)
+
+
+# ---------------------------------------------------------------------------
 # Single-atom site finding
 # ---------------------------------------------------------------------------
 
@@ -306,7 +326,7 @@ def _find_sites_single(surface_graph: nx.Graph, reactant: Reactant,
     if verbose:
         print(f"  [single] probe pts after filter: {len(probe_pts)}")
 
-    # Deduplicate
+    # Deduplicate — use sorted tuple as key (cheaper than frozenset hashing)
     seen: dict = {}
     unique_pts: list[np.ndarray] = []
     unique_conns: list[frozenset] = []
@@ -314,27 +334,33 @@ def _find_sites_single(surface_graph: nx.Graph, reactant: Reactant,
         bonded = np.where(d_mat[i] <= bond_cutoffs)[0]
         if not len(bonded):
             continue
-        key = frozenset(int(surf_indices[k]) for k in bonded)
+        key = tuple(sorted(int(surf_indices[k]) for k in bonded))
         if key not in seen:
             seen[key] = len(unique_pts)
             unique_pts.append(probe_pts[i].copy())
-            unique_conns.append(key)
+            unique_conns.append(frozenset(key))
 
     if verbose:
         print(f"  [single] unique connectivities: {len(unique_pts)}")
 
-    # Isomorphism
+    # Isomorphism — pre-filter with cheap structural key before running VF2
     node_match = isomorphism.categorical_node_match("element", "X")
     class_reps: list[nx.Graph] = []
+    class_keys: list[tuple] = []   # pre-filter fingerprints
     iso_ids: list[int] = []
     for conn in unique_conns:
         ego = _build_ego_single(surface_graph, conn, ads_elem)
+        fkey = _iso_prefilter_key(ego)
         assigned = False
-        for cid, rep in enumerate(class_reps):
+        for cid, (rep, rkey) in enumerate(zip(class_reps, class_keys)):
+            if fkey != rkey:
+                continue
             if isomorphism.GraphMatcher(ego, rep, node_match=node_match).is_isomorphic():
                 iso_ids.append(cid); assigned = True; break
         if not assigned:
-            class_reps.append(ego); iso_ids.append(len(class_reps) - 1)
+            class_reps.append(ego)
+            class_keys.append(fkey)
+            iso_ids.append(len(class_reps) - 1)
 
     # Geometric optimisation
     surf_idx_to_local = {int(surf_indices[k]): k for k in range(len(surf_indices))}
@@ -360,7 +386,24 @@ def _find_sites_single(surface_graph: nx.Graph, reactant: Reactant,
 def _find_sites_multi(surface_graph: nx.Graph, reactant: Reactant,
                        bond_factor: float, grid_spacing: float,
                        n_orientations: int, verbose: bool) -> tuple:
-    """Returns (opt_positions_list, unique_conns, iso_ids, class_reps)."""
+    """Returns (opt_positions_list, unique_conns, iso_ids, class_reps).
+
+    Optimisations applied
+    ---------------------
+    1. **Vectorised orientation loop** – all *n_orientations* rotations for a
+       given grid point and anchor atom are evaluated in a single batched
+       NumPy operation rather than a Python loop.
+    2. **KD-tree xy pre-filter** – grid points whose nearest surface atom
+       (in the unwrapped xy plane) is farther than *d_max_global* are
+       discarded before the rotation search begins.
+    3. **Sorted-tuple connectivity key** – cheaper to construct and compare
+       than ``frozenset`` for the deduplication dict.
+    5. **Isomorphism pre-filter** – a cheap structural fingerprint
+       (node/edge counts, degree sequence, element–degree pairs) is compared
+       before invoking the full VF2 ``GraphMatcher``.
+    """
+    from scipy.spatial import cKDTree
+
     cell = surface_graph.graph["cell"]
     cell_inv = np.linalg.inv(cell)
 
@@ -379,6 +422,7 @@ def _find_sites_multi(surface_graph: nx.Graph, reactant: Reactant,
 
     # Pre-compute per-(ads_atom, surf_atom) bonding cutoffs: (N_ads, S)
     cutoff_mat = bond_factor * (ads_rcov[:, None] + surf_rcov[None, :])  # (N_ads, S)
+    max_cutoff = float(cutoff_mat.max())
 
     # z-window for anchor atoms
     d_min_global = ads_rcov.min() * 0.5
@@ -386,10 +430,10 @@ def _find_sites_multi(surface_graph: nx.Graph, reactant: Reactant,
     z_lo = float(surf_z_max) + d_min_global
     z_hi = float(surf_z_max) + d_max_global
 
-    # Sample SO(3) rotations once
-    rot_mats = _sample_so3(n_orientations)  # (n_orient, 3, 3)
+    # Sample SO(3) rotations once  →  (n_orient, 3, 3)
+    rot_mats = _sample_so3(n_orientations)
 
-    # Grid for anchor placement
+    # ── Grid for anchor placement ──────────────────────────────────────────
     a_len = np.linalg.norm(cell[0]); b_len = np.linalg.norm(cell[1])
     fa = np.linspace(0, 1, max(1, int(np.ceil(a_len / grid_spacing))), endpoint=False)
     fb = np.linspace(0, 1, max(1, int(np.ceil(b_len / grid_spacing))), endpoint=False)
@@ -399,65 +443,91 @@ def _find_sites_multi(surface_graph: nx.Graph, reactant: Reactant,
     grid_xy  = gfa.ravel()[:, None] * cell[0, :2] + gfb.ravel()[:, None] * cell[1, :2]
     grid_pts = np.hstack([grid_xy, ggz.ravel()[:, None]])   # (G, 3)
 
+    # ── Strategy 2: KD-tree xy pre-filter ─────────────────────────────────
+    # Build a tiled copy of surface atom xy positions to handle PBC neighbours
+    # in a simple way: tile ±1 images in x and y.
+    cell_x = float(cell[0, 0]); cell_y = float(cell[1, 1])
+    tile_offsets = np.array([[dx * cell_x, dy * cell_y]
+                              for dx in (-1, 0, 1) for dy in (-1, 0, 1)])
+    surf_xy_tiled = (surf_pos[:, :2][:, None, :] + tile_offsets[None, :, :]).reshape(-1, 2)
+    tree = cKDTree(surf_xy_tiled)
+    dists_xy, _ = tree.query(grid_pts[:, :2])
+    grid_pts = grid_pts[dists_xy <= max_cutoff]
+
     if verbose:
-        print(f"  [multi] grid pts: {len(grid_pts)},  "
+        print(f"  [multi] grid pts: {len(grid_pts)} (after xy filter),  "
               f"orientations: {n_orientations},  anchors: {N_ads}")
 
-    seen: dict = {}
-    unique_conns:  list[frozenset] = []
-    unique_anchors: list[int]      = []   # which ads atom was anchor
-    unique_anchor_pos: list[np.ndarray] = []
-    unique_rotvec:    list[np.ndarray]  = []
+    # ── Strategy 3: sorted-tuple key for deduplication ────────────────────
+    seen: dict[tuple, int] = {}
+    unique_conns:      list[frozenset]    = []
+    unique_anchors:    list[int]          = []
+    unique_anchor_pos: list[np.ndarray]  = []
+    unique_rotvec:     list[np.ndarray]  = []
 
-    # For each anchor atom in the adsorbate
+    # ── Strategy 1: vectorised orientation loop ────────────────────────────
     for anchor_idx in range(N_ads):
-        # Relative positions of all ads atoms w.r.t. anchor
         rel_pos = ads_pos - ads_pos[anchor_idx]   # (N_ads, 3)
 
         for gpt in grid_pts:
-            for rot in rot_mats:
-                # Place adsorbate: anchor at gpt, rest rotated
-                placed = gpt + (rot @ rel_pos.T).T   # (N_ads, 3)
+            # placed: (n_orient, N_ads, 3)
+            # rot_mats @ rel_pos.T  →  (n_orient, 3, N_ads)  →  transpose  →  (n_orient, N_ads, 3)
+            placed = gpt + np.einsum("oij,aj->oai", rot_mats, rel_pos)  # (n_orient, N_ads, 3)
 
-                # For each ads atom, compute PBC distances to all surf atoms
-                conn_set: set[tuple[int, int]] = set()
-                for ak in range(N_ads):
-                    # PBC wrap
-                    dv   = surf_pos - placed[ak]
-                    frac = dv @ cell_inv
-                    frac[:, :2] -= np.round(frac[:, :2])
-                    d_ak = np.sqrt(((frac @ cell) ** 2).sum(axis=1))   # (S,)
-                    bonded_local = np.where(d_ak <= cutoff_mat[ak])[0]
-                    for bl in bonded_local:
-                        conn_set.add((int(ak), int(surf_indices[bl])))
+            # PBC distances for all orientations and all ads atoms at once
+            # dv: (n_orient, N_ads, S, 3)
+            dv = surf_pos[None, None, :, :] - placed[:, :, None, :]
+            frac = dv @ cell_inv                        # (n_orient, N_ads, S, 3)
+            frac[..., :2] -= np.round(frac[..., :2])
+            d_all = np.sqrt(((frac @ cell) ** 2).sum(axis=-1))  # (n_orient, N_ads, S)
 
-                if not conn_set:
+            # Bonded mask: (n_orient, N_ads, S)
+            bonded_mask = d_all <= cutoff_mat[None, :, :]
+
+            # Any orientation that has at least one bond is interesting
+            has_bond = bonded_mask.any(axis=(1, 2))  # (n_orient,)
+            interesting = np.where(has_bond)[0]
+
+            for oi in interesting:
+                # Build connectivity set for this orientation
+                ak_idx, sl_idx = np.where(bonded_mask[oi])  # local indices
+                conn_pairs = tuple(sorted(
+                    (int(ak_idx[i]), int(surf_indices[sl_idx[i]]))
+                    for i in range(len(ak_idx))
+                ))
+                if not conn_pairs:
                     continue
-
-                key = frozenset(conn_set)
-                if key not in seen:
-                    seen[key] = len(unique_conns)
-                    unique_conns.append(key)
+                # Strategy 3: sorted tuple key
+                if conn_pairs not in seen:
+                    seen[conn_pairs] = len(unique_conns)
+                    unique_conns.append(frozenset(conn_pairs))
                     unique_anchors.append(anchor_idx)
                     unique_anchor_pos.append(gpt.copy())
-                    # Initial rotation as rotvec
-                    unique_rotvec.append(Rotation.from_matrix(rot).as_rotvec())
+                    unique_rotvec.append(
+                        Rotation.from_matrix(rot_mats[oi]).as_rotvec()
+                    )
 
     if verbose:
         print(f"  [multi] unique connectivities: {len(unique_conns)}")
 
-    # Isomorphism classification
+    # ── Strategy 5: isomorphism pre-filter ────────────────────────────────
     node_match = isomorphism.categorical_node_match("element", "X")
-    class_reps: list[nx.Graph] = []
+    class_reps:  list[nx.Graph] = []
+    class_keys:  list[tuple]    = []
     iso_ids: list[int] = []
     for conn in unique_conns:
-        ego = _build_ego_multi(surface_graph, reactant, conn)
+        ego  = _build_ego_multi(surface_graph, reactant, conn)
+        fkey = _iso_prefilter_key(ego)
         assigned = False
-        for cid, rep in enumerate(class_reps):
+        for cid, (rep, rkey) in enumerate(zip(class_reps, class_keys)):
+            if fkey != rkey:
+                continue
             if isomorphism.GraphMatcher(ego, rep, node_match=node_match).is_isomorphic():
                 iso_ids.append(cid); assigned = True; break
         if not assigned:
-            class_reps.append(ego); iso_ids.append(len(class_reps) - 1)
+            class_reps.append(ego)
+            class_keys.append(fkey)
+            iso_ids.append(len(class_reps) - 1)
 
     # Geometric optimisation (6 DOF per site)
     surf_idx_to_local = {int(surf_indices[k]): k for k in range(len(surf_indices))}
