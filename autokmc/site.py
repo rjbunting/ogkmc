@@ -480,8 +480,26 @@ def _find_sites_multi(surface_graph: nx.Graph, reactant: Reactant,
 def _get_frozen_indices(slab, n_freeze_layers: int) -> list[int]:
     """Return atom indices belonging to the bottom *n_freeze_layers* layers.
 
-    Layers are identified by clustering z-coordinates (tolerance = NN spacing / 4).
+    Resolution order
+    ----------------
+    1. ``slab.info["frozen_indices"]`` – set by :func:`~autokmc.structure.build_surface`
+       at construction time; used as-is when present.
+    2. Existing :class:`~ase.constraints.FixAtoms` constraint on *slab* –
+       used when the slab was built externally but still carries the constraint.
+    3. Z-coordinate clustering heuristic (original fallback).
     """
+    from ase.constraints import FixAtoms
+
+    # 1. Preferred: indices stored in info dict
+    if "frozen_indices" in slab.info:
+        return list(slab.info["frozen_indices"])
+
+    # 2. Read from existing FixAtoms constraint
+    for c in slab.constraints:
+        if isinstance(c, FixAtoms):
+            return list(c.index)
+
+    # 3. Fallback: z-coordinate clustering
     pos    = slab.get_positions()
     z_vals = pos[:, 2]
     z_sort = np.sort(z_vals)
@@ -679,7 +697,13 @@ def _relax_per_iso_class_multi(
     # Expected internal bonds (from RDKit topology)
     expected_bonds = {(min(u, v), max(u, v)) for u, v in reactant.graph.edges()}
 
-    # Per-atom covalent radii of surface atoms — used via bond_factor per-pair in the check below
+    # Per-atom covalent radii of surface atoms — looked up from slab symbols
+    from ase.data import covalent_radii as _cov_rad_surf
+    from ase.data import atomic_numbers as _anum_surf
+    slab_symbols = slab.get_chemical_symbols()
+    surf_rcov_check = np.array([
+        _cov_rad_surf[_anum_surf[slab_symbols[i]]] for i in surface_indices
+    ])
     cell_x = float(cell[0, 0])
     cell_y = float(cell[1, 1])
 
@@ -747,8 +771,8 @@ def _relax_per_iso_class_multi(
             dv[:, 0] -= np.round(dv[:, 0] / cell_x) * cell_x
             dv[:, 1] -= np.round(dv[:, 1] / cell_y) * cell_y
             d = np.sqrt((dv ** 2).sum(axis=1))
-            cutoff = bond_factor * (ads_rcov[ak] + ads_rcov.mean())
-            for k in np.where(d <= cutoff)[0]:
+            cutoffs_k = bond_factor * (ads_rcov[ak] + surf_rcov_check)
+            for k in np.where(d <= cutoffs_k)[0]:
                 conn_actual.add((int(ak), int(surface_indices[k])))
 
         conn_intended = {(ak, sg) for ak, sg in conn_pairs}

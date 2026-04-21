@@ -484,6 +484,9 @@ def build_surface(
         a_val = float(lp["a"])
         fixed_indices = _get_bottom_layer_indices(atoms, n_freeze_layers, a_val)
         atoms.set_constraint(FixAtoms(indices=fixed_indices))
+        # Store frozen indices in info so downstream code can reuse them
+        # without re-running the layer-detection heuristic.
+        atoms.info["frozen_indices"] = list(fixed_indices)
         if verbose:
             print(f"  Fixing bottom {n_freeze_layers} layer(s): "
                   f"{len(fixed_indices)} atoms")
