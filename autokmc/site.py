@@ -642,6 +642,153 @@ def _relax_per_iso_class(
     return iso_results
 
 
+def _relax_per_iso_class_multi(
+    slab,
+    reactant: Reactant,
+    opt_positions: list[np.ndarray],
+    unique_conns: list[frozenset],
+    iso_ids: list[int],
+    surface_indices: np.ndarray,
+    cell: np.ndarray,
+    calculator,
+    n_freeze_layers: int,
+    bond_factor: float,
+    fmax: float,
+    steps: int,
+    verbose: bool,
+    debug_dir: str | None = None,
+) -> dict[int, dict]:
+    """Relax one representative per iso-class for a **multi-atom** adsorbate.
+
+    After relaxation validates:
+    1. Adsorbate–surface connectivity matches the intended set.
+    2. Adsorbate internal bond graph is unchanged (molecule did not break apart).
+    """
+    from ase import Atoms as AseAtoms
+    from ase.optimize import LBFGS
+    from ase.constraints import FixAtoms
+    from ase.data import covalent_radii as _cov_rad
+    from ase.data import atomic_numbers as _anum
+
+    iso_ids_arr   = np.array(iso_ids)
+    n_iso_classes = int(iso_ids_arr.max()) + 1 if len(iso_ids_arr) else 0
+    n_ads         = len(reactant.atoms)
+    ads_symbols   = reactant.atoms.get_chemical_symbols()
+    ads_rcov      = np.array([_cov_rad[_anum[s]] for s in ads_symbols])
+
+    # Expected internal bonds (from RDKit topology)
+    expected_bonds = {(min(u, v), max(u, v)) for u, v in reactant.graph.edges()}
+
+    # Per-atom covalent radii of surface atoms — used via bond_factor per-pair in the check below
+    cell_x = float(cell[0, 0])
+    cell_y = float(cell[1, 1])
+
+    # Clean slab energy
+    slab_clean = slab.copy()
+    slab_clean.calc = copy.deepcopy(calculator)
+    e_slab = float(slab_clean.get_potential_energy())
+    del slab_clean
+
+    frozen_idx = _get_frozen_indices(slab, n_freeze_layers)
+
+    if verbose:
+        print(f"\n  Calculator relaxation: 1 representative per iso-class "
+              f"({n_iso_classes} classes, {n_ads}-atom adsorbate, "
+              f"{len(frozen_idx)} atoms frozen)")
+        print("  " + "=" * 56)
+
+    if debug_dir is not None:
+        os.makedirs(debug_dir, exist_ok=True)
+
+    iso_results: dict[int, dict] = {}
+
+    for cid in range(n_iso_classes):
+        members = np.where(iso_ids_arr == cid)[0]
+        if len(members) == 0:
+            continue
+        site_idx   = int(members[0])
+        ads_pos0   = opt_positions[site_idx]   # (N_ads, 3)
+        conn_pairs = unique_conns[site_idx]    # frozenset of (ak, sg)
+
+        # Build slab + adsorbate
+        slab_ads = slab.copy()
+        slab_ads.calc = copy.deepcopy(calculator)
+        for k in range(n_ads):
+            slab_ads.append(ads_symbols[k])
+            slab_ads.positions[-1] = ads_pos0[k]
+        slab_ads.set_constraint(FixAtoms(indices=frozen_idx))
+
+        if debug_dir is not None:
+            from ase.io import write as _ase_write
+            _ase_write(os.path.join(debug_dir, f"class_{cid:02d}_initial.extxyz"), slab_ads)
+
+        logfile = os.path.join(debug_dir, f"class_{cid:02d}.log") \
+            if debug_dir is not None else os.devnull
+        traj    = os.path.join(debug_dir, f"class_{cid:02d}.traj") \
+            if debug_dir is not None else None
+
+        opt = LBFGS(slab_ads, logfile=logfile,
+                    trajectory=traj if traj else None)
+        opt.run(fmax=fmax, steps=steps)
+
+        converged  = bool(opt.converged())
+        final_pos  = slab_ads.get_positions()
+        ads_final  = final_pos[-n_ads:]   # (N_ads, 3)
+
+        if debug_dir is not None:
+            from ase.io import write as _ase_write
+            _ase_write(os.path.join(debug_dir, f"class_{cid:02d}_final.extxyz"), slab_ads)
+
+        # ── 1. Adsorbate–surface connectivity check ───────────────────────
+        surf_pos_all = slab.get_positions()
+        conn_actual: set[tuple[int, int]] = set()
+        for ak in range(n_ads):
+            dv = surf_pos_all[surface_indices] - ads_final[ak]
+            dv[:, 0] -= np.round(dv[:, 0] / cell_x) * cell_x
+            dv[:, 1] -= np.round(dv[:, 1] / cell_y) * cell_y
+            d = np.sqrt((dv ** 2).sum(axis=1))
+            cutoff = bond_factor * (ads_rcov[ak] + ads_rcov.mean())
+            for k in np.where(d <= cutoff)[0]:
+                conn_actual.add((int(ak), int(surface_indices[k])))
+
+        conn_intended = {(ak, sg) for ak, sg in conn_pairs}
+        valid = frozenset(conn_actual) == frozenset(conn_intended)
+
+        # ── 2. Adsorbate internal-connectivity check ──────────────────────
+        if valid and n_ads > 1:
+            relaxed_bonds: set[tuple[int, int]] = set()
+            for ai in range(n_ads):
+                for aj in range(ai + 1, n_ads):
+                    d = float(np.linalg.norm(ads_final[ai] - ads_final[aj]))
+                    cutoff = bond_factor * (ads_rcov[ai] + ads_rcov[aj])
+                    if d <= cutoff:
+                        relaxed_bonds.add((ai, aj))
+            if relaxed_bonds != expected_bonds:
+                valid = False
+                if verbose:
+                    print(f"    iso-class {cid:2d}: adsorbate broke apart — "
+                          f"expected bonds {expected_bonds}, got {relaxed_bonds}")
+
+        adsorption_e = float(slab_ads.get_potential_energy()) - e_slab if valid else None
+
+        if verbose:
+            status = "OK  " if valid else "FAIL"
+            n_i = len({sg for _, sg in conn_intended})
+            n_a = len({sg for _, sg in conn_actual})
+            print(f"  iso-class {cid:2d}  [{status}]  converged={converged}  "
+                  f"surf-bonds intended={n_i}  actual={n_a}"
+                  + (f"  E_ads={adsorption_e:.4f} eV" if adsorption_e is not None else ""))
+
+        iso_results[cid] = dict(energy=adsorption_e, converged=converged, valid=valid)
+
+    if verbose:
+        n_valid = sum(1 for r in iso_results.values() if r["valid"])
+        print("  " + "=" * 56)
+        print(f"  Valid classes : {n_valid} / {n_iso_classes}")
+
+    return iso_results
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -763,16 +910,35 @@ def find_adsorption_sites(
             surface_graph, reactant, bond_factor, grid_spacing,
             n_orientations, verbose)
 
+        # ── optional calculator relaxation (one rep per iso-class) ───────────
+        iso_results_multi: dict[int, dict] = {}
+        if calculator is not None and slab is not None:
+            surf_nodes   = [(n, d) for n, d in surface_graph.nodes(data=True)
+                            if d["type"] == "surface"]
+            surf_indices = np.array([n for n, d in surf_nodes], dtype=int)
+            iso_results_multi = _relax_per_iso_class_multi(
+                slab, reactant,
+                opt_positions, unique_conns, iso_ids,
+                surf_indices, cell, calculator,
+                n_freeze_layers, bond_factor, fmax, steps, verbose,
+                debug_dir=debug_dir,
+            )
+
         sites = []
         for opt_ads, conn, iso_cid in zip(opt_positions, unique_conns, iso_ids):
+            if iso_results_multi and not iso_results_multi.get(iso_cid, {}).get("valid", True):
+                continue
             surf_atoms = {sg for _, sg in conn}
             n_surf = len(surf_atoms)
+            res = iso_results_multi.get(iso_cid, {})
             sites.append(AdsorptionSite(
                 position    = opt_ads,        # (N_ads, 3)
                 conn_global = conn,
                 n_conn      = n_surf,
                 site_type   = _site_label(n_surf),
                 iso_class   = iso_cid,
+                energy      = res.get("energy"),
+                converged   = res.get("converged"),
             ))
 
     # Site-adjacency graph
