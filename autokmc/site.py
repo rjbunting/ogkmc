@@ -294,12 +294,59 @@ def _iso_prefilter_key(g: nx.Graph) -> tuple:
 # Single-atom site finding — graph / clique enumeration
 # ---------------------------------------------------------------------------
 
+def _co_bond_max_clique(g: nx.Graph) -> int:
+    """Return the size of the largest clique in *g* (the maximum coordination).
+
+    Uses ``nx.graph_clique_number`` which internally calls
+    ``nx.find_cliques`` (Bron-Kerbosch with pivoting).  The result
+    directly gives the largest number of surface atoms that could
+    simultaneously bond to the adsorbate — i.e. the natural upper bound
+    for *k_max*.
+    """
+    if g.number_of_nodes() == 0:
+        return 0
+    return max(len(c) for c in nx.find_cliques(g))
+
+
+def _is_probe_clashing(probe: np.ndarray, exclude_lids: set,
+                        surf_pos: np.ndarray, surf_rcov: np.ndarray,
+                        r_cov_ads: float, clash_factor: float,
+                        cell: np.ndarray) -> bool:
+    """Return True if *probe* is within clash_factor*(r_cov_ads+r_cov_s) of any
+    non-bonded surface atom.
+
+    Parameters
+    ----------
+    probe       : (3,) proposed adsorbate position
+    exclude_lids: local indices of the bonded atoms (not checked)
+    surf_pos    : (N, 3) all surface atom positions
+    surf_rcov   : (N,) all surface atom covalent radii
+    r_cov_ads   : adsorbate covalent radius
+    clash_factor: fraction of combined covalent radii that counts as a clash
+                  (e.g. 0.8 means d < 0.8*(r_ads+r_s) → blocked)
+    cell        : (3, 3) unit cell matrix
+    """
+    cell_inv = np.linalg.inv(cell)
+    for k in range(len(surf_pos)):
+        if k in exclude_lids:
+            continue
+        dv   = surf_pos[k] - probe
+        frac = dv @ cell_inv
+        frac[:2] -= np.round(frac[:2])
+        dist = float(np.linalg.norm(frac @ cell))
+        if dist < clash_factor * (r_cov_ads + float(surf_rcov[k])):
+            return True
+    return False
+
+
 def _find_sites_single_graph(
     surface_graph: nx.Graph,
     reactant: Reactant,
     bond_factor: float,
-    k_max: int,
+    k_max: int | None,
     verbose: bool,
+    clash_factor: float | None = None,
+    reach_factor: float = 1.0,
 ) -> tuple:
 
     """Find single-atom adsorption sites by k-clique enumeration.
@@ -318,6 +365,24 @@ def _find_sites_single_graph(
     covalent bonding distance, so any k atoms that form a k-clique are
     guaranteed to be mutually close enough to share a single adsorbate
     bonding partner above them.
+
+    When *clash_factor* is given (e.g. 0.8), two additional steric filters
+    are applied:
+
+    * **Edge-level (bridge pre-filter)**: Before adding an edge ``(s1, s2)``
+      to the co-bonding graph, estimate the adsorbate position at the
+      midpoint centroid + bond height and check whether any *other* surface
+      atom ``s3`` would clash (``d < clash_factor*(r_cov_ads + r_cov_s3)``).
+      If so, the edge is suppressed, preventing ``{s1,s2}`` from ever
+      becoming a bridge-site clique.  Note: this only covers **k=2** sites;
+      a blocking atom that is itself part of the clique (e.g. a hollow
+      site) is not pruned here.
+
+    * **Clique-level (all-k filter)**: After the centroid probe position
+      is computed for every accepted clique (including k=1 top sites and
+      k≥3 hollow sites), the same clash check is applied.  Cliques whose
+      probe position overlaps a non-bonded atom are silently discarded.
+      This catches the cases the edge-level filter misses.
 
     Returns the same tuple as :func:`_find_sites_single` so the rest of
     :func:`find_adsorption_sites` is unchanged.
@@ -354,9 +419,17 @@ def _find_sites_single_graph(
     # This is always >= the surface-surface bond cutoff (r_cov_s1 + r_cov_s2)
     # so it correctly captures bridge/hollow sites accessible only to large
     # adsorbates that the surface-surface graph would miss.
+    #
+    # Optional edge-level clash filter (clash_factor is not None):
+    # Before adding edge (i, j), estimate the adsorbate probe position at
+    # the midpoint centroid + bond height and reject the edge if any third
+    # surface atom s3 is within clash_factor*(r_cov_ads+r_cov_s3) of it.
+    # This prevents bridge sites that are physically blocked by a protruding
+    # neighbour from ever appearing in clique enumeration.
     co_bond_graph = nx.Graph()
     co_bond_graph.add_nodes_from(int(n) for n, _ in surf_nodes)
     cell_inv = np.linalg.inv(cell)
+    n_edges_clash_pruned = 0
     for i in range(len(surf_indices)):
         for j in range(i + 1, len(surf_indices)):
             cutoff = bond_factor * (2.0 * r_cov_ads + float(surf_rcov[i]) + float(surf_rcov[j]))
@@ -365,13 +438,36 @@ def _find_sites_single_graph(
             frac[:2] -= np.round(frac[:2])
             dist = float(np.linalg.norm(frac @ cell))
             if dist <= cutoff:
+                if clash_factor is not None:
+                    # Estimate probe position above the midpoint of s_i, s_j
+                    mid    = (surf_pos[i] + surf_pos[j]) / 2.0
+                    height = r_cov_ads + (float(surf_rcov[i]) + float(surf_rcov[j])) / 2.0
+                    probe  = mid.copy()
+                    probe[2] = surf_z_max + height
+                    if _is_probe_clashing(probe, {i, j}, surf_pos, surf_rcov,
+                                          r_cov_ads, clash_factor, cell):
+                        n_edges_clash_pruned += 1
+                        continue
                 co_bond_graph.add_edge(int(surf_indices[i]), int(surf_indices[j]))
+
+    # ── Auto-detect k_max from co-bonding graph ───────────────────────────
+    # The maximum clique of the co-bonding graph is the largest set of
+    # surface atoms that are mutually reachable by the adsorbate — i.e. the
+    # physically meaningful upper bound on site coordination.  Using this
+    # avoids enumerating cliques that cannot exist on the actual surface.
+    if k_max is None:
+        k_max = _co_bond_max_clique(co_bond_graph)
+        if verbose:
+            print(f"  [single-graph] auto k_max = {k_max} "
+                  f"(max clique of co-bonding graph)")
 
     # ── Enumerate all cliques of size 1 … k_max ───────────────────────────
     # nx.enumerate_all_cliques yields cliques in non-decreasing size order.
     unique_conns: list[frozenset]   = []
     unique_pts:   list[np.ndarray]  = []
     seen:         set[frozenset]    = set()
+    n_cliques_clash_pruned    = 0
+    n_cliques_reach_pruned    = 0
 
     for clique in nx.enumerate_all_cliques(co_bond_graph):
         if len(clique) > k_max:
@@ -380,13 +476,47 @@ def _find_sites_single_graph(
         if key in seen:
             continue
         seen.add(key)
-        unique_conns.append(key)
 
         # Initial probe position: centroid of clique atoms + estimated height
         lids     = [surf_idx_to_local[g] for g in clique]
-        centroid = surf_pos[lids].mean(axis=0).copy()
-        height   = r_cov_ads + float(surf_rcov[lids].mean())
+        lids_arr = np.array(lids)
+        centroid = surf_pos[lids_arr].mean(axis=0).copy()
+        height   = r_cov_ads + float(surf_rcov[lids_arr].mean())
         centroid[2] = surf_z_max + height
+
+        # ── Geometric reachability filter ─────────────────────────────────
+        # For each bonded atom i the adsorbate (constrained to z ≥ z_lo)
+        # must be able to get within reach_factor*(r_cov_ads+r_cov_si) of it.
+        # The minimum achievable 3D distance from ANY valid adsorbate
+        # position to atom i is:
+        #
+        #   min_dist_i = sqrt(d_lat_i² + max(0, z_lo − z_i)²)
+        #
+        # where d_lat_i is the xy distance from the centroid to atom i.
+        # If min_dist_i exceeds the bond ceiling the adsorbate physically
+        # cannot bond to atom i — the k-fold site is geometrically
+        # infeasible.  reach_factor (default 1.0, exact covalent radii sum)
+        # is intentionally tighter than bond_factor (1.1) so that slightly
+        # stretched co-bond-graph edges do not produce geometrically
+        # impossible k-fold sites.
+        d_lat_sq = ((surf_pos[lids_arr, :2] - centroid[:2]) ** 2).sum(axis=1)
+        dz_min   = np.maximum(0.0, z_lo - surf_pos[lids_arr, 2])
+        min_dist = np.sqrt(d_lat_sq + dz_min ** 2)
+        bond_max = reach_factor * (r_cov_ads + surf_rcov[lids_arr])
+        if np.any(min_dist > bond_max):
+            n_cliques_reach_pruned += 1
+            continue
+
+        # ── Steric clash filter ───────────────────────────────────────────
+        # Clique-level: catches k=1 top sites and k≥3 hollow sites whose
+        # blocking atom sits outside all clique edges.
+        if clash_factor is not None:
+            if _is_probe_clashing(centroid, set(lids), surf_pos, surf_rcov,
+                                  r_cov_ads, clash_factor, cell):
+                n_cliques_clash_pruned += 1
+                continue
+
+        unique_conns.append(key)
         unique_pts.append(centroid)
 
     if verbose:
@@ -398,6 +528,10 @@ def _find_sites_single_graph(
         print(f"  [single-graph] co-bond graph: {co_bond_graph.number_of_nodes()} nodes, "
               f"{co_bond_graph.number_of_edges()} edges  "
               f"(r_cov_ads={r_cov_ads:.3f} Å, bond_factor={bond_factor})")
+        print(f"  [single-graph] clique filters: "
+              f"reach pruned={n_cliques_reach_pruned}  "
+              f"clash pruned={n_cliques_clash_pruned}"
+              + (f"  edge clash pruned={n_edges_clash_pruned}" if clash_factor is not None else ""))
         print(f"  [single-graph] clique candidates: {len(unique_pts)}  "
               f"({size_str})")
 
@@ -455,8 +589,10 @@ def _find_sites_multi_graph(
     surface_graph: nx.Graph,
     reactant: Reactant,
     bond_factor: float,
-    k_max: int,
+    k_max: int | None,
     verbose: bool,
+    clash_factor: float | None = None,
+    reach_factor: float = 1.0,
 ) -> tuple:
     """Find multi-atom adsorption sites by graph-based enumeration.
 
@@ -520,8 +656,14 @@ def _find_sites_multi_graph(
     z_hi         = surf_z_max + d_max_global
 
     # ── Helper: co-bonding graph for adsorbate atom with r_cov_a ─────────
-    def _make_co_bond_graph(r_cov_a: float, local_ids: list) -> nx.Graph:
-        """Adsorbate-aware co-bonding graph on a subset of surface atoms."""
+    def _make_co_bond_graph(r_cov_a: float, local_ids: list,
+                             probe_z: float | None = None) -> nx.Graph:
+        """Adsorbate-aware co-bonding graph on a subset of surface atoms.
+
+        When *clash_factor* is set and *probe_z* is provided, each candidate
+        edge (li, lj) is checked: if the estimated adsorbate midpoint probe
+        would clash with any other surface atom it is suppressed.
+        """
         g = nx.Graph()
         g.add_nodes_from(int(surf_indices[li]) for li in local_ids)
         for ii in range(len(local_ids)):
@@ -532,6 +674,14 @@ def _find_sites_multi_graph(
                                         + float(surf_rcov[lj]))
                 dist = _pbc_dist_scalar(surf_pos[li], surf_pos[lj], cell_inv, cell)
                 if dist <= cutoff:
+                    if clash_factor is not None and probe_z is not None:
+                        mid    = (surf_pos[li] + surf_pos[lj]) / 2.0
+                        height = r_cov_a + (float(surf_rcov[li]) + float(surf_rcov[lj])) / 2.0
+                        probe  = mid.copy()
+                        probe[2] = probe_z + height
+                        if _is_probe_clashing(probe, {li, lj}, surf_pos, surf_rcov,
+                                              r_cov_a, clash_factor, cell):
+                            continue
                     g.add_edge(int(surf_indices[li]), int(surf_indices[lj]))
         return g
 
@@ -542,6 +692,26 @@ def _find_sites_multi_graph(
         U, _, Vt = np.linalg.svd(H)
         d = np.linalg.det(Vt.T @ U.T)
         return Vt.T @ np.diag([1.0, 1.0, d]) @ U.T  # (3, 3)
+
+    # ── Adsorbate automorphisms for symmetry-aware deduplication ─────────
+    # Two connectivity patterns that differ only by a permutation of
+    # symmetrically equivalent adsorbate atoms represent the same physical
+    # site.  We pre-compute all graph automorphisms (element-preserving
+    # bijections of the adsorbate onto itself) so that when a new conn_key
+    # is accepted we immediately register ALL its symmetry-equivalent
+    # variants in `seen`, preventing duplicates from entering unique_conns.
+    _ads_nm = isomorphism.categorical_node_match("element", "X")
+    _gm_auto = isomorphism.GraphMatcher(
+        reactant.graph, reactant.graph, node_match=_ads_nm
+    )
+    _automorphisms: list[dict] = list(_gm_auto.isomorphisms_iter())
+
+    def _symmetric_conn_keys(conn_list: list) -> list[tuple]:
+        """Return all symmetry-permuted variants of a connectivity list."""
+        keys = set()
+        for perm in _automorphisms:
+            keys.add(tuple(sorted((perm[ak], sg) for ak, sg in conn_list)))
+        return list(keys)
 
     # ── Main enumeration ──────────────────────────────────────────────────
     seen:              dict[tuple, int]    = {}
@@ -596,17 +766,46 @@ def _find_sites_multi_graph(
         non_anchor_idxs = [j for j in range(N_ads) if j != anchor_idx]
 
         # ── 1. Anchor co-bonding graph + clique enumeration ───────────────
-        anchor_cbg = _make_co_bond_graph(r_cov_a, all_local_ids)
+        anchor_cbg = _make_co_bond_graph(r_cov_a, all_local_ids,
+                                          probe_z=surf_z_max)
+
+        # Auto-detect k_max from the anchor co-bonding graph on first anchor.
+        # The max clique of this graph is the tightest physically meaningful
+        # upper bound on how many surface atoms can simultaneously bond to
+        # the anchor atom.  All subsequent anchors and non-anchor sub-graphs
+        # respect the same ceiling (conservative — sub-graphs can only be
+        # equal or smaller).
+        effective_k_max = k_max
+        if effective_k_max is None:
+            effective_k_max = _co_bond_max_clique(anchor_cbg)
+            if verbose and anchor_idx == anchor_representatives[0]:
+                print(f"  [multi-graph] auto k_max = {effective_k_max} "
+                      f"(max clique of anchor co-bonding graph, anchor={anchor_idx})")
 
         for anchor_clique in nx.enumerate_all_cliques(anchor_cbg):
-            if len(anchor_clique) > k_max:
+            if len(anchor_clique) > effective_k_max:
                 break
 
             # Initial anchor position: centroid of clique atoms + height
-            lids_anchor = [surf_idx_to_local[g] for g in anchor_clique]
-            pos_anchor  = surf_pos[lids_anchor].mean(axis=0).copy()
-            h_anchor    = r_cov_a + float(surf_rcov[lids_anchor].mean())
-            pos_anchor[2] = surf_z_max + h_anchor
+            lids_anchor     = [surf_idx_to_local[g] for g in anchor_clique]
+            lids_anchor_arr = np.array(lids_anchor)
+            pos_anchor      = surf_pos[lids_anchor_arr].mean(axis=0).copy()
+            h_anchor        = r_cov_a + float(surf_rcov[lids_anchor_arr].mean())
+            pos_anchor[2]   = surf_z_max + h_anchor
+
+            # ── Geometric reachability filter ─────────────────────────────
+            d_lat_sq = ((surf_pos[lids_anchor_arr, :2] - pos_anchor[:2]) ** 2).sum(axis=1)
+            dz_min   = np.maximum(0.0, z_lo - surf_pos[lids_anchor_arr, 2])
+            min_dist = np.sqrt(d_lat_sq + dz_min ** 2)
+            bond_max = reach_factor * (r_cov_a + surf_rcov[lids_anchor_arr])
+            if np.any(min_dist > bond_max):
+                continue
+
+            # ── Steric clash check for the anchor site ────────────────────
+            if clash_factor is not None:
+                if _is_probe_clashing(pos_anchor, set(lids_anchor), surf_pos,
+                                      surf_rcov, r_cov_a, clash_factor, cell):
+                    continue
 
             # ── 2a–b. Non-anchor reachable sets + sub-clique options ──────
             # For each non-anchor adsorbate atom collect a list of possible
@@ -627,10 +826,29 @@ def _find_sites_multi_graph(
                 # Always include "no surface bond" for this atom
                 options_j: list[frozenset] = [frozenset()]
                 if reach_lids:
-                    cbg_j = _make_co_bond_graph(r_cov_j, reach_lids)
+                    cbg_j = _make_co_bond_graph(r_cov_j, reach_lids,
+                                                probe_z=surf_z_max)
                     for sub_clique in nx.enumerate_all_cliques(cbg_j):
-                        if len(sub_clique) > k_max:
+                        if len(sub_clique) > effective_k_max:
                             break
+                        lids_j     = [surf_idx_to_local[g] for g in sub_clique]
+                        lids_j_arr = np.array(lids_j)
+                        probe_j    = surf_pos[lids_j_arr].mean(axis=0).copy()
+                        probe_j[2] = surf_z_max + r_cov_j + float(surf_rcov[lids_j_arr].mean())
+
+                        # Reachability filter for non-anchor sub-clique
+                        d_lat_sq_j = ((surf_pos[lids_j_arr, :2] - probe_j[:2]) ** 2).sum(axis=1)
+                        dz_min_j   = np.maximum(0.0, z_lo - surf_pos[lids_j_arr, 2])
+                        min_dist_j = np.sqrt(d_lat_sq_j + dz_min_j ** 2)
+                        bond_max_j = reach_factor * (r_cov_j + surf_rcov[lids_j_arr])
+                        if np.any(min_dist_j > bond_max_j):
+                            continue
+
+                        # Clash filter for non-anchor sub-clique
+                        if clash_factor is not None:
+                            if _is_probe_clashing(probe_j, set(lids_j), surf_pos,
+                                                  surf_rcov, r_cov_j, clash_factor, cell):
+                                continue
                         options_j.append(frozenset(sub_clique))
 
                 non_anchor_options.append(options_j)
@@ -647,7 +865,11 @@ def _find_sites_multi_graph(
                 conn_key = tuple(sorted(conn_list))
                 if conn_key in seen:
                     continue
-                seen[conn_key] = len(unique_conns)
+                # Register all symmetry-equivalent conn_keys so they are
+                # not added as separate entries later.
+                idx = len(unique_conns)
+                for sym_key in _symmetric_conn_keys(conn_list):
+                    seen[sym_key] = idx
 
                 unique_conns.append(frozenset(conn_key))
                 unique_anchors.append(anchor_idx)
@@ -927,6 +1149,7 @@ def _relax_per_iso_class_multi(
     steps: int,
     verbose: bool,
     debug_dir: str | None = None,
+    internal_bond_factor: float = 1.3,
 ) -> dict[int, dict]:
     """Relax one representative per iso-class for a **multi-atom** adsorbate.
 
@@ -1036,7 +1259,7 @@ def _relax_per_iso_class_multi(
             for ai in range(n_ads):
                 for aj in range(ai + 1, n_ads):
                     d = float(np.linalg.norm(ads_final[ai] - ads_final[aj]))
-                    cutoff = bond_factor * (ads_rcov[ai] + ads_rcov[aj])
+                    cutoff = internal_bond_factor * (ads_rcov[ai] + ads_rcov[aj])
                     if d <= cutoff:
                         relaxed_bonds.add((ai, aj))
             if relaxed_bonds != expected_bonds:
@@ -1074,7 +1297,10 @@ def find_adsorption_sites(
     reactant: Reactant,
     *,
     bond_factor: float = 1.1,
-    k_max: int = 4,
+    k_max: int | None = None,
+    clash_factor: float | None = None,
+    reach_factor: float = 1.0,
+    internal_bond_factor: float = 1.3,
     calculator: Any = None,
     slab: Any = None,
     n_freeze_layers: int = 2,
@@ -1095,10 +1321,73 @@ def find_adsorption_sites(
         Adsorbate from :func:`~autokmc.reactants.build_reactant`.
     bond_factor : float
         Bonding cutoff multiplier.  Default 1.1.
-    k_max : int
-        Maximum clique size to enumerate.  Maps directly to site
-        coordination: 1 = top, 2 = bridge, 3 = hollow, 4 = 4-fold, etc.
-        Default 4.
+    k_max : int or None
+        Maximum clique size (site coordination) to enumerate.
+        ``1`` = top only, ``2`` = top + bridge, ``3`` = + hollow, etc.
+        When ``None`` (default), *k_max* is set automatically to the size
+        of the largest clique in the adsorbate-specific co-bonding graph —
+        i.e. the maximum number of surface atoms that can simultaneously
+        bond to the adsorbate on this particular surface.  This is always
+        the tightest physically meaningful upper bound and avoids
+        enumerating coordination patterns that are impossible for the given
+        adsorbate / surface combination.  Pass an explicit integer to
+        restrict enumeration to lower coordination numbers.
+    clash_factor : float or None
+        Steric clash threshold as a fraction of the combined covalent radii
+        of the adsorbate atom and each non-bonded surface atom.  Two filters
+        are applied during co-bonding graph construction and clique
+        enumeration:
+
+        * **Edge-level**: a candidate edge ``(s1, s2)`` is suppressed if the
+          estimated adsorbate probe at the midpoint is within
+          ``clash_factor × (r_cov_ads + r_cov_s3)`` of any third surface
+          atom ``s3``.  On Cu(111) this eliminates next-nearest-neighbour
+          bridge "sites" where a surface atom sits directly in between.
+        * **Clique-level**: every clique's centroid probe is checked against
+          all non-bonded surface atoms; cliques that fail are discarded.
+          This catches the cases the edge-level filter misses (top sites,
+          large hollows with obstructing neighbours).
+
+        ``None`` (default) resolves to *bond_factor* at runtime — i.e. the
+        standard bonding cutoff.  This is the physically correct choice:
+        a site is invalid if any non-bonded atom would actually bond to the
+        adsorbate at the estimated probe position.  Pass an explicit float
+        to tighten (< bond_factor) or loosen (> bond_factor) the filter;
+        pass ``0.0`` to disable it entirely.
+
+        .. note::
+            The probe used is a centroid + estimated-height approximation.
+            Valid non-nearest-neighbour hollow sites (e.g. FCC(100) 4-fold
+            hollow) are correctly preserved because no surface atom occupies
+            the centroid above the hollow.
+    reach_factor : float
+        Maximum bond-length multiplier used by the **geometric reachability
+        filter**.  For each bonded surface atom i, the minimum achievable
+        3D distance from any valid adsorbate position to atom i (the lateral
+        distance from the clique centroid) must not exceed
+        ``reach_factor × (r_cov_ads + r_cov_si)``.  If it does, the
+        adsorbate cannot physically bond to atom i regardless of where it is
+        placed and the k-fold site is discarded.
+
+        Default ``1.0`` (exact covalent radii sum).  This is intentionally
+        *tighter* than *bond_factor* (1.1): the co-bonding graph may
+        include slightly stretched bonds, but a site is only geometrically
+        feasible if the adsorbate can reach each bonded atom within the
+        nominal bond length.  Increase toward *bond_factor* to loosen the
+        filter; decrease below 1.0 (e.g. 0.9) to tighten further.
+    internal_bond_factor : float
+        Bond-length multiplier used when checking whether the **adsorbate's
+        internal bond topology** is preserved after relaxation.  For each
+        pair of adsorbate atoms (ai, aj), the relaxed distance must satisfy
+        ``d ≤ internal_bond_factor × (r_cov_ai + r_cov_aj)`` for the bond
+        to be considered intact.  Default ``1.3``.
+
+        This is intentionally larger than *bond_factor* (1.1) because
+        molecular bonds often stretch when the molecule adsorbs (e.g. O₂
+        on Cu(111) can reach ~1.45 Å vs. the gas-phase 1.21 Å).  Using
+        ``bond_factor`` here would incorrectly flag those sites as invalid.
+        Increase toward 1.5 for very soft bonds; decrease toward 1.1 to
+        require near-gas-phase bond lengths.
     calculator : ASE calculator or None
         When provided (together with *slab*), one representative per
         iso-class is structurally relaxed with this calculator.
@@ -1128,15 +1417,27 @@ def find_adsorption_sites(
     n_ads = len(reactant.atoms)
     cell  = surface_graph.graph["cell"]
 
+    # Resolve clash_factor: None → use bond_factor (the bonding cutoff itself).
+    # This is the physically correct default: a site is blocked if any
+    # non-bonded surface atom is within standard bonding distance of the
+    # estimated probe position, meaning it would actually bond and change
+    # the connectivity.  Users can pass an explicit value to tighten or
+    # loosen the filter, or pass 0.0 to disable it entirely.
+    effective_clash = clash_factor if clash_factor is not None else bond_factor
+
     if verbose:
+        k_str = "auto" if k_max is None else str(k_max)
+        cf_str = f"{effective_clash:.2f}" + (" (= bond_factor)" if clash_factor is None else "")
         print(f"Finding sites for '{reactant.smiles}'  "
-              f"({'single' if n_ads == 1 else 'multi'}-atom path,  k_max={k_max})")
+              f"({'single' if n_ads == 1 else 'multi'}-atom path,  k_max={k_str},  "
+              f"clash_factor={cf_str},  reach_factor={reach_factor})")
 
     if n_ads == 1:
         (opt_pts, unique_conns, iso_ids,
          class_reps, surf_rcov, surf_idx_to_local,
          bond_targets_all) = _find_sites_single_graph(
-            surface_graph, reactant, bond_factor, k_max, verbose)
+            surface_graph, reactant, bond_factor, k_max, verbose,
+            clash_factor=effective_clash, reach_factor=reach_factor)
 
         # ── optional calculator relaxation (one rep per iso-class) ───────────
         iso_results: dict[int, dict] = {}
@@ -1148,7 +1449,6 @@ def find_adsorption_sites(
             ads_data      = next(iter(reactant.graph.nodes(data=True)))[1]
             r_cov_ads     = float(ads_data["covalent_radius"])
             bond_cutoff   = bond_factor * (r_cov_ads + surf_rcov_arr.mean())
-
             iso_results = _relax_per_iso_class(
                 slab, ads_data["element"],
                 opt_pts, unique_conns, iso_ids,
@@ -1177,7 +1477,8 @@ def find_adsorption_sites(
 
     else:
         opt_positions, unique_conns, iso_ids, class_reps = _find_sites_multi_graph(
-            surface_graph, reactant, bond_factor, k_max, verbose)
+            surface_graph, reactant, bond_factor, k_max, verbose,
+            clash_factor=effective_clash, reach_factor=reach_factor)
 
         # ── optional calculator relaxation (one rep per iso-class) ───────────
         iso_results_multi: dict[int, dict] = {}
@@ -1191,6 +1492,7 @@ def find_adsorption_sites(
                 surf_indices, cell, calculator,
                 n_freeze_layers, bond_factor, fmax, steps, verbose,
                 debug_dir=debug_dir,
+                internal_bond_factor=internal_bond_factor,
             )
 
         sites = []
