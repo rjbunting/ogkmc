@@ -19,16 +19,28 @@ Algorithm
 
 **Multi-atom adsorbate**
 
-For each atom *a* in the adsorbate molecule (each is tried as the *anchor*):
+0. **Convex-hull face pre-filter** — compute the 3D convex hull of the
+   adsorbate's gas-phase geometry.  An atom can only bond to the surface
+   if it lies on a *bottom face* of the hull (a face whose outward normal
+   has a downward component, ``n_z < 0``).  A set of adsorbate atoms can
+   **simultaneously** bond to the surface only if they all lie on a single
+   bottom face of the hull.  Interior atoms (e.g. C in CH₄) and atoms on
+   purely upward-facing faces are excluded entirely, drastically reducing
+   the search space before any surface enumeration begins.
+
+   For linear/planar molecules (convex hull degenerate in 3D) the filter
+   falls back to exposing all atoms as candidates.
+
+For each *bottom-face atom set* (one atom per group is the *anchor*):
 
 1. Build an anchor-specific co-bonding graph and enumerate k-cliques
    (same as single-atom) for the anchor contact set.
 2. For each anchor clique, compute the rigid-body distance of every
-   non-anchor adsorbate atom from the anchor (gas-phase geometry).
+   *co-face* adsorbate atom from the anchor (gas-phase geometry).
    Surface atoms within reach for some molecular orientation are found
    via the triangle-inequality bound; their co-bonding sub-cliques
    (including the empty set) are enumerated.
-3. Form the Cartesian product of anchor clique × non-anchor sub-cliques
+3. Form the Cartesian product of anchor clique × co-face sub-cliques
    to obtain all unique connectivity patterns
    ``frozenset{(ads_local_idx, surf_global_idx)}``.
 4. Compute an initial rigid-body orientation with the Kabsch algorithm
@@ -61,6 +73,7 @@ import numpy as np
 import networkx as nx
 from networkx.algorithms import isomorphism
 from scipy.optimize import minimize
+from scipy.spatial import ConvexHull
 from scipy.spatial.transform import Rotation
 
 from autokmc.reactants import Reactant
@@ -142,6 +155,78 @@ def _pbc_dist_scalar(p: np.ndarray, q: np.ndarray,
     return float(np.linalg.norm(frac @ cell))
 
 
+
+
+# ---------------------------------------------------------------------------
+# Convex-hull face pre-filter
+# ---------------------------------------------------------------------------
+
+def _bottom_face_atom_sets(ads_pos: np.ndarray,
+                            normal_tol: float = 0.0) -> list[frozenset[int]]:
+    """Return the sets of adsorbate atom indices that lie on bottom convex-hull faces.
+
+    A *bottom face* is a triangular face of the 3D convex hull whose outward
+    normal has a strictly downward component (``n_z < -normal_tol``).  Only
+    atoms on such faces can be oriented toward a flat surface.  Interior atoms
+    (e.g. C in CH₄) never appear in any returned set.
+
+    Multiple atoms can **simultaneously** bond to the surface only if they all
+    lie on the same bottom face of the hull.  The returned list therefore
+    contains one ``frozenset`` per bottom face (vertices only).
+
+    Degenerate cases
+    ----------------
+    * **< 4 atoms or coplanar / collinear**: ConvexHull cannot be built in
+      3D.  All atoms are returned as a single set (no filtering).
+    * **Single atom**: trivially returns ``[frozenset({0})]``.
+    * **All faces upward-facing** (e.g. a molecule presented with every atom
+      on the top): returns all atoms (no filtering) as a safe fallback.
+
+    Parameters
+    ----------
+    ads_pos : (N, 3) array
+        Gas-phase Cartesian positions of the adsorbate atoms (Å).
+    normal_tol : float
+        Minimum magnitude of the downward normal component required to
+        classify a face as a bottom face.  Default 0.0 (any downward component
+        counts).  Increase (e.g. 0.1) to exclude nearly-horizontal faces.
+
+    Returns
+    -------
+    face_sets : list of frozenset[int]
+        Each entry is the set of adsorbate atom local indices on one bottom
+        face.  Duplicate sets (faces sharing the same vertex set) are removed.
+    """
+    N = len(ads_pos)
+    if N == 1:
+        return [frozenset({0})]
+
+    # Try to build a 3D convex hull; fall back to all-atoms if degenerate
+    try:
+        hull = ConvexHull(ads_pos)
+    except Exception:
+        # Degenerate (collinear / coplanar) — expose all atoms
+        return [frozenset(range(N))]
+
+    face_sets: list[frozenset[int]] = []
+    seen: set[frozenset[int]] = set()
+
+    for simplex, eq in zip(hull.simplices, hull.equations):
+        # eq[:3] is the outward normal, eq[3] is the offset
+        normal_z = float(eq[2])
+        if normal_z < -normal_tol:          # downward-facing face
+            fs = frozenset(int(i) for i in simplex)
+            if fs not in seen:
+                seen.add(fs)
+                face_sets.append(fs)
+
+    # Safe fallback: if no bottom faces found (e.g. molecule oriented with all
+    # faces upward in gas-phase geometry) expose all hull vertices
+    if not face_sets:
+        hull_vertices = frozenset(int(i) for i in hull.vertices)
+        face_sets = [hull_vertices]
+
+    return face_sets
 
 
 # ---------------------------------------------------------------------------
@@ -722,20 +807,19 @@ def _find_sites_multi_graph(
 
     all_local_ids = list(range(len(surf_indices)))
 
-    # ── Anchor deduplication via WL colour refinement ─────────────────────
-    # Atoms that are automorphically equivalent in the adsorbate graph will
-    # always produce the same set of surface connectivity patterns regardless
-    # of which one is chosen as the anchor.  We identify these equivalence
-    # classes with Weisfeiler-Lehman (WL) label propagation and only try one
-    # representative anchor per class, avoiding redundant enumeration.
+    # ── Step 0: Convex-hull face pre-filter ───────────────────────────────
+    # Only atoms on bottom-facing convex-hull faces can bond to the surface.
+    # A set of adsorbate atoms can simultaneously bond only if they all lie
+    # on the same bottom face.  Interior atoms (e.g. C in CH₄) are excluded.
     #
-    # Number of WL iterations = graph diameter (longest shortest path between
-    # any two nodes).  After `diameter` rounds each node's label encodes the
-    # structure of its entire connected component, so no further refinement
-    # is possible.  For a single-atom adsorbate the diameter is 0; we use
-    # at least 1 iteration so the element label is always set.
-    #
-    # WL iteration: label(v) = hash(element(v), sorted(label(u) for u in N(v)))
+    # For each bottom face we try every atom on that face as the anchor;
+    # the remaining co-face atoms are the only non-anchor candidates allowed
+    # to carry surface bonds.  Atoms NOT on any bottom face are treated as
+    # spectators (no surface contact) in every pattern.
+    bottom_faces = _bottom_face_atom_sets(ads_pos)
+
+    # Deduplicate anchors across faces using WL colour refinement so that
+    # symmetrically equivalent anchors on different faces are not repeated.
     def _wl_anchor_representatives(graph: nx.Graph) -> list[int]:
         """Return one representative anchor index per WL equivalence class."""
         n_iter = nx.diameter(graph) if graph.number_of_nodes() > 1 else 1
@@ -746,7 +830,6 @@ def _find_sites_multi_graph(
                 nbr_labels = tuple(sorted(labels[u] for u in graph.neighbors(n)))
                 new_labels[n] = (labels[n], nbr_labels)
             labels = {n: str(v) for n, v in new_labels.items()}
-        # One representative per unique label (preserving node order)
         seen_labels: dict[str, int] = {}
         for n in graph.nodes():
             lbl = labels[n]
@@ -754,151 +837,149 @@ def _find_sites_multi_graph(
                 seen_labels[lbl] = n
         return list(seen_labels.values())
 
-    anchor_representatives = _wl_anchor_representatives(reactant.graph)
+    wl_reps = set(_wl_anchor_representatives(reactant.graph))
 
     if verbose:
-        print(f"  [multi-graph] adsorbate has {N_ads} atoms, "
-              f"{len(anchor_representatives)} distinct anchor class(es): "
-              f"indices {anchor_representatives}")
+        hull_atoms = frozenset(a for face in bottom_faces for a in face)
+        print(f"  [multi-graph] adsorbate has {N_ads} atoms; "
+              f"convex-hull bottom faces: {len(bottom_faces)}  "
+              f"bondable atom indices: {sorted(hull_atoms)}")
 
-    for anchor_idx in anchor_representatives:
-        r_cov_a = float(ads_rcov[anchor_idx])
-        non_anchor_idxs = [j for j in range(N_ads) if j != anchor_idx]
+    effective_k_max: int | None = k_max   # may be set on first anchor
 
-        # ── 1. Anchor co-bonding graph + clique enumeration ───────────────
-        anchor_cbg = _make_co_bond_graph(r_cov_a, all_local_ids,
-                                          probe_z=surf_z_max)
+    for face_atom_set in bottom_faces:
+        # Anchors for this face: hull atoms that also pass WL deduplication
+        face_anchors = [a for a in sorted(face_atom_set) if a in wl_reps]
+        # Co-face atoms that may carry additional surface bonds (excludes anchor)
+        co_face_atoms = face_atom_set  # full face; anchor excluded per-iteration
 
-        # Auto-detect k_max from the anchor co-bonding graph on first anchor.
-        # The max clique of this graph is the tightest physically meaningful
-        # upper bound on how many surface atoms can simultaneously bond to
-        # the anchor atom.  All subsequent anchors and non-anchor sub-graphs
-        # respect the same ceiling (conservative — sub-graphs can only be
-        # equal or smaller).
-        effective_k_max = k_max
-        if effective_k_max is None:
-            effective_k_max = _co_bond_max_clique(anchor_cbg)
-            if verbose and anchor_idx == anchor_representatives[0]:
-                print(f"  [multi-graph] auto k_max = {effective_k_max} "
-                      f"(max clique of anchor co-bonding graph, anchor={anchor_idx})")
+        for anchor_idx in face_anchors:
+            r_cov_a = float(ads_rcov[anchor_idx])
+            # Non-anchor atoms allowed to bond: only co-face atoms on this face
+            co_face_non_anchor = sorted(co_face_atoms - {anchor_idx})
 
-        for anchor_clique in nx.enumerate_all_cliques(anchor_cbg):
-            if len(anchor_clique) > effective_k_max:
-                break
+            # ── 1. Anchor co-bonding graph + clique enumeration ───────────
+            anchor_cbg = _make_co_bond_graph(r_cov_a, all_local_ids,
+                                              probe_z=surf_z_max)
 
-            # Initial anchor position: centroid of clique atoms + height
-            lids_anchor     = [surf_idx_to_local[g] for g in anchor_clique]
-            lids_anchor_arr = np.array(lids_anchor)
-            pos_anchor      = surf_pos[lids_anchor_arr].mean(axis=0).copy()
-            h_anchor        = r_cov_a + float(surf_rcov[lids_anchor_arr].mean())
-            pos_anchor[2]   = surf_z_max + h_anchor
+            if effective_k_max is None:
+                effective_k_max = _co_bond_max_clique(anchor_cbg)
+                if verbose:
+                    print(f"  [multi-graph] auto k_max = {effective_k_max} "
+                          f"(max clique of anchor co-bonding graph, anchor={anchor_idx})")
 
-            # ── Geometric reachability filter ─────────────────────────────
-            d_lat_sq = ((surf_pos[lids_anchor_arr, :2] - pos_anchor[:2]) ** 2).sum(axis=1)
-            dz_min   = np.maximum(0.0, z_lo - surf_pos[lids_anchor_arr, 2])
-            min_dist = np.sqrt(d_lat_sq + dz_min ** 2)
-            bond_max = reach_factor * (r_cov_a + surf_rcov[lids_anchor_arr])
-            if np.any(min_dist > bond_max):
-                continue
+            for anchor_clique in nx.enumerate_all_cliques(anchor_cbg):
+                if len(anchor_clique) > effective_k_max:
+                    break
 
-            # ── Steric clash check for the anchor site ────────────────────
-            if clash_factor is not None:
-                if _is_probe_clashing(pos_anchor, set(lids_anchor), surf_pos,
-                                      surf_rcov, r_cov_a, clash_factor, cell):
+                # Initial anchor position: centroid of clique atoms + height
+                lids_anchor     = [surf_idx_to_local[g] for g in anchor_clique]
+                lids_anchor_arr = np.array(lids_anchor)
+                pos_anchor      = surf_pos[lids_anchor_arr].mean(axis=0).copy()
+                h_anchor        = r_cov_a + float(surf_rcov[lids_anchor_arr].mean())
+                pos_anchor[2]   = surf_z_max + h_anchor
+
+                # ── Geometric reachability filter ─────────────────────────
+                d_lat_sq = ((surf_pos[lids_anchor_arr, :2] - pos_anchor[:2]) ** 2).sum(axis=1)
+                dz_min   = np.maximum(0.0, z_lo - surf_pos[lids_anchor_arr, 2])
+                min_dist = np.sqrt(d_lat_sq + dz_min ** 2)
+                bond_max = reach_factor * (r_cov_a + surf_rcov[lids_anchor_arr])
+                if np.any(min_dist > bond_max):
                     continue
 
-            # ── 2a–b. Non-anchor reachable sets + sub-clique options ──────
-            # For each non-anchor adsorbate atom collect a list of possible
-            # surface contact frozensets (including the empty set).
-            non_anchor_options: list[list] = []   # one list per non-anchor atom
-            for j in non_anchor_idxs:
-                r_cov_j = float(ads_rcov[j])
-                # Rigid-body distance from anchor to a_j in gas-phase geometry
-                d_mol_j = float(np.linalg.norm(ads_pos[j] - ads_pos[anchor_idx]))
-
-                # Surface atoms reachable by a_j (triangle-inequality upper bound)
-                reach_lids = [
-                    li for li in all_local_ids
-                    if _pbc_dist_scalar(pos_anchor, surf_pos[li], cell_inv, cell)
-                       <= d_mol_j + bond_factor * (r_cov_j + float(surf_rcov[li]))
-                ]
-
-                # Always include "no surface bond" for this atom
-                options_j: list[frozenset] = [frozenset()]
-                if reach_lids:
-                    cbg_j = _make_co_bond_graph(r_cov_j, reach_lids,
-                                                probe_z=surf_z_max)
-                    for sub_clique in nx.enumerate_all_cliques(cbg_j):
-                        if len(sub_clique) > effective_k_max:
-                            break
-                        lids_j     = [surf_idx_to_local[g] for g in sub_clique]
-                        lids_j_arr = np.array(lids_j)
-                        probe_j    = surf_pos[lids_j_arr].mean(axis=0).copy()
-                        probe_j[2] = surf_z_max + r_cov_j + float(surf_rcov[lids_j_arr].mean())
-
-                        # Reachability filter for non-anchor sub-clique
-                        d_lat_sq_j = ((surf_pos[lids_j_arr, :2] - probe_j[:2]) ** 2).sum(axis=1)
-                        dz_min_j   = np.maximum(0.0, z_lo - surf_pos[lids_j_arr, 2])
-                        min_dist_j = np.sqrt(d_lat_sq_j + dz_min_j ** 2)
-                        bond_max_j = reach_factor * (r_cov_j + surf_rcov[lids_j_arr])
-                        if np.any(min_dist_j > bond_max_j):
-                            continue
-
-                        # Clash filter for non-anchor sub-clique
-                        if clash_factor is not None:
-                            if _is_probe_clashing(probe_j, set(lids_j), surf_pos,
-                                                  surf_rcov, r_cov_j, clash_factor, cell):
-                                continue
-                        options_j.append(frozenset(sub_clique))
-
-                non_anchor_options.append(options_j)
-
-            # ── 2c. Cartesian product → unique connectivity patterns ───────
-            for combo in itertools.product(*non_anchor_options):
-                # Full connectivity: (ads_local_idx, surf_global_idx) pairs
-                conn_list = (
-                    [(anchor_idx, int(s)) for s in sorted(anchor_clique)]
-                    + [(j, int(s))
-                       for j, clique_j in zip(non_anchor_idxs, combo)
-                       for s in sorted(clique_j)]
-                )
-                conn_key = tuple(sorted(conn_list))
-                if conn_key in seen:
-                    continue
-                # Register all symmetry-equivalent conn_keys so they are
-                # not added as separate entries later.
-                idx = len(unique_conns)
-                for sym_key in _symmetric_conn_keys(conn_list):
-                    seen[sym_key] = idx
-
-                unique_conns.append(frozenset(conn_key))
-                unique_anchors.append(anchor_idx)
-                unique_anchor_pos.append(pos_anchor.copy())
-
-                # ── 4. Kabsch initial rotation ────────────────────────────
-                # Align non-anchor atoms that have surface contacts toward the
-                # centroid of those contacts.
-                rel_pos = ads_pos - ads_pos[anchor_idx]  # (N_ads, 3) molecular frame
-                src_pts, tgt_pts = [], []
-                for j, clique_j in zip(non_anchor_idxs, combo):
-                    if not clique_j:
+                # ── Steric clash check for the anchor site ─────────────────
+                if clash_factor is not None:
+                    if _is_probe_clashing(pos_anchor, set(lids_anchor), surf_pos,
+                                          surf_rcov, r_cov_a, clash_factor, cell):
                         continue
-                    lids_j = [surf_idx_to_local[g] for g in clique_j]
-                    tgt_j  = surf_pos[lids_j].mean(axis=0) - pos_anchor
-                    # Ensure the target direction has a positive z component
-                    # (the non-anchor should point up, not into the slab)
-                    if tgt_j[2] < 0:
-                        tgt_j[2] = abs(tgt_j[2])
-                    src_pts.append(rel_pos[j])
-                    tgt_pts.append(tgt_j)
 
-                if src_pts:
-                    R_init  = _kabsch(np.array(src_pts), np.array(tgt_pts))
-                    rotvec0 = Rotation.from_matrix(R_init).as_rotvec()
-                else:
-                    rotvec0 = np.zeros(3)
+                # ── 2a–b. Co-face non-anchor reachable sets + sub-cliques ──
+                # Only atoms on the same convex-hull bottom face as the anchor
+                # are allowed to carry surface bonds.  Atoms on other faces or
+                # in the interior are assigned the empty set (no bond) directly.
+                non_anchor_options: list[list] = []   # one list per non-anchor atom
+                non_anchor_idxs = [j for j in range(N_ads) if j != anchor_idx]
+                for j in non_anchor_idxs:
+                    if j not in co_face_non_anchor:
+                        # Not on this bottom face → can never bond in this orientation
+                        non_anchor_options.append([frozenset()])
+                        continue
 
-                unique_rotvec.append(rotvec0)
+                    r_cov_j = float(ads_rcov[j])
+                    d_mol_j = float(np.linalg.norm(ads_pos[j] - ads_pos[anchor_idx]))
+
+                    reach_lids = [
+                        li for li in all_local_ids
+                        if _pbc_dist_scalar(pos_anchor, surf_pos[li], cell_inv, cell)
+                           <= d_mol_j + bond_factor * (r_cov_j + float(surf_rcov[li]))
+                    ]
+
+                    options_j: list[frozenset] = [frozenset()]
+                    if reach_lids:
+                        cbg_j = _make_co_bond_graph(r_cov_j, reach_lids,
+                                                    probe_z=surf_z_max)
+                        for sub_clique in nx.enumerate_all_cliques(cbg_j):
+                            if len(sub_clique) > effective_k_max:
+                                break
+                            lids_j     = [surf_idx_to_local[g] for g in sub_clique]
+                            lids_j_arr = np.array(lids_j)
+                            probe_j    = surf_pos[lids_j_arr].mean(axis=0).copy()
+                            probe_j[2] = surf_z_max + r_cov_j + float(surf_rcov[lids_j_arr].mean())
+
+                            d_lat_sq_j = ((surf_pos[lids_j_arr, :2] - probe_j[:2]) ** 2).sum(axis=1)
+                            dz_min_j   = np.maximum(0.0, z_lo - surf_pos[lids_j_arr, 2])
+                            min_dist_j = np.sqrt(d_lat_sq_j + dz_min_j ** 2)
+                            bond_max_j = reach_factor * (r_cov_j + surf_rcov[lids_j_arr])
+                            if np.any(min_dist_j > bond_max_j):
+                                continue
+
+                            if clash_factor is not None:
+                                if _is_probe_clashing(probe_j, set(lids_j), surf_pos,
+                                                      surf_rcov, r_cov_j, clash_factor, cell):
+                                    continue
+                            options_j.append(frozenset(sub_clique))
+
+                    non_anchor_options.append(options_j)
+
+                # ── 2c. Cartesian product → unique connectivity patterns ────
+                for combo in itertools.product(*non_anchor_options):
+                    conn_list = (
+                        [(anchor_idx, int(s)) for s in sorted(anchor_clique)]
+                        + [(j, int(s))
+                           for j, clique_j in zip(non_anchor_idxs, combo)
+                           for s in sorted(clique_j)]
+                    )
+                    conn_key = tuple(sorted(conn_list))
+                    if conn_key in seen:
+                        continue
+                    idx = len(unique_conns)
+                    for sym_key in _symmetric_conn_keys(conn_list):
+                        seen[sym_key] = idx
+
+                    unique_conns.append(frozenset(conn_key))
+                    unique_anchors.append(anchor_idx)
+                    unique_anchor_pos.append(pos_anchor.copy())
+
+                    # ── 4. Kabsch initial rotation ─────────────────────────
+                    rel_pos = ads_pos - ads_pos[anchor_idx]
+                    src_pts, tgt_pts = [], []
+                    for j, clique_j in zip(non_anchor_idxs, combo):
+                        if not clique_j:
+                            continue
+                        lids_j = [surf_idx_to_local[g] for g in clique_j]
+                        tgt_j  = surf_pos[lids_j].mean(axis=0) - pos_anchor
+                        if tgt_j[2] < 0:
+                            tgt_j[2] = abs(tgt_j[2])
+                        src_pts.append(rel_pos[j])
+                        tgt_pts.append(tgt_j)
+
+                    if src_pts:
+                        R_init  = _kabsch(np.array(src_pts), np.array(tgt_pts))
+                        rotvec0 = Rotation.from_matrix(R_init).as_rotvec()
+                    else:
+                        rotvec0 = np.zeros(3)
+
+                    unique_rotvec.append(rotvec0)
 
     if verbose:
         print(f"  [multi-graph] unique connectivity patterns: {len(unique_conns)}")
