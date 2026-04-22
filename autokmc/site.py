@@ -344,10 +344,13 @@ def _opt_multi(anchor0: np.ndarray, rotvec0: np.ndarray,
                conn_pairs: frozenset[tuple[int, int]],
                surf_pos: np.ndarray, surf_rcov: np.ndarray,
                surf_idx_to_local: dict[int, int],
-               cell: np.ndarray, z_lo: float, z_hi: float) -> np.ndarray:
+               cell: np.ndarray, z_lo: float, z_hi: float) -> tuple:
     """Optimise a multi-atom rigid-body placement (6 DOF).
 
-    Returns the optimised positions of all adsorbate atoms (N_ads, 3).
+    Legacy single-pass optimizer kept for reference.  The pipeline now uses
+    :func:`_opt_rotation` (stage 2) on top of :func:`_opt_single` (stage 1).
+
+    Returns ``(positions (N_ads, 3), residual)``.
     """
     # Bond targets: r_cov_ads[ak] + r_cov_surf[sk]
     pairs = list(conn_pairs)
@@ -382,6 +385,119 @@ def _opt_multi(anchor0: np.ndarray, rotvec0: np.ndarray,
     anchor_opt = x_opt[:3]
     rot_opt    = Rotation.from_rotvec(x_opt[3:]).as_matrix()
     return anchor_opt + (rot_opt @ rel_pos.T).T, float(res.fun)   # (N_ads, 3)
+
+
+def _opt_rotation(anchor_pos: np.ndarray,
+                  rotvec0: np.ndarray,
+                  anchor_idx: int,
+                  rel_pos: np.ndarray,
+                  ads_rcov: np.ndarray,
+                  conn_pairs: frozenset[tuple[int, int]],
+                  surf_pos: np.ndarray,
+                  surf_rcov: np.ndarray,
+                  surf_idx_to_local: dict[int, int],
+                  cell: np.ndarray,
+                  z_lo: float,
+                  repulsion_weight: float = 0.5) -> tuple:
+    """Stage-2 rotation optimizer: fix anchor, optimize 3-DOF rotation.
+
+    With the anchor atom already placed at its optimal position (from
+    :func:`_opt_single`), this optimizer finds the best molecular orientation
+    by minimizing:
+
+    * **Non-anchor bond residuals** – bond-length squared error for every
+      adsorbate atom *other than* the anchor that is also bonded to a surface
+      atom (e.g. the second O in O₂, or all H atoms in CH that bind to the
+      surface).
+    * **Non-bonded surface repulsion** – r⁻⁶ Lennard-Jones repulsion from
+      every surface atom that is *not* in the intended bonded set.  This
+      naturally orients free atoms (e.g. the O of CO) away from the surface
+      layer, producing physically sensible upright geometries without any
+      molecule-specific rules.
+
+    Parameters
+    ----------
+    anchor_pos : (3,) ndarray
+        Cartesian position of the anchor atom after stage-1 optimisation.
+    rotvec0 : (3,) ndarray
+        Initial rotation vector (from the SO(3) grid sample that first
+        produced this connectivity pattern).
+    anchor_idx : int
+        Local index of the anchor atom within the adsorbate.
+    rel_pos : (N_ads, 3) ndarray
+        Positions of all adsorbate atoms relative to the anchor atom
+        (i.e. ``ads_pos - ads_pos[anchor_idx]``).
+    ads_rcov : (N_ads,) ndarray
+        Covalent radii of all adsorbate atoms.
+    conn_pairs : frozenset of (int, int)
+        Intended connectivity: ``(ads_local_idx, surf_global_idx)`` pairs.
+    surf_pos : (S, 3) ndarray
+        Positions of all surface atoms.
+    surf_rcov : (S,) ndarray
+        Covalent radii of all surface atoms.
+    surf_idx_to_local : dict
+        Maps surface global atom index → local row index in *surf_pos*.
+    cell : (3, 3) ndarray
+    z_lo : float
+        Minimum allowed z for any adsorbate atom.
+    repulsion_weight : float
+        Weight of the non-bonded r⁻⁶ repulsion term.  Default ``0.5``.
+
+    Returns
+    -------
+    ads_positions : (N_ads, 3) ndarray
+        Optimised Cartesian positions of all adsorbate atoms.
+    residual : float
+        Final objective value.
+    """
+    pairs    = list(conn_pairs)
+    cell_inv = np.linalg.inv(cell)
+
+    # Non-anchor bond data: (ak, local_sl, target_length)
+    non_anchor = [
+        (ak, surf_idx_to_local[sg],
+         float(ads_rcov[ak]) + float(surf_rcov[surf_idx_to_local[sg]]))
+        for ak, sg in pairs
+        if ak != anchor_idx and sg in surf_idx_to_local
+    ]
+
+    # Boolean mask over surface atoms: True = non-bonded (subject to repulsion)
+    bonded_lids = frozenset(surf_idx_to_local[sg]
+                            for _, sg in pairs if sg in surf_idx_to_local)
+    nb_mask      = np.array([i not in bonded_lids for i in range(len(surf_pos))],
+                            dtype=bool)
+    nb_surf_pos  = surf_pos[nb_mask]   # (M, 3)
+    nb_surf_rcov = surf_rcov[nb_mask]  # (M,)
+
+    def obj(rotvec):
+        rot   = Rotation.from_rotvec(rotvec).as_matrix()
+        ads_p = anchor_pos + (rot @ rel_pos.T).T   # (N_ads, 3)
+
+        # Floor penalty: all adsorbate atoms must stay above the surface
+        below = np.maximum(0.0, z_lo - ads_p[:, 2])
+        loss = 100.0 * float(np.sum(below ** 2))
+
+        # Non-anchor bond residuals (e.g. second O in O₂, H atoms in CHₓ)
+        for ak, sl, tgt in non_anchor:
+            d     = _pbc_dist_vec(ads_p[ak], surf_pos[sl:sl + 1], cell)[0]
+            loss += (d - tgt) ** 2
+
+        # Vectorised non-bonded repulsion: (N_ads, M, 3) → (N_ads, M)
+        if repulsion_weight > 0 and len(nb_surf_pos):
+            dv   = nb_surf_pos[None, :, :] - ads_p[:, None, :]  # (N, M, 3)
+            frac = dv @ cell_inv
+            frac[..., :2] -= np.round(frac[..., :2])
+            d_nb = np.sqrt(((frac @ cell) ** 2).sum(axis=-1))   # (N, M)
+            d_nb = np.maximum(d_nb, 0.3)
+            r_min = ads_rcov[:, None] + nb_surf_rcov[None, :]    # (N, M)
+            loss += repulsion_weight * float(np.sum((r_min / d_nb) ** 6))
+
+        return loss
+
+    res = minimize(obj, rotvec0, method="L-BFGS-B",
+                   options={"maxiter": 300, "ftol": 1e-10, "gtol": 1e-7})
+    rot_opt = Rotation.from_rotvec(res.x).as_matrix()
+    return anchor_pos + (rot_opt @ rel_pos.T).T, float(res.fun)
 
 
 # ---------------------------------------------------------------------------
@@ -1466,11 +1582,42 @@ def _find_sites_multi(surface_graph: nx.Graph, reactant: Reactant,
         anchor0    = unique_anchor_pos[rep_i]
         rv0        = unique_rotvec[rep_i]
         rel_pos    = ads_pos - ads_pos[anchor_idx]
-        class_opt_pos[cid], class_residuals[cid] = _opt_multi(
-            anchor0, rv0, anchor_idx, rel_pos, ads_rcov,
+
+        # ── Stage 1: optimise anchor position (3 DOF) ────────────────────
+        # Treat the anchor as a single atom and find its optimal position
+        # w.r.t. the surface atoms it is bonded to.  This reuses the same
+        # well-tested code path as the single-atom site optimizer.
+        anchor_lids = [surf_idx_to_local[sg]
+                       for ak, sg in conn
+                       if ak == anchor_idx and sg in surf_idx_to_local]
+
+        if anchor_lids:
+            a_lids_arr   = np.array(anchor_lids)
+            a_conn_pos   = surf_pos[a_lids_arr]
+            a_tgts       = ads_rcov[anchor_idx] + surf_rcov[a_lids_arr]
+            nb_lids      = [k for k in range(len(surf_pos))
+                            if k not in set(anchor_lids)]
+            nb_pos       = surf_pos[nb_lids] if nb_lids else np.empty((0, 3))
+            anchor_opt, s1_res = _opt_single(
+                anchor0, a_conn_pos, a_tgts, nb_pos, cell, z_lo, z_hi)
+        else:
+            anchor_opt = anchor0
+            s1_res     = 0.0
+
+        # ── Stage 2: optimise rotation around optimised anchor (3 DOF) ───
+        # With the anchor correctly placed, find the molecular orientation
+        # that satisfies any remaining (non-anchor) surface bonds and
+        # maximises distance from all non-bonded surface atoms via r⁻⁶
+        # repulsion.  For CO this naturally produces an upright geometry;
+        # for CH₂/CH₃ the H atoms are oriented away from the surface.
+        ads_p_opt, s2_res = _opt_rotation(
+            anchor_opt, rv0, anchor_idx, rel_pos, ads_rcov,
             conn, surf_pos, surf_rcov, surf_idx_to_local,
-            cell, z_lo, z_hi,
+            cell, z_lo,
         )
+
+        class_opt_pos[cid]  = ads_p_opt
+        class_residuals[cid] = s1_res + s2_res
 
     # Post-rigid-body-opt pruning (5 geometric strategies)
     pruned_class_ids = _prune_opt_classes_multi(
