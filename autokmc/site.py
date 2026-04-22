@@ -134,6 +134,131 @@ def _sample_so3(n: int, seed: int = 42) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
+# WL-colour anchor deduplication
+# ---------------------------------------------------------------------------
+
+def _wl_anchor_indices(reactant: Reactant) -> list[int]:
+    """Return one representative atom index per WL-colour equivalence class.
+
+    Atoms that are symmetrically equivalent (same element environment at every
+    shell radius) share the same WL colour.  Only one anchor per colour class
+    needs to be sampled on the probe grid — all others are guaranteed to
+    produce the same set of connectivity patterns by symmetry.
+
+    Examples
+    --------
+    * O₂  (O=O)        → 1 anchor  (both O atoms are equivalent)
+    * CO  ([C-]#[O+])  → 2 anchors (C and O are inequivalent)
+    * CH₄ (C)          → 2 anchors (C and H are inequivalent)
+    """
+    graph = reactant.graph
+    if graph.number_of_nodes() == 0:
+        return []
+
+    labels: dict = {n: d["element"] for n, d in graph.nodes(data=True)}
+    n_iter = max(1, graph.number_of_nodes())
+    for _ in range(n_iter):
+        new_labels: dict = {}
+        for n in graph.nodes():
+            nbr = tuple(sorted(labels[u] for u in graph.neighbors(n)))
+            new_labels[n] = (labels[n], nbr)
+        labels = {n: str(v) for n, v in new_labels.items()}
+
+    seen_colours: dict[str, int] = {}
+    reps: list[int] = []
+    for n in graph.nodes():
+        col = labels[n]
+        if col not in seen_colours:
+            seen_colours[col] = n
+            reps.append(n)
+    return reps
+
+
+# ---------------------------------------------------------------------------
+# Convex-hull surface-exposure filter
+# ---------------------------------------------------------------------------
+
+def _hull_bondable_indices(ads_pos: np.ndarray) -> list[int]:
+    """Return the adsorbate atom indices that can face the surface.
+
+    An atom can only bond to the surface if it lies on the convex hull of
+    the molecule — interior atoms (e.g. C in CH₄, the central atom of a
+    tetrahedral molecule) are geometrically shielded by their neighbours
+    and can never approach the surface directly.
+
+    Since the grid approach tries all SO(3) orientations, **any** hull
+    vertex can potentially face downward, so we expose all hull vertices
+    rather than only bottom-facing faces.  Interior atoms (not on the hull)
+    are excluded entirely.
+
+    Degenerate cases (< 4 atoms, collinear, coplanar)
+    --------------------------------------------------
+    ``ConvexHull`` requires at least 4 non-coplanar points in 3D.  For
+    molecules with fewer atoms, or those whose positions are degenerate,
+    all atoms are returned as candidates (safe fallback).
+
+    Parameters
+    ----------
+    ads_pos : (N, 3) ndarray
+        Gas-phase Cartesian positions of the adsorbate atoms (Å).
+
+    Returns
+    -------
+    bondable : list[int]
+        Atom local indices that lie on the convex hull (or all indices for
+        degenerate molecules).
+    """
+    from scipy.spatial import ConvexHull
+
+    N = len(ads_pos)
+    if N <= 1:
+        return list(range(N))
+
+    try:
+        hull = ConvexHull(ads_pos)
+        return sorted(set(int(i) for i in hull.vertices))
+    except Exception:
+        # Degenerate geometry (collinear / coplanar / too few points)
+        return list(range(N))
+
+
+# ---------------------------------------------------------------------------
+# Steric clash helper
+# ---------------------------------------------------------------------------
+
+def _is_probe_clashing(probe: np.ndarray, exclude_lids: set,
+                        surf_pos: np.ndarray, surf_rcov: np.ndarray,
+                        r_cov_ads: float, clash_factor: float,
+                        cell_inv: np.ndarray, cell: np.ndarray) -> bool:
+    """Return True if *probe* is within ``clash_factor*(r_cov_ads+r_cov_s)``
+    of any non-bonded surface atom.
+
+    Parameters
+    ----------
+    probe        : (3,) proposed adsorbate position
+    exclude_lids : local indices of the bonded atoms (not clash-checked)
+    surf_pos     : (N, 3) all surface atom positions
+    surf_rcov    : (N,) all surface atom covalent radii
+    r_cov_ads    : adsorbate covalent radius
+    clash_factor : fraction of combined covalent radii that counts as a clash
+                   (e.g. bond_factor=1.1 means any atom that would actually
+                   bond counts as a clash)
+    cell_inv     : (3, 3) inverse unit cell matrix
+    cell         : (3, 3) unit cell matrix
+    """
+    for k in range(len(surf_pos)):
+        if k in exclude_lids:
+            continue
+        dv   = surf_pos[k] - probe
+        frac = dv @ cell_inv
+        frac[:2] -= np.round(frac[:2])
+        dist = float(np.linalg.norm(frac @ cell))
+        if dist < clash_factor * (r_cov_ads + float(surf_rcov[k])):
+            return True
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Isomorphism helpers
 # ---------------------------------------------------------------------------
 
@@ -394,7 +519,8 @@ def _adaptive_probe_grid(
 
 def _find_sites_single(surface_graph: nx.Graph, reactant: Reactant,
                         bond_factor: float, grid_spacing: float,
-                        verbose: bool) -> tuple[list, list, list]:
+                        verbose: bool,
+                        clash_factor: float | None = None) -> tuple[list, list, list]:
     """Returns (unique_pts, unique_conns, iso_class_ids)."""
     cell = surface_graph.graph["cell"]
     surf_nodes   = [(n, d) for n, d in surface_graph.nodes(data=True)
@@ -439,18 +565,33 @@ def _find_sites_single(surface_graph: nx.Graph, reactant: Reactant,
     seen: dict = {}
     unique_pts: list[np.ndarray] = []
     unique_conns: list[frozenset] = []
+    n_clash_pruned = 0
     for i in range(len(probe_pts)):
         bonded = np.where(d_mat[i] <= bond_cutoffs)[0]
         if not len(bonded):
             continue
         key = tuple(sorted(int(surf_indices[k]) for k in bonded))
-        if key not in seen:
-            seen[key] = len(unique_pts)
-            unique_pts.append(probe_pts[i].copy())
-            unique_conns.append(frozenset(key))
+        if key in seen:
+            continue
+
+        # ── Steric clash filter ────────────────────────────────────────────
+        # Reject probes where a non-bonded surface atom sits within
+        # clash_factor*(r_cov_ads+r_cov_s) — i.e. it would actually bond,
+        # meaning the connectivity set is incomplete / the site is blocked.
+        if clash_factor is not None:
+            if _is_probe_clashing(probe_pts[i], set(bonded.tolist()),
+                                  surf_pos, surf_rcov, r_cov_ads,
+                                  clash_factor, cell_inv, cell):
+                n_clash_pruned += 1
+                continue
+
+        seen[key] = len(unique_pts)
+        unique_pts.append(probe_pts[i].copy())
+        unique_conns.append(frozenset(key))
 
     if verbose:
-        print(f"  [single] unique connectivities: {len(unique_pts)}")
+        print(f"  [single] unique connectivities: {len(unique_pts)}"
+              + (f"  (clash pruned={n_clash_pruned})" if clash_factor is not None else ""))
 
     # Isomorphism — pre-filter with cheap structural key before running VF2
     node_match = isomorphism.categorical_node_match("element", "X")
@@ -528,7 +669,8 @@ def _auto_n_orientations(ads_pos: np.ndarray, grid_spacing: float) -> int:
 
 def _find_sites_multi(surface_graph: nx.Graph, reactant: Reactant,
                        bond_factor: float, grid_spacing: float,
-                       n_orientations: int | None, verbose: bool) -> tuple:
+                       n_orientations: int | None, verbose: bool,
+                       clash_factor: float | None = None) -> tuple:
     """Returns (opt_positions_list, unique_conns, iso_ids, class_reps).
 
     Optimisations applied
@@ -610,15 +752,59 @@ def _find_sites_multi(surface_graph: nx.Graph, reactant: Reactant,
         print(f"  [multi] grid pts: {len(grid_pts)} (after xy filter),  "
               f"orientations: {n_orientations},  anchors: {N_ads}")
 
-    # ── Strategy 3: sorted-tuple key for deduplication ────────────────────
+    # ── Convex-hull pre-filter ────────────────────────────────────────────
+    # Interior atoms (e.g. C in CH₄) are shielded by their neighbours and
+    # can never reach the surface directly regardless of orientation.
+    # Only hull vertices are kept as anchor candidates.
+    hull_indices = set(_hull_bondable_indices(ads_pos))
+
+    # ── WL anchor deduplication ───────────────────────────────────────────
+    # Of the hull vertices, only one representative per WL-colour class
+    # needs to be sampled — symmetrically equivalent atoms (e.g. both O in
+    # O₂, or all H in CH₄) produce identical connectivity patterns.
+    wl_reps = set(_wl_anchor_indices(reactant))
+    anchor_indices = [i for i in range(N_ads)
+                      if i in hull_indices and i in wl_reps]
+
+    # Safety: if the intersection is empty (degenerate molecule) fall back
+    # to WL reps alone so we always sample something.
+    if not anchor_indices:
+        anchor_indices = sorted(wl_reps)
+
+    if verbose:
+        print(f"  [multi] anchor candidates: {anchor_indices} "
+              f"(hull={sorted(hull_indices)}, WL-reps={sorted(wl_reps)}, "
+              f"final={len(anchor_indices)}/{N_ads})")
+
+    # ── Adsorbate automorphism deduplication ──────────────────────────────
+    # Pre-compute all graph automorphisms (element-preserving bijections of
+    # the adsorbate graph onto itself).  When a new connectivity pattern is
+    # accepted, all permutations of equivalent atoms are immediately
+    # registered in `seen` so that redundant orientations are never added.
+    _ads_nm  = isomorphism.categorical_node_match("element", "X")
+    _gm_auto = isomorphism.GraphMatcher(
+        reactant.graph, reactant.graph, node_match=_ads_nm
+    )
+    automorphisms: list[dict] = list(_gm_auto.isomorphisms_iter())
+
+    def _symmetric_conn_keys(conn_list: list[tuple[int, int]]) -> list[tuple]:
+        """Return all automorphism-permuted variants of a connectivity list."""
+        keys: set[tuple] = set()
+        for perm in automorphisms:
+            keys.add(tuple(sorted((perm[ak], sg) for ak, sg in conn_list)))
+        return list(keys)
+
+    # ── Deduplication state ───────────────────────────────────────────────
     seen: dict[tuple, int] = {}
     unique_conns:      list[frozenset]    = []
     unique_anchors:    list[int]          = []
     unique_anchor_pos: list[np.ndarray]  = []
     unique_rotvec:     list[np.ndarray]  = []
 
-    # ── Strategy 1: vectorised orientation loop ────────────────────────────
-    for anchor_idx in range(N_ads):
+    n_clash_pruned = 0
+
+    # ── Vectorised orientation loop ───────────────────────────────────────
+    for anchor_idx in anchor_indices:
         rel_pos = ads_pos - ads_pos[anchor_idx]   # (N_ads, 3)
 
         for gpt in grid_pts:
@@ -641,17 +827,42 @@ def _find_sites_multi(surface_graph: nx.Graph, reactant: Reactant,
             interesting = np.where(has_bond)[0]
 
             for oi in interesting:
-                # Build connectivity set for this orientation
-                ak_idx, sl_idx = np.where(bonded_mask[oi])  # local indices
-                conn_pairs = tuple(sorted(
-                    (int(ak_idx[i]), int(surf_indices[sl_idx[i]]))
-                    for i in range(len(ak_idx))
-                ))
-                if not conn_pairs:
-                    continue
-                # Strategy 3: sorted tuple key
-                if conn_pairs not in seen:
-                    seen[conn_pairs] = len(unique_conns)
+                    # Build connectivity set for this orientation
+                    ak_idx, sl_idx = np.where(bonded_mask[oi])  # local indices
+
+                    # ── Steric clash filter ────────────────────────────────
+                    # For each adsorbate atom, check it does not overlap any
+                    # surface atom that it is NOT bonded to.
+                    if clash_factor is not None:
+                        clashing = False
+                        bonded_surf_per_ak: dict[int, set] = {}
+                        for bi in range(len(ak_idx)):
+                            bonded_surf_per_ak.setdefault(int(ak_idx[bi]), set()).add(int(sl_idx[bi]))
+                        for ak_k, sl_set in bonded_surf_per_ak.items():
+                            probe_ak = placed[oi, ak_k]
+                            r_a = float(ads_rcov[ak_k])
+                            if _is_probe_clashing(probe_ak, sl_set, surf_pos,
+                                                  surf_rcov, r_a, clash_factor,
+                                                  cell_inv, cell):
+                                clashing = True
+                                break
+                        if clashing:
+                            n_clash_pruned += 1
+                            continue
+
+                    conn_pairs = tuple(sorted(
+                        (int(ak_idx[i]), int(surf_indices[sl_idx[i]]))
+                        for i in range(len(ak_idx))
+                    ))
+                    if not conn_pairs:
+                        continue
+                    if conn_pairs in seen:
+                        continue
+                    # New connectivity: register all automorphism-permuted
+                    # variants so equivalent orientations are never duplicated.
+                    idx = len(unique_conns)
+                    for sym_key in _symmetric_conn_keys(list(conn_pairs)):
+                        seen[sym_key] = idx
                     unique_conns.append(frozenset(conn_pairs))
                     unique_anchors.append(anchor_idx)
                     unique_anchor_pos.append(gpt.copy())
@@ -660,7 +871,8 @@ def _find_sites_multi(surface_graph: nx.Graph, reactant: Reactant,
                     )
 
     if verbose:
-        print(f"  [multi] unique connectivities: {len(unique_conns)}")
+        print(f"  [multi] unique connectivities: {len(unique_conns)}"
+              + (f"  (clash pruned={n_clash_pruned})" if clash_factor is not None else ""))
 
     # ── Strategy 5: isomorphism pre-filter ────────────────────────────────
     node_match = isomorphism.categorical_node_match("element", "X")
@@ -909,6 +1121,7 @@ def _relax_per_iso_class_multi(
     steps: int,
     verbose: bool,
     debug_dir: str | None = None,
+    internal_bond_factor: float = 1.3,
 ) -> dict[int, dict]:
     """Relax one representative per iso-class for a **multi-atom** adsorbate.
 
@@ -1018,7 +1231,7 @@ def _relax_per_iso_class_multi(
             for ai in range(n_ads):
                 for aj in range(ai + 1, n_ads):
                     d = float(np.linalg.norm(ads_final[ai] - ads_final[aj]))
-                    cutoff = bond_factor * (ads_rcov[ai] + ads_rcov[aj])
+                    cutoff = internal_bond_factor * (ads_rcov[ai] + ads_rcov[aj])
                     if d <= cutoff:
                         relaxed_bonds.add((ai, aj))
             if relaxed_bonds != expected_bonds:
@@ -1058,6 +1271,8 @@ def find_adsorption_sites(
     bond_factor: float = 1.1,
     grid_spacing: float = 0.4,
     n_orientations: int | None = None,
+    clash_factor: float | None = None,
+    internal_bond_factor: float = 1.3,
     calculator: Any = None,
     slab: Any = None,
     n_freeze_layers: int = 2,
@@ -1086,6 +1301,31 @@ def find_adsorption_sites(
         the molecule's geometric extent: ``N = ceil((π × R_max / grid_spacing)²)``,
         where *R_max* is the furthest atom distance from the molecular centroid.
         Pass an explicit integer to override.
+    clash_factor : float or None
+        Steric clash threshold as a fraction of the combined covalent radii
+        of the adsorbate atom and each non-bonded surface atom.  When any
+        non-bonded surface atom is within
+        ``clash_factor × (r_cov_ads + r_cov_s)`` of the probe position the
+        site is rejected.
+
+        * **Single-atom**: applied per grid point before deduplication.
+        * **Multi-atom**: applied per adsorbate atom per orientation before
+          deduplication.
+
+        ``None`` (default) resolves to *bond_factor* at runtime — i.e. the
+        standard bonding cutoff.  This is the physically correct default:
+        a site is blocked if a non-bonded atom would actually bond to the
+        adsorbate at the estimated probe position.  Pass an explicit float
+        to tighten (< bond_factor) or loosen (> bond_factor) the filter.
+        Pass ``0.0`` to disable it entirely.
+    internal_bond_factor : float
+        Bond-length multiplier used when checking whether the adsorbate's
+        internal bond topology is preserved after relaxation.  Default
+        ``1.3``, intentionally larger than *bond_factor* (1.1) because
+        molecular bonds genuinely stretch on adsorption (e.g. O₂ on
+        Cu(111) can reach ~1.45 Å vs. gas-phase 1.21 Å).  Increase toward
+        1.5 for very soft bonds; decrease toward 1.1 to require near
+        gas-phase bond lengths.
     calculator : ASE calculator or None
         When provided (together with *slab*), one representative per
         iso-class is structurally relaxed with this calculator.
@@ -1116,15 +1356,27 @@ def find_adsorption_sites(
     n_ads = len(reactant.atoms)
     cell  = surface_graph.graph["cell"]
 
+    # Resolve clash_factor: None → use bond_factor (the bonding cutoff itself).
+    # A site is physically blocked when a non-bonded surface atom is close
+    # enough to actually bond, so bond_factor is the correct default threshold.
+    effective_clash: float | None = bond_factor if clash_factor is None else clash_factor
+    # Allow the caller to pass 0.0 to disable the filter entirely
+    if effective_clash == 0.0:
+        effective_clash = None
+
     if verbose:
+        cf_str = (f"{effective_clash:.2f}" + (" (= bond_factor)" if clash_factor is None else "")
+                  if effective_clash is not None else "disabled")
         print(f"Finding sites for '{reactant.smiles}'  "
-              f"({'single' if n_ads == 1 else 'multi'}-atom path)")
+              f"({'single' if n_ads == 1 else 'multi'}-atom path,  "
+              f"clash_factor={cf_str})")
 
     if n_ads == 1:
         (opt_pts, unique_conns, iso_ids,
          class_reps, surf_rcov, surf_idx_to_local,
          bond_targets_all) = _find_sites_single(
-            surface_graph, reactant, bond_factor, grid_spacing, verbose)
+            surface_graph, reactant, bond_factor, grid_spacing, verbose,
+            clash_factor=effective_clash)
 
         # ── optional EMT relaxation (one rep per iso-class) ──────────────────
         iso_results: dict[int, dict] = {}
@@ -1169,7 +1421,7 @@ def find_adsorption_sites(
     else:
         opt_positions, unique_conns, iso_ids, class_reps = _find_sites_multi(
             surface_graph, reactant, bond_factor, grid_spacing,
-            n_orientations, verbose)
+            n_orientations, verbose, clash_factor=effective_clash)
 
         # ── optional calculator relaxation (one rep per iso-class) ───────────
         iso_results_multi: dict[int, dict] = {}
@@ -1183,6 +1435,7 @@ def find_adsorption_sites(
                 surf_indices, cell, calculator,
                 n_freeze_layers, bond_factor, fmax, steps, verbose,
                 debug_dir=debug_dir,
+                internal_bond_factor=internal_bond_factor,
             )
 
         sites = []
