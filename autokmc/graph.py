@@ -11,17 +11,18 @@ Each node represents one atom and carries:
 * ``type``           – one of ``"bulk"``, ``"surface"``, or ``"adsorbate"`` (str)
 * ``covalent_radius``– covalent radius in Å from ASE data (float)
 
-The ``type`` attribute is read from ``atoms.arrays["surface"]`` (int8):
+For **surface** nodes, additional attributes are stored after
+:func:`_annotate_surface_shells` runs:
 
-* ``0`` → ``"bulk"``
-* ``1`` → ``"surface"``
-* ``2`` → ``"adsorbate"``
+* ``surf_wl_k{1..4}``  – WL-refinement hash at depth k on the surface-only
+                          subgraph (str).  Two surface atoms with equal hashes
+                          at depth k have the same chemical environment out to
+                          k bond-hops, ignoring all bulk/adsorbate atoms.
+* ``surf_nn_k{1..4}``  – minimum Cartesian distance (Å) from this node to any
+                          surface atom exactly k hops away (float).
 
-Edges connect atoms whose covalent-radius neighbour-lists overlap (ASE
-:class:`~ase.neighborlist.NeighborList` with ``mult=1.1``).
-
-The graph also carries cell-level metadata as :attr:`~networkx.Graph.graph`
-attributes: ``"cell"``, ``"pbc"``.
+These are used by :func:`~autokmc.site.find_adsorption_sites` to restrict
+probe-grid sampling to one representative per surface equivalence class.
 
 Typical usage
 -------------
@@ -52,6 +53,82 @@ import networkx as nx
 from ase import Atoms
 from ase.data import covalent_radii as ASE_COVALENT_RADII
 from ase.neighborlist import NeighborList, natural_cutoffs
+
+
+# ---------------------------------------------------------------------------
+# Surface-shell annotation
+# ---------------------------------------------------------------------------
+
+def _annotate_surface_shells(G: nx.Graph, k_max: int = 4) -> None:
+    """Annotate every surface node with WL hashes and shell distances.
+
+    Only surface-to-surface edges are traversed, so bulk/adsorbate atoms
+    never influence the classification.
+
+    Attributes written
+    ------------------
+    ``surf_wl_k{k}`` (str)
+        WL-refinement label after *k* iterations on the surface-only
+        subgraph.  Atoms with equal labels at depth *k* have identical
+        chemical environments out to *k* bond-hops on the surface.
+    ``surf_nn_k{k}`` (float)
+        Minimum Cartesian distance (Å) to surface atoms at exactly *k*
+        hops from this node (the *k*-th coordination shell).
+
+    Graph-level summary
+    -------------------
+    ``G.graph["surf_nn_k{k}"]`` stores the minimum of ``surf_nn_k{k}``
+    over all surface atoms, allowing quick shell-distance look-up.
+    """
+    surf_nodes = [n for n, d in G.nodes(data=True) if d["type"] == "surface"]
+    if len(surf_nodes) < 2:
+        return
+
+    surf_set  = set(surf_nodes)
+    positions = {n: G.nodes[n]["position"] for n in surf_nodes}
+
+    # Surface-only adjacency — never traverse bulk or adsorbate edges
+    surf_adj: dict[int, list[int]] = {
+        n: [u for u in G.neighbors(n) if u in surf_set]
+        for n in surf_nodes
+    }
+
+    # ── Per-node BFS: record min distance to atoms at each shell ─────────
+    for n in surf_nodes:
+        visited: set[int] = {n}
+        frontier: list[int] = [n]
+        for hop in range(1, k_max + 1):
+            next_frontier: list[int] = []
+            for v in frontier:
+                for u in surf_adj[v]:
+                    if u not in visited:
+                        visited.add(u)
+                        next_frontier.append(u)
+            if next_frontier:
+                d_min = float(min(
+                    np.linalg.norm(positions[n] - positions[u])
+                    for u in next_frontier
+                ))
+                G.nodes[n][f"surf_nn_k{hop}"] = d_min
+            frontier = next_frontier
+
+    # ── WL refinement: k iterations on surface-only adjacency ────────────
+    wl: dict[int, str] = {n: G.nodes[n]["element"] for n in surf_nodes}
+    for k in range(1, k_max + 1):
+        new_wl: dict[int, str] = {}
+        for n in surf_nodes:
+            nbr = tuple(sorted(wl[u] for u in surf_adj[n]))
+            new_wl[n] = str((wl[n], nbr))
+        wl = new_wl
+        for n in surf_nodes:
+            G.nodes[n][f"surf_wl_k{k}"] = wl[n]
+
+    # ── Graph-level summary ───────────────────────────────────────────────
+    for k in range(1, k_max + 1):
+        vals = [G.nodes[n][f"surf_nn_k{k}"]
+                for n in surf_nodes if f"surf_nn_k{k}" in G.nodes[n]]
+        if vals:
+            G.graph[f"surf_nn_k{k}"] = float(min(vals))
 
 
 # ---------------------------------------------------------------------------
@@ -151,5 +228,9 @@ def build_graph(
         for j in map(int, neighbours):
             if j > i:
                 G.add_edge(i, j)
+
+    # Annotate surface nodes with WL hashes and shell distances.
+    # Used by find_adsorption_sites to restrict probe-grid sampling.
+    _annotate_surface_shells(G)
 
     return G

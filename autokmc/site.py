@@ -335,7 +335,7 @@ def _opt_single(probe0: np.ndarray, conn_pos: np.ndarray,
     res = minimize(obj, p0, method="L-BFGS-B",
                    bounds=[(None, None), (None, None), (z_lo, z_hi)],
                    options={"maxiter": 500, "ftol": 1e-12, "gtol": 1e-8})
-    return res.x
+    return res.x, float(res.fun)
 
 
 def _opt_multi(anchor0: np.ndarray, rotvec0: np.ndarray,
@@ -381,7 +381,7 @@ def _opt_multi(anchor0: np.ndarray, rotvec0: np.ndarray,
     x_opt = res.x
     anchor_opt = x_opt[:3]
     rot_opt    = Rotation.from_rotvec(x_opt[3:]).as_matrix()
-    return anchor_opt + (rot_opt @ rel_pos.T).T        # (N_ads, 3)
+    return anchor_opt + (rot_opt @ rel_pos.T).T, float(res.fun)   # (N_ads, 3)
 
 
 # ---------------------------------------------------------------------------
@@ -402,6 +402,244 @@ def _iso_prefilter_key(g: nx.Graph) -> tuple:
     ))
     deg_seq = tuple(sorted(g.degree(n) for n in g.nodes()))
     return (g.number_of_nodes(), g.number_of_edges(), deg_seq, elem_counts)
+
+
+def _ego_wl_hash(g: nx.Graph) -> str:
+    """Weisfeiler-Lehman graph hash for fast iso-class bucketing.
+
+    Graphs with *different* hashes are provably non-isomorphic and can skip
+    the full VF2 ``GraphMatcher`` check entirely.  Only graphs that share the
+    same hash need the more expensive VF2 verification.
+
+    Uses node attribute ``"element"`` as the initial node label.
+    """
+    from networkx.algorithms.graph_hashing import weisfeiler_lehman_graph_hash
+    return weisfeiler_lehman_graph_hash(g, node_attr="element")
+
+
+def _prune_opt_classes_single(
+    class_opt_pts: dict,
+    class_residuals: dict,
+    class_rep_idx: dict,
+    unique_conns: list,
+    surf_pos: np.ndarray,
+    surf_idx_to_local: dict,
+    bond_targets_all: np.ndarray,
+    cell: np.ndarray,
+    residual_threshold: float,
+    stretch_factor: float,
+    compression_factor: float,
+    normal_cos_min: float,
+    merge_tol: float,
+    verbose: bool,
+) -> set:
+    """Return the set of iso-class ids to prune before ML relaxation.
+
+    Five geometric strategies are applied in order (single-atom adsorbate):
+
+    1. **Residual threshold** – rigid-body L-BFGS-B objective value after
+       optimisation is too large, indicating a geometrically strained site
+       whose bond lengths cannot be satisfied simultaneously.
+    2. **Bond-stretch filter** – at least one intended bond is longer than
+       ``stretch_factor × ideal_bond_length`` in the optimised geometry.
+    3. **Bond-compression filter** – at least one bond is shorter than
+       ``compression_factor × ideal_bond_length`` (over-compressed).
+    4. **Surface-normal alignment** – the vector from the adsorbate to the
+       mean position of its bonded surface atoms should point *downward*
+       (negative z).  Sites where this vector has a positive z-component
+       greater than *normal_cos_min* are pruned.
+    5. **Post-opt spatial dedup** – two classes that converged to the same
+       Cartesian position (within *merge_tol* Å, PBC-aware) are merged; the
+       higher-id duplicate is removed.
+    """
+    cell_inv = np.linalg.inv(cell)
+    n_classes = len(class_opt_pts)
+    pruned: set = set()
+    reasons: dict = {}
+
+    for cid, rep_i in class_rep_idx.items():
+        opt_pos = class_opt_pts[cid]
+        conn    = unique_conns[rep_i]
+        lids    = [surf_idx_to_local[g] for g in sorted(conn)
+                   if g in surf_idx_to_local]
+        if not lids:
+            pruned.add(cid); reasons[cid] = "no_local_atoms"; continue
+
+        # Strategy 1: residual threshold
+        if class_residuals[cid] > residual_threshold:
+            pruned.add(cid)
+            reasons[cid] = (f"residual={class_residuals[cid]:.3f}"
+                            f">{residual_threshold}")
+            continue
+
+        lids_arr = np.array(lids)
+        conn_pos = surf_pos[lids_arr]
+        tgts     = bond_targets_all[lids_arr]
+        dists    = _pbc_dist_vec(opt_pos, conn_pos, cell)
+
+        # Strategy 2: bond stretch
+        ratio_max = float((dists / tgts).max())
+        if ratio_max > stretch_factor:
+            pruned.add(cid)
+            reasons[cid] = f"stretch={ratio_max:.3f}>{stretch_factor}"
+            continue
+
+        # Strategy 3: bond compression
+        ratio_min = float((dists / tgts).min())
+        if ratio_min < compression_factor:
+            pruned.add(cid)
+            reasons[cid] = f"compress={ratio_min:.3f}<{compression_factor}"
+            continue
+
+        # Strategy 4: surface-normal alignment
+        # bond_vec points from adsorbate toward surface atoms (should be -z)
+        mean_surf = conn_pos.mean(axis=0)
+        bond_vec  = mean_surf - opt_pos
+        bv_norm   = float(np.linalg.norm(bond_vec))
+        if bv_norm > 1e-6:
+            cos_z = bond_vec[2] / bv_norm   # negative = pointing downward ✓
+            if cos_z > normal_cos_min:
+                pruned.add(cid)
+                reasons[cid] = f"normal_cos={cos_z:.3f}>{normal_cos_min}"
+                continue
+
+    # Strategy 5: post-opt spatial dedup (surviving classes only, PBC-aware)
+    if merge_tol > 0:
+        surviving = sorted(cid for cid in class_opt_pts if cid not in pruned)
+        for i, cid_i in enumerate(surviving):
+            if cid_i in pruned:
+                continue
+            pi = class_opt_pts[cid_i]
+            for cid_j in surviving[i + 1:]:
+                if cid_j in pruned:
+                    continue
+                dv   = class_opt_pts[cid_j] - pi
+                frac = dv @ cell_inv
+                frac[:2] -= np.round(frac[:2])
+                d = float(np.linalg.norm(frac @ cell))
+                if d < merge_tol:
+                    pruned.add(cid_j)
+                    reasons[cid_j] = f"spatial_dup_of_{cid_i} d={d:.3f}Å"
+
+    if verbose and pruned:
+        print(f"  [single pre-relax pruning] {len(pruned)}/{n_classes} "
+              f"classes pruned:")
+        for cid in sorted(pruned):
+            print(f"    iso-class {cid:2d}: {reasons.get(cid, '?')}")
+
+    return pruned
+
+
+def _prune_opt_classes_multi(
+    class_opt_pos: dict,
+    class_residuals: dict,
+    class_rep_idx: dict,
+    unique_conns: list,
+    surf_pos: np.ndarray,
+    surf_rcov: np.ndarray,
+    surf_idx_to_local: dict,
+    ads_rcov: np.ndarray,
+    cell: np.ndarray,
+    residual_threshold: float,
+    stretch_factor: float,
+    compression_factor: float,
+    normal_cos_min: float,
+    merge_tol: float,
+    verbose: bool,
+) -> set:
+    """Post-rigid-body-opt pruning for multi-atom adsorbates.
+
+    Applies the same five strategies as :func:`_prune_opt_classes_single`
+    adapted for ``(N_ads, 3)`` adsorbate positions and per-bond
+    ``(adsorbate_atom, surface_atom)`` covalent-radii cutoffs.
+    Spatial dedup (strategy 5) uses the adsorbate centroid as the proxy
+    position.
+    """
+    cell_inv  = np.linalg.inv(cell)
+    n_classes = len(class_opt_pos)
+    pruned: set = set()
+    reasons: dict = {}
+
+    for cid, rep_i in class_rep_idx.items():
+        opt_pos = class_opt_pos[cid]   # (N_ads, 3)
+        conn    = unique_conns[rep_i]  # frozenset of (ak, sg)
+
+        # Strategy 1: residual threshold
+        if class_residuals[cid] > residual_threshold:
+            pruned.add(cid)
+            reasons[cid] = (f"residual={class_residuals[cid]:.3f}"
+                            f">{residual_threshold}")
+            continue
+
+        # Build per-bond (ak, lid, ideal_length) triples
+        bond_data = []
+        for ak, sg in conn:
+            if sg not in surf_idx_to_local:
+                continue
+            lid = surf_idx_to_local[sg]
+            tgt = float(ads_rcov[ak]) + float(surf_rcov[lid])
+            bond_data.append((ak, lid, tgt))
+        if not bond_data:
+            pruned.add(cid); reasons[cid] = "no_local_atoms"; continue
+
+        dists = np.array([
+            _pbc_dist_vec(opt_pos[ak], surf_pos[lid:lid + 1], cell)[0]
+            for ak, lid, _ in bond_data
+        ])
+        tgts = np.array([tgt for _, _, tgt in bond_data])
+
+        # Strategy 2: bond stretch
+        ratio_max = float((dists / tgts).max())
+        if ratio_max > stretch_factor:
+            pruned.add(cid)
+            reasons[cid] = f"stretch={ratio_max:.3f}>{stretch_factor}"
+            continue
+
+        # Strategy 3: bond compression
+        ratio_min = float((dists / tgts).min())
+        if ratio_min < compression_factor:
+            pruned.add(cid)
+            reasons[cid] = f"compress={ratio_min:.3f}<{compression_factor}"
+            continue
+
+        # Strategy 4: surface-normal alignment
+        surf_lids    = list({lid for _, lid, _ in bond_data})
+        mean_surf    = surf_pos[surf_lids].mean(axis=0)
+        ads_centroid = opt_pos.mean(axis=0)
+        bond_vec     = mean_surf - ads_centroid
+        bv_norm      = float(np.linalg.norm(bond_vec))
+        if bv_norm > 1e-6:
+            cos_z = bond_vec[2] / bv_norm
+            if cos_z > normal_cos_min:
+                pruned.add(cid)
+                reasons[cid] = f"normal_cos={cos_z:.3f}>{normal_cos_min}"
+                continue
+
+    # Strategy 5: post-opt spatial dedup on adsorbate centroid (PBC-aware)
+    if merge_tol > 0:
+        surviving  = sorted(cid for cid in class_opt_pos if cid not in pruned)
+        centroids  = {cid: class_opt_pos[cid].mean(axis=0) for cid in surviving}
+        for i, cid_i in enumerate(surviving):
+            if cid_i in pruned:
+                continue
+            for cid_j in surviving[i + 1:]:
+                if cid_j in pruned:
+                    continue
+                dv   = centroids[cid_j] - centroids[cid_i]
+                frac = dv @ cell_inv
+                frac[:2] -= np.round(frac[:2])
+                d = float(np.linalg.norm(frac @ cell))
+                if d < merge_tol:
+                    pruned.add(cid_j)
+                    reasons[cid_j] = f"spatial_dup_of_{cid_i} d={d:.3f}Å"
+
+    if verbose and pruned:
+        print(f"  [multi pre-relax pruning] {len(pruned)}/{n_classes} "
+              f"classes pruned:")
+        for cid in sorted(pruned):
+            print(f"    iso-class {cid:2d}: {reasons.get(cid, '?')}")
+
+    return pruned
 
 
 # ---------------------------------------------------------------------------
@@ -514,14 +752,208 @@ def _adaptive_probe_grid(
 
 
 # ---------------------------------------------------------------------------
+# Surface equivalence helpers (WL-based representative selection + expansion)
+# ---------------------------------------------------------------------------
+
+def _surface_representative_nodes(
+    surface_graph: nx.Graph,
+    d_mol_max: float,
+) -> tuple[list[int], str | None]:
+    """Return one representative surface node per WL equivalence class.
+
+    The WL depth *k* is the smallest value such that the *k*-th shell
+    distance on the surface is ≥ *d_mol_max*.  This ensures the
+    classification is just deep enough to distinguish all environments
+    that an adsorbate of the given extent can sample.
+
+    Parameters
+    ----------
+    surface_graph : nx.Graph
+        Must have ``surf_wl_k{k}`` node attributes (written by
+        :func:`~autokmc.graph._annotate_surface_shells`).
+    d_mol_max : float
+        Maximum spatial extent of the adsorbate from its anchor atom (Å).
+        Pass ``0.0`` for a single-atom adsorbate.
+
+    Returns
+    -------
+    rep_nodes : list[int]
+        One representative node per WL equivalence class.
+    wl_key : str or None
+        The node attribute used (``"surf_wl_k{k}"``), or ``None`` when
+        WL data are absent (caller should fall back to all surface nodes).
+    """
+    surf_pairs = [(n, d) for n, d in surface_graph.nodes(data=True)
+                  if d["type"] == "surface"]
+    if not surf_pairs:
+        return [], None
+
+    sample_d = surf_pairs[0][1]
+    if "surf_wl_k1" not in sample_d:
+        return [n for n, _ in surf_pairs], None
+
+    # Choose k: smallest k with surf_nn_k{k} >= d_mol_max
+    k = 4
+    for ki in range(1, 5):
+        shell_d = surface_graph.graph.get(f"surf_nn_k{ki}")
+        if shell_d is not None and d_mol_max <= shell_d:
+            k = ki
+            break
+
+    wl_key = f"surf_wl_k{k}"
+    if wl_key not in sample_d:
+        # Requested depth not stored; use deepest available
+        for ki in range(4, 0, -1):
+            if f"surf_wl_k{ki}" in sample_d:
+                wl_key = f"surf_wl_k{ki}"
+                break
+        else:
+            return [n for n, _ in surf_pairs], None
+
+    seen: dict[str, int] = {}
+    reps: list[int] = []
+    for n, d in surf_pairs:
+        cls = d.get(wl_key, "")
+        if cls not in seen:
+            seen[cls] = n
+            reps.append(n)
+    return reps, wl_key
+
+
+def _expand_site_instances(
+    unique_conns: list[frozenset],
+    unique_pts:   list[np.ndarray],
+    iso_ids:      list[int],
+    surface_graph: nx.Graph,
+    wl_key:        str,
+    surf_pos:      np.ndarray,
+    surf_indices:  np.ndarray,
+    cell:          np.ndarray,
+    is_multi:      bool = False,
+) -> tuple[list[frozenset], list[np.ndarray], list[int]]:
+    """Expand sites found near representative atoms to all surface instances.
+
+    For each discovered connectivity pattern the function locates every
+    isomorphic copy in the full surface graph (using the WL hash stored
+    in *wl_key* as the node-match criterion) and generates translated
+    site positions by centroid-shifting.
+
+    Parameters
+    ----------
+    unique_conns : list of frozenset
+        * Single-atom: frozenset of surface global indices.
+        * Multi-atom:  frozenset of ``(ads_local_idx, surf_global_idx)`` pairs.
+    unique_pts : list of ndarray
+        Corresponding adsorbate positions — shape ``(3,)`` for single-atom
+        or ``(N_ads, 3)`` for multi-atom.
+    iso_ids : list of int
+        Iso-class id per entry (unchanged for expanded instances).
+    surface_graph : nx.Graph
+    wl_key : str
+        Node attribute used for WL classification.
+    surf_pos : (S, 3) ndarray
+    surf_indices : (S,) ndarray
+        Global atom indices for each row of *surf_pos*.
+    cell : (3, 3) ndarray
+    is_multi : bool
+        ``True`` for multi-atom adsorbates.
+
+    Returns
+    -------
+    all_conns, all_pts, all_iso_ids : expanded lists (may be much larger
+    than the inputs when the surface has many equivalent atoms).
+    """
+    cell_inv = np.linalg.inv(cell)
+    surf_idx_to_local = {int(surf_indices[k]): k
+                         for k in range(len(surf_indices))}
+
+    surf_node_set = frozenset(
+        n for n, d in surface_graph.nodes(data=True) if d["type"] == "surface"
+    )
+    surf_subgraph = surface_graph.subgraph(surf_node_set)
+    nm = isomorphism.categorical_node_match(wl_key, "")
+
+    all_conns: list[frozenset] = []
+    all_pts:   list[np.ndarray] = []
+    all_iso:   list[int] = []
+    seen_conns: set[frozenset] = set()
+
+    for conn, pt, iso_id in zip(unique_conns, unique_pts, iso_ids):
+        # Extract surface atom subset
+        if is_multi:
+            surf_atoms = sorted(set(sg for _, sg in conn))
+        else:
+            surf_atoms = sorted(conn)
+
+        local_ref = [surf_idx_to_local[s] for s in surf_atoms
+                     if s in surf_idx_to_local]
+        if not local_ref:
+            continue
+        centroid_ref = surf_pos[local_ref].mean(axis=0)
+
+        # Build reference subgraph and find all isomorphic copies via VF2
+        ref_sub = surf_subgraph.subgraph(surf_atoms).copy()
+        gm = isomorphism.GraphMatcher(surf_subgraph, ref_sub, node_match=nm)
+
+        for iso_map in gm.subgraph_isomorphisms_iter():
+            # iso_map: surf_subgraph node → ref_sub node
+            matched = sorted(iso_map.keys())
+
+            if is_multi:
+                inv_map = {v: k for k, v in iso_map.items()}  # ref→new
+                new_conn = frozenset((ak, inv_map[sg]) for ak, sg in conn)
+            else:
+                new_conn = frozenset(int(n) for n in matched)
+
+            if new_conn in seen_conns:
+                continue
+            seen_conns.add(new_conn)
+
+            local_new = [surf_idx_to_local[s] for s in matched
+                         if s in surf_idx_to_local]
+            if not local_new:
+                continue
+            centroid_new = surf_pos[local_new].mean(axis=0)
+
+            # Minimal-image centroid shift
+            shift = centroid_new - centroid_ref
+            frac_s = shift @ cell_inv
+            frac_s[:2] -= np.round(frac_s[:2])
+            shift = frac_s @ cell
+
+            if is_multi and pt.ndim > 1:
+                new_pt = pt + shift[None, :]   # (N_ads, 3)
+                for i in range(len(new_pt)):
+                    frac = new_pt[i] @ cell_inv
+                    frac[:2] -= np.floor(frac[:2])
+                    new_pt[i] = frac @ cell
+            else:
+                new_pt = pt + shift
+                frac = new_pt @ cell_inv
+                frac[:2] -= np.floor(frac[:2])
+                new_pt = frac @ cell
+
+            all_conns.append(new_conn)
+            all_pts.append(new_pt)
+            all_iso.append(iso_id)
+
+    return all_conns, all_pts, all_iso
+
+
+# ---------------------------------------------------------------------------
 # Single-atom site finding
 # ---------------------------------------------------------------------------
 
 def _find_sites_single(surface_graph: nx.Graph, reactant: Reactant,
                         bond_factor: float, grid_spacing: float,
                         verbose: bool,
-                        clash_factor: float | None = None) -> tuple[list, list, list]:
-    """Returns (unique_pts, unique_conns, iso_class_ids)."""
+                        clash_factor: float | None = None,
+                        residual_threshold: float = 2.0,
+                        stretch_factor: float = 1.3,
+                        compression_factor: float = 0.65,
+                        normal_cos_min: float = 0.0,
+                        merge_tol: float = 0.15) -> tuple:
+    """Returns (unique_pts, unique_conns, iso_class_ids, …, pruned_class_ids)."""
     cell = surface_graph.graph["cell"]
     surf_nodes   = [(n, d) for n, d in surface_graph.nodes(data=True)
                     if d["type"] == "surface"]
@@ -539,11 +971,29 @@ def _find_sites_single(surface_graph: nx.Graph, reactant: Reactant,
     d_min = r_cov_ads * 0.5
     d_max = bond_factor * (r_cov_ads + surf_rcov.max())
 
-    # ── Adaptive probe grid ────────────────────────────────────────────────
-    # Points are placed on hemispherical shells centred on each surface atom
-    # at radii tuned to (r_ads + r_surf) rather than a flat uniform grid.
+    # ── Representative-restricted probe grid ──────────────────────────────
+    # Select one surface atom per WL equivalence class and build the probe
+    # grid only around those representatives.  Equivalent sites are recovered
+    # afterwards by _expand_site_instances.  For a pure-metal surface this
+    # reduces the grid by a factor equal to the number of surface atoms.
+    surf_idx_to_local = {int(surf_indices[k]): k for k in range(len(surf_indices))}
+    rep_nodes, wl_key = _surface_representative_nodes(surface_graph, 0.0)
+    if rep_nodes:
+        rep_local = np.array([surf_idx_to_local[n] for n in rep_nodes
+                               if n in surf_idx_to_local])
+        rep_surf_pos  = surf_pos[rep_local]
+        rep_surf_rcov = surf_rcov[rep_local]
+    else:
+        rep_surf_pos  = surf_pos
+        rep_surf_rcov = surf_rcov
+        wl_key = None
+
+    if verbose:
+        print(f"  [single] surface representatives: {len(rep_surf_pos)} "
+              f"of {len(surf_pos)} atoms  (wl_key={wl_key})")
+
     probe_pts = _adaptive_probe_grid(
-        surf_pos, surf_rcov, [r_cov_ads],
+        rep_surf_pos, rep_surf_rcov, [r_cov_ads],
         bond_factor, grid_spacing, surf_z_max, cell,
     )
 
@@ -593,27 +1043,40 @@ def _find_sites_single(surface_graph: nx.Graph, reactant: Reactant,
         print(f"  [single] unique connectivities: {len(unique_pts)}"
               + (f"  (clash pruned={n_clash_pruned})" if clash_factor is not None else ""))
 
-    # Isomorphism — pre-filter with cheap structural key before running VF2
+    # ── Expand to all equivalent surface instances ────────────────────────
+    # The probe grid only covered representative atoms; reconstruct the full
+    # set of instances by isomorphic subgraph matching on the surface graph.
+    if wl_key is not None:
+        unique_conns, unique_pts, _ = _expand_site_instances(
+            unique_conns, unique_pts,
+            list(range(len(unique_conns))),   # dummy ids — iso classification follows
+            surface_graph, wl_key,
+            surf_pos, surf_indices, cell,
+            is_multi=False,
+        )
+        if verbose:
+            print(f"  [single] after expansion: {len(unique_conns)} instances")
+
+    # Isomorphism — WL hash bucketing avoids VF2 for graphs with distinct hashes
     node_match = isomorphism.categorical_node_match("element", "X")
     class_reps: list[nx.Graph] = []
-    class_keys: list[tuple] = []   # pre-filter fingerprints
+    class_hash_buckets: dict[str, list[int]] = {}   # WL hash → list of class ids
     iso_ids: list[int] = []
     for conn in unique_conns:
-        ego = _build_ego_single(surface_graph, conn, ads_elem)
-        fkey = _iso_prefilter_key(ego)
+        ego    = _build_ego_single(surface_graph, conn, ads_elem)
+        wl_key = _ego_wl_hash(ego)
         assigned = False
-        for cid, (rep, rkey) in enumerate(zip(class_reps, class_keys)):
-            if fkey != rkey:
-                continue
-            if isomorphism.GraphMatcher(ego, rep, node_match=node_match).is_isomorphic():
+        for cid in class_hash_buckets.get(wl_key, []):
+            if isomorphism.GraphMatcher(ego, class_reps[cid],
+                                        node_match=node_match).is_isomorphic():
                 iso_ids.append(cid); assigned = True; break
         if not assigned:
+            new_cid = len(class_reps)
             class_reps.append(ego)
-            class_keys.append(fkey)
-            iso_ids.append(len(class_reps) - 1)
+            class_hash_buckets.setdefault(wl_key, []).append(new_cid)
+            iso_ids.append(new_cid)
 
     # Geometric optimisation — one representative per iso-class only
-    surf_idx_to_local = {int(surf_indices[k]): k for k in range(len(surf_indices))}
     z_lo = float(surf_z_max) + d_min
     z_hi = float(surf_z_max) + d_max
 
@@ -623,8 +1086,9 @@ def _find_sites_single(surface_graph: nx.Graph, reactant: Reactant,
     class_rep_idx = {cid: int(np.where(iso_ids_arr == cid)[0][0])
                      for cid in range(n_classes)}
 
-    # Optimise one representative per class, then copy to all members
+    # Optimise one representative per class; collect residuals for pruning
     class_opt_pts: dict[int, np.ndarray] = {}
+    class_residuals: dict[int, float] = {}
     for cid, rep_i in class_rep_idx.items():
         pt0  = unique_pts[rep_i]
         conn = unique_conns[rep_i]
@@ -633,12 +1097,21 @@ def _find_sites_single(surface_graph: nx.Graph, reactant: Reactant,
         bond_tgts  = bond_targets_all[lids]
         nb_lids    = [k for k in range(len(surf_indices)) if k not in lids]
         nonbond    = surf_pos[nb_lids] if nb_lids else np.empty((0, 3))
-        class_opt_pts[cid] = _opt_single(pt0, conn_pos, bond_tgts, nonbond,
-                                         cell, z_lo, z_hi)
+        class_opt_pts[cid], class_residuals[cid] = _opt_single(
+            pt0, conn_pos, bond_tgts, nonbond, cell, z_lo, z_hi)
+
+    # Post-rigid-body-opt pruning (5 geometric strategies)
+    pruned_class_ids = _prune_opt_classes_single(
+        class_opt_pts, class_residuals, class_rep_idx,
+        unique_conns, surf_pos, surf_idx_to_local, bond_targets_all, cell,
+        residual_threshold, stretch_factor, compression_factor,
+        normal_cos_min, merge_tol, verbose,
+    )
 
     opt_pts = [class_opt_pts[cid] for cid in iso_ids]
 
-    return opt_pts, unique_conns, iso_ids, class_reps, surf_rcov, surf_idx_to_local, bond_targets_all
+    return (opt_pts, unique_conns, iso_ids, class_reps,
+            surf_rcov, surf_idx_to_local, bond_targets_all, pruned_class_ids)
 
 
 # ---------------------------------------------------------------------------
@@ -670,8 +1143,13 @@ def _auto_n_orientations(ads_pos: np.ndarray, grid_spacing: float) -> int:
 def _find_sites_multi(surface_graph: nx.Graph, reactant: Reactant,
                        bond_factor: float, grid_spacing: float,
                        n_orientations: int | None, verbose: bool,
-                       clash_factor: float | None = None) -> tuple:
-    """Returns (opt_positions_list, unique_conns, iso_ids, class_reps).
+                       clash_factor: float | None = None,
+                       residual_threshold: float = 2.0,
+                       stretch_factor: float = 1.3,
+                       compression_factor: float = 0.65,
+                       normal_cos_min: float = 0.0,
+                       merge_tol: float = 0.15) -> tuple:
+    """Returns (opt_positions_list, unique_conns, iso_ids, class_reps, pruned_class_ids).
 
     Optimisations applied
     ---------------------
@@ -683,9 +1161,8 @@ def _find_sites_multi(surface_graph: nx.Graph, reactant: Reactant,
        discarded before the rotation search begins.
     3. **Sorted-tuple connectivity key** – cheaper to construct and compare
        than ``frozenset`` for the deduplication dict.
-    5. **Isomorphism pre-filter** – a cheap structural fingerprint
-       (node/edge counts, degree sequence, element–degree pairs) is compared
-       before invoking the full VF2 ``GraphMatcher``.
+    4. **WL graph hash iso-filter** – Weisfeiler-Lehman hash on ego-graphs
+       replaces the manual fingerprint; non-matching hashes skip VF2 entirely.
     """
     from scipy.spatial import cKDTree
 
@@ -727,13 +1204,35 @@ def _find_sites_multi(surface_graph: nx.Graph, reactant: Reactant,
     # Sample SO(3) rotations once  →  (n_orient, 3, 3)
     rot_mats = _sample_so3(n_orientations)
 
+    # ── Representative-restricted probe grid ──────────────────────────────
+    # d_mol_max = max adsorbate atom distance from the centroid (spatial extent).
+    # We use this to choose the WL depth k and build the grid only around
+    # representative surface atoms.
+    ads_centroid = ads_pos.mean(axis=0)
+    d_mol_max = float(np.linalg.norm(ads_pos - ads_centroid, axis=1).max())
+    surf_idx_to_local_m = {int(surf_indices[k]): k for k in range(len(surf_indices))}
+    rep_nodes_m, wl_key_m = _surface_representative_nodes(surface_graph, d_mol_max)
+    if rep_nodes_m:
+        rep_local_m   = np.array([surf_idx_to_local_m[n] for n in rep_nodes_m
+                                   if n in surf_idx_to_local_m])
+        rep_surf_pos_m  = surf_pos[rep_local_m]
+        rep_surf_rcov_m = surf_rcov[rep_local_m]
+    else:
+        rep_surf_pos_m  = surf_pos
+        rep_surf_rcov_m = surf_rcov
+        wl_key_m = None
+
+    if verbose:
+        print(f"  [multi] surface representatives: {len(rep_surf_pos_m)} "
+              f"of {len(surf_pos)} atoms  (wl_key={wl_key_m}, d_mol_max={d_mol_max:.3f} Å)")
+
     # ── Adaptive probe grid (replaces uniform xy+z grid) ──────────────────
     # One combined grid covers all anchor cov radii: for each surface atom and
     # each distinct anchor cov radius, shells at the ideal and cutoff bond
     # distances are sampled.  This ensures anchor positions are always placed
     # at physically meaningful distances regardless of which atom anchors.
     grid_pts = _adaptive_probe_grid(
-        surf_pos, surf_rcov, list(ads_rcov),
+        rep_surf_pos_m, rep_surf_rcov_m, list(ads_rcov),
         bond_factor, grid_spacing, surf_z_max, cell,
     )
 
@@ -908,27 +1407,51 @@ def _find_sites_multi(surface_graph: nx.Graph, reactant: Reactant,
         print(f"  [multi] unique connectivities: {len(unique_conns)}"
               + (f"  (clash pruned={n_clash_pruned})" if clash_factor is not None else ""))
 
-    # ── Strategy 5: isomorphism pre-filter ────────────────────────────────
+    # ── Expand to all equivalent surface instances ────────────────────────
+    if wl_key_m is not None and unique_conns:
+        # Expand both the connectivity frozensets (is_multi=True, containing
+        # (ak, sg) pairs) and the anchor positions (is_multi=False, (3,) arrays).
+        # The dummy iso_ids passed in are 0..M-1 so we can map back to the
+        # original rotvec / anchor-atom index after expansion.
+        orig_ids = list(range(len(unique_conns)))
+
+        expanded_conns, expanded_anchor_pos, dummy_ids = _expand_site_instances(
+            unique_conns,
+            [p.copy() for p in unique_anchor_pos],
+            orig_ids,
+            surface_graph, wl_key_m,
+            surf_pos, surf_indices, cell,
+            is_multi=True,    # conn entries are (ak, sg) frozensets
+        )
+        if expanded_conns:
+            unique_conns      = expanded_conns
+            unique_anchor_pos = expanded_anchor_pos
+            unique_anchors    = [unique_anchors[i]  for i in dummy_ids]
+            unique_rotvec     = [unique_rotvec[i]   for i in dummy_ids]
+        if verbose:
+            print(f"  [multi] after expansion: {len(unique_conns)} instances")
+
+    # Isomorphism — WL hash bucketing (replaces manual fingerprint + VF2 for all)
     node_match = isomorphism.categorical_node_match("element", "X")
-    class_reps:  list[nx.Graph] = []
-    class_keys:  list[tuple]    = []
+    class_reps:        list[nx.Graph]       = []
+    class_hash_buckets: dict[str, list[int]] = {}   # WL hash → class ids
     iso_ids: list[int] = []
     for conn in unique_conns:
-        ego  = _build_ego_multi(surface_graph, reactant, conn)
-        fkey = _iso_prefilter_key(ego)
+        ego    = _build_ego_multi(surface_graph, reactant, conn)
+        wl_key = _ego_wl_hash(ego)
         assigned = False
-        for cid, (rep, rkey) in enumerate(zip(class_reps, class_keys)):
-            if fkey != rkey:
-                continue
-            if isomorphism.GraphMatcher(ego, rep, node_match=node_match).is_isomorphic():
+        for cid in class_hash_buckets.get(wl_key, []):
+            if isomorphism.GraphMatcher(ego, class_reps[cid],
+                                        node_match=node_match).is_isomorphic():
                 iso_ids.append(cid); assigned = True; break
         if not assigned:
+            new_cid = len(class_reps)
             class_reps.append(ego)
-            class_keys.append(fkey)
-            iso_ids.append(len(class_reps) - 1)
+            class_hash_buckets.setdefault(wl_key, []).append(new_cid)
+            iso_ids.append(new_cid)
 
     # Geometric optimisation (6 DOF) — one representative per iso-class only
-    surf_idx_to_local = {int(surf_indices[k]): k for k in range(len(surf_indices))}
+    surf_idx_to_local = surf_idx_to_local_m
 
     iso_ids_arr = np.array(iso_ids)
     n_classes   = int(iso_ids_arr.max()) + 1 if len(iso_ids_arr) else 0
@@ -936,21 +1459,31 @@ def _find_sites_multi(surface_graph: nx.Graph, reactant: Reactant,
                      for cid in range(n_classes)}
 
     class_opt_pos: dict[int, np.ndarray] = {}
+    class_residuals: dict[int, float] = {}
     for cid, rep_i in class_rep_idx.items():
         conn       = unique_conns[rep_i]
         anchor_idx = unique_anchors[rep_i]
         anchor0    = unique_anchor_pos[rep_i]
         rv0        = unique_rotvec[rep_i]
         rel_pos    = ads_pos - ads_pos[anchor_idx]
-        class_opt_pos[cid] = _opt_multi(
+        class_opt_pos[cid], class_residuals[cid] = _opt_multi(
             anchor0, rv0, anchor_idx, rel_pos, ads_rcov,
             conn, surf_pos, surf_rcov, surf_idx_to_local,
             cell, z_lo, z_hi,
         )
 
+    # Post-rigid-body-opt pruning (5 geometric strategies)
+    pruned_class_ids = _prune_opt_classes_multi(
+        class_opt_pos, class_residuals, class_rep_idx,
+        unique_conns, surf_pos, surf_rcov, surf_idx_to_local,
+        ads_rcov, cell,
+        residual_threshold, stretch_factor, compression_factor,
+        normal_cos_min, merge_tol, verbose,
+    )
+
     opt_positions = [class_opt_pos[cid] for cid in iso_ids]
 
-    return opt_positions, unique_conns, iso_ids, class_reps
+    return opt_positions, unique_conns, iso_ids, class_reps, pruned_class_ids
 
 
 # ---------------------------------------------------------------------------
@@ -1025,6 +1558,7 @@ def _relax_per_iso_class(
     debug_dir: str | None = None,
     reactant=None,
     bond_factor: float = 1.1,
+    skip_classes: set | None = None,
 ) -> dict[int, dict]:
     """Relax one representative per iso-class.
 
@@ -1061,6 +1595,8 @@ def _relax_per_iso_class(
     iso_results: dict[int, dict] = {}
 
     for cid in range(n_iso_classes):
+        if skip_classes and cid in skip_classes:
+            continue
         members = np.where(iso_ids_arr == cid)[0]
         if len(members) == 0:
             continue
@@ -1156,6 +1692,7 @@ def _relax_per_iso_class_multi(
     verbose: bool,
     debug_dir: str | None = None,
     internal_bond_factor: float = 1.3,
+    skip_classes: set | None = None,
 ) -> dict[int, dict]:
     """Relax one representative per iso-class for a **multi-atom** adsorbate.
 
@@ -1208,6 +1745,8 @@ def _relax_per_iso_class_multi(
     iso_results: dict[int, dict] = {}
 
     for cid in range(n_iso_classes):
+        if skip_classes and cid in skip_classes:
+            continue
         members = np.where(iso_ids_arr == cid)[0]
         if len(members) == 0:
             continue
@@ -1313,6 +1852,11 @@ def find_adsorption_sites(
     fmax: float = 0.05,
     steps: int = 500,
     debug_dir: str | None = "debug",
+    residual_threshold: float = 2.0,
+    stretch_factor: float = 1.3,
+    compression_factor: float = 0.65,
+    normal_cos_min: float = 0.0,
+    merge_tol: float = 0.15,
     verbose: bool = False,
 ) -> tuple[list[AdsorptionSite], nx.Graph]:
     """Find all unique adsorption sites for an adsorbate on a surface.
@@ -1380,6 +1924,28 @@ def find_adsorption_sites(
         ``class_XX_final.extxyz``, ``.traj`` and ``.log`` files here
         (matching workflow_surface.py convention).  Default ``"debug"``.
         Set to ``None`` to suppress all file output.
+    residual_threshold : float
+        Maximum allowed rigid-body L-BFGS-B objective value (Å²) after the
+        cheap geometric optimisation.  Classes whose residual exceeds this
+        are pruned before the expensive ML relaxation.  Default ``2.0``.
+    stretch_factor : float
+        Maximum allowed ratio of optimised bond length to ideal covalent-sum
+        bond length.  Classes where any bond exceeds this fraction are pruned.
+        Default ``1.3`` (30 % stretch).
+    compression_factor : float
+        Minimum allowed ratio of optimised bond length to ideal.  Classes
+        where any bond is shorter than this fraction are pruned.
+        Default ``0.65`` (35 % compression).
+    normal_cos_min : float
+        If the z-component of the unit vector from the adsorbate toward its
+        bonded surface-atom centroid is *greater* than this value the site is
+        pruned (adsorbate is beside or below the surface atoms, not above).
+        Default ``0.0`` (prune if adsorbate is geometrically below centroid).
+    merge_tol : float
+        PBC-aware spatial tolerance (Å) for post-opt duplicate detection.
+        Two iso-classes whose representative positions are closer than this
+        after rigid-body optimisation are merged (lower id kept).
+        Default ``0.15`` Å.
 
     Returns
     -------
@@ -1408,9 +1974,14 @@ def find_adsorption_sites(
     if n_ads == 1:
         (opt_pts, unique_conns, iso_ids,
          class_reps, surf_rcov, surf_idx_to_local,
-         bond_targets_all) = _find_sites_single(
+         bond_targets_all, pruned_class_ids) = _find_sites_single(
             surface_graph, reactant, bond_factor, grid_spacing, verbose,
-            clash_factor=effective_clash)
+            clash_factor=effective_clash,
+            residual_threshold=residual_threshold,
+            stretch_factor=stretch_factor,
+            compression_factor=compression_factor,
+            normal_cos_min=normal_cos_min,
+            merge_tol=merge_tol)
 
         # ── optional EMT relaxation (one rep per iso-class) ──────────────────
         iso_results: dict[int, dict] = {}
@@ -1432,11 +2003,15 @@ def find_adsorption_sites(
                 debug_dir=debug_dir,
                 reactant=reactant,
                 bond_factor=bond_factor,
+                skip_classes=pruned_class_ids,
             )
 
         # ── build AdsorptionSite list, filtering invalid iso-classes ─────────
         sites: list[AdsorptionSite] = []
         for opt, conn, iso_cid in zip(opt_pts, unique_conns, iso_ids):
+            # Skip classes pruned by pre-relax geometric filters
+            if iso_cid in pruned_class_ids:
+                continue
             # If relaxation was run and this class failed validation → skip
             if iso_results and not iso_results.get(iso_cid, {}).get("valid", True):
                 continue
@@ -1453,9 +2028,15 @@ def find_adsorption_sites(
             ))
 
     else:
-        opt_positions, unique_conns, iso_ids, class_reps = _find_sites_multi(
+        (opt_positions, unique_conns, iso_ids,
+         class_reps, pruned_class_ids) = _find_sites_multi(
             surface_graph, reactant, bond_factor, grid_spacing,
-            n_orientations, verbose, clash_factor=effective_clash)
+            n_orientations, verbose, clash_factor=effective_clash,
+            residual_threshold=residual_threshold,
+            stretch_factor=stretch_factor,
+            compression_factor=compression_factor,
+            normal_cos_min=normal_cos_min,
+            merge_tol=merge_tol)
 
         # ── optional calculator relaxation (one rep per iso-class) ───────────
         iso_results_multi: dict[int, dict] = {}
@@ -1470,10 +2051,13 @@ def find_adsorption_sites(
                 n_freeze_layers, bond_factor, fmax, steps, verbose,
                 debug_dir=debug_dir,
                 internal_bond_factor=internal_bond_factor,
+                skip_classes=pruned_class_ids,
             )
 
         sites = []
         for opt_ads, conn, iso_cid in zip(opt_positions, unique_conns, iso_ids):
+            if iso_cid in pruned_class_ids:
+                continue
             if iso_results_multi and not iso_results_multi.get(iso_cid, {}).get("valid", True):
                 continue
             surf_atoms = {sg for _, sg in conn}
