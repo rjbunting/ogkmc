@@ -748,6 +748,21 @@ def _find_sites_multi(surface_graph: nx.Graph, reactant: Reactant,
     dists_xy, _ = tree.query(grid_pts[:, :2])
     grid_pts = grid_pts[dists_xy <= max_cutoff]
 
+    # ── 3D PBC-tiled KD-tree for per-point local neighbourhood queries ─────
+    # For each grid point + anchor, only surface atoms within
+    #   reach = max_extent_of_molecule_from_anchor + max_bond_cutoff
+    # can possibly bond to any adsorbate atom regardless of orientation.
+    # Pre-filtering to this local set avoids computing distances to the whole
+    # surface (~S atoms) and replaces it with a much smaller local set (~L
+    # atoms, L << S for small adsorbates on large slabs).
+    pbc_z_offsets = np.array([[dx * cell_x, dy * cell_y, 0.0]
+                               for dx in (-1, 0, 1) for dy in (-1, 0, 1)])
+    surf_pos_tiled_3d = np.concatenate(
+        [surf_pos + off for off in pbc_z_offsets], axis=0
+    )  # (9*S, 3)
+    surf_local_from_tiled = np.tile(np.arange(len(surf_pos)), 9)  # (9*S,)
+    tree_3d = cKDTree(surf_pos_tiled_3d)
+
     if verbose:
         print(f"  [multi] grid pts: {len(grid_pts)} (after xy filter),  "
               f"orientations: {n_orientations},  anchors: {N_ads}")
@@ -807,32 +822,50 @@ def _find_sites_multi(surface_graph: nx.Graph, reactant: Reactant,
     for anchor_idx in anchor_indices:
         rel_pos = ads_pos - ads_pos[anchor_idx]   # (N_ads, 3)
 
+        # Maximum distance any adsorbate atom can be from the anchor grid point,
+        # regardless of orientation.  Any surface atom beyond this + max_bond_cutoff
+        # is guaranteed to be out of reach for every orientation at every grid point.
+        d_mol_max    = float(np.linalg.norm(rel_pos, axis=1).max())
+        reach_radius = d_mol_max + float(cutoff_mat.max())
+
         for gpt in grid_pts:
+            # ── Local surface atom pre-filter ─────────────────────────────
+            # Only surface atoms within `reach_radius` of this grid point can
+            # bond to any adsorbate atom at any orientation.  This reduces the
+            # per-point distance tensor from (n_orient, N_ads, S) to
+            # (n_orient, N_ads, L) where L is typically much smaller than S.
+            tiled_near = tree_3d.query_ball_point(gpt, reach_radius)
+            if not tiled_near:
+                continue
+            local_sl     = np.unique(surf_local_from_tiled[tiled_near])  # original local indices
+            l_surf_pos   = surf_pos[local_sl]          # (L, 3)
+            l_surf_rcov  = surf_rcov[local_sl]         # (L,)
+            l_cutoff_mat = cutoff_mat[:, local_sl]     # (N_ads, L)
+            l_surf_idx   = surf_indices[local_sl]      # global atom indices (L,)
+
             # placed: (n_orient, N_ads, 3)
-            # rot_mats @ rel_pos.T  →  (n_orient, 3, N_ads)  →  transpose  →  (n_orient, N_ads, 3)
-            placed = gpt + np.einsum("oij,aj->oai", rot_mats, rel_pos)  # (n_orient, N_ads, 3)
+            placed = gpt + np.einsum("oij,aj->oai", rot_mats, rel_pos)
 
-            # PBC distances for all orientations and all ads atoms at once
-            # dv: (n_orient, N_ads, S, 3)
-            dv = surf_pos[None, None, :, :] - placed[:, :, None, :]
-            frac = dv @ cell_inv                        # (n_orient, N_ads, S, 3)
+            # PBC distances — only against local surface atoms → (n_orient, N_ads, L, 3)
+            dv   = l_surf_pos[None, None, :, :] - placed[:, :, None, :]
+            frac = dv @ cell_inv
             frac[..., :2] -= np.round(frac[..., :2])
-            d_all = np.sqrt(((frac @ cell) ** 2).sum(axis=-1))  # (n_orient, N_ads, S)
+            d_all = np.sqrt(((frac @ cell) ** 2).sum(axis=-1))  # (n_orient, N_ads, L)
 
-            # Bonded mask: (n_orient, N_ads, S)
-            bonded_mask = d_all <= cutoff_mat[None, :, :]
+            # Bonded mask: (n_orient, N_ads, L)
+            bonded_mask = d_all <= l_cutoff_mat[None, :, :]
 
             # Any orientation that has at least one bond is interesting
-            has_bond = bonded_mask.any(axis=(1, 2))  # (n_orient,)
+            has_bond    = bonded_mask.any(axis=(1, 2))  # (n_orient,)
             interesting = np.where(has_bond)[0]
 
             for oi in interesting:
-                    # Build connectivity set for this orientation
-                    ak_idx, sl_idx = np.where(bonded_mask[oi])  # local indices
+                    # Build connectivity set — sl_idx indexes into local_sl
+                    ak_idx, sl_idx = np.where(bonded_mask[oi])
 
                     # ── Steric clash filter ────────────────────────────────
-                    # For each adsorbate atom, check it does not overlap any
-                    # surface atom that it is NOT bonded to.
+                    # Uses the local surface arrays; atoms outside reach_radius
+                    # cannot clash because they cannot bond either.
                     if clash_factor is not None:
                         clashing = False
                         bonded_surf_per_ak: dict[int, set] = {}
@@ -841,8 +874,8 @@ def _find_sites_multi(surface_graph: nx.Graph, reactant: Reactant,
                         for ak_k, sl_set in bonded_surf_per_ak.items():
                             probe_ak = placed[oi, ak_k]
                             r_a = float(ads_rcov[ak_k])
-                            if _is_probe_clashing(probe_ak, sl_set, surf_pos,
-                                                  surf_rcov, r_a, clash_factor,
+                            if _is_probe_clashing(probe_ak, sl_set, l_surf_pos,
+                                                  l_surf_rcov, r_a, clash_factor,
                                                   cell_inv, cell):
                                 clashing = True
                                 break
@@ -850,8 +883,9 @@ def _find_sites_multi(surface_graph: nx.Graph, reactant: Reactant,
                             n_clash_pruned += 1
                             continue
 
+                    # Map local sl_idx → global surface atom indices
                     conn_pairs = tuple(sorted(
-                        (int(ak_idx[i]), int(surf_indices[sl_idx[i]]))
+                        (int(ak_idx[i]), int(l_surf_idx[sl_idx[i]]))
                         for i in range(len(ak_idx))
                     ))
                     if not conn_pairs:
