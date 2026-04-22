@@ -7,27 +7,33 @@ Algorithm
 ---------
 **Single-atom adsorbate**
 
-1. Cast a 3-D probe grid above the top surface layer.
-2. For each grid point read the surface-atom connectivity directly from
-   the grid (no post-hoc recheck).
-3. Deduplicate by frozenset of connected surface-atom global indices.
-4. Geometrically optimise each unique site.
-5. Classify by ego-graph isomorphism.
+1. Build an adsorbate-specific co-bonding graph on the surface atoms where
+   two surface atoms are connected if an adsorbate atom with the given
+   covalent radius could simultaneously bond to both
+   (``d(s1,s2) ≤ bond_factor × (2·r_cov_ads + r_cov_s1 + r_cov_s2)``).
+2. Enumerate all k-cliques (k = 1…k_max) of this graph.  Each clique
+   directly defines a candidate bonded surface-atom set (top, bridge,
+   hollow, …) without any spatial grid.
+3. Geometrically optimise each unique connectivity (3 DOF: x, y, z).
+4. Classify by ego-graph isomorphism.
 
 **Multi-atom adsorbate**
 
 For each atom *a* in the adsorbate molecule (each is tried as the *anchor*):
 
-1. Place *a* at every point on the surface grid.
-2. For each grid point sample *n_orientations* random orientations of the
-   whole molecule (uniform SO(3) sampling) by rotating the molecule around *a*.
-3. For each placement check which surface atoms are within bonding distance
-   of **any** adsorbate atom.
-4. Deduplicate by a frozenset of ``(adsorbate_local_idx, surface_global_idx)``
-   pairs — this captures both which surface atoms bond *and* through which
-   adsorbate atom.
-5. Geometrically optimise each unique placement as a 6-DOF rigid body
-   (3 translation + 3 rotation).
+1. Build an anchor-specific co-bonding graph and enumerate k-cliques
+   (same as single-atom) for the anchor contact set.
+2. For each anchor clique, compute the rigid-body distance of every
+   non-anchor adsorbate atom from the anchor (gas-phase geometry).
+   Surface atoms within reach for some molecular orientation are found
+   via the triangle-inequality bound; their co-bonding sub-cliques
+   (including the empty set) are enumerated.
+3. Form the Cartesian product of anchor clique × non-anchor sub-cliques
+   to obtain all unique connectivity patterns
+   ``frozenset{(ads_local_idx, surf_global_idx)}``.
+4. Compute an initial rigid-body orientation with the Kabsch algorithm
+   (aligns bonded non-anchor atoms toward their surface contacts).
+5. Geometrically optimise each unique pattern as a 6-DOF rigid body.
 6. Classify by ego-graph isomorphism on the combined adsorbate + surface
    ego-subgraph.
 
@@ -39,8 +45,7 @@ Typical usage
     sites, site_graph = find_adsorption_sites(surface_graph, carbon)
 
     co = build_reactant("[C-]#[O+]", calculator=EMT())
-    sites, site_graph = find_adsorption_sites(surface_graph, co,
-                                               n_orientations=300)
+    sites, site_graph = find_adsorption_sites(surface_graph, co, k_max=3)
 """
 
 from __future__ import annotations
@@ -128,9 +133,15 @@ def _pbc_dist_vec(probe: np.ndarray, surf_pos: np.ndarray,
     return np.sqrt(((frac @ cell) ** 2).sum(axis=1))
 
 
-def _sample_so3(n: int, seed: int = 42) -> np.ndarray:
-    """Return *n* uniformly distributed 3×3 rotation matrices (SO(3))."""
-    return Rotation.random(n, random_state=seed).as_matrix()   # (n, 3, 3)
+def _pbc_dist_scalar(p: np.ndarray, q: np.ndarray,
+                     cell_inv: np.ndarray, cell: np.ndarray) -> float:
+    """PBC-wrapped distance (x, y wrapped) between two points."""
+    dv   = q - p
+    frac = dv @ cell_inv
+    frac[:2] -= np.round(frac[:2])
+    return float(np.linalg.norm(frac @ cell))
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -280,185 +291,123 @@ def _iso_prefilter_key(g: nx.Graph) -> tuple:
 
 
 # ---------------------------------------------------------------------------
-# Adaptive probe grid
+# Single-atom site finding — graph / clique enumeration
 # ---------------------------------------------------------------------------
 
-def _adaptive_probe_grid(
-    surf_pos: np.ndarray,
-    surf_rcov: np.ndarray,
-    anchor_rcov_list: list[float],
+def _find_sites_single_graph(
+    surface_graph: nx.Graph,
+    reactant: Reactant,
     bond_factor: float,
-    grid_spacing: float,
-    surf_z_max: float,
-    cell: np.ndarray,
-) -> np.ndarray:
-    """Generate a probe grid adapted to local covalent radii.
+    k_max: int,
+    verbose: bool,
+) -> tuple:
 
-    Instead of a uniform rectangular grid, probe points are placed on
-    hemispherical shells centred on each surface atom.  For every
-    (surface atom *s*, anchor covalent radius *r_a*) pair two shells are
-    sampled:
+    """Find single-atom adsorption sites by k-clique enumeration.
 
-    * **ideal shell** at radius  ``r_a + r_s``   (the expected bond length)
-    * **cutoff shell** at radius ``bond_factor * (r_a + r_s)``
+    Instead of casting a spatial probe grid, all cliques of size 1..k_max
+    in the surface-atom subgraph are enumerated directly.  Each clique
+    uniquely defines a connectivity set (bonded surface atoms) without any
+    grid search:
 
-    The angular spacing of each shell is chosen so that the arc-length
-    between adjacent sample points is approximately *grid_spacing*.
+    * size 1 → top sites      (single surface atom)
+    * size 2 → bridge sites   (every edge in the surface graph)
+    * size 3 → hollow sites   (every triangle)
+    * size k → k-fold sites
 
-    Points below ``surf_z_max + min(anchor_rcov) * 0.5`` are discarded.
-    All surviving points are PBC-wrapped into the primary cell and
-    spatially deduplicated with tolerance ``grid_spacing / 2`` using a
-    ``cKDTree``.
+    The surface graph edges encode which surface atom pairs are within
+    covalent bonding distance, so any k atoms that form a k-clique are
+    guaranteed to be mutually close enough to share a single adsorbate
+    bonding partner above them.
 
-    Parameters
-    ----------
-    surf_pos : (S, 3) ndarray
-    surf_rcov : (S,) ndarray
-    anchor_rcov_list : list of float
-        Covalent radii of adsorbate atoms that may act as the grid anchor.
-    bond_factor : float
-    grid_spacing : float
-        Target arc-length spacing between probe points (Å).
-    surf_z_max : float
-        Maximum z-coordinate of the top surface layer.
-    cell : (3, 3) ndarray
-
-    Returns
-    -------
-    grid_pts : (G, 3) ndarray
-        Deduplicated probe positions PBC-wrapped into the primary cell.
+    Returns the same tuple as :func:`_find_sites_single` so the rest of
+    :func:`find_adsorption_sites` is unchanged.
     """
-    from scipy.spatial import cKDTree
-
-    cell_inv = np.linalg.inv(cell)
-    z_min = surf_z_max + min(anchor_rcov_list) * 0.5
-
-    raw: list[np.ndarray] = []
-
-    for si in range(len(surf_pos)):
-        ps  = surf_pos[si]
-        rs  = float(surf_rcov[si])
-
-        for r_a in anchor_rcov_list:
-            r_a = float(r_a)
-            d_ideal  = r_a + rs
-            d_cutoff = bond_factor * d_ideal
-
-            for radius in (d_ideal, d_cutoff):
-                # Angular spacing: arc-length ~ grid_spacing
-                n_theta = max(2, int(np.ceil((np.pi / 2) * radius / grid_spacing)))
-                for i_t in range(n_theta + 1):
-                    theta = (np.pi / 2) * i_t / n_theta   # 0 = top, π/2 = equator
-                    rho   = radius * np.sin(theta)         # xy-plane offset
-                    dz    = radius * np.cos(theta)
-                    z     = ps[2] + dz
-                    if z < z_min:
-                        continue
-                    n_phi = max(1, int(np.ceil(2 * np.pi * rho / grid_spacing))) \
-                            if rho > 1e-6 else 1
-                    for i_p in range(n_phi):
-                        phi = 2 * np.pi * i_p / n_phi
-                        pt = np.array([
-                            ps[0] + rho * np.cos(phi),
-                            ps[1] + rho * np.sin(phi),
-                            z,
-                        ])
-                        # PBC-wrap xy into primary cell via fractional coords
-                        frac = pt @ cell_inv
-                        frac[:2] = frac[:2] % 1.0
-                        raw.append(frac @ cell)
-
-    if not raw:
-        return np.empty((0, 3))
-
-    pts = np.array(raw)
-
-    # Spatial deduplication with tolerance grid_spacing / 2
-    tol  = grid_spacing / 2.0
-    tree = cKDTree(pts)
-    used = np.zeros(len(pts), dtype=bool)
-    keep: list[int] = []
-    for i in range(len(pts)):
-        if used[i]:
-            continue
-        keep.append(i)
-        for j in tree.query_ball_point(pts[i], tol):
-            used[j] = True
-
-    return pts[keep]
-
-
-# ---------------------------------------------------------------------------
-# Single-atom site finding
-# ---------------------------------------------------------------------------
-
-def _find_sites_single(surface_graph: nx.Graph, reactant: Reactant,
-                        bond_factor: float, grid_spacing: float,
-                        verbose: bool) -> tuple[list, list, list]:
-    """Returns (unique_pts, unique_conns, iso_class_ids)."""
-    cell = surface_graph.graph["cell"]
+    cell     = surface_graph.graph["cell"]
     surf_nodes   = [(n, d) for n, d in surface_graph.nodes(data=True)
                     if d["type"] == "surface"]
     surf_indices = np.array([n for n, d in surf_nodes], dtype=int)
     surf_pos     = np.array([d["position"] for n, d in surf_nodes])
     surf_rcov    = np.array([d["covalent_radius"] for n, d in surf_nodes])
+    surf_idx_to_local = {int(surf_indices[k]): k for k in range(len(surf_indices))}
 
-    ads_data  = next(iter(reactant.graph.nodes(data=True)))[1]
-    r_cov_ads = float(ads_data["covalent_radius"])
-    ads_elem  = ads_data["element"]
-
-    bond_cutoffs     = bond_factor * (r_cov_ads + surf_rcov)
+    ads_data         = next(iter(reactant.graph.nodes(data=True)))[1]
+    r_cov_ads        = float(ads_data["covalent_radius"])
+    ads_elem         = ads_data["element"]
     bond_targets_all = r_cov_ads + surf_rcov
-    surf_z_max = surf_pos[:, 2].max()
-    d_min = r_cov_ads * 0.5
-    d_max = bond_factor * (r_cov_ads + surf_rcov.max())
 
-    # ── Adaptive probe grid ────────────────────────────────────────────────
-    # Points are placed on hemispherical shells centred on each surface atom
-    # at radii tuned to (r_ads + r_surf) rather than a flat uniform grid.
-    probe_pts = _adaptive_probe_grid(
-        surf_pos, surf_rcov, [r_cov_ads],
-        bond_factor, grid_spacing, surf_z_max, cell,
-    )
+    surf_z_max = float(surf_pos[:, 2].max())
+    d_min      = r_cov_ads * 0.5
+    d_max      = bond_factor * (r_cov_ads + float(surf_rcov.max()))
+    z_lo       = surf_z_max + d_min
+    z_hi       = surf_z_max + d_max
 
-    # Distance matrix between probe points and surface atoms (with PBC)
+    # ── Adsorbate-specific co-bonding graph ───────────────────────────────
+    # Two surface atoms can share an adsorbate bond if the adsorbate's
+    # bonding spheres (radius = bond_factor × (r_cov_ads + r_cov_si))
+    # centred on each atom overlap — i.e. the inter-atom distance is at most
+    # the sum of the two radii:
+    #
+    #   d(s1, s2) ≤ bond_factor × (r_cov_ads + r_cov_s1)
+    #             + bond_factor × (r_cov_ads + r_cov_s2)
+    #             = bond_factor × (2·r_cov_ads + r_cov_s1 + r_cov_s2)
+    #
+    # This is always >= the surface-surface bond cutoff (r_cov_s1 + r_cov_s2)
+    # so it correctly captures bridge/hollow sites accessible only to large
+    # adsorbates that the surface-surface graph would miss.
+    co_bond_graph = nx.Graph()
+    co_bond_graph.add_nodes_from(int(n) for n, _ in surf_nodes)
     cell_inv = np.linalg.inv(cell)
-    dv    = surf_pos[None] - probe_pts[:, None]
-    dfrac = dv @ cell_inv
-    dfrac[:, :, :2] -= np.round(dfrac[:, :, :2])
-    d_mat = np.sqrt(((dfrac @ cell) ** 2).sum(axis=2))
+    for i in range(len(surf_indices)):
+        for j in range(i + 1, len(surf_indices)):
+            cutoff = bond_factor * (2.0 * r_cov_ads + float(surf_rcov[i]) + float(surf_rcov[j]))
+            dv   = surf_pos[j] - surf_pos[i]
+            frac = dv @ cell_inv
+            frac[:2] -= np.round(frac[:2])
+            dist = float(np.linalg.norm(frac @ cell))
+            if dist <= cutoff:
+                co_bond_graph.add_edge(int(surf_indices[i]), int(surf_indices[j]))
 
-    # Keep only points within the bonding z-window
-    keep = (d_mat.min(axis=1) >= d_min) & (d_mat.min(axis=1) <= d_max)
-    probe_pts = probe_pts[keep]; d_mat = d_mat[keep]
+    # ── Enumerate all cliques of size 1 … k_max ───────────────────────────
+    # nx.enumerate_all_cliques yields cliques in non-decreasing size order.
+    unique_conns: list[frozenset]   = []
+    unique_pts:   list[np.ndarray]  = []
+    seen:         set[frozenset]    = set()
 
-    if verbose:
-        print(f"  [single] probe pts after filter: {len(probe_pts)}")
-
-    # Deduplicate — use sorted tuple as key (cheaper than frozenset hashing)
-    seen: dict = {}
-    unique_pts: list[np.ndarray] = []
-    unique_conns: list[frozenset] = []
-    for i in range(len(probe_pts)):
-        bonded = np.where(d_mat[i] <= bond_cutoffs)[0]
-        if not len(bonded):
+    for clique in nx.enumerate_all_cliques(co_bond_graph):
+        if len(clique) > k_max:
+            break                         # safe: yielded in size order
+        key = frozenset(clique)
+        if key in seen:
             continue
-        key = tuple(sorted(int(surf_indices[k]) for k in bonded))
-        if key not in seen:
-            seen[key] = len(unique_pts)
-            unique_pts.append(probe_pts[i].copy())
-            unique_conns.append(frozenset(key))
+        seen.add(key)
+        unique_conns.append(key)
+
+        # Initial probe position: centroid of clique atoms + estimated height
+        lids     = [surf_idx_to_local[g] for g in clique]
+        centroid = surf_pos[lids].mean(axis=0).copy()
+        height   = r_cov_ads + float(surf_rcov[lids].mean())
+        centroid[2] = surf_z_max + height
+        unique_pts.append(centroid)
 
     if verbose:
-        print(f"  [single] unique connectivities: {len(unique_pts)}")
+        by_size = {}
+        for c in unique_conns:
+            by_size.setdefault(len(c), 0)
+            by_size[len(c)] += 1
+        size_str = "  ".join(f"k={k}: {v}" for k, v in sorted(by_size.items()))
+        print(f"  [single-graph] co-bond graph: {co_bond_graph.number_of_nodes()} nodes, "
+              f"{co_bond_graph.number_of_edges()} edges  "
+              f"(r_cov_ads={r_cov_ads:.3f} Å, bond_factor={bond_factor})")
+        print(f"  [single-graph] clique candidates: {len(unique_pts)}  "
+              f"({size_str})")
 
-    # Isomorphism — pre-filter with cheap structural key before running VF2
-    node_match = isomorphism.categorical_node_match("element", "X")
+    # ── Isomorphism classification (identical to grid path) ───────────────
+    node_match  = isomorphism.categorical_node_match("element", "X")
     class_reps: list[nx.Graph] = []
-    class_keys: list[tuple] = []   # pre-filter fingerprints
-    iso_ids: list[int] = []
+    class_keys: list[tuple]    = []
+    iso_ids:    list[int]      = []
     for conn in unique_conns:
-        ego = _build_ego_single(surface_graph, conn, ads_elem)
+        ego  = _build_ego_single(surface_graph, conn, ads_elem)
         fkey = _iso_prefilter_key(ego)
         assigned = False
         for cid, (rep, rkey) in enumerate(zip(class_reps, class_keys)):
@@ -471,83 +420,85 @@ def _find_sites_single(surface_graph: nx.Graph, reactant: Reactant,
             class_keys.append(fkey)
             iso_ids.append(len(class_reps) - 1)
 
-    # Geometric optimisation — one representative per iso-class only
-    surf_idx_to_local = {int(surf_indices[k]): k for k in range(len(surf_indices))}
-    z_lo = float(surf_z_max) + d_min
-    z_hi = float(surf_z_max) + d_max
+    if verbose:
+        print(f"  [single-graph] iso-classes: {len(class_reps)}")
 
-    # Find the index of the first member of each iso-class
-    iso_ids_arr = np.array(iso_ids)
-    n_classes   = int(iso_ids_arr.max()) + 1 if len(iso_ids_arr) else 0
+    # ── Geometric optimisation — one representative per iso-class ─────────
+    iso_ids_arr   = np.array(iso_ids)
+    n_classes     = int(iso_ids_arr.max()) + 1 if len(iso_ids_arr) else 0
     class_rep_idx = {cid: int(np.where(iso_ids_arr == cid)[0][0])
                      for cid in range(n_classes)}
 
-    # Optimise one representative per class, then copy to all members
     class_opt_pts: dict[int, np.ndarray] = {}
     for cid, rep_i in class_rep_idx.items():
         pt0  = unique_pts[rep_i]
         conn = unique_conns[rep_i]
-        lids       = [surf_idx_to_local[g] for g in sorted(conn)]
-        conn_pos   = surf_pos[lids]
-        bond_tgts  = bond_targets_all[lids]
-        nb_lids    = [k for k in range(len(surf_indices)) if k not in lids]
-        nonbond    = surf_pos[nb_lids] if nb_lids else np.empty((0, 3))
+        lids      = [surf_idx_to_local[g] for g in sorted(conn)]
+        conn_pos  = surf_pos[lids]
+        bond_tgts = bond_targets_all[lids]
+        nb_lids   = [k for k in range(len(surf_indices)) if k not in set(lids)]
+        nonbond   = surf_pos[nb_lids] if nb_lids else np.empty((0, 3))
         class_opt_pts[cid] = _opt_single(pt0, conn_pos, bond_tgts, nonbond,
                                          cell, z_lo, z_hi)
 
     opt_pts = [class_opt_pts[cid] for cid in iso_ids]
 
-    return opt_pts, unique_conns, iso_ids, class_reps, surf_rcov, surf_idx_to_local, bond_targets_all
+    return (opt_pts, unique_conns, iso_ids, class_reps,
+            surf_rcov, surf_idx_to_local, bond_targets_all)
 
 
 # ---------------------------------------------------------------------------
-# Multi-atom site finding
+# Multi-atom site finding — graph / clique enumeration
 # ---------------------------------------------------------------------------
 
-def _auto_n_orientations(ads_pos: np.ndarray, grid_spacing: float) -> int:
-    """Compute SO(3) sample count consistent with *grid_spacing*.
+def _find_sites_multi_graph(
+    surface_graph: nx.Graph,
+    reactant: Reactant,
+    bond_factor: float,
+    k_max: int,
+    verbose: bool,
+) -> tuple:
+    """Find multi-atom adsorption sites by graph-based enumeration.
 
-    A rotation by angle δ displaces the furthest adsorbate atom (at radius
-    *R_max* from the molecular centroid) by ``R_max × δ``.  Requiring
-    ``δ ≤ grid_spacing / R_max`` to not miss any connectivity transition
-    gives::
+    Algorithm
+    ---------
+    For each adsorbate atom tried as the *anchor*:
 
-        N ≈ (π × R_max / grid_spacing)²
+    1. Build an anchor-specific co-bonding graph on the surface atoms and
+       enumerate all cliques of size 1..k_max — exactly as in the single-atom
+       path — to get candidate anchor contact sets.
 
-    This ties orientation density to the same length-scale as the position
-    grid: larger molecules automatically receive more orientations, and
-    tightening *grid_spacing* consistently increases both.
-    Returns 1 for atomic / zero-extent adsorbates.
+    2. For each anchor clique (initial anchor position = centroid + height):
+
+       a. For every non-anchor adsorbate atom ``a_j``, compute its
+          rigid-body distance from the anchor in the gas-phase geometry
+          (``d_mol_j = ||pos_j - pos_anchor||``).  Surface atoms within
+          ``d_mol_j + bond_factor*(r_cov_j + r_cov_s)`` of the anchor form
+          ``a_j``'s *reachable set* ``R_j`` — the atoms that *could* bond to
+          ``a_j`` for some molecular orientation.
+
+       b. Build a co-bonding graph on ``R_j`` (same adsorbate-aware edge
+          criterion as the anchor graph) and enumerate sub-cliques of size
+          0..k_max.  The empty set (no surface bond) is always included.
+
+       c. Take the Cartesian product of sub-clique options for all
+          non-anchor atoms.  Each combination together with the anchor
+          clique defines a unique connectivity pattern
+          ``frozenset{(ads_local_idx, surf_global_idx)}``.
+
+    3. Deduplicate by connectivity frozenset.
+
+    4. Compute an initial rigid-body orientation via the *orthogonal
+       Procrustes* (Kabsch) algorithm: align non-anchor atoms that have
+       non-empty surface contacts toward the centroid of those contacts.
+       Atoms with no surface contact do not constrain the rotation.
+
+    5. Isomorphism classification and 6-DOF geometric optimisation —
+       identical to the existing multi-atom path.
+
+    Returns the same tuple as :func:`_find_sites_multi`.
     """
-    centroid = ads_pos.mean(axis=0)
-    r_max = float(np.linalg.norm(ads_pos - centroid, axis=1).max())
-    if r_max < 1e-6:
-        return 1
-    return max(1, int(np.ceil((np.pi * r_max / grid_spacing) ** 2)))
-
-
-def _find_sites_multi(surface_graph: nx.Graph, reactant: Reactant,
-                       bond_factor: float, grid_spacing: float,
-                       n_orientations: int | None, verbose: bool) -> tuple:
-    """Returns (opt_positions_list, unique_conns, iso_ids, class_reps).
-
-    Optimisations applied
-    ---------------------
-    1. **Vectorised orientation loop** – all *n_orientations* rotations for a
-       given grid point and anchor atom are evaluated in a single batched
-       NumPy operation rather than a Python loop.
-    2. **KD-tree xy pre-filter** – grid points whose nearest surface atom
-       (in the unwrapped xy plane) is farther than *d_max_global* are
-       discarded before the rotation search begins.
-    3. **Sorted-tuple connectivity key** – cheaper to construct and compare
-       than ``frozenset`` for the deduplication dict.
-    5. **Isomorphism pre-filter** – a cheap structural fingerprint
-       (node/edge counts, degree sequence, element–degree pairs) is compared
-       before invoking the full VF2 ``GraphMatcher``.
-    """
-    from scipy.spatial import cKDTree
-
-    cell = surface_graph.graph["cell"]
+    cell     = surface_graph.graph["cell"]
     cell_inv = np.linalg.inv(cell)
 
     surf_nodes   = [(n, d) for n, d in surface_graph.nodes(data=True)
@@ -555,118 +506,186 @@ def _find_sites_multi(surface_graph: nx.Graph, reactant: Reactant,
     surf_indices = np.array([n for n, d in surf_nodes], dtype=int)
     surf_pos     = np.array([d["position"] for n, d in surf_nodes])
     surf_rcov    = np.array([d["covalent_radius"] for n, d in surf_nodes])
+    surf_idx_to_local = {int(surf_indices[k]): k for k in range(len(surf_indices))}
 
     ads_nodes = list(reactant.graph.nodes(data=True))
-    ads_pos   = np.array([d["position"] for _, d in ads_nodes])   # (N_ads, 3)
+    ads_pos   = np.array([d["position"] for _, d in ads_nodes])
     ads_rcov  = np.array([d["covalent_radius"] for _, d in ads_nodes])
     N_ads     = len(ads_pos)
 
-    # Auto-compute orientations from molecule extent and grid_spacing if not given
-    if n_orientations is None:
-        n_orientations = _auto_n_orientations(ads_pos, grid_spacing)
-        if verbose:
-            centroid = ads_pos.mean(axis=0)
-            r_max = float(np.linalg.norm(ads_pos - centroid, axis=1).max())
-            print(f"  [multi] n_orientations auto={n_orientations} "
-                  f"(R_max={r_max:.3f} Å, grid_spacing={grid_spacing:.3f} Å)")
+    surf_z_max   = float(surf_pos[:, 2].max())
+    d_min_global = float(ads_rcov.min()) * 0.5
+    d_max_global = bond_factor * (float(ads_rcov.max()) + float(surf_rcov.max()))
+    z_lo         = surf_z_max + d_min_global
+    z_hi         = surf_z_max + d_max_global
 
-    surf_z_max = surf_pos[:, 2].max()
+    # ── Helper: co-bonding graph for adsorbate atom with r_cov_a ─────────
+    def _make_co_bond_graph(r_cov_a: float, local_ids: list) -> nx.Graph:
+        """Adsorbate-aware co-bonding graph on a subset of surface atoms."""
+        g = nx.Graph()
+        g.add_nodes_from(int(surf_indices[li]) for li in local_ids)
+        for ii in range(len(local_ids)):
+            for jj in range(ii + 1, len(local_ids)):
+                li, lj = local_ids[ii], local_ids[jj]
+                cutoff = bond_factor * (2.0 * r_cov_a
+                                        + float(surf_rcov[li])
+                                        + float(surf_rcov[lj]))
+                dist = _pbc_dist_scalar(surf_pos[li], surf_pos[lj], cell_inv, cell)
+                if dist <= cutoff:
+                    g.add_edge(int(surf_indices[li]), int(surf_indices[lj]))
+        return g
 
-    # Pre-compute per-(ads_atom, surf_atom) bonding cutoffs: (N_ads, S)
-    cutoff_mat = bond_factor * (ads_rcov[:, None] + surf_rcov[None, :])  # (N_ads, S)
-    max_cutoff = float(cutoff_mat.max())
+    # ── Helper: Kabsch / orthogonal Procrustes rotation ──────────────────
+    def _kabsch(src: np.ndarray, tgt: np.ndarray) -> np.ndarray:
+        """Rotation matrix R minimising ||R @ src[i] - tgt[i]||^2 (sum)."""
+        H = src.T @ tgt
+        U, _, Vt = np.linalg.svd(H)
+        d = np.linalg.det(Vt.T @ U.T)
+        return Vt.T @ np.diag([1.0, 1.0, d]) @ U.T  # (3, 3)
 
-    # z-window for anchor atoms
-    d_min_global = ads_rcov.min() * 0.5
-    d_max_global = bond_factor * (ads_rcov.max() + surf_rcov.max())
-    z_lo = float(surf_z_max) + d_min_global
-    z_hi = float(surf_z_max) + d_max_global
+    # ── Main enumeration ──────────────────────────────────────────────────
+    seen:              dict[tuple, int]    = {}
+    unique_conns:      list[frozenset]     = []
+    unique_anchors:    list[int]           = []
+    unique_anchor_pos: list[np.ndarray]   = []
+    unique_rotvec:     list[np.ndarray]   = []
 
-    # Sample SO(3) rotations once  →  (n_orient, 3, 3)
-    rot_mats = _sample_so3(n_orientations)
+    all_local_ids = list(range(len(surf_indices)))
 
-    # ── Adaptive probe grid (replaces uniform xy+z grid) ──────────────────
-    # One combined grid covers all anchor cov radii: for each surface atom and
-    # each distinct anchor cov radius, shells at the ideal and cutoff bond
-    # distances are sampled.  This ensures anchor positions are always placed
-    # at physically meaningful distances regardless of which atom anchors.
-    grid_pts = _adaptive_probe_grid(
-        surf_pos, surf_rcov, list(ads_rcov),
-        bond_factor, grid_spacing, surf_z_max, cell,
-    )
+    # ── Anchor deduplication via WL colour refinement ─────────────────────
+    # Atoms that are automorphically equivalent in the adsorbate graph will
+    # always produce the same set of surface connectivity patterns regardless
+    # of which one is chosen as the anchor.  We identify these equivalence
+    # classes with Weisfeiler-Lehman (WL) label propagation and only try one
+    # representative anchor per class, avoiding redundant enumeration.
+    #
+    # Number of WL iterations = graph diameter (longest shortest path between
+    # any two nodes).  After `diameter` rounds each node's label encodes the
+    # structure of its entire connected component, so no further refinement
+    # is possible.  For a single-atom adsorbate the diameter is 0; we use
+    # at least 1 iteration so the element label is always set.
+    #
+    # WL iteration: label(v) = hash(element(v), sorted(label(u) for u in N(v)))
+    def _wl_anchor_representatives(graph: nx.Graph) -> list[int]:
+        """Return one representative anchor index per WL equivalence class."""
+        n_iter = nx.diameter(graph) if graph.number_of_nodes() > 1 else 1
+        labels = {n: d["element"] for n, d in graph.nodes(data=True)}
+        for _ in range(n_iter):
+            new_labels = {}
+            for n in graph.nodes():
+                nbr_labels = tuple(sorted(labels[u] for u in graph.neighbors(n)))
+                new_labels[n] = (labels[n], nbr_labels)
+            labels = {n: str(v) for n, v in new_labels.items()}
+        # One representative per unique label (preserving node order)
+        seen_labels: dict[str, int] = {}
+        for n in graph.nodes():
+            lbl = labels[n]
+            if lbl not in seen_labels:
+                seen_labels[lbl] = n
+        return list(seen_labels.values())
 
-    # ── Strategy 2: KD-tree xy pre-filter ─────────────────────────────────
-    # (still applied on top of the adaptive grid to handle the tiled-image
-    #  case and any residual out-of-range points)
-    cell_x = float(cell[0, 0]); cell_y = float(cell[1, 1])
-    tile_offsets = np.array([[dx * cell_x, dy * cell_y]
-                              for dx in (-1, 0, 1) for dy in (-1, 0, 1)])
-    surf_xy_tiled = (surf_pos[:, :2][:, None, :] + tile_offsets[None, :, :]).reshape(-1, 2)
-    tree = cKDTree(surf_xy_tiled)
-    dists_xy, _ = tree.query(grid_pts[:, :2])
-    grid_pts = grid_pts[dists_xy <= max_cutoff]
+    anchor_representatives = _wl_anchor_representatives(reactant.graph)
 
     if verbose:
-        print(f"  [multi] grid pts: {len(grid_pts)} (after xy filter),  "
-              f"orientations: {n_orientations},  anchors: {N_ads}")
+        print(f"  [multi-graph] adsorbate has {N_ads} atoms, "
+              f"{len(anchor_representatives)} distinct anchor class(es): "
+              f"indices {anchor_representatives}")
 
-    # ── Strategy 3: sorted-tuple key for deduplication ────────────────────
-    seen: dict[tuple, int] = {}
-    unique_conns:      list[frozenset]    = []
-    unique_anchors:    list[int]          = []
-    unique_anchor_pos: list[np.ndarray]  = []
-    unique_rotvec:     list[np.ndarray]  = []
+    for anchor_idx in anchor_representatives:
+        r_cov_a = float(ads_rcov[anchor_idx])
+        non_anchor_idxs = [j for j in range(N_ads) if j != anchor_idx]
 
-    # ── Strategy 1: vectorised orientation loop ────────────────────────────
-    for anchor_idx in range(N_ads):
-        rel_pos = ads_pos - ads_pos[anchor_idx]   # (N_ads, 3)
+        # ── 1. Anchor co-bonding graph + clique enumeration ───────────────
+        anchor_cbg = _make_co_bond_graph(r_cov_a, all_local_ids)
 
-        for gpt in grid_pts:
-            # placed: (n_orient, N_ads, 3)
-            # rot_mats @ rel_pos.T  →  (n_orient, 3, N_ads)  →  transpose  →  (n_orient, N_ads, 3)
-            placed = gpt + np.einsum("oij,aj->oai", rot_mats, rel_pos)  # (n_orient, N_ads, 3)
+        for anchor_clique in nx.enumerate_all_cliques(anchor_cbg):
+            if len(anchor_clique) > k_max:
+                break
 
-            # PBC distances for all orientations and all ads atoms at once
-            # dv: (n_orient, N_ads, S, 3)
-            dv = surf_pos[None, None, :, :] - placed[:, :, None, :]
-            frac = dv @ cell_inv                        # (n_orient, N_ads, S, 3)
-            frac[..., :2] -= np.round(frac[..., :2])
-            d_all = np.sqrt(((frac @ cell) ** 2).sum(axis=-1))  # (n_orient, N_ads, S)
+            # Initial anchor position: centroid of clique atoms + height
+            lids_anchor = [surf_idx_to_local[g] for g in anchor_clique]
+            pos_anchor  = surf_pos[lids_anchor].mean(axis=0).copy()
+            h_anchor    = r_cov_a + float(surf_rcov[lids_anchor].mean())
+            pos_anchor[2] = surf_z_max + h_anchor
 
-            # Bonded mask: (n_orient, N_ads, S)
-            bonded_mask = d_all <= cutoff_mat[None, :, :]
+            # ── 2a–b. Non-anchor reachable sets + sub-clique options ──────
+            # For each non-anchor adsorbate atom collect a list of possible
+            # surface contact frozensets (including the empty set).
+            non_anchor_options: list[list] = []   # one list per non-anchor atom
+            for j in non_anchor_idxs:
+                r_cov_j = float(ads_rcov[j])
+                # Rigid-body distance from anchor to a_j in gas-phase geometry
+                d_mol_j = float(np.linalg.norm(ads_pos[j] - ads_pos[anchor_idx]))
 
-            # Any orientation that has at least one bond is interesting
-            has_bond = bonded_mask.any(axis=(1, 2))  # (n_orient,)
-            interesting = np.where(has_bond)[0]
+                # Surface atoms reachable by a_j (triangle-inequality upper bound)
+                reach_lids = [
+                    li for li in all_local_ids
+                    if _pbc_dist_scalar(pos_anchor, surf_pos[li], cell_inv, cell)
+                       <= d_mol_j + bond_factor * (r_cov_j + float(surf_rcov[li]))
+                ]
 
-            for oi in interesting:
-                # Build connectivity set for this orientation
-                ak_idx, sl_idx = np.where(bonded_mask[oi])  # local indices
-                conn_pairs = tuple(sorted(
-                    (int(ak_idx[i]), int(surf_indices[sl_idx[i]]))
-                    for i in range(len(ak_idx))
-                ))
-                if not conn_pairs:
+                # Always include "no surface bond" for this atom
+                options_j: list[frozenset] = [frozenset()]
+                if reach_lids:
+                    cbg_j = _make_co_bond_graph(r_cov_j, reach_lids)
+                    for sub_clique in nx.enumerate_all_cliques(cbg_j):
+                        if len(sub_clique) > k_max:
+                            break
+                        options_j.append(frozenset(sub_clique))
+
+                non_anchor_options.append(options_j)
+
+            # ── 2c. Cartesian product → unique connectivity patterns ───────
+            for combo in itertools.product(*non_anchor_options):
+                # Full connectivity: (ads_local_idx, surf_global_idx) pairs
+                conn_list = (
+                    [(anchor_idx, int(s)) for s in sorted(anchor_clique)]
+                    + [(j, int(s))
+                       for j, clique_j in zip(non_anchor_idxs, combo)
+                       for s in sorted(clique_j)]
+                )
+                conn_key = tuple(sorted(conn_list))
+                if conn_key in seen:
                     continue
-                # Strategy 3: sorted tuple key
-                if conn_pairs not in seen:
-                    seen[conn_pairs] = len(unique_conns)
-                    unique_conns.append(frozenset(conn_pairs))
-                    unique_anchors.append(anchor_idx)
-                    unique_anchor_pos.append(gpt.copy())
-                    unique_rotvec.append(
-                        Rotation.from_matrix(rot_mats[oi]).as_rotvec()
-                    )
+                seen[conn_key] = len(unique_conns)
+
+                unique_conns.append(frozenset(conn_key))
+                unique_anchors.append(anchor_idx)
+                unique_anchor_pos.append(pos_anchor.copy())
+
+                # ── 4. Kabsch initial rotation ────────────────────────────
+                # Align non-anchor atoms that have surface contacts toward the
+                # centroid of those contacts.
+                rel_pos = ads_pos - ads_pos[anchor_idx]  # (N_ads, 3) molecular frame
+                src_pts, tgt_pts = [], []
+                for j, clique_j in zip(non_anchor_idxs, combo):
+                    if not clique_j:
+                        continue
+                    lids_j = [surf_idx_to_local[g] for g in clique_j]
+                    tgt_j  = surf_pos[lids_j].mean(axis=0) - pos_anchor
+                    # Ensure the target direction has a positive z component
+                    # (the non-anchor should point up, not into the slab)
+                    if tgt_j[2] < 0:
+                        tgt_j[2] = abs(tgt_j[2])
+                    src_pts.append(rel_pos[j])
+                    tgt_pts.append(tgt_j)
+
+                if src_pts:
+                    R_init  = _kabsch(np.array(src_pts), np.array(tgt_pts))
+                    rotvec0 = Rotation.from_matrix(R_init).as_rotvec()
+                else:
+                    rotvec0 = np.zeros(3)
+
+                unique_rotvec.append(rotvec0)
 
     if verbose:
-        print(f"  [multi] unique connectivities: {len(unique_conns)}")
+        print(f"  [multi-graph] unique connectivity patterns: {len(unique_conns)}")
 
-    # ── Strategy 5: isomorphism pre-filter ────────────────────────────────
+    # ── Isomorphism classification ────────────────────────────────────────
     node_match = isomorphism.categorical_node_match("element", "X")
     class_reps:  list[nx.Graph] = []
     class_keys:  list[tuple]    = []
-    iso_ids: list[int] = []
+    iso_ids:     list[int]      = []
     for conn in unique_conns:
         ego  = _build_ego_multi(surface_graph, reactant, conn)
         fkey = _iso_prefilter_key(ego)
@@ -681,11 +700,12 @@ def _find_sites_multi(surface_graph: nx.Graph, reactant: Reactant,
             class_keys.append(fkey)
             iso_ids.append(len(class_reps) - 1)
 
-    # Geometric optimisation (6 DOF) — one representative per iso-class only
-    surf_idx_to_local = {int(surf_indices[k]): k for k in range(len(surf_indices))}
+    if verbose:
+        print(f"  [multi-graph] iso-classes: {len(class_reps)}")
 
-    iso_ids_arr = np.array(iso_ids)
-    n_classes   = int(iso_ids_arr.max()) + 1 if len(iso_ids_arr) else 0
+    # ── Geometric optimisation (6 DOF) — one representative per iso-class ─
+    iso_ids_arr   = np.array(iso_ids)
+    n_classes     = int(iso_ids_arr.max()) + 1 if len(iso_ids_arr) else 0
     class_rep_idx = {cid: int(np.where(iso_ids_arr == cid)[0][0])
                      for cid in range(n_classes)}
 
@@ -703,13 +723,11 @@ def _find_sites_multi(surface_graph: nx.Graph, reactant: Reactant,
         )
 
     opt_positions = [class_opt_pos[cid] for cid in iso_ids]
-
     return opt_positions, unique_conns, iso_ids, class_reps
-
-
 # ---------------------------------------------------------------------------
-# EMT relaxation helpers
+# Relaxation helpers
 # ---------------------------------------------------------------------------
+
 
 def _get_frozen_indices(slab, n_freeze_layers: int) -> list[int]:
     """Return atom indices belonging to the bottom *n_freeze_layers* layers.
@@ -1056,8 +1074,7 @@ def find_adsorption_sites(
     reactant: Reactant,
     *,
     bond_factor: float = 1.1,
-    grid_spacing: float = 0.4,
-    n_orientations: int | None = None,
+    k_max: int = 4,
     calculator: Any = None,
     slab: Any = None,
     n_freeze_layers: int = 2,
@@ -1078,14 +1095,10 @@ def find_adsorption_sites(
         Adsorbate from :func:`~autokmc.reactants.build_reactant`.
     bond_factor : float
         Bonding cutoff multiplier.  Default 1.1.
-    grid_spacing : float
-        Surface grid spacing (Å).  Default 0.4 Å.
-    n_orientations : int or None
-        Number of random SO(3) orientations for multi-atom adsorbates.
-        ``None`` (default) auto-computes the count from *grid_spacing* and
-        the molecule's geometric extent: ``N = ceil((π × R_max / grid_spacing)²)``,
-        where *R_max* is the furthest atom distance from the molecular centroid.
-        Pass an explicit integer to override.
+    k_max : int
+        Maximum clique size to enumerate.  Maps directly to site
+        coordination: 1 = top, 2 = bridge, 3 = hollow, 4 = 4-fold, etc.
+        Default 4.
     calculator : ASE calculator or None
         When provided (together with *slab*), one representative per
         iso-class is structurally relaxed with this calculator.
@@ -1103,9 +1116,8 @@ def find_adsorption_sites(
         Print progress.  Default ``False``.
     debug_dir : str or None
         When *calculator* is given, write ``class_XX_initial.extxyz``,
-        ``class_XX_final.extxyz``, ``.traj`` and ``.log`` files here
-        (matching workflow_surface.py convention).  Default ``"debug"``.
-        Set to ``None`` to suppress all file output.
+        ``class_XX_final.extxyz``, ``.traj`` and ``.log`` files here.
+        Default ``"debug"``.  Set to ``None`` to suppress all file output.
 
     Returns
     -------
@@ -1118,18 +1130,17 @@ def find_adsorption_sites(
 
     if verbose:
         print(f"Finding sites for '{reactant.smiles}'  "
-              f"({'single' if n_ads == 1 else 'multi'}-atom path)")
+              f"({'single' if n_ads == 1 else 'multi'}-atom path,  k_max={k_max})")
 
     if n_ads == 1:
         (opt_pts, unique_conns, iso_ids,
          class_reps, surf_rcov, surf_idx_to_local,
-         bond_targets_all) = _find_sites_single(
-            surface_graph, reactant, bond_factor, grid_spacing, verbose)
+         bond_targets_all) = _find_sites_single_graph(
+            surface_graph, reactant, bond_factor, k_max, verbose)
 
-        # ── optional EMT relaxation (one rep per iso-class) ──────────────────
+        # ── optional calculator relaxation (one rep per iso-class) ───────────
         iso_results: dict[int, dict] = {}
         if calculator is not None and slab is not None:
-            # Gather surface indices from graph for connectivity re-check
             surf_nodes    = [(n, d) for n, d in surface_graph.nodes(data=True)
                              if d["type"] == "surface"]
             surf_indices  = np.array([n for n, d in surf_nodes], dtype=int)
@@ -1148,10 +1159,8 @@ def find_adsorption_sites(
                 bond_factor=bond_factor,
             )
 
-        # ── build AdsorptionSite list, filtering invalid iso-classes ─────────
         sites: list[AdsorptionSite] = []
         for opt, conn, iso_cid in zip(opt_pts, unique_conns, iso_ids):
-            # If relaxation was run and this class failed validation → skip
             if iso_results and not iso_results.get(iso_cid, {}).get("valid", True):
                 continue
             n_surf = len(conn)
@@ -1167,9 +1176,8 @@ def find_adsorption_sites(
             ))
 
     else:
-        opt_positions, unique_conns, iso_ids, class_reps = _find_sites_multi(
-            surface_graph, reactant, bond_factor, grid_spacing,
-            n_orientations, verbose)
+        opt_positions, unique_conns, iso_ids, class_reps = _find_sites_multi_graph(
+            surface_graph, reactant, bond_factor, k_max, verbose)
 
         # ── optional calculator relaxation (one rep per iso-class) ───────────
         iso_results_multi: dict[int, dict] = {}
@@ -1193,7 +1201,7 @@ def find_adsorption_sites(
             n_surf = len(surf_atoms)
             res = iso_results_multi.get(iso_cid, {})
             sites.append(AdsorptionSite(
-                position    = opt_ads,        # (N_ads, 3)
+                position    = opt_ads,
                 conn_global = conn,
                 n_conn      = n_surf,
                 site_type   = _site_label(n_surf),
