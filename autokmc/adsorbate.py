@@ -209,13 +209,33 @@ class AdsorptionSite:
     occupied : bool
         KMC occupancy flag.  ``False`` = vacant site (adsorption is
         possible); ``True`` = occupied.
+    ads_position : np.ndarray, shape (3,)
+        Cartesian coordinates (Å) of the adsorbate atom at this site.
+        For the iso-class **representative** this is the fully **relaxed**
+        position taken from ``result.atoms_final``.  For all other members
+        of the same iso-class this is the **geometrically optimised**
+        position from ``G.graph['site_positions']`` — the best available
+        without running additional calculations.
+    subgraph : nx.Graph
+        A copy of the clean-surface graph ``G`` with one additional node
+        representing the adsorbed atom.  The node key is
+        ``G.number_of_nodes()`` (i.e. ``len(slab)``).  It carries the same
+        node attributes as every other node (``element``, ``position``,
+        ``type="adsorbate"``, ``covalent_radius``, ``index``).  Edges
+        connect it to every atom in :attr:`clique`.
+
+        The ``position`` attribute of the adsorbate node matches
+        :attr:`ads_position` — relaxed for the representative, geometric
+        for other members.  The original ``G`` and all default-site data
+        inside it are **never modified**.
     """
     clique             : frozenset
     iso_class          : IsoClass
     result             : SiteOptResult
     adsorption_energy  : float
-    occupied           : bool               = field(default=False)
-    subgraph           : Optional[nx.Graph] = field(default=None, repr=False)
+    occupied           : bool                 = field(default=False)
+    ads_position       : Optional[np.ndarray] = field(default=None, repr=False)
+    subgraph           : Optional[nx.Graph]   = field(default=None, repr=False)
 
 
 # ---------------------------------------------------------------------------
@@ -983,14 +1003,20 @@ def optimise_unique_sites(
             if res is None:
                 continue
             for clique in iso.members:
-                # Geometric position for this specific clique instance
-                try:
-                    idx      = k_cliques.index(clique)
-                    position = k_positions[idx]
-                except (ValueError, IndexError):
-                    position = iso.position  # fallback: representative position
+                # Adsorbate position for this specific clique:
+                #   - representative  → relaxed position from atoms_final
+                #   - other members   → geometric position from site_positions
+                if clique == iso.representative:
+                    ads_pos: np.ndarray = res.atoms_final.get_positions()[res.ads_index].copy()
+                else:
+                    try:
+                        idx     = k_cliques.index(clique)
+                        ads_pos = np.asarray(k_positions[idx]).copy()
+                    except (ValueError, IndexError):
+                        # iso.position is guaranteed non-None here (checked above)
+                        ads_pos = np.asarray(iso.position).copy()
 
-                H = _build_adsorbate_subgraph(G, clique, element, position, r_cov_ads)
+                H = _build_adsorbate_subgraph(G, clique, element, ads_pos, r_cov_ads)
 
                 ads_sites[clique] = AdsorptionSite(
                     clique            = clique,
@@ -998,6 +1024,7 @@ def optimise_unique_sites(
                     result            = res,
                     adsorption_energy = res.adsorption_energy,
                     occupied          = False,
+                    ads_position      = ads_pos,
                     subgraph          = H,
                 )
 
