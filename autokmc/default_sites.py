@@ -78,13 +78,13 @@ class IsoClass:
 def _build_co_bond_graph(
     surface_graph: nx.Graph,
     r_cov_ads: float,
-    bond_factor: float = 1.0,
+    co_factor: float = 1.05,
 ) -> nx.Graph:
     """Build the adsorbate-specific co-bonding graph on surface atoms.
 
     Two surface atoms i, j are connected when an adsorbate with covalent
     radius r_cov_ads can simultaneously bond to both:
-        d(i, j) <= bond_factor * (2*r_cov_ads + r_cov_i + r_cov_j)
+        d(i, j) <= co_factor * (2*r_cov_ads + r_cov_i + r_cov_j)
     """
     surf_nodes = [(n, d) for n, d in surface_graph.nodes(data=True)
                   if d["type"] == "surface"]
@@ -110,7 +110,7 @@ def _build_co_bond_graph(
     for ii in range(len(surf_list)):
         for jj in range(ii + 1, len(surf_list)):
             ni, nj = surf_list[ii], surf_list[jj]
-            cutoff = bond_factor * (2.0 * r_cov_ads + surf_rcov[ni] + surf_rcov[nj])
+            cutoff = co_factor * (2.0 * r_cov_ads + surf_rcov[ni] + surf_rcov[nj])
             dv = surf_pos[nj] - surf_pos[ni]
             if use_mic:
                 frac = dv @ cell_inv
@@ -210,7 +210,7 @@ def _optimize_site_position(
     clique: frozenset,
     r_cov_ads: float,
     *,
-    bond_factor: float = 1.0,
+    opt_factor: float = 0.85,
     repulsion_weight: float = 0.1,
 ) -> np.ndarray:
     """Find the optimal Cartesian position for an adsorbate at a given site.
@@ -220,7 +220,7 @@ def _optimize_site_position(
     *Bond term* – penalises deviation from the ideal bond length to each
     bonded surface atom::
 
-        d_ideal(i) = bond_factor * (r_cov_ads + r_cov_i)
+        d_ideal(i) = opt_factor * (r_cov_ads + r_cov_i)
         bond_term  = sum_i (|p - pos_i|_MIC - d_ideal_i)^2
 
     *Repulsion term* – soft repulsion from non-bonded surface atoms,
@@ -242,8 +242,9 @@ def _optimize_site_position(
         Global atom indices of the bonded surface atoms.
     r_cov_ads : float
         Covalent radius of the adsorbate (Å).
-    bond_factor : float
-        Scales the ideal bond length.  Default 1.0.
+    opt_factor : float
+        Scales the ideal bond length for geometric position optimisation.
+        Default 0.85.
     repulsion_weight : float
         Relative weight of the non-bonded repulsion term.  Default 0.1.
 
@@ -269,7 +270,7 @@ def _optimize_site_position(
     bonded      = list(clique)
     bonded_pos  = np.array([G.nodes[n]["position"]        for n in bonded])
     bonded_rcov = np.array([G.nodes[n]["covalent_radius"] for n in bonded])
-    ideal_dists = bond_factor * (r_cov_ads + bonded_rcov)
+    ideal_dists = opt_factor * (r_cov_ads + bonded_rcov)
 
     clique_set = set(clique)
     nb_pos_list = [
@@ -335,10 +336,10 @@ def _optimize_site_position(
 def k_max_for_radius(
     surface_graph: nx.Graph,
     r_cov_ads: float,
-    bond_factor: float = 1.0,
+    co_factor: float = 1.05,
 ) -> int:
     """Return k_max -- the largest clique of the co-bonding graph."""
-    cbg = _build_co_bond_graph(surface_graph, r_cov_ads, bond_factor)
+    cbg = _build_co_bond_graph(surface_graph, r_cov_ads, co_factor)
     if cbg.number_of_nodes() == 0:
         return 1
     return max((len(c) for c in nx.find_cliques(cbg)), default=1)
@@ -348,7 +349,7 @@ def k_max_for_element(
     G: nx.Graph,
     element: str,
     *,
-    bond_factor: float = 1.0,
+    co_factor: float = 1.05,
     verbose: bool = False,
 ) -> int:
     """Find k_max for element and cache it in G.graph['k_max'][element]."""
@@ -356,7 +357,7 @@ def k_max_for_element(
         raise KeyError(f"Unknown element '{element}'.")
 
     r_cov = float(ASE_COVALENT_RADII[ASE_ATOMIC_NUMBERS[element]])
-    k_max = k_max_for_radius(G, r_cov, bond_factor=bond_factor)
+    k_max = k_max_for_radius(G, r_cov, co_factor=co_factor)
 
     if verbose:
         print(f"k_max_for_element: '{element}'  r_cov={r_cov:.4f} A  k_max={k_max}")
@@ -369,7 +370,7 @@ def find_sites_for_element(
     G: nx.Graph,
     element: str,
     *,
-    bond_factor: float = 1.0,
+    co_factor: float = 1.05,
     verbose: bool = False,
 ) -> dict[int, list[frozenset]]:
     """Find all adsorption sites for element and store in G.graph['sites'][element].
@@ -389,7 +390,7 @@ def find_sites_for_element(
     r_cov = float(ASE_COVALENT_RADII[ASE_ATOMIC_NUMBERS[element]])
 
     # ── Build co-bonding graph ────────────────────────────────────────────
-    cbg = _build_co_bond_graph(G, r_cov, bond_factor)
+    cbg = _build_co_bond_graph(G, r_cov, co_factor)
 
     # ── k_max from largest clique ─────────────────────────────────────────
     if cbg.number_of_nodes() == 0:
@@ -400,7 +401,7 @@ def find_sites_for_element(
     if verbose:
         print(f"find_sites_for_element: '{element}'  "
               f"r_cov={r_cov:.4f} A  k_max={k_max}  "
-              f"bond_factor={bond_factor}")
+              f"co_factor={co_factor}")
 
     # ── Enumerate all cliques of size 1 … k_max ───────────────────────────
     sites: dict[int, list[frozenset]] = {k: [] for k in range(1, k_max + 1)}
@@ -434,7 +435,7 @@ def reduce_sites_by_isomorphism(
     G: nx.Graph,
     element: str,
     *,
-    n_shells: int = 2,
+    n_shells: int = 1,
     verbose: bool = False,
 ) -> dict[int, list[IsoClass]]:
     """Group all sites for element into iso-classes using an n-shell ego-graph.
@@ -553,7 +554,7 @@ def optimise_site_positions(
     G: nx.Graph,
     element: str,
     *,
-    bond_factor: float = 1.0,
+    opt_factor: float = 0.85,
     repulsion_weight: float = 0.1,
     verbose: bool = False,
 ) -> dict[int, list[np.ndarray]]:
@@ -563,7 +564,7 @@ def optimise_site_positions(
     runs a local geometry optimisation that:
 
     * Places the adsorbate at the ideal bond-length distance from each
-      bonded surface atom (``bond_factor * (r_cov_ads + r_cov_i)``).
+      bonded surface atom (``opt_factor * (r_cov_ads + r_cov_i)``).
     * Maximises the distance from non-bonded surface atoms via a soft
       ``1/r²`` repulsion term (important for top and bridge sites where
       there is lateral freedom).
@@ -580,8 +581,8 @@ def optimise_site_positions(
     G : nx.Graph
         ``find_sites_for_element`` must have been called first.
     element : str
-    bond_factor : float
-        Passed to :func:`_optimize_site_position`.  Default 1.0.
+    opt_factor : float
+        Passed to :func:`_optimize_site_position`.  Default 0.85.
     repulsion_weight : float
         Weight of the non-bonded repulsion term.  Default 0.1.
     verbose : bool
@@ -611,7 +612,7 @@ def optimise_site_positions(
 
     if verbose:
         print(f"optimise_site_positions: '{element}'  "
-              f"r_cov={r_cov:.4f} Å  bond_factor={bond_factor}  "
+              f"r_cov={r_cov:.4f} Å  opt_factor={opt_factor}  "
               f"repulsion_weight={repulsion_weight}")
 
     positions: dict[int, list[np.ndarray]] = {}
@@ -622,7 +623,7 @@ def optimise_site_positions(
         for clique in cliques:
             p = _optimize_site_position(
                 G, clique, r_cov,
-                bond_factor=bond_factor,
+                opt_factor=opt_factor,
                 repulsion_weight=repulsion_weight,
             )
             pos_list.append(p)
