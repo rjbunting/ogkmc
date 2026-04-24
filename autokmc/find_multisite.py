@@ -90,6 +90,20 @@ from autokmc.default_sites import (
     _build_clique_ego,
     _iso_prefilter_key,
 )
+from autokmc.cache import get_cache
+from autokmc.constants import (
+    BOND_TOLERANCE,
+    CO_FACTOR,
+    CONTACT_FACTOR,
+    MAX_PAIR_SHELLS,
+    NN_DISTANCE,
+    N_SHELLS_DEFAULT,
+    OPT_FACTOR,
+    REPULSION_WEIGHT,
+)
+from autokmc.logging_utils import get_logger
+
+_log = get_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -137,7 +151,8 @@ class MultiSite:
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _suggested_n_shells(bond_length: float, nn_distance: float = 2.5) -> int:
+def _suggested_n_shells(bond_length: float,
+                        nn_distance: float = NN_DISTANCE) -> int:
     """Heuristic shell depth from the molecule's geometric reach."""
     return max(1, int(np.ceil(bond_length / nn_distance)))
 
@@ -147,23 +162,22 @@ def _ensure_default_sites(
     element: str,
     n_shells: int,
     *,
-    co_factor: float = 0.95,
-    opt_factor: float = 0.85,
-    repulsion_weight: float = 0.1,
+    co_factor: float = CO_FACTOR,
+    opt_factor: float = OPT_FACTOR,
+    repulsion_weight: float = REPULSION_WEIGHT,
     verbose: bool = False,
 ) -> None:
     """Lazily run the ``default_sites`` pipeline for *element* on *G*.
 
     No-op for any stage already cached in ``G.graph``.
     """
-    if "sites" not in G.graph or element not in G.graph["sites"]:
+    cache = get_cache(G)
+    if element not in cache.sites:
         find_sites_for_element(G, element, co_factor=co_factor, verbose=verbose)
-    if ("unique_sites" not in G.graph
-            or element not in G.graph["unique_sites"]
-            or n_shells not in G.graph["unique_sites"][element]):
+    if (element not in cache.unique_sites
+            or n_shells not in cache.unique_sites[element]):
         reduce_sites_by_isomorphism(G, element, n_shells=n_shells, verbose=verbose)
-    if ("site_positions" not in G.graph
-            or element not in G.graph["site_positions"]):
+    if element not in cache.site_positions:
         optimise_site_positions(
             G, element,
             opt_factor=opt_factor,
@@ -201,9 +215,10 @@ def _mic_distance(p, q, cell, cell_inv, pbc, use_mic) -> float:
 def _all_raw_sites_with_positions(
     G: nx.Graph, element: str
 ) -> list[tuple[frozenset, np.ndarray]]:
-    """Flatten ``G.graph['sites'][element]`` to ``[(clique, position), …]``."""
-    sites     = G.graph["sites"][element]
-    positions = G.graph["site_positions"][element]
+    """Flatten ``cache.sites[element]`` to ``[(clique, position), …]``."""
+    cache = get_cache(G)
+    sites     = cache.sites[element]
+    positions = cache.site_positions[element]
     out: list[tuple[frozenset, np.ndarray]] = []
     for k in sorted(sites):
         for clique, pos in zip(sites[k], positions[k]):
@@ -311,12 +326,12 @@ def find_multisites_for_diatomic(
     G: nx.Graph,
     reactant,
     *,
-    bond_tolerance: float = 0.4,
+    bond_tolerance: float = BOND_TOLERANCE,
     n_shells_anchor: int | None = None,
-    n_shells_pair: int = 1,
-    co_factor: float = 0.95,
-    opt_factor: float = 0.85,
-    repulsion_weight: float = 0.1,
+    n_shells_pair: int = N_SHELLS_DEFAULT,
+    co_factor: float = CO_FACTOR,
+    opt_factor: float = OPT_FACTOR,
+    repulsion_weight: float = REPULSION_WEIGHT,
     include_unbonded: bool = True,
     verbose: bool = False,
 ) -> list[MultiSite]:
@@ -449,17 +464,39 @@ def _canonical_subset_key(
 
 
 def _clique_to_clique_max_hops(
-    G: nx.Graph, clique_a, clique_b
+    G: nx.Graph,
+    clique_a,
+    clique_b,
+    *,
+    apsp: dict | None = None,
 ) -> int:
     """Max graph-hops from *clique_a* required to reach every node of
     *clique_b* via the surface graph.
 
-    Multi-source BFS from ``clique_a``; returns the largest shortest-
-    path distance to any node in ``clique_b``.  Returns a sentinel
-    (``10**6``) if any node of ``clique_b`` is unreachable.
+    Uses cached all-pairs shortest paths (``apsp``) when available — the
+    typical path through :func:`find_multisites`, which calls
+    :func:`_get_surface_apsp` once per enumeration pass.  Falls back to
+    a multi-source BFS when no cache is provided.
     """
-    from collections import deque
     target = set(clique_b)
+
+    if apsp is not None:
+        worst = 0
+        for b in target:
+            best_to_b = 10 ** 6
+            for a in clique_a:
+                d = apsp.get(a, {}).get(b)
+                if d is None:
+                    continue
+                if d < best_to_b:
+                    best_to_b = d
+            if best_to_b >= 10 ** 6:
+                return 10 ** 6
+            if best_to_b > worst:
+                worst = best_to_b
+        return worst
+
+    from collections import deque
     dist: dict = {n: 0 for n in clique_a}
     q: deque = deque(clique_a)
     while q:
@@ -471,11 +508,12 @@ def _clique_to_clique_max_hops(
                 dist[m] = dist[n] + 1
                 q.append(m)
     if any(b not in dist for b in target):
-        return 10**6
+        return 10 ** 6
     return max(dist[b] for b in target)
 
 
-def _required_n_shells(G: nx.Graph, multisites: list[MultiSite]) -> int:
+def _required_n_shells(G: nx.Graph, multisites: list[MultiSite],
+                       *, apsp: dict | None = None) -> int:
     """Largest depth needed for the iso-class ego graph to actually
     contain every other bonded clique seen in *multisites*.
 
@@ -491,7 +529,7 @@ def _required_n_shells(G: nx.Graph, multisites: list[MultiSite]) -> int:
             continue
         first = bonded[0]
         for other in bonded[1:]:
-            d = _clique_to_clique_max_hops(G, first, other)
+            d = _clique_to_clique_max_hops(G, first, other, apsp=apsp)
             if d > needed:
                 needed = d
     return needed
@@ -503,30 +541,75 @@ def _surface_subgraph(G: nx.Graph) -> nx.Graph:
     return G.subgraph(nodes)
 
 
+def _get_surface_apsp(G: nx.Graph, *, cutoff: int = MAX_PAIR_SHELLS) -> dict:
+    """Return cached surface-only all-pairs shortest paths up to *cutoff*.
+
+    Stored on :attr:`autokmc.cache.SiteCache.surface_apsp`.  The cache is
+    invalidated implicitly whenever :func:`autokmc.cache.SiteCache.invalidate`
+    is called (or whenever ``G.graph["autokmc"]`` is replaced).
+
+    Parameters
+    ----------
+    G : nx.Graph
+    cutoff : int
+        Maximum BFS depth to compute.  Defaults to
+        :data:`autokmc.constants.MAX_PAIR_SHELLS`.
+
+    Returns
+    -------
+    dict[node, dict[node, int]]
+        ``apsp[u][v]`` is the surface-graph hop distance from *u* to *v*
+        (only entries with distance ≤ *cutoff* are populated).
+    """
+    cache = get_cache(G)
+    apsp = cache.surface_apsp
+    if isinstance(apsp, dict) and apsp.get("_cutoff") == cutoff:
+        return apsp["data"]
+    G_surf = _surface_subgraph(G)
+    data: dict = {}
+    for u in G_surf.nodes:
+        # nx.single_source_shortest_path_length returns dict[node, distance]
+        data[u] = dict(nx.single_source_shortest_path_length(G_surf, u, cutoff=cutoff))
+    cache.surface_apsp = {"_cutoff": cutoff, "data": data}
+    return data
+
+
 def _bonded_cliques_surface_connected(
-    G_surf: nx.Graph, bonded_cliques: list,
+    G_surf: nx.Graph,
+    bonded_cliques: list,
+    *,
+    apsp: dict | None = None,
 ) -> bool:
     """Are all *bonded_cliques* mutually reachable via surface-only edges?
 
-    Multi-source BFS from the first clique through ``G_surf`` (restricted
-    to ``type == "surface"`` nodes only).  Returns True iff every node in
-    every other bonded clique is reachable.
-
-    Catches the edge case where a large bidentate molecule lands on two
-    cliques that are too far apart on the surface to actually share a
-    connected adsorption "site" — e.g. opposite facets of a nanoparticle
-    that aren't joined by a surface path, or two patches separated only
-    by bulk atoms.
+    Uses the cached APSP table when available (constant-time lookups);
+    otherwise falls back to a multi-source BFS through *G_surf*.
     """
     if len(bonded_cliques) < 2:
         return True
+
+    if apsp is not None:
+        first = bonded_cliques[0]
+        if not first:
+            return False
+        for other in bonded_cliques[1:]:
+            if not other:
+                return False
+            reachable = False
+            for a in first:
+                a_dists = apsp.get(a, {})
+                if any(b in a_dists for b in other):
+                    reachable = True
+                    break
+            if not reachable:
+                return False
+        return True
+
     from collections import deque
     seeds = set(bonded_cliques[0])
     targets = set()
     for c in bonded_cliques[1:]:
         targets |= set(c)
-    # If any required node is missing from the surface subgraph (e.g.
-    # adsorbate or bulk), it can't be reached via surface edges.
     if not seeds.issubset(G_surf):
         return False
     if not targets.issubset(G_surf):
@@ -543,20 +626,35 @@ def _bonded_cliques_surface_connected(
 
 
 def _shortest_path_between_cliques(
-    G: nx.Graph, clique_a, clique_b,
+    G: nx.Graph,
+    clique_a,
+    clique_b,
+    *,
+    apsp: dict | None = None,
 ) -> int:
     """Surface-graph hop distance between the two closest nodes of
     *clique_a* and *clique_b*.
 
-    Multi-source BFS from ``clique_a`` until any node of ``clique_b`` is
-    found.  Returns ``0`` if the cliques share at least one node (or are
-    edge-adjacent at distance 0 by virtue of overlap), and the sentinel
-    ``10**6`` if ``clique_b`` is unreachable.
+    Uses the cached APSP table when available.
     """
     if not clique_a or not clique_b:
         return 10**6
     if set(clique_a) & set(clique_b):
         return 0
+
+    if apsp is not None:
+        target = set(clique_b)
+        best = 10 ** 6
+        for a in clique_a:
+            a_dists = apsp.get(a, {})
+            for b in target:
+                d = a_dists.get(b)
+                if d is None:
+                    continue
+                if d < best:
+                    best = d
+        return best
+
     from collections import deque
     target = set(clique_b)
     dist: dict = {n: 0 for n in clique_a}
@@ -573,29 +671,30 @@ def _shortest_path_between_cliques(
 
 
 def _min_ego_depth_for_connectivity(
-    G_surf: nx.Graph, bonded_cliques: list,
+    G_surf: nx.Graph,
+    bonded_cliques: list,
+    *,
+    apsp: dict | None = None,
 ) -> int:
     """Smallest ego-graph depth at which every pair of *bonded_cliques*
     is connected through surface-only edges.
 
     For two cliques whose closest surface-graph hop distance is *L*, the
     shortest connecting path lies entirely within the
-    ``floor(L / 2)``-shell ego of their union (the path's midpoint is at
-    most ``floor(L/2)`` hops from either end-clique seed).  Returns the
-    max over all clique pairs.
-
-    Returns ``0`` if a single clique (trivially connected) and the
-    sentinel ``10**6`` if any pair is unreachable.
+    ``floor(L / 2)``-shell ego of their union.  Returns the max over all
+    clique pairs.
     """
     if len(bonded_cliques) < 2:
         return 0
-    if not all(set(c).issubset(G_surf) for c in bonded_cliques):
+    # When using cached APSP we don't need to verify subset-of-G_surf
+    # because non-surface seeds will simply have no entries in the table.
+    if apsp is None and not all(set(c).issubset(G_surf) for c in bonded_cliques):
         return 10**6
     max_d = 0
     for i in range(len(bonded_cliques)):
         for j in range(i + 1, len(bonded_cliques)):
             L = _shortest_path_between_cliques(
-                G_surf, bonded_cliques[i], bonded_cliques[j]
+                G_surf, bonded_cliques[i], bonded_cliques[j], apsp=apsp
             )
             if L >= 10**6:
                 return 10**6
@@ -609,18 +708,18 @@ def find_multisites(
     G: nx.Graph,
     reactant,
     *,
-    bond_tolerance: float = 0.4,
+    bond_tolerance: float = BOND_TOLERANCE,
     n_shells_anchor: int | None = None,
-    n_shells_pair: int = 1,
-    co_factor: float = 0.95,
-    opt_factor: float = 0.85,
-    repulsion_weight: float = 0.1,
+    n_shells_pair: int = N_SHELLS_DEFAULT,
+    co_factor: float = CO_FACTOR,
+    opt_factor: float = OPT_FACTOR,
+    repulsion_weight: float = REPULSION_WEIGHT,
     include_partial: bool = True,
     require_anchors: bool = True,
     auto_grow_shells: bool = True,
     max_shell_retries: int = 3,
     require_surface_connected: bool = True,
-    max_pair_shells: int = 10,
+    max_pair_shells: int = MAX_PAIR_SHELLS,
     verbose: bool = False,
 ) -> list[MultiSite]:
     """Universal N-atom adsorbate site enumerator (handles N >= 2).
@@ -764,6 +863,11 @@ def find_multisites(
     orbit_id = _orbit_id_of(reactant)
     node_match = isomorphism.categorical_node_match("element", "X")
     G_surf = _surface_subgraph(G) if require_surface_connected else None
+    # Pre-computed surface-only all-pairs shortest paths (one BFS per
+    # surface node, cached on the graph).  Replaces the per-pair BFS the
+    # legacy connectivity helpers ran for every emitted placement.
+    apsp = _get_surface_apsp(G, cutoff=max_pair_shells) \
+        if require_surface_connected else None
 
     def _run_pass(depth: int) -> list[MultiSite]:
         """One enumeration pass at iso-class depth ``depth``."""
@@ -836,7 +940,9 @@ def find_multisites(
             ego_depth = n_shells_pair
             if G_surf is not None:
                 bonded_cliques = [c for c in atom_cliques if c is not None]
-                needed = _min_ego_depth_for_connectivity(G_surf, bonded_cliques)
+                needed = _min_ego_depth_for_connectivity(
+                    G_surf, bonded_cliques, apsp=apsp
+                )
                 if needed >= 10**6 or needed > max_pair_shells:
                     rejected_disconnected += 1
                     return
@@ -931,7 +1037,7 @@ def find_multisites(
     multisites: list[MultiSite] = _run_pass(n_shells_anchor_eff)
     retries = 0
     while auto_grow_shells and retries < max_shell_retries:
-        needed = _required_n_shells(G, multisites)
+        needed = _required_n_shells(G, multisites, apsp=apsp)
         if needed <= n_shells_anchor_eff:
             break
         new_depth = needed
@@ -946,7 +1052,7 @@ def find_multisites(
         retries += 1
     else:
         if auto_grow_shells and retries == max_shell_retries:
-            needed = _required_n_shells(G, multisites)
+            needed = _required_n_shells(G, multisites, apsp=apsp)
             if needed > n_shells_anchor_eff and verbose:
                 print(
                     f"  ⚠  hit max_shell_retries={max_shell_retries}; "
@@ -974,6 +1080,7 @@ def find_multisites(
         )
 
     G.graph.setdefault("multisites", {})[reactant.smiles] = multisites
+    get_cache(G).multisites[reactant.smiles] = multisites
     return multisites
 
 
@@ -1043,7 +1150,7 @@ def optimise_multisite_positions(
     *,
     restraint_weight: float = 10.0,
     repulsion_weight: float = 1.0,
-    contact_factor: float = 0.9,
+    contact_factor: float = CONTACT_FACTOR,
     max_iter: int = 100,
     verbose: bool = False,
 ) -> list[MultiSite]:

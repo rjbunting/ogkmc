@@ -11,6 +11,12 @@ Each node represents one atom and carries:
 * ``type``           – one of ``"bulk"``, ``"surface"``, or ``"adsorbate"`` (str)
 * ``covalent_radius``– covalent radius in Å from ASE data (float)
 
+Each edge carries:
+
+* ``distance`` – minimum-image bond length in Å (float)
+* ``offset``   – integer cell-image offset ``(i, j, k)`` of the partner
+  atom; ``(0, 0, 0)`` for in-cell bonds (tuple[int, int, int])
+
 The ``type`` attribute is read from ``atoms.arrays["surface"]`` (int8):
 
 * ``0`` → ``"bulk"``
@@ -18,39 +24,17 @@ The ``type`` attribute is read from ``atoms.arrays["surface"]`` (int8):
 * ``2`` → ``"adsorbate"``
 
 Edges connect atoms whose covalent-radius neighbour-lists overlap (ASE
-:class:`~ase.neighborlist.NeighborList` with ``mult=1.0``).
+:class:`~ase.neighborlist.NeighborList` with
+``mult=autokmc.constants.NL_MULT_DEFAULT``).
 
-The graph also carries cell-level metadata as :attr:`~networkx.Graph.graph`
-attributes: ``"cell"``, ``"pbc"``.  Note that ``"pbc"`` is **derived** from
-the neighbour-list — an axis is reported periodic only if at least one bond
-crosses the cell image along it.  This means a nanoparticle sitting in a
-periodic cubic cell with sufficient vacuum reports ``pbc=[False, False, False]``
-even when ``atoms.get_pbc()`` is all True.
+Graph-level metadata (``G.graph[...]``):
 
-Typical usage
--------------
-::
-
-    from autokmc.surface import find_surface_atoms
-    from autokmc.graph import build_graph
-    from autokmc.default_sites import compute_sites_for_element
-    from ase.build import fcc111
-
-    slab = fcc111("Cu", size=(4, 4, 4), vacuum=10.0, periodic=True)
-    find_surface_atoms(slab, tag_atoms=True)   # writes slab.arrays["surface"]
-    G = build_graph(slab)
-    compute_sites_for_element(G, "O", verbose=True)
-    # G.graph["sites"]["O"] now holds the unique site iso-classes
-
-Public API
-----------
-* :func:`build_graph` – main entry point
-
-Backward-compatible re-exports (from :mod:`autokmc.default_sites`)
--------------------------------------------------------------------
-* :class:`~autokmc.default_sites.SiteClass`
-* :func:`~autokmc.default_sites.find_unique_surface_sites`
-* :func:`~autokmc.default_sites.k_max_for_radius`
+* ``"cell"`` – :class:`numpy.ndarray`, shape ``(3, 3)`` (rows = lattice vectors).
+* ``"pbc"``  – :class:`numpy.ndarray` of three :class:`bool`.  **Derived** from
+  the neighbour-list — an axis is True iff at least one bond crosses
+  the cell image along it (so a nanoparticle in a periodic cubic cell
+  with sufficient vacuum reports ``pbc=array([False, False, False])``).
+* ``"autokmc"`` – the :class:`~autokmc.cache.SiteCache` for this graph.
 """
 
 from __future__ import annotations
@@ -62,10 +46,11 @@ from ase import Atoms
 from ase.data import covalent_radii as ASE_COVALENT_RADII
 from ase.neighborlist import NeighborList, natural_cutoffs
 
-# Re-export for backward compatibility (site.py imports these from graph)
-from autokmc.default_sites import (  # noqa: F401
-    k_max_for_radius,
-)
+from autokmc.constants import NL_MULT_DEFAULT
+from autokmc.cache import get_cache
+from autokmc.logging_utils import get_logger
+
+_log = get_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -75,7 +60,7 @@ from autokmc.default_sites import (  # noqa: F401
 def build_graph(
     atoms: Atoms,
     *,
-    nl_mult: float = 1.0,
+    nl_mult: float = NL_MULT_DEFAULT,
 ) -> nx.Graph:
     """Build an atom-connectivity graph from *atoms*.
 
@@ -88,35 +73,16 @@ def build_graph(
     ----------
     atoms : Atoms
         The structure to graph.  Must have ``atoms.arrays["surface"]``
-        populated (int8 array: 0 = bulk, 1 = surface).
+        populated (int8 array: 0 = bulk, 1 = surface, 2 = adsorbate).
     nl_mult : float
         Multiplier for ASE :func:`~ase.neighborlist.natural_cutoffs` used
-        to determine which atom pairs are bonded.  Default 1.1.
+        to determine which atom pairs are bonded.  Defaults to
+        :data:`autokmc.constants.NL_MULT_DEFAULT` (currently ``1.0``).
 
     Returns
     -------
     G : nx.Graph
-        Connectivity graph.
-
-        **Node attributes** (every node):
-
-        =========  ================================================
-        element          Chemical symbol (str)
-        position         Cartesian coordinates – np.ndarray, shape (3,)
-        index            Atom index in *atoms* (int)
-        type             ``"bulk"``, ``"surface"``, or ``"adsorbate"`` (str)
-        covalent_radius  Covalent radius in Å from ASE data (float)
-        =========  ================================================
-
-        **Graph attributes**:
-
-        ====  =============================================
-        cell  Unit-cell matrix – np.ndarray, shape (3, 3)
-        pbc   Effective periodic boundary conditions – list[bool],
-              length 3.  An axis is True iff at least one bond crosses
-              the cell image along that axis (derived from the neighbour
-              list, *not* read from ``atoms.get_pbc()``).
-        ====  =============================================
+        Connectivity graph (see module docstring for full attribute list).
 
     Raises
     ------
@@ -134,25 +100,14 @@ def build_graph(
 
     _TYPE_MAP = {0: "bulk", 1: "surface", 2: "adsorbate"}
 
-    # ------------------------------------------------------------------
-    # Build neighbour list
-    # ------------------------------------------------------------------
-    # Use the atoms object's own PBC flag for the neighbour search (this is
-    # what controls whether ASE looks across cell images at all).  We then
-    # *derive* the effective periodicity from whether any bond actually
-    # crosses an image (offset != 0) per axis — this means a nanoparticle
-    # placed in a periodic cubic cell with sufficient vacuum will correctly
-    # report pbc=[False, False, False] even though atoms.pbc=[True]*3.
     cutoffs = natural_cutoffs(atoms, mult=nl_mult)
     nl = NeighborList(cutoffs, self_interaction=False, bothways=True)
     nl.update(atoms)
 
-    # ------------------------------------------------------------------
-    # Assemble graph
-    # ------------------------------------------------------------------
     G = nx.Graph()
 
-    G.graph["cell"] = np.array(atoms.get_cell())
+    cell_arr = np.array(atoms.get_cell(), dtype=float)
+    G.graph["cell"] = cell_arr
 
     positions      = atoms.get_positions()
     symbols        = atoms.get_chemical_symbols()
@@ -172,17 +127,41 @@ def build_graph(
     # graph's effective periodicity.
     pbc_effective = np.zeros(3, dtype=bool)
 
+    # Walk the bothways=True neighbour list and add each bond once (i<j),
+    # recording the integer cell offset of the partner atom and the MIC
+    # bond distance so downstream code can avoid re-deriving them.
     for i in range(len(atoms)):
         neighbours, offsets = nl.get_neighbors(i)
-        for j, off in zip(map(int, neighbours), offsets):
-            if j > i:
-                G.add_edge(i, j)
-            # Detect cross-image bond regardless of i,j ordering so we don't
-            # miss anything in the bothways=True list.
+        for jj, off in zip(map(int, neighbours), offsets):
             off = np.asarray(off, dtype=int)
             if np.any(off != 0):
                 pbc_effective |= (off != 0)
+            if jj <= i:
+                continue
+            # Cartesian displacement of the partner image relative to atom i.
+            dv = positions[jj] + off @ cell_arr - positions[i]
+            d = float(np.linalg.norm(dv))
+            G.add_edge(i, jj,
+                       distance=d,
+                       offset=(int(off[0]), int(off[1]), int(off[2])))
 
-    G.graph["pbc"] = pbc_effective.tolist()
+    G.graph["pbc"] = pbc_effective
+
+    # Install (or refresh) the typed cache; aliases legacy G.graph["sites"]
+    # etc. to the typed dicts so existing code keeps working.
+    cache = get_cache(G)
+
+    # Re-use any hull computed by find_surface_atoms (nanoparticle path) so
+    # downstream code (default_sites.find_sites_for_element) need not
+    # rebuild it.  Stored as the (n_facets, 4) equations array; that is
+    # all the spurious-clique filter actually needs.
+    hull_eq = atoms.info.get("_hull_equations")
+    if hull_eq is not None:
+        cache.hull = np.asarray(hull_eq, dtype=float)
+
+    _log.debug(
+        "build_graph: %d nodes, %d edges, pbc=%s, nl_mult=%g",
+        G.number_of_nodes(), G.number_of_edges(), pbc_effective.tolist(), nl_mult,
+    )
 
     return G

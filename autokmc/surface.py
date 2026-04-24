@@ -11,7 +11,10 @@ Utilities for identifying surface atoms in two geometries:
 
 * :func:`find_surface_atoms`
     Unified entry point: auto-detects geometry via :func:`has_pbc_connectivity`
-    and dispatches to the appropriate method.
+    and dispatches to the appropriate method.  Returns a
+    :class:`~autokmc.results.SurfaceClassification` (which is also iterable
+    in the same shape as the legacy variable-length tuple, for backwards
+    compatibility).
 
 * :func:`tag_surface_atoms`
     Writes atom-type codes into ``atoms.arrays["surface"]`` (int8) so they
@@ -27,6 +30,12 @@ from ase import Atoms
 from ase.data import covalent_radii as ASE_COVALENT_RADII
 from scipy.spatial import ConvexHull
 
+from autokmc.constants import NL_MULT_DEFAULT
+from autokmc.logging_utils import get_logger
+from autokmc.results import SurfaceClassification
+
+_log = get_logger(__name__)
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -40,35 +49,25 @@ def tag_surface_atoms(atoms: Atoms, surface_mask: np.ndarray) -> None:
     * ``0`` – bulk
     * ``1`` – surface
     * ``2`` – adsorbate
-
-    Written as ``int8`` so it appears as a plain integer column when the
-    structure is saved with :func:`ase.io.write` to an ``.extxyz`` file.
-
-    Parameters
-    ----------
-    atoms:
-        The :class:`~ase.Atoms` object to annotate **in-place**.
-    surface_mask:
-        Boolean array of length ``len(atoms)``.  ``True`` → surface (1),
-        ``False`` → bulk (0).  Pass an all-True mask to mark every atom
-        as surface, or build the int8 array manually and assign it directly
-        to ``atoms.arrays["surface"]`` for adsorbate (2) labelling.
     """
     atoms.arrays["surface"] = surface_mask.astype(np.int8)
 
 
-def has_pbc_connectivity(atoms: Atoms, nl_mult: float = 1.1) -> bool:
+def has_pbc_connectivity(atoms: Atoms,
+                         nl_mult: float = NL_MULT_DEFAULT) -> bool:
     """Return ``True`` if at least one bonded pair crosses a periodic boundary.
 
     Builds an ASE :class:`~ase.neighborlist.NeighborList` and inspects the
-    integer cell-image offsets for every neighbour.  A non-zero offset means
-    the bond crosses a periodic boundary image.
+    integer cell-image offsets for every neighbour.  A non-zero offset
+    along a *periodic* axis means the bond crosses a periodic boundary
+    image.
 
     Parameters
     ----------
     atoms : Atoms
     nl_mult : float
-        Multiplier for :func:`~ase.neighborlist.natural_cutoffs`.  Default 1.1.
+        Multiplier for :func:`~ase.neighborlist.natural_cutoffs`.  Defaults
+        to :data:`autokmc.constants.NL_MULT_DEFAULT`.
 
     Returns
     -------
@@ -78,7 +77,8 @@ def has_pbc_connectivity(atoms: Atoms, nl_mult: float = 1.1) -> bool:
     """
     from ase.neighborlist import NeighborList, natural_cutoffs
 
-    if not atoms.get_pbc().any():
+    pbc_axes = np.asarray(atoms.get_pbc(), dtype=bool)
+    if not pbc_axes.any():
         return False
 
     cutoffs = natural_cutoffs(atoms, mult=nl_mult)
@@ -87,7 +87,12 @@ def has_pbc_connectivity(atoms: Atoms, nl_mult: float = 1.1) -> bool:
 
     for i in range(len(atoms)):
         _, offsets = nl.get_neighbors(i)
-        if offsets.any():
+        if not len(offsets):
+            continue
+        # Only count cross-image bonds along axes the user actually marked
+        # periodic.  This makes the test honest for partial-PBC cells.
+        masked = np.asarray(offsets) * pbc_axes[np.newaxis, :]
+        if masked.any():
             return True
     return False
 
@@ -99,7 +104,7 @@ def has_pbc_connectivity(atoms: Atoms, nl_mult: float = 1.1) -> bool:
 def find_surface_atoms(
     atoms: Atoms,
     *,
-    nl_mult: float = 1.0,
+    nl_mult: float = NL_MULT_DEFAULT,
     # ray-casting kwargs
     surf_radius_factor: float = 1.0,
     which: str = "top",
@@ -110,7 +115,7 @@ def find_surface_atoms(
     return_diagnostics: bool = False,
     # tagging
     tag_atoms: bool = False,
-):
+) -> SurfaceClassification:
     """Auto-detect geometry and classify surface atoms.
 
     Decision rule
@@ -133,13 +138,12 @@ def find_surface_atoms(
 
     Returns
     -------
-    surface_mask : np.ndarray[bool]
-    surface_indices : np.ndarray[int]
-    extra :
-        Convex-hull path: ``(hull,)`` or ``(hull, diagnostics)`` depending on
-        ``return_diagnostics``; ray-casting path: nothing extra.
-    method : str
-        ``"raycasting"`` or ``"convexhull"``.
+    SurfaceClassification
+        Dataclass exposing ``.mask``, ``.indices``, ``.method``, and
+        (nanoparticle path only) ``.hull`` and optionally ``.diagnostics``.
+        The dataclass is iterable in the same order as the legacy
+        variable-length tuple, so ``mask, indices, method = ...`` and
+        ``mask, indices, hull, method = ...`` continue to work.
     """
     pbc = has_pbc_connectivity(atoms, nl_mult=nl_mult)
 
@@ -153,18 +157,39 @@ def find_surface_atoms(
         )
         if tag_atoms:
             tag_surface_atoms(atoms, surface_mask)
-        return surface_mask, surface_indices, "raycasting"
-
-    else:
-        result = find_surface_atoms_convexhull(
-            atoms,
-            hull_tol_factor=hull_tol_factor,
-            return_diagnostics=return_diagnostics,
+        result = SurfaceClassification(
+            mask=surface_mask, indices=surface_indices, method="raycasting",
         )
-        surface_mask = result[0]
-        if tag_atoms:
-            tag_surface_atoms(atoms, surface_mask)
-        return (*result, "convexhull")
+        _log.debug("find_surface_atoms: raycasting → %d/%d surface atoms",
+                   int(surface_mask.sum()), len(atoms))
+        return result
+
+    # ── nanoparticle (convex hull) ────────────────────────────────────────
+    raw = find_surface_atoms_convexhull(
+        atoms,
+        hull_tol_factor=hull_tol_factor,
+        return_diagnostics=return_diagnostics,
+    )
+    if return_diagnostics:
+        surface_mask, surface_indices, hull, diagnostics = raw
+    else:
+        surface_mask, surface_indices, hull = raw
+        diagnostics = None
+    if tag_atoms:
+        tag_surface_atoms(atoms, surface_mask)
+    # Stash the hull facet equations on atoms.info so that downstream
+    # consumers (default_sites.find_sites_for_element, build_graph cache)
+    # do not have to rebuild the same hull.  We store only the equations
+    # array because the ConvexHull object itself doesn't survive
+    # atoms.copy() / serialisation cleanly.
+    atoms.info["_hull_equations"] = np.asarray(hull.equations, dtype=float)
+    result = SurfaceClassification(
+        mask=surface_mask, indices=surface_indices, method="convexhull",
+        hull=hull, diagnostics=diagnostics,
+    )
+    _log.debug("find_surface_atoms: convexhull → %d/%d surface atoms",
+               int(surface_mask.sum()), len(atoms))
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -181,40 +206,8 @@ def find_surface_atoms_raycasting(
 ):
     """Classify surface atoms by per-atom disc-coverage ray-casting.
 
-    For each atom a small grid of rays is sampled uniformly over its capture
-    disc (a circle of radius ``surf_radius_factor * r_cov`` centred on its
-    projected *xy* position).  The atom is classified as a surface atom if
-    it wins at least ``coverage_threshold`` fraction of those rays — i.e. it
-    is the highest-*z* atom within capture range of at least that fraction of
-    the disc.
-
-    This cleanly handles close-packed surfaces such as FCC(111): a top-layer
-    atom wins nearly all its disc rays, while a sub-surface atom only wins
-    rays that slip through the tiny inter-atom gaps, giving a coverage close
-    to zero.
-
-    Parameters
-    ----------
-    atoms : Atoms
-        Slab with an orthogonal or non-orthogonal periodic cell.
-    surf_radius_factor : float
-        Per-atom capture radius = ``surf_radius_factor * r_cov(element)``.
-        Default 1.0.
-    which : {"top", "bottom", "both"}
-        Which vacuum face to classify.  Default ``"top"``.
-    coverage_threshold : float
-        Minimum fraction of disc rays an atom must win to be labelled
-        surface.  Default 0.5 (must win at least half its disc).
-    n_disc_sample : int
-        Side length of the square grid used to sample each atom's disc.
-        A ``n_disc_sample × n_disc_sample`` grid is filtered to the
-        inscribed circle, giving roughly ``0.78 * n_disc_sample²`` rays
-        per atom.  Default 5 (≈ 19 rays/atom).
-
-    Returns
-    -------
-    surface_mask : np.ndarray[bool], shape (N,)
-    surface_indices : np.ndarray[int]
+    See module docstring for the algorithm.  Returns
+    ``(mask, indices)``.
     """
     if which not in ("top", "bottom", "both"):
         raise ValueError(f"which must be 'top', 'bottom', or 'both', got {which!r}")
@@ -235,26 +228,17 @@ def find_surface_atoms_raycasting(
     unit_pts = unit_pts[(unit_pts ** 2).sum(axis=1) <= 1.0]        # (K, 2) in disc
     K = len(unit_pts)
 
-    # Each atom i contributes K rays: pos[i,:2] + surf_radii[i] * unit_pts
-    # Shape: (N, K, 2) → (N*K, 2)
     rays_xy = (pos[:, np.newaxis, :2]
                + surf_radii[:, np.newaxis, np.newaxis] * unit_pts[np.newaxis, :, :])
     rays_xy    = rays_xy.reshape(-1, 2)                            # (N*K, 2)
 
-    # Convert ray origins to fractional coordinates (for PBC wrapping)
     rays_frac  = rays_xy @ cell_inv[:2, :2]                        # (N*K, 2)
-
-    # Fractional xy of all atoms
     atom_frac  = (pos @ cell_inv)[:, :2]                           # (N, 2)
     z_vals     = pos[:, 2]
 
     n_rays = len(rays_xy)
-
-    # Internal chunk size: process rays in batches to bound peak memory.
-    # 4096 rays × N atoms stays well under ~100 MB for typical slab sizes.
     _CHUNK = 4096
 
-    # wins_top[i] / wins_bot[i] = number of disc rays atom i won
     wins_top = np.zeros(N, dtype=np.int32)
     wins_bot = np.zeros(N, dtype=np.int32)
 
@@ -262,13 +246,11 @@ def find_surface_atoms_raycasting(
         sl         = slice(start, start + _CHUNK)
         chunk_frac = rays_frac[sl]                                 # (C, 2)
 
-        # PBC-wrapped fractional delta → Cartesian xy distance  (C, N, 2)
         dfrac  = atom_frac[np.newaxis, :, :] - chunk_frac[:, np.newaxis, :]
         dfrac -= np.round(dfrac)
         dxy    = dfrac @ cell[:2, :2]                              # (C, N, 2)
         xy_dist = np.sqrt((dxy ** 2).sum(axis=2))                  # (C, N)
 
-        # Atom j is a candidate for ray c if xy_dist[c,j] <= surf_radii[j]
         within  = xy_dist <= surf_radii[np.newaxis, :]             # (C, N)
         has_any = within.any(axis=1)                               # (C,)
         valid   = np.where(has_any)[0]                             # indices into chunk
@@ -283,8 +265,6 @@ def find_surface_atoms_raycasting(
             best_bot = np.argmin(z_bot, axis=1)                    # (valid,)
             np.add.at(wins_bot, best_bot, 1)
 
-    # Coverage fraction: wins / K  (rays that hit nothing don't count against)
-    # We use K as the denominator — an atom that wins > coverage_threshold*K is surface.
     threshold_count = coverage_threshold * K
 
     if which == "top":
@@ -310,50 +290,19 @@ def find_surface_atoms_convexhull(
 ):
     """Classify surface atoms via convex-hull signed distance.
 
-    An atom is a surface atom if its signed distance to the convex hull
-    satisfies ``signed_dist > -hull_tol_per_atom``.  The per-atom tolerance
-    is ``hull_tol_factor * r_cov(element)`` further scaled by the local facet
-    curvature, so larger atoms naturally receive a wider inclusion band and
-    curved facets (corners/edges) are less strict than flat terraces.
-    Hull vertices are always included regardless of the distance criterion.
-
-    Parameters
-    ----------
-    atoms : Atoms
-        Nanoparticle (finite, non-periodic structure).
-    hull_tol_factor : float
-        Per-atom tolerance = ``hull_tol_factor * r_cov(element)``.
-        Default 0.5 (~0.64 Å for Cu).  Further scaled by local curvature
-        (flat facet -> 1x, most curved -> 2x).
-    return_diagnostics : bool
-        If ``True``, append a ``diagnostics`` dict to the return value.
-        Keys: ``"signed_dist"``, ``"hull_tol_per_atom"``,
-        ``"dist_surface_mask"``, ``"vertex_mask"``.
-
-    Returns
-    -------
-    surface_mask : np.ndarray[bool], shape (N,)
-    surface_indices : np.ndarray[int]
-    hull : ConvexHull
-    diagnostics : dict  (only when ``return_diagnostics=True``)
+    See module docstring; returns ``(mask, indices, hull[, diagnostics])``.
     """
     pos  = atoms.get_positions()
     N    = len(atoms)
     hull = ConvexHull(pos)
 
-    # Signed distance: max over facets of  n·p + d
     eq          = hull.equations                                   # (F, 4)
     signed_dist = (eq[:, :3] @ pos.T + eq[:, 3:4]).max(axis=0)   # (N,)
 
-    # Per-atom base tolerance from covalent radii
     atomic_numbers = atoms.get_atomic_numbers()
     cov_radii      = ASE_COVALENT_RADII[atomic_numbers]           # (N,)
     hull_tol_base  = cov_radii * hull_tol_factor                   # (N,)
 
-    # Adaptive scaling by local facet curvature
-    # Curvature proxy: mean(1 - n_i · n_j) for K angularly-nearest facets.
-    # 0 = flat/parallel neighbours → tight tolerance.
-    # Up to 2 = perpendicular neighbours → loose tolerance.
     normals       = eq[:, :3]                                      # (F, 3)
     signed_all    = eq[:, :3] @ pos.T + eq[:, 3:4]                # (F, N)
     nearest_facet = np.argmax(signed_all, axis=0)                  # (N,)
@@ -372,7 +321,6 @@ def find_surface_atoms_convexhull(
 
     dist_surface_mask = signed_dist > -hull_tol_per_atom           # (N,)
 
-    # Hull vertices are definitionally on the surface
     vertex_mask = np.zeros(N, dtype=bool)
     vertex_mask[hull.vertices] = True
 

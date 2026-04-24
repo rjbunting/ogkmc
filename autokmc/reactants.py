@@ -55,6 +55,10 @@ from ase.data import covalent_radii as ASE_COVALENT_RADII
 from ase.optimize import LBFGS
 
 from autokmc.graph import build_graph
+from autokmc.constants import NL_MULT_DEFAULT
+from autokmc.logging_utils import get_logger
+
+_log = get_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -123,7 +127,11 @@ def _smiles_to_atoms(smiles: str, *, add_hydrogens: bool = True) -> Atoms:
     ----------
     smiles : str
     add_hydrogens : bool
-        Whether to add explicit hydrogens.  Default ``True``.
+        Whether to add explicit hydrogens.  Default ``True``.  Hydrogens
+        are only added to atoms whose SMILES specification implies them
+        (i.e. those with a non-zero implicit-H count); explicit-H atoms
+        and atoms with closed valences (``[O]``, ``[Au]``, …) are left
+        untouched.  Pass ``add_hydrogens=False`` to skip this entirely.
 
     Returns
     -------
@@ -144,7 +152,15 @@ def _smiles_to_atoms(smiles: str, *, add_hydrogens: bool = True) -> Atoms:
         raise ValueError(f"RDKit could not parse SMILES: {smiles!r}")
 
     if add_hydrogens:
-        mol = Chem.AddHs(mol)
+        # Only add Hs to atoms that *want* them — i.e. those with a
+        # non-zero implicit-H count given the SMILES.  This matches the
+        # SMILES author's intent: e.g. "[O]" stays as a bare O, but "O"
+        # gets two Hs (water).  Build a per-atom mask before calling
+        # AddHs so atoms with closed/forced valences are preserved.
+        only_atoms = [a.GetIdx() for a in mol.GetAtoms()
+                      if a.GetNumImplicitHs() > 0 or a.GetNumExplicitHs() > 0]
+        if only_atoms:
+            mol = Chem.AddHs(mol, onlyOnAtoms=only_atoms)
 
     params = AllChem.ETKDGv3()
     params.randomSeed = 69
@@ -339,7 +355,7 @@ def build_reactant(
     add_hydrogens: bool = True,
     fmax: float = 0.05,
     steps: int = 500,
-    nl_mult: float = 1.1,
+    nl_mult: float = NL_MULT_DEFAULT,
     hull_tol: float = 0.1,
 ) -> Reactant:
     """Build a :class:`Reactant` from a SMILES string.
@@ -394,8 +410,15 @@ def build_reactant(
         _optimise(atoms, calculator, fmax=fmax, steps=steps)
         try:
             energy = float(atoms.get_potential_energy())
-        except Exception:
-            energy = float("nan")
+        except Exception as exc:
+            # Don't silently swallow calculator failures — users see
+            # `nan` and assume "no calculator", but it might mean the
+            # calculator crashed.  Warn loudly via the package logger.
+            _log.warning(
+                "build_reactant(%r): calculator failed to evaluate energy "
+                "after relaxation (%s); Reactant.energy left as NaN.",
+                smiles, exc,
+            )
 
     # 3. Tag every atom as adsorbate (molecules have no bulk interior and are
     #    not part of the surface — they will adsorb onto it).
