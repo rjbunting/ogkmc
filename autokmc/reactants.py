@@ -147,7 +147,7 @@ def _smiles_to_atoms(smiles: str, *, add_hydrogens: bool = True) -> Atoms:
         mol = Chem.AddHs(mol)
 
     params = AllChem.ETKDGv3()
-    params.randomSeed = 42
+    params.randomSeed = 69
     result = AllChem.EmbedMolecule(mol, params)
     if result == -1:
         # Fall back to random embedding

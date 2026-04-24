@@ -21,7 +21,11 @@ Edges connect atoms whose covalent-radius neighbour-lists overlap (ASE
 :class:`~ase.neighborlist.NeighborList` with ``mult=1.0``).
 
 The graph also carries cell-level metadata as :attr:`~networkx.Graph.graph`
-attributes: ``"cell"``, ``"pbc"``.
+attributes: ``"cell"``, ``"pbc"``.  Note that ``"pbc"`` is **derived** from
+the neighbour-list — an axis is reported periodic only if at least one bond
+crosses the cell image along it.  This means a nanoparticle sitting in a
+periodic cubic cell with sufficient vacuum reports ``pbc=[False, False, False]``
+even when ``atoms.get_pbc()`` is all True.
 
 Typical usage
 -------------
@@ -108,7 +112,10 @@ def build_graph(
 
         ====  =============================================
         cell  Unit-cell matrix – np.ndarray, shape (3, 3)
-        pbc   Periodic boundary conditions – list[bool]
+        pbc   Effective periodic boundary conditions – list[bool],
+              length 3.  An axis is True iff at least one bond crosses
+              the cell image along that axis (derived from the neighbour
+              list, *not* read from ``atoms.get_pbc()``).
         ====  =============================================
 
     Raises
@@ -130,6 +137,12 @@ def build_graph(
     # ------------------------------------------------------------------
     # Build neighbour list
     # ------------------------------------------------------------------
+    # Use the atoms object's own PBC flag for the neighbour search (this is
+    # what controls whether ASE looks across cell images at all).  We then
+    # *derive* the effective periodicity from whether any bond actually
+    # crosses an image (offset != 0) per axis — this means a nanoparticle
+    # placed in a periodic cubic cell with sufficient vacuum will correctly
+    # report pbc=[False, False, False] even though atoms.pbc=[True]*3.
     cutoffs = natural_cutoffs(atoms, mult=nl_mult)
     nl = NeighborList(cutoffs, self_interaction=False, bothways=True)
     nl.update(atoms)
@@ -140,7 +153,6 @@ def build_graph(
     G = nx.Graph()
 
     G.graph["cell"] = np.array(atoms.get_cell())
-    G.graph["pbc"]  = atoms.get_pbc().tolist()
 
     positions      = atoms.get_positions()
     symbols        = atoms.get_chemical_symbols()
@@ -156,10 +168,21 @@ def build_graph(
             covalent_radius = float(ASE_COVALENT_RADII[atomic_numbers[i]]),
         )
 
+    # Track per-axis whether *any* bond crosses an image — this defines the
+    # graph's effective periodicity.
+    pbc_effective = np.zeros(3, dtype=bool)
+
     for i in range(len(atoms)):
-        neighbours, _ = nl.get_neighbors(i)
-        for j in map(int, neighbours):
+        neighbours, offsets = nl.get_neighbors(i)
+        for j, off in zip(map(int, neighbours), offsets):
             if j > i:
                 G.add_edge(i, j)
+            # Detect cross-image bond regardless of i,j ordering so we don't
+            # miss anything in the bothways=True list.
+            off = np.asarray(off, dtype=int)
+            if np.any(off != 0):
+                pbc_effective |= (off != 0)
+
+    G.graph["pbc"] = pbc_effective.tolist()
 
     return G

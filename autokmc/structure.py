@@ -148,6 +148,7 @@ def build_nanoparticle(
     composition_seed: int = 69,
     calculator=None,
     fmax: float = 0.05,
+    vacuum: float = 10.0,
     logfile: Optional[str] = None,
     verbose: bool = True,
 ) -> Atoms:
@@ -179,6 +180,15 @@ def build_nanoparticle(
         Used for bulk relaxation and structure optimisation.  Defaults to EMT.
     fmax : float
         Force convergence criterion in eV/Å.
+    vacuum : float
+        Minimum vacuum gap (Å) between the nanoparticle and its periodic
+        images, applied along all three axes.  The unit cell is built as a
+        cube whose edge equals ``particle_extent + 2 * vacuum`` so that the
+        particle is centred with at least *vacuum* Å of empty space on every
+        side.  ``pbc`` is set to ``True`` along all axes — downstream code
+        (e.g. :func:`autokmc.graph.build_graph`) determines effective
+        periodicity by checking for bonds across cell images, not by reading
+        this flag.  Default 10.0 Å.
     logfile : str, optional
         Path to the LBFGS log file.  ``None`` silences output.
     verbose : bool
@@ -272,6 +282,29 @@ def build_nanoparticle(
         for sym, frac in comp.items():
             print(f"  {sym:<14s} : {(syms == sym).sum():<6d}  ({frac*100:.1f} %)")
         print(f"  Diameter (2·R) : {2*r_max:.2f} Å  ({2*r_max/10:.2f} nm)")
+        _print_divider()
+
+    # ------------------------------------------------------------------
+    # 5b. Wrap in a cubic cell with vacuum padding and centre the particle
+    # ------------------------------------------------------------------
+    # The particle is given a periodic cubic cell with at least *vacuum* Å
+    # of empty space between any atom and the nearest periodic image, on
+    # every axis.  Effective periodicity is determined later by
+    # build_graph (via cross-image bond detection), not by this flag.
+    pos = atoms.get_positions()
+    extent = float((pos.max(axis=0) - pos.min(axis=0)).max())
+    box = extent + 2.0 * float(vacuum)
+    new_cell = np.eye(3) * box
+    atoms.set_cell(new_cell)
+    atoms.set_pbc(True)
+    # Centre the particle inside the new cell
+    com_shift = 0.5 * np.array([box, box, box]) - pos.mean(axis=0)
+    atoms.set_positions(pos + com_shift)
+
+    if verbose:
+        print(f"  Cell (cubic)   : {box:.2f} Å (vacuum={vacuum:.2f} Å)")
+        print(f"  PBC            : True (effective periodicity inferred "
+              "from bonding in build_graph)")
         _print_divider()
 
     # ------------------------------------------------------------------
