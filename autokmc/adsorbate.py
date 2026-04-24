@@ -61,13 +61,23 @@ the clique atoms by edges.  The original ``G`` — including
 
 Public API
 ----------
-* :func:`optimise_unique_sites`      -- main entry point
+* :func:`optimise_unique_sites`      -- main entry point (Stage 2/3 bootstrap)
 * :func:`calculate_gas_phase_energy` -- compute isolated-atom reference energy
 * :class:`SiteOptResult`             -- per-iso-class result record
 * :class:`AdsorptionSite`            -- per-clique-instance record for KMC
 * :class:`ConnectivityStatus`        -- connectivity check outcome enum
 * :func:`place_adsorbate`            -- low-level: append adsorbate to Atoms copy
 * :func:`find_actual_clique`         -- low-level: bonds after relaxation
+
+On-the-fly KMC API (see ``dev/PLAN_adsorption_sites.md``)
+---------------------------------------------------------
+* :func:`compute_neighbour_sites`    -- shared-surface-atom neighbour map
+* :func:`discover_context_site`      -- relax (or cache-hit) one site under a
+                                        given occupancy context
+* :func:`register_adsorption`        -- KMC event hook: an atom adsorbed at a site
+* :func:`register_desorption`        -- KMC event hook: an atom desorbed from a site
+* :func:`update_reactive_flags`      -- recompute ``reactive`` for a clique and its
+                                        neighbours after an event
 * :func:`check_connectivity`         -- low-level: verify bond topology
 * :func:`find_matching_isoclass`     -- low-level: isomorphism match for migrated sites
 """
@@ -236,6 +246,39 @@ class AdsorptionSite:
     occupied           : bool                 = field(default=False)
     ads_position       : Optional[np.ndarray] = field(default=None, repr=False)
     subgraph           : Optional[nx.Graph]   = field(default=None, repr=False)
+
+    # ------------------------------------------------------------------
+    # On-the-fly KMC state (populated by optimise_unique_sites Stage 3
+    # and updated by register_adsorption / register_desorption /
+    # update_reactive_flags).  See dev/PLAN_adsorption_sites.md.
+    # ------------------------------------------------------------------
+    stable             : bool                 = field(default=True)
+    """``True`` iff the iso-class representative relaxed with
+    ``ConnectivityStatus.OK`` on the clean surface.  All clique members of
+    the same iso-class share this flag."""
+
+    reactive           : bool                 = field(default=True)
+    """``True`` iff this site is stable, vacant, *and* a relaxation result
+    is cached for the current neighbour-occupancy context.  Updated by
+    :func:`update_reactive_flags`."""
+
+    migrated_to        : Optional[frozenset]  = field(default=None)
+    """For unstable sites only: surface-atom indices the adsorbate
+    actually bonded to after relaxation (from
+    ``SiteOptResult.actual_clique``).  ``None`` for stable sites."""
+
+    neighbour_sites    : list                 = field(default_factory=list, repr=False)
+    """Cliques sharing at least one surface atom with this one (computed
+    by :func:`compute_neighbour_sites`).  List of ``frozenset[int]``."""
+
+    context_results    : dict                 = field(default_factory=dict, repr=False)
+    """Per-site cache: ``{frozenset(occupied_neighbour_cliques) ->
+    SiteOptResult}``.  Empty key = clean-surface bootstrap result."""
+
+    current_result     : Optional[SiteOptResult] = field(default=None, repr=False)
+    """Most recently looked-up :class:`SiteOptResult` for this site under
+    the current surface state.  KMC reads ``current_result.adsorption_energy``
+    to compute rates."""
 
 
 # ---------------------------------------------------------------------------
@@ -1018,7 +1061,14 @@ def optimise_unique_sites(
 
                 H = _build_adsorbate_subgraph(G, clique, element, ads_pos, r_cov_ads)
 
-                ads_sites[clique] = AdsorptionSite(
+                stable = (res.connectivity == ConnectivityStatus.OK)
+                migrated_to = (
+                    res.actual_clique
+                    if (not stable and res.actual_clique)
+                    else None
+                )
+
+                site = AdsorptionSite(
                     clique            = clique,
                     iso_class         = iso,
                     result            = res,
@@ -1026,19 +1076,1130 @@ def optimise_unique_sites(
                     occupied          = False,
                     ads_position      = ads_pos,
                     subgraph          = H,
+                    stable            = stable,
+                    # Reactive only on a clean surface AND stable; flips off
+                    # as soon as a neighbour adsorbs (see update_reactive_flags).
+                    reactive          = stable,
+                    migrated_to       = migrated_to,
+                    current_result    = res,
                 )
+                # Seed the context cache with the clean-surface (no occupied
+                # neighbours) result.  Discovery loops can then short-circuit
+                # back to this entry on full desorption.
+                site.context_results[frozenset()] = res
+                ads_sites[clique] = site
 
     (G.graph
        .setdefault("adsorption_sites", {})
        .setdefault(element, {})[n_shells]) = ads_sites
 
+    # ── Stage 3b: populate per-site neighbour lists ──────────────────────
+    compute_neighbour_sites(G, element, n_shells)
+
     if verbose:
         n_vacant = sum(1 for s in ads_sites.values() if not s.occupied)
+        n_stable = sum(1 for s in ads_sites.values() if s.stable)
+        n_unstab = len(ads_sites) - n_stable
         print(f"\n  adsorption_sites registered: {len(ads_sites)} "
-              f"({n_vacant} vacant) → G.graph['adsorption_sites']['{element}'][{n_shells}]")
+              f"({n_vacant} vacant, {n_stable} stable, {n_unstab} unstable) "
+              f"→ G.graph['adsorption_sites']['{element}'][{n_shells}]")
         print(f"  Each AdsorptionSite.subgraph = copy(G) + adsorbate node "
               f"(node {G.number_of_nodes()}) bonded to its clique.")
         print(f"  G.graph['sites'] / 'unique_sites' / 'site_positions' unchanged.")
 
     return results
 
+
+# ===========================================================================
+# Multi-atom adsorbate placement and discovery
+#
+# See dev/PLAN_multiatom_adsorbates.md for the full design.  This block
+# parallels the single-atom API above but is deliberately separate: it
+# never mutates G.graph["adsorption_sites"] / ["site_opt"] /
+# ["context_cache"] *except* for the documented occupancy-blocking
+# cross-write performed by register_adsorption_multi (PLAN §13).
+# ===========================================================================
+
+from itertools import product as _iproduct  # noqa: E402
+
+# Forward reference – Reactant is only needed for typing.
+from autokmc.reactants import Reactant  # noqa: E402
+
+
+# ---------------------------------------------------------------------------
+# Result + configuration dataclasses
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ConfigOptResult:
+    """Optimisation result for one multi-atom :class:`AdsorptionConfiguration`.
+
+    Mirrors :class:`SiteOptResult` but per-anchor for connectivity bookkeeping.
+    """
+    config_key            : frozenset
+    smiles                : str
+    atoms_initial         : Atoms
+    atoms_final           : Atoms
+    energy                : float
+    adsorption_energy     : float
+    converged             : bool
+    n_steps               : int
+    connectivity          : dict        # {anchor_atom_idx -> ConnectivityStatus}
+    actual_clique         : dict        # {anchor_atom_idx -> frozenset}
+    matched_iso_class     : Optional[object] = field(default=None)
+    intramolecular_intact : bool        = field(default=True)
+    displacement          : float       = field(default=0.0)
+    ads_indices           : list        = field(default_factory=list)
+    opt_log               : str         = field(default="", repr=False)
+
+
+@dataclass
+class AdsorptionConfiguration:
+    """One concrete multi-atom adsorption configuration on the surface.
+
+    Parallels :class:`AdsorptionSite` but covers a *molecular* reactant:
+    every anchor of the reactant is mapped onto a slab clique.
+    """
+    reactant_smiles    : str
+    reactant           : Reactant
+    anchor_clique_map  : dict                         # {anchor_idx -> frozenset(clique)}
+    subgraph           : nx.Graph
+    iso_class          : object                       # opaque hash repr (set by dedup)
+    ads_positions      : dict                         # {reactant_atom_idx -> np.ndarray(3,)}
+    adsorption_energy  : float                        = field(default=float("nan"))
+    energy             : float                        = field(default=float("nan"))
+    occupied           : bool                         = field(default=False)
+    stable             : bool                         = field(default=True)
+    reactive           : bool                         = field(default=True)
+    migrated_to        : dict                         = field(default_factory=dict)
+    neighbour_sites    : list                         = field(default_factory=list, repr=False)
+    context_results    : dict                         = field(default_factory=dict, repr=False)
+    current_result     : Optional[ConfigOptResult]    = field(default=None, repr=False)
+
+
+# ---------------------------------------------------------------------------
+# Geometric helpers
+# ---------------------------------------------------------------------------
+
+def _config_key(anchor_clique_map: dict) -> frozenset:
+    """Canonical hashable key for an :class:`AdsorptionConfiguration`."""
+    return frozenset(frozenset(c) for c in anchor_clique_map.values())
+
+
+def _surface_normal(G: nx.Graph, clique: frozenset) -> np.ndarray:
+    """Return a unit vector pointing *away* from the slab/NP at *clique*.
+
+    Strategy
+    --------
+    * If the cell is diagonal and PBC has at least one False axis, the
+      non-periodic axis is taken as the surface normal direction.
+    * Otherwise (nanoparticle / non-orthogonal cell), use the vector from
+      the slab centroid (mean of all surface-typed nodes) to the clique
+      centroid.
+    """
+    cell = np.array(G.graph.get("cell", np.eye(3)), dtype=float)
+    pbc  = np.asarray(G.graph.get("pbc", [True, True, False]), dtype=bool)
+
+    pos = {n: np.asarray(d["position"], dtype=float)
+           for n, d in G.nodes(data=True)}
+    clique_pos = np.array([pos[a] for a in clique])
+    centroid = clique_pos.mean(axis=0)
+
+    # Diagonal-ish slab → use the non-periodic axis as the normal.
+    is_diag = np.allclose(cell - np.diag(np.diag(cell)), 0.0, atol=1e-6)
+    if is_diag and not pbc.all():
+        ax = int(np.argmin(pbc.astype(int)))    # first False axis
+        # Decide sign: outward = away from the slab COM along that axis.
+        slab_com_ax = np.mean([pos[n][ax] for n, d in G.nodes(data=True)
+                               if d.get("type") == "surface"])
+        sign = 1.0 if centroid[ax] >= slab_com_ax else -1.0
+        n = np.zeros(3); n[ax] = sign
+        return n
+
+    # Fallback: clique centroid - structure centroid.
+    surf_pos = np.array([pos[n] for n, d in G.nodes(data=True)
+                         if d.get("type") == "surface"])
+    if len(surf_pos) == 0:
+        surf_pos = np.array(list(pos.values()))
+    com = surf_pos.mean(axis=0)
+    v = centroid - com
+    nrm = np.linalg.norm(v)
+    if nrm < 1e-9:
+        return np.array([0.0, 0.0, 1.0])
+    return v / nrm
+
+
+def _rigid_transform_for_anchor(
+    reactant: Reactant,
+    anchor_idx: int,
+    target_pos: np.ndarray,
+    surface_normal: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return ``(R, t)`` aligning *reactant* such that *anchor_idx* lands on
+    *target_pos* and the molecule's "anchor outward axis" lines up with
+    *surface_normal*.
+
+    The molecular outward axis is the unit vector from the molecular
+    centroid to *anchor_idx* (so the rest of the molecule points away from
+    the surface).  Single-atom reactants get the identity rotation.
+    """
+    pts = reactant.atoms.get_positions()
+    n_atoms = len(pts)
+    if n_atoms == 1:
+        return np.eye(3), target_pos - pts[anchor_idx]
+
+    centroid = pts.mean(axis=0)
+    axis = pts[anchor_idx] - centroid
+    nrm = np.linalg.norm(axis)
+    if nrm < 1e-9:
+        # Anchor at centroid → fall back to identity rotation.
+        R = np.eye(3)
+    else:
+        a = axis / nrm
+        n = surface_normal / max(np.linalg.norm(surface_normal), 1e-12)
+        R = _rotation_between(a, n)
+    t = target_pos - R @ pts[anchor_idx]
+    return R, t
+
+
+def _rotation_between(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Rotation matrix that maps unit vector *a* onto unit vector *b*."""
+    a = np.asarray(a, dtype=float); b = np.asarray(b, dtype=float)
+    v = np.cross(a, b)
+    c = float(np.dot(a, b))
+    s = float(np.linalg.norm(v))
+    if s < 1e-12:
+        if c > 0:
+            return np.eye(3)
+        # 180° rotation about any axis perpendicular to a.
+        # Pick the smallest component of a as the seed for orthogonality.
+        seed = np.eye(3)[int(np.argmin(np.abs(a)))]
+        axis = np.cross(a, seed)
+        axis /= np.linalg.norm(axis)
+        K = np.array([[    0, -axis[2],  axis[1]],
+                      [ axis[2],      0, -axis[0]],
+                      [-axis[1],  axis[0],     0]])
+        return np.eye(3) + 2 * K @ K
+    K = np.array([[    0, -v[2],  v[1]],
+                  [ v[2],      0, -v[0]],
+                  [-v[1],  v[0],     0]])
+    return np.eye(3) + K + K @ K * ((1 - c) / (s * s))
+
+
+def _apply_transform(pts: np.ndarray, R: np.ndarray, t: np.ndarray) -> np.ndarray:
+    """Apply ``R @ p + t`` row-wise to *pts*."""
+    return pts @ R.T + t
+
+
+def _mic_distance(p: np.ndarray, q: np.ndarray, cell: np.ndarray,
+                  cell_inv: np.ndarray | None, pbc: np.ndarray) -> float:
+    return _mic_dist_vec(np.asarray(p), np.asarray(q), cell, cell_inv, pbc)
+
+
+# ---------------------------------------------------------------------------
+# Combined-subgraph builder + iso-dedup
+# ---------------------------------------------------------------------------
+
+def _build_config_subgraph(
+    G: nx.Graph,
+    reactant: Reactant,
+    anchor_clique_map: dict,
+    ads_positions: dict,
+) -> nx.Graph:
+    """Return ``G.copy()`` extended with every reactant atom + intramolecular
+    edges + anchor↔clique bonds.  Reactant atoms occupy keys
+    ``len(slab) + i`` for ``i`` in reactant atom index.
+    """
+    H = G.copy()
+    n_slab = G.number_of_nodes()
+    R = reactant.graph
+    for ratom, attrs in R.nodes(data=True):
+        node_id = n_slab + int(ratom)
+        new_attrs = dict(attrs)
+        if int(ratom) in ads_positions:
+            new_attrs["position"] = np.asarray(ads_positions[int(ratom)]).copy()
+        new_attrs["type"] = "adsorbate"
+        new_attrs["index"] = node_id
+        H.add_node(node_id, **new_attrs)
+    for u, v in R.edges():
+        H.add_edge(n_slab + int(u), n_slab + int(v))
+    for anchor, clique in anchor_clique_map.items():
+        for surf in clique:
+            H.add_edge(n_slab + int(anchor), int(surf))
+    return H
+
+
+def _config_iso_ego(
+    G: nx.Graph,
+    reactant: Reactant,
+    anchor_clique_map: dict,
+) -> nx.Graph:
+    """One-shell ego subgraph used to deduplicate configurations."""
+    n_slab = G.number_of_nodes()
+    # Build an augmented graph: G ∪ reactant nodes ∪ intramolecular edges
+    # ∪ anchor-to-clique-member edges.
+    H = G.copy()
+    for ratom, attrs in reactant.graph.nodes(data=True):
+        node_id = n_slab + int(ratom)
+        new_attrs = dict(attrs)
+        new_attrs["type"] = "adsorbate"
+        new_attrs["index"] = node_id
+        H.add_node(node_id, **new_attrs)
+    for u, v in reactant.graph.edges():
+        H.add_edge(n_slab + int(u), n_slab + int(v))
+    for anchor, clique in anchor_clique_map.items():
+        for surf in clique:
+            H.add_edge(n_slab + int(anchor), int(surf))
+
+    seed: set = set()
+    for clique in anchor_clique_map.values():
+        seed |= set(clique)
+    for ratom in reactant.graph.nodes:
+        seed.add(n_slab + int(ratom))
+
+    visited = set(seed)
+    next_shell: set = set()
+    for n in seed:
+        if n in H:
+            next_shell.update(H.neighbors(n))
+    visited |= next_shell
+
+    # Surface labels feed the categorical match below; copy them onto the
+    # ego nodes so the prefilter / isomorphism check sees them.
+    ego = H.subgraph(visited).copy()
+    surf_arr = G.graph.get("_surface_label_cache")
+    return ego
+
+
+def _config_iso_key(ego: nx.Graph) -> tuple:
+    return _iso_prefilter_key(ego)
+
+
+# ---------------------------------------------------------------------------
+# Enumeration
+# ---------------------------------------------------------------------------
+
+def enumerate_configurations(
+    G: nx.Graph,
+    reactant: Reactant,
+    *,
+    n_shells: int = 1,
+    max_anchors: int = 4,
+    k_candidates: int = 8,
+    anchor_distance_tol: float = 0.5,
+    clash_factor: float = 0.75,
+    bond_factor: float = 1.10,
+    verbose: bool = False,
+) -> list[AdsorptionConfiguration]:
+    """Enumerate all geometrically-feasible multi-anchor configurations
+    of *reactant* on the surface graph *G*.
+
+    See ``dev/PLAN_multiatom_adsorbates.md`` §4–§6 / §9 for the
+    algorithm and parameter semantics.
+
+    Complexity
+    ----------
+    Worst case ``O(n_anchors! · k_candidates ** n_anchors)``.  Anchor
+    orbit deduplication divides by ``|aut(reactant.graph)|``; the
+    clash + anchor-distance filters dominate in practice.
+
+    Raises
+    ------
+    NotImplementedError
+        If ``n_shells != 1`` (per plan v1).
+    ValueError
+        If the reactant has more than ``max_anchors`` anchors.
+    """
+    if n_shells != 1:
+        raise NotImplementedError(
+            "Multi-atom adsorbate placement only supports n_shells=1 in v1."
+        )
+
+    anchors = list(reactant.anchor_atoms)
+    if len(anchors) > max_anchors:
+        raise ValueError(
+            f"Reactant {reactant.smiles!r} has {len(anchors)} anchors "
+            f"(> max_anchors={max_anchors}). v1 caps multi-anchor "
+            "scaling — raise max_anchors explicitly to override."
+        )
+
+    # Canonical anchor ordering: orbit id ascending, then atom index.
+    orbit_of = reactant.anchor_orbit
+    anchors.sort(key=lambda a: (orbit_of.get(a, -1), a))
+
+    cell = np.array(G.graph.get("cell", np.eye(3)), dtype=float)
+    pbc  = np.asarray(G.graph.get("pbc", [True, True, False]), dtype=bool)
+    cell_inv = None
+    if pbc.any():
+        try:
+            cell_inv = np.linalg.inv(cell)
+        except np.linalg.LinAlgError:
+            cell_inv = None
+
+    # Per-element flat list of (k, clique, position) for fast lookup.
+    sites = G.graph.get("sites", {})
+    site_pos = G.graph.get("site_positions", {})
+
+    def _flat_sites(elem: str) -> list[tuple[int, frozenset, np.ndarray]]:
+        out: list[tuple[int, frozenset, np.ndarray]] = []
+        e_sites = sites.get(elem, {})
+        e_pos = site_pos.get(elem, {})
+        for k, cliques in e_sites.items():
+            positions = e_pos.get(k, [])
+            for i, c in enumerate(cliques):
+                p = (np.asarray(positions[i]) if i < len(positions)
+                     else np.mean([G.nodes[a]["position"] for a in c], axis=0))
+                out.append((k, c, p))
+        return out
+
+    elements = [reactant.graph.nodes[a]["element"] for a in anchors]
+    flat_per_anchor: dict[int, list[tuple[int, frozenset, np.ndarray]]] = {
+        a: _flat_sites(e) for a, e in zip(anchors, elements)
+    }
+    if any(not v for v in flat_per_anchor.values()):
+        return []
+
+    # Reactant intramolecular pair distances (used by the early reject).
+    rpts = reactant.atoms.get_positions()
+    intra_d = {(i, j): float(np.linalg.norm(rpts[i] - rpts[j]))
+               for i in anchors for j in anchors if i < j}
+
+    intramol_pairs = {frozenset((u, v)) for u, v in reactant.graph.edges()}
+    r_cov_slab = {n: float(d["covalent_radius"])
+                  for n, d in G.nodes(data=True)}
+    r_cov_react = {a: float(reactant.graph.nodes[a]["covalent_radius"])
+                   for a in reactant.graph.nodes}
+
+    slab_positions = {n: np.asarray(d["position"], dtype=float)
+                      for n, d in G.nodes(data=True)
+                      if d.get("type") in ("surface", "bulk")}
+
+    # ---- Enumerate ------------------------------------------------------
+    seen_iso: dict[tuple, AdsorptionConfiguration] = {}
+    seen_keys: set = set()
+    configs: list[AdsorptionConfiguration] = []
+
+    first = anchors[0]
+    rest  = anchors[1:]
+
+    for _k0, clique0, pos0 in flat_per_anchor[first]:
+        normal = _surface_normal(G, clique0)
+        R, t = _rigid_transform_for_anchor(reactant, first, pos0, normal)
+
+        # Predict positions of all reactant atoms after the rigid transform.
+        all_pos = _apply_transform(rpts, R, t)
+
+        # For every remaining anchor, gather candidates within tolerance
+        # of its predicted Cartesian position.
+        candidate_lists = []
+        feasible = True
+        for a in rest:
+            pred = all_pos[a]
+            cands = []
+            for ks, cl, cp in flat_per_anchor[a]:
+                if cl == clique0:
+                    continue   # disallow identical clique (PLAN §4d note)
+                d = _mic_distance(pred, cp, cell, cell_inv, pbc)
+                if d <= anchor_distance_tol:
+                    cands.append((d, cl, cp))
+            cands.sort(key=lambda x: x[0])
+            cands = cands[:k_candidates]
+            if not cands:
+                feasible = False
+                break
+            candidate_lists.append(cands)
+        if not feasible:
+            continue
+
+        if not rest:
+            # Single-anchor degenerate case
+            assignments = [tuple()]
+        else:
+            assignments = list(_iproduct(*candidate_lists))
+
+        for asgn in assignments:
+            anchor_clique_map: dict = {first: clique0}
+            for a, (_d, cl, _cp) in zip(rest, asgn):
+                anchor_clique_map[a] = cl
+            # Reject duplicate cliques across anchors.
+            cliques_used = list(anchor_clique_map.values())
+            if len(set(cliques_used)) != len(cliques_used):
+                continue
+            # Anchor-anchor MIC-distance prefilter against intramolecular dist.
+            ok = True
+            cliques_pos = {}
+            for a, cl in anchor_clique_map.items():
+                if a == first:
+                    cliques_pos[a] = pos0
+                else:
+                    # find position from flat list
+                    for ks, c2, cp2 in flat_per_anchor[a]:
+                        if c2 == cl:
+                            cliques_pos[a] = cp2
+                            break
+            for i in range(len(anchors)):
+                for j in range(i + 1, len(anchors)):
+                    ai, aj = anchors[i], anchors[j]
+                    d = _mic_distance(cliques_pos[ai], cliques_pos[aj],
+                                      cell, cell_inv, pbc)
+                    if abs(d - intra_d[(min(ai, aj), max(ai, aj))]) > anchor_distance_tol:
+                        ok = False
+                        break
+                if not ok:
+                    break
+            if not ok:
+                continue
+
+            # Clash filter: reactant atoms vs slab atoms.
+            ads_positions = {int(i): all_pos[int(i)].copy()
+                             for i in range(len(rpts))}
+            clash = False
+            for ri, rp in ads_positions.items():
+                rc = r_cov_react[ri]
+                for sn, sp in slab_positions.items():
+                    if frozenset((sn, ri)) in intramol_pairs:
+                        continue
+                    cutoff = clash_factor * (rc + r_cov_slab[sn])
+                    # Allow legitimate anchor-clique bond contacts.
+                    if (ri in anchor_clique_map
+                            and sn in anchor_clique_map[ri]):
+                        continue
+                    d = _mic_distance(rp, sp, cell, cell_inv, pbc)
+                    if d < cutoff:
+                        clash = True
+                        break
+                if clash:
+                    break
+            if clash:
+                continue
+
+            ckey = _config_key(anchor_clique_map)
+            if ckey in seen_keys:
+                continue
+            seen_keys.add(ckey)
+
+            subg = _build_config_subgraph(G, reactant, anchor_clique_map, ads_positions)
+            ego  = _config_iso_ego(G, reactant, anchor_clique_map)
+            iso_key = _config_iso_key(ego)
+
+            cfg = AdsorptionConfiguration(
+                reactant_smiles    = reactant.smiles,
+                reactant           = reactant,
+                anchor_clique_map  = dict(anchor_clique_map),
+                subgraph           = subg,
+                iso_class          = iso_key,
+                ads_positions      = ads_positions,
+            )
+            configs.append(cfg)
+
+            # Iso-dedup: keep first representative per (prefilter, iso) key.
+            existing = seen_iso.get(iso_key)
+            if existing is None:
+                seen_iso[iso_key] = cfg
+            else:
+                node_match = isomorphism.categorical_node_match("element", "X")
+                gm = isomorphism.GraphMatcher(
+                    ego, _config_iso_ego(G, reactant, existing.anchor_clique_map),
+                    node_match=node_match,
+                )
+                if gm.is_isomorphic():
+                    cfg.iso_class = existing.iso_class
+
+    if verbose:
+        n_unique = len({id(seen_iso[k]) for k in seen_iso})
+        print(f"enumerate_configurations: smiles={reactant.smiles!r}  "
+              f"anchors={anchors}  total={len(configs)}  "
+              f"unique_iso_classes={n_unique}")
+
+    return configs
+
+
+# ---------------------------------------------------------------------------
+# Optimisation pipeline (Stage 2/3 for multi-atom)
+# ---------------------------------------------------------------------------
+
+def _intramolecular_intact(
+    atoms_final: Atoms,
+    reactant: Reactant,
+    n_slab: int,
+    bond_factor: float = 1.10,
+) -> bool:
+    """Check that every intramolecular bond in *reactant.graph* is still
+    present in *atoms_final* (and no new internal bonds appeared)."""
+    pts = atoms_final.get_positions()
+    R = reactant.graph
+    rad = {a: float(R.nodes[a]["covalent_radius"]) for a in R.nodes}
+    n_react = R.number_of_nodes()
+    expected = {frozenset((u, v)) for u, v in R.edges()}
+    actual: set = set()
+    for i in range(n_react):
+        pi = pts[n_slab + i]
+        for j in range(i + 1, n_react):
+            pj = pts[n_slab + j]
+            cutoff = bond_factor * (rad[i] + rad[j])
+            if float(np.linalg.norm(pi - pj)) <= cutoff:
+                actual.add(frozenset((i, j)))
+    return expected == actual
+
+
+def optimise_unique_configurations(
+    G: nx.Graph,
+    reactant: Reactant,
+    atoms: Atoms,
+    calculator,
+    *,
+    n_shells: int = 1,
+    bond_factor: float = 1.10,
+    fmax: float = 0.05,
+    steps: int = 500,
+    e_surface: float | None = None,
+    e_reactant: float | None = None,
+    max_anchors: int = 4,
+    k_candidates: int = 8,
+    anchor_distance_tol: float = 0.5,
+    clash_factor: float = 0.75,
+    logfile: str | None = None,
+    verbose: bool = True,
+) -> list[ConfigOptResult]:
+    """Multi-atom analogue of :func:`optimise_unique_sites`.
+
+    Pipeline
+    --------
+    1. Enumerate all configurations (:func:`enumerate_configurations`).
+    2. For each iso-class representative: assemble trial Atoms, relax with
+       LBFGS, check per-anchor connectivity + intramolecular bond
+       preservation, build a :class:`ConfigOptResult`.
+    3. Stage-3 expansion: every configuration sharing the iso-class
+       inherits the representative's result; populated into
+       ``G.graph['adsorption_configs'][smiles][n_shells]``.
+    4. Compute neighbour configurations for the discovery loop.
+
+    Reference energies: ``E_ads = E_total − (E_reactant + E_surface)`` where
+    ``E_reactant = reactant.energy`` (relaxed gas-phase) by default.
+    """
+    if n_shells != 1:
+        raise NotImplementedError(
+            "Multi-atom adsorbate optimisation only supports n_shells=1 in v1."
+        )
+
+    smiles = reactant.smiles
+
+    # ── References ────────────────────────────────────────────────────────
+    if e_surface is None:
+        slab_ref = atoms.copy()
+        slab_ref.calc = calculator
+        try:
+            e_surface = float(slab_ref.get_potential_energy())
+        except Exception as exc:
+            warnings.warn(
+                f"Could not compute surface energy: {exc}",
+                RuntimeWarning, stacklevel=2,
+            )
+            e_surface = float("nan")
+
+    if e_reactant is None:
+        e_reactant = float(reactant.energy)
+
+    e_ref = float(e_reactant) + float(e_surface)
+
+    # ── Enumerate candidates ─────────────────────────────────────────────
+    configs = enumerate_configurations(
+        G, reactant,
+        n_shells=n_shells,
+        max_anchors=max_anchors,
+        k_candidates=k_candidates,
+        anchor_distance_tol=anchor_distance_tol,
+        clash_factor=clash_factor,
+        bond_factor=bond_factor,
+        verbose=verbose,
+    )
+
+    # Group by iso_class (the prefilter/iso key already deduplicated).
+    by_iso: dict = {}
+    for cfg in configs:
+        by_iso.setdefault(cfg.iso_class, []).append(cfg)
+
+    n_slab = G.number_of_nodes()
+    results: list[ConfigOptResult] = []
+
+    if verbose:
+        print(f"optimise_unique_configurations: smiles={smiles!r}  "
+              f"n_configs={len(configs)}  unique_iso={len(by_iso)}  "
+              f"E_surface={e_surface:.4f}  E_reactant={e_reactant:.4f}")
+
+    # ── Relax one representative per iso-class ───────────────────────────
+    iso_to_result: dict = {}
+    for iso_key, cfgs in by_iso.items():
+        rep = cfgs[0]
+
+        # Build trial Atoms = host + reactant atoms at rigid-aligned positions.
+        trial = atoms.copy()
+        ads_indices = list(range(n_slab, n_slab + len(reactant.atoms)))
+        order = sorted(rep.ads_positions.keys())
+        symbols = [reactant.atoms[i].symbol for i in order]
+        positions = np.array([rep.ads_positions[i] for i in order])
+        trial += Atoms(symbols=symbols, positions=positions)
+        trial_init = trial.copy()
+        trial.calc = calculator
+
+        log = os.devnull if logfile is None else logfile.format(
+            smiles=smiles, iso=hash(iso_key) & 0xFFFFFFFF
+        )
+
+        opt = LBFGS(trial, logfile=log)
+        try:
+            opt.run(fmax=fmax, steps=steps)
+            converged = opt.converged()
+            n_steps = opt.get_number_of_steps()
+            energy = float(trial.get_potential_energy())
+        except Exception as exc:
+            warnings.warn(
+                f"LBFGS failed for config (iso={iso_key}): {exc}",
+                RuntimeWarning, stacklevel=2,
+            )
+            converged, n_steps, energy = False, 0, float("nan")
+
+        ads_energy = energy - e_ref
+
+        # Per-anchor connectivity.
+        per_conn: dict = {}
+        per_actual: dict = {}
+        all_ok = True
+        for anchor, planned in rep.anchor_clique_map.items():
+            ads_node_idx = n_slab + int(anchor)
+            r_cov_a = float(reactant.graph.nodes[anchor]["covalent_radius"])
+            actual = find_actual_clique(
+                trial, ads_node_idx, G, r_cov_a, bond_factor=bond_factor,
+            )
+            per_actual[anchor] = actual
+            status = check_connectivity(
+                trial, ads_node_idx, planned, r_cov_a, G,
+                bond_factor=bond_factor,
+            )
+            per_conn[anchor] = status
+            if status != ConnectivityStatus.OK:
+                all_ok = False
+
+        intact = _intramolecular_intact(trial, reactant, n_slab,
+                                        bond_factor=bond_factor)
+
+        # Displacement of the reactant centroid (MIC-aware via anchor 0).
+        first = sorted(rep.anchor_clique_map.keys())[0]
+        disp = _ads_displacement(
+            trial_init, trial, n_slab + int(first), G,
+        )
+
+        result = ConfigOptResult(
+            config_key            = _config_key(rep.anchor_clique_map),
+            smiles                = smiles,
+            atoms_initial         = trial_init,
+            atoms_final           = trial,
+            energy                = energy,
+            adsorption_energy     = ads_energy,
+            converged             = converged,
+            n_steps               = n_steps,
+            connectivity          = per_conn,
+            actual_clique         = per_actual,
+            matched_iso_class     = None,
+            intramolecular_intact = intact,
+            displacement          = disp,
+            ads_indices           = ads_indices,
+            opt_log               = log if logfile else "",
+        )
+        results.append(result)
+        iso_to_result[iso_key] = result
+
+        stable = all_ok and intact
+        # Propagate to every config in the iso-class.
+        for cfg in cfgs:
+            cfg.energy = energy
+            cfg.adsorption_energy = ads_energy
+            cfg.stable = stable
+            cfg.reactive = stable
+            cfg.current_result = result
+            cfg.context_results[frozenset()] = result
+            if not stable:
+                cfg.migrated_to = dict(per_actual)
+
+        if verbose:
+            ads_str = (f"{ads_energy:+.4f}" if not np.isnan(ads_energy)
+                       else "     nan")
+            print(f"  iso={hash(iso_key) & 0xFFFF:04x}  members={len(cfgs)}  "
+                  f"conv={'✓' if converged else '✗'}  steps={n_steps:>4}  "
+                  f"E={energy:>10.4f}  E_ads={ads_str}  "
+                  f"intact={intact}  stable={stable}")
+
+    # ── Register configurations on the graph ─────────────────────────────
+    cfg_dict: dict = {}
+    for cfg in configs:
+        cfg_dict[_config_key(cfg.anchor_clique_map)] = cfg
+    (G.graph
+       .setdefault("adsorption_configs", {})
+       .setdefault(smiles, {})[n_shells]) = cfg_dict
+    (G.graph
+       .setdefault("unique_configs", {})
+       .setdefault(smiles, {})[n_shells]) = [
+        by_iso[k][0] for k in by_iso
+    ]
+    (G.graph
+       .setdefault("config_opt", {})
+       .setdefault(smiles, {})[n_shells]) = results
+
+    compute_neighbour_configurations(G, smiles, n_shells=n_shells)
+
+    if verbose:
+        print(f"  adsorption_configs registered: {len(cfg_dict)} → "
+              f"G.graph['adsorption_configs'][{smiles!r}][{n_shells}]")
+
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Neighbour configurations
+# ---------------------------------------------------------------------------
+
+def compute_neighbour_configurations(
+    G: nx.Graph,
+    smiles: str,
+    n_shells: int = 1,
+) -> dict:
+    """Populate :attr:`AdsorptionConfiguration.neighbour_sites`.
+
+    Two configurations are neighbours iff the union of their anchor cliques
+    share at least one surface atom (consistent with single-atom
+    :func:`compute_neighbour_sites`).
+    """
+    cfgs: dict = (
+        G.graph.get("adsorption_configs", {}).get(smiles, {}).get(n_shells, {})
+    )
+    if not cfgs:
+        raise KeyError(
+            f"No adsorption_configs for smiles={smiles!r} at n_shells={n_shells}. "
+            "Call optimise_unique_configurations first."
+        )
+
+    # atom -> [config_key]
+    atom_to_cfg: dict = {}
+    for ckey, cfg in cfgs.items():
+        for clique in cfg.anchor_clique_map.values():
+            for a in clique:
+                atom_to_cfg.setdefault(int(a), []).append(ckey)
+
+    neighbours: dict = {}
+    for ckey, cfg in cfgs.items():
+        seen: set = set()
+        for clique in cfg.anchor_clique_map.values():
+            for a in clique:
+                for other in atom_to_cfg.get(int(a), []):
+                    if other != ckey:
+                        seen.add(other)
+        cfg.neighbour_sites = list(seen)
+        neighbours[ckey] = list(seen)
+    return neighbours
+
+
+# ---------------------------------------------------------------------------
+# Discovery / KMC event hooks (multi-atom)
+# ---------------------------------------------------------------------------
+
+def _build_trial_atoms_multi(
+    host_atoms: Atoms,
+    occupied_configs: list,
+    target_cfg: AdsorptionConfiguration,
+) -> tuple[Atoms, list[int]]:
+    """Assemble host + every occupied reactant + target reactant.
+
+    Returns ``(trial, target_ads_indices)`` — the indices of the target
+    reactant's atoms inside *trial*.
+    """
+    trial = host_atoms.copy()
+    for occ in occupied_configs:
+        result = occ.current_result
+        if result is not None and result.atoms_final is not None:
+            n_slab_now = len(trial)
+            # Pull reactant atoms out of the cached final structure.
+            r = occ.reactant
+            n_react = len(r.atoms)
+            ads_part = result.atoms_final[len(result.atoms_final) - n_react:]
+            trial += ads_part
+        else:
+            # Fallback: rigid-aligned ads_positions
+            r = occ.reactant
+            order = sorted(occ.ads_positions.keys())
+            symbols = [r.atoms[i].symbol for i in order]
+            positions = np.array([occ.ads_positions[i] for i in order])
+            trial += Atoms(symbols=symbols, positions=positions)
+
+    start = len(trial)
+    r = target_cfg.reactant
+    order = sorted(target_cfg.ads_positions.keys())
+    symbols = [r.atoms[i].symbol for i in order]
+    positions = np.array([target_cfg.ads_positions[i] for i in order])
+    trial += Atoms(symbols=symbols, positions=positions)
+    target_indices = list(range(start, start + len(order)))
+    return trial, target_indices
+
+
+def discover_context_configuration(
+    G: nx.Graph,
+    smiles: str,
+    config_key: frozenset,
+    host_atoms: Atoms,
+    calculator,
+    *,
+    n_shells: int = 1,
+    bond_factor: float = 1.10,
+    fmax: float = 0.05,
+    steps: int = 500,
+    logfile: str | None = None,
+    verbose: bool = False,
+) -> ConfigOptResult:
+    """Multi-atom analogue of :func:`discover_context_site`.
+
+    Two-tier cache lookup (per-config exact-occupancy → global
+    iso-deduplicated → calculator miss).  Stores the result on both the
+    target config's ``context_results`` and the global
+    ``G.graph['context_cache_multi']`` cache.
+    """
+    cfgs: dict = (
+        G.graph["adsorption_configs"][smiles][n_shells]
+    )
+    cfg = cfgs[config_key]
+
+    occupied_neighbours = [
+        cfgs[k] for k in cfg.neighbour_sites
+        if k in cfgs and cfgs[k].occupied
+    ]
+    occ_key = frozenset(_config_key(o.anchor_clique_map)
+                        for o in occupied_neighbours)
+
+    cached = cfg.context_results.get(occ_key)
+    if cached is not None:
+        cfg.current_result = cached
+        return cached
+
+    # Global iso-dedup cache: keyed by (cfg.iso_class, tuple-of-occupied-iso).
+    occ_iso_key = (cfg.iso_class,
+                   tuple(sorted(hash(o.iso_class) for o in occupied_neighbours)))
+    global_cache = (
+        G.graph
+         .setdefault("context_cache_multi", {})
+         .setdefault(smiles, {})
+         .setdefault(n_shells, {})
+    )
+    cached = global_cache.get(occ_iso_key)
+    if cached is not None:
+        cfg.context_results[occ_key] = cached
+        cfg.current_result = cached
+        return cached
+
+    # ── Miss: full relaxation ────────────────────────────────────────────
+    bootstrap = cfg.context_results.get(frozenset())
+    if bootstrap is None:
+        raise RuntimeError(
+            "Cannot infer reference energies: no clean-surface bootstrap "
+            "result is cached for this config."
+        )
+    e_ref = float(bootstrap.energy) - float(bootstrap.adsorption_energy)
+
+    trial, target_indices = _build_trial_atoms_multi(
+        host_atoms, occupied_neighbours, cfg,
+    )
+    trial_init = trial.copy()
+    trial.calc = calculator
+
+    log = os.devnull if logfile is None else logfile
+    opt = LBFGS(trial, logfile=log)
+    try:
+        opt.run(fmax=fmax, steps=steps)
+        converged = opt.converged()
+        n_steps = opt.get_number_of_steps()
+        energy = float(trial.get_potential_energy())
+    except Exception as exc:
+        warnings.warn(
+            f"discover_context_configuration LBFGS failed: {exc}",
+            RuntimeWarning, stacklevel=2,
+        )
+        converged, n_steps, energy = False, 0, float("nan")
+
+    ads_energy = energy - e_ref
+
+    # Per-anchor connectivity for the *target* configuration.
+    n_slab_in_trial = target_indices[0]
+    per_conn: dict = {}
+    per_actual: dict = {}
+    all_ok = True
+    for anchor, planned in cfg.anchor_clique_map.items():
+        idx = n_slab_in_trial + int(anchor)
+        r_cov_a = float(cfg.reactant.graph.nodes[anchor]["covalent_radius"])
+        actual = find_actual_clique(
+            trial, idx, G, r_cov_a, bond_factor=bond_factor,
+        )
+        per_actual[anchor] = actual
+        status = check_connectivity(
+            trial, idx, planned, r_cov_a, G,
+            bond_factor=bond_factor,
+        )
+        per_conn[anchor] = status
+        if status != ConnectivityStatus.OK:
+            all_ok = False
+
+    intact = _intramolecular_intact(
+        trial, cfg.reactant, n_slab_in_trial, bond_factor=bond_factor,
+    )
+
+    disp = _ads_displacement(
+        trial_init, trial, n_slab_in_trial, G,
+    )
+
+    result = ConfigOptResult(
+        config_key            = config_key,
+        smiles                = smiles,
+        atoms_initial         = trial_init,
+        atoms_final           = trial,
+        energy                = energy,
+        adsorption_energy     = ads_energy,
+        converged             = converged,
+        n_steps               = n_steps,
+        connectivity          = per_conn,
+        actual_clique         = per_actual,
+        matched_iso_class     = None,
+        intramolecular_intact = intact,
+        displacement          = disp,
+        ads_indices           = target_indices,
+        opt_log               = log if logfile else "",
+    )
+
+    cfg.context_results[occ_key] = result
+    cfg.current_result = result
+    global_cache[occ_iso_key] = result
+
+    if verbose:
+        print(f"discover_context_configuration: smiles={smiles!r} "
+              f"|N_occ|={len(occupied_neighbours)}  "
+              f"E_ads={ads_energy:+.4f}  "
+              f"stable={all_ok and intact}  steps={n_steps}")
+
+    return result
+
+
+def update_reactive_flags_multi(
+    G: nx.Graph,
+    smiles: str,
+    n_shells: int,
+    changed_key: frozenset,
+) -> set:
+    """Recompute ``reactive`` for *changed_key* and its neighbour configs."""
+    cfgs: dict = G.graph["adsorption_configs"][smiles][n_shells]
+    affected: set = {changed_key}
+    if changed_key in cfgs:
+        affected.update(cfgs[changed_key].neighbour_sites)
+
+    flipped: set = set()
+    for ck in affected:
+        cfg = cfgs.get(ck)
+        if cfg is None:
+            continue
+        occ_key = frozenset(
+            k for k in cfg.neighbour_sites
+            if k in cfgs and cfgs[k].occupied
+        )
+        cached = cfg.context_results.get(occ_key)
+        new_reactive = (
+            cfg.stable and not cfg.occupied and cached is not None
+        )
+        if cached is not None:
+            cfg.current_result = cached
+        if new_reactive != cfg.reactive:
+            cfg.reactive = new_reactive
+            flipped.add(ck)
+    return flipped
+
+
+def register_adsorption_multi(
+    G: nx.Graph,
+    smiles: str,
+    config_key: frozenset,
+    host_atoms: Atoms,
+    calculator,
+    *,
+    n_shells: int = 1,
+    discover: bool = True,
+    **discover_kwargs,
+) -> set:
+    """KMC event hook: a multi-atom reactant adsorbed at *config_key*.
+
+    Side-effects (PLAN §13):
+
+    * Marks every clique covered by an anchor of *config_key* as
+      ``occupied=True`` in the **single-atom**
+      ``G.graph['adsorption_sites'][element][1]`` dict so single-atom
+      discovery treats them as blockers.
+    * Marks the configuration ``occupied=True``, ``reactive=False``.
+    * If *discover*: re-runs :func:`discover_context_configuration` for
+      every stable, vacant neighbour configuration.
+    * Returns the set of config_keys whose ``reactive`` flag flipped.
+    """
+    cfgs: dict = G.graph["adsorption_configs"][smiles][n_shells]
+    cfg = cfgs[config_key]
+    if cfg.occupied:
+        warnings.warn(
+            f"register_adsorption_multi: config {config_key} already occupied.",
+            RuntimeWarning, stacklevel=2,
+        )
+    cfg.occupied = True
+    cfg.reactive = False
+
+    # Cross-write to single-atom adsorption_sites (PLAN §13).
+    single = G.graph.get("adsorption_sites", {})
+    for anchor, clique in cfg.anchor_clique_map.items():
+        elem = cfg.reactant.graph.nodes[anchor]["element"]
+        site_dict = single.get(elem, {}).get(n_shells, {})
+        s = site_dict.get(clique)
+        if s is not None:
+            s.occupied = True
+
+    if discover:
+        for nbr_key in cfg.neighbour_sites:
+            nbr = cfgs.get(nbr_key)
+            if nbr is None or nbr.occupied or not nbr.stable:
+                continue
+            discover_context_configuration(
+                G, smiles, nbr_key,
+                host_atoms, calculator,
+                n_shells=n_shells,
+                **discover_kwargs,
+            )
+
+    return update_reactive_flags_multi(G, smiles, n_shells, config_key)
+
+
+def register_desorption_multi(
+    G: nx.Graph,
+    smiles: str,
+    config_key: frozenset,
+    *,
+    n_shells: int = 1,
+) -> set:
+    """KMC event hook: a multi-atom reactant desorbed from *config_key*.
+
+    Inverse of :func:`register_adsorption_multi`.
+    """
+    cfgs: dict = G.graph["adsorption_configs"][smiles][n_shells]
+    cfg = cfgs[config_key]
+    if not cfg.occupied:
+        warnings.warn(
+            f"register_desorption_multi: config {config_key} was not occupied.",
+            RuntimeWarning, stacklevel=2,
+        )
+    cfg.occupied = False
+
+    single = G.graph.get("adsorption_sites", {})
+    for anchor, clique in cfg.anchor_clique_map.items():
+        elem = cfg.reactant.graph.nodes[anchor]["element"]
+        site_dict = single.get(elem, {}).get(n_shells, {})
+        s = site_dict.get(clique)
+        if s is not None:
+            s.occupied = False
+
+    return update_reactive_flags_multi(G, smiles, n_shells, config_key)
