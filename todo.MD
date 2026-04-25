@@ -16,3 +16,5 @@ Can optimise setting the position of the unique sites relative to the graph
 graph.py:
 Maybe add another flag to associate it with an adsorbate molecule... not sure yet
 
+Multi site:
+Solve beyond rigid molecule - can have variable orbits? maybe?

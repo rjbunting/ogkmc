@@ -29,7 +29,7 @@ NL_MULT_DEFAULT: float = 1.0
 #: :func:`autokmc.default_sites._build_co_bond_graph`: two surface atoms can
 #: simultaneously bind a single adsorbate when their separation is at most
 #: ``CO_FACTOR * (2*r_cov_ads + r_cov_i + r_cov_j)``.
-CO_FACTOR: float = 0.95
+CO_FACTOR: float = 0.90
 
 # ---------------------------------------------------------------------------
 # Geometric site / multisite optimisation

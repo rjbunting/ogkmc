@@ -160,9 +160,16 @@ def _build_co_bond_graph(
 
     if is_ortho:
         boxsize = np.where(pbc, np.diag(cell), 0.0)
-        # cKDTree requires boxsize > 0 along periodic axes; non-periodic
-        # axes use 0 (which means "no wrap" in scipy ≥ 1.6).
-        tree = cKDTree(surf_pos, boxsize=np.where(boxsize > 0, boxsize, 0.0))
+        # cKDTree requires all coordinates to lie in ``[0, boxsize)`` along
+        # periodic axes.  Relaxed slabs / nanoparticle wrappers can drift
+        # slightly outside this range (negative coordinates, or coords ≥ L),
+        # so wrap them back into the primary image before constructing the
+        # tree.  Non-periodic axes are left untouched.
+        surf_pos_kd = surf_pos.copy()
+        for axis in range(3):
+            if pbc[axis] and boxsize[axis] > 0:
+                surf_pos_kd[:, axis] = np.mod(surf_pos_kd[:, axis], boxsize[axis])
+        tree = cKDTree(surf_pos_kd, boxsize=np.where(boxsize > 0, boxsize, 0.0))
         pairs = tree.query_pairs(r=r_query, output_type="ndarray")
     elif use_mic:
         # Non-orthogonal periodic cell: tile ±1 image of every periodic axis,
@@ -739,26 +746,48 @@ def optimise_site_positions(
 
     cache.site_positions[element] = positions
 
-    # ------------------------------------------------------------------
-    # Replace cached IsoClass records with new instances that include the
-    # freshly-computed position.  We construct fresh dataclass instances
-    # via dataclasses.replace rather than mutating in place — see the
-    # docstring rationale above.
-    # ------------------------------------------------------------------
-    if element in cache.unique_sites:
-        for n_shells_cached, unique in cache.unique_sites[element].items():
-            new_unique: dict[int, list[IsoClass]] = {}
-            for k, classes in unique.items():
-                k_cliques = sites_by_k.get(k, [])
-                new_classes: list[IsoClass] = []
-                for iso in classes:
-                    try:
-                        idx = k_cliques.index(iso.representative)
-                        new_classes.append(replace(iso, position=positions[k][idx]))
-                    except ValueError:
-                        new_classes.append(iso)
-                new_unique[k] = new_classes
-            cache.unique_sites[element][n_shells_cached] = new_unique
+    # Propagate freshly-computed positions into every cached iso-class
+    # depth (see helper docstring for rationale).
+    propagate_positions_to_iso_classes(G, element)
 
     return positions
+
+
+def propagate_positions_to_iso_classes(G: nx.Graph, element: str) -> None:
+    """Inject ``cache.site_positions[element]`` into every cached
+    :class:`IsoClass` for *element*, at every shell depth.
+
+    New :class:`IsoClass` instances are constructed via
+    :func:`dataclasses.replace` rather than mutating in place — this
+    keeps the data flow explicit and avoids surprising aliasing between
+    the position-and-iso-class stages.
+
+    Idempotent and cheap: must be called whenever a *new* shell depth is
+    added to ``cache.unique_sites[element]`` after
+    :func:`optimise_site_positions` has already run, otherwise the new
+    iso-classes will carry ``position=None`` and downstream consumers
+    (e.g. :mod:`autokmc.find_multisite`) silently skip them.
+    """
+    cache = get_cache(G)
+    if element not in cache.unique_sites or element not in cache.site_positions:
+        return
+    sites_by_k  = cache.sites.get(element, {})
+    positions   = cache.site_positions[element]
+    for n_shells_cached, unique in cache.unique_sites[element].items():
+        new_unique: dict[int, list[IsoClass]] = {}
+        for k, classes in unique.items():
+            k_cliques = sites_by_k.get(k, [])
+            new_classes: list[IsoClass] = []
+            for iso in classes:
+                if iso.position is not None:
+                    new_classes.append(iso)
+                    continue
+                try:
+                    idx = k_cliques.index(iso.representative)
+                    new_classes.append(replace(iso, position=positions[k][idx]))
+                except (ValueError, KeyError, IndexError):
+                    new_classes.append(iso)
+            new_unique[k] = new_classes
+        cache.unique_sites[element][n_shells_cached] = new_unique
+
 

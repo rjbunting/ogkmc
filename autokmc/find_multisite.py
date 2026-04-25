@@ -11,8 +11,8 @@ atom — rather than a single node.
 
 The same code path handles diatomics, triatomics and arbitrary N-atom
 adsorbates: there is **one** universal enumerator,
-:func:`find_multisites`.  ``find_multisites_for_diatomic`` and
-``find_multisites_for_reactant`` are kept as thin back-compat wrappers.
+:func:`find_multisites`.  ``find_multisites_for_reactant`` is kept as a
+thin back-compat wrapper.
 
 Strategy
 --------
@@ -69,7 +69,6 @@ Public API
 ----------
 * :class:`MultiSite`                       -- one iso-class of multi-atom placements
 * :func:`find_multisites`                  -- universal N-atom enumerator (N>=2)
-* :func:`find_multisites_for_diatomic`     -- back-compat wrapper (N==2)
 * :func:`find_multisites_for_reactant`     -- back-compat alias
 * :func:`optimise_multisite_positions`     -- rigid-body refinement of MultiSite.positions
 """
@@ -87,6 +86,7 @@ from autokmc.default_sites import (
     find_sites_for_element,
     reduce_sites_by_isomorphism,
     optimise_site_positions,
+    propagate_positions_to_iso_classes,
     _build_clique_ego,
     _iso_prefilter_key,
 )
@@ -174,8 +174,9 @@ def _ensure_default_sites(
     cache = get_cache(G)
     if element not in cache.sites:
         find_sites_for_element(G, element, co_factor=co_factor, verbose=verbose)
-    if (element not in cache.unique_sites
-            or n_shells not in cache.unique_sites[element]):
+    needs_reduce = (element not in cache.unique_sites
+                    or n_shells not in cache.unique_sites[element])
+    if needs_reduce:
         reduce_sites_by_isomorphism(G, element, n_shells=n_shells, verbose=verbose)
     if element not in cache.site_positions:
         optimise_site_positions(
@@ -184,6 +185,15 @@ def _ensure_default_sites(
             repulsion_weight=repulsion_weight,
             verbose=verbose,
         )
+    elif needs_reduce:
+        # Positions were already computed at a previous shell depth; the
+        # iso-classes we just created at the new depth carry
+        # position=None.  Inject the cached site positions into them so
+        # downstream code (which skips position=None classes) actually
+        # sees them.  Without this, e.g. find_multisites for OCS — whose
+        # reach forces n_shells_anchor=2 — would silently produce zero
+        # placements after a previous depth-1 default_sites pass.
+        propagate_positions_to_iso_classes(G, element)
 
 
 def _resolve_cell(G: nx.Graph):
@@ -317,50 +327,6 @@ def _try_merge_or_new(
         ego_graph    = ego_graph,
     ))
 
-
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
-
-def find_multisites_for_diatomic(
-    G: nx.Graph,
-    reactant,
-    *,
-    bond_tolerance: float = BOND_TOLERANCE,
-    n_shells_anchor: int | None = None,
-    n_shells_pair: int = N_SHELLS_DEFAULT,
-    co_factor: float = CO_FACTOR,
-    opt_factor: float = OPT_FACTOR,
-    repulsion_weight: float = REPULSION_WEIGHT,
-    include_unbonded: bool = True,
-    verbose: bool = False,
-) -> list[MultiSite]:
-    """Backward-compat wrapper around :func:`find_multisites` for 2-atom reactants.
-
-    The unified enumerator handles diatomics natively (orbit-canonical
-    subset enumeration + iso-graph deduplication subsumes the legacy
-    swap-mirror trick); this wrapper is kept so existing call-sites work
-    unchanged.  The legacy ``include_unbonded`` flag maps to
-    ``include_partial`` in the new API.
-
-    Raises ``ValueError`` if *reactant* is not a 2-atom molecule.
-    """
-    if len(reactant.atoms) != 2:
-        raise ValueError(
-            "find_multisites_for_diatomic requires a 2-atom reactant; "
-            f"got {len(reactant.atoms)} atoms."
-        )
-    return find_multisites(
-        G, reactant,
-        bond_tolerance   = bond_tolerance,
-        n_shells_anchor  = n_shells_anchor,
-        n_shells_pair    = n_shells_pair,
-        co_factor        = co_factor,
-        opt_factor       = opt_factor,
-        repulsion_weight = repulsion_weight,
-        include_partial  = include_unbonded,
-        verbose          = verbose,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -923,21 +889,21 @@ def find_multisites(
 
         # ── Backtracking chain placement ────────────────────────────────
         rejected_disconnected = 0
-        ego_depth_grew         = 0   # placements that needed depth > n_shells_pair
 
         def _emit(bonded: list[int], assigned_pos: dict[int, np.ndarray],
                   assigned_clique: dict[int, frozenset]) -> None:
-            nonlocal rejected_disconnected, ego_depth_grew
+            nonlocal rejected_disconnected
             atom_cliques: list = [None] * n_atoms
             for i in bonded:
                 atom_cliques[i] = assigned_clique[i]
 
-            # Surface-connectivity guard: instead of rejecting a placement
-            # whose bonded cliques sit far apart, GROW the per-placement
-            # ego depth until they are mutually reachable through surface
-            # edges.  Only drop the placement when no path exists at all,
-            # or it would need more than max_pair_shells hops.
-            ego_depth = n_shells_pair
+            # Surface-connectivity guard: drop placements whose bonded
+            # cliques cannot reach each other through the surface graph
+            # within max_pair_shells hops.  We do NOT grow the ego depth
+            # used for the iso-class graph above n_shells_pair — the
+            # iso-class ego is, by design, the n_shells_pair-shell
+            # neighbourhood of all coordinated surface atoms (see the
+            # `ego` construction below).
             if G_surf is not None:
                 bonded_cliques = [c for c in atom_cliques if c is not None]
                 needed = _min_ego_depth_for_connectivity(
@@ -946,9 +912,6 @@ def find_multisites(
                 if needed >= 10**6 or needed > max_pair_shells:
                     rejected_disconnected += 1
                     return
-                if needed > ego_depth:
-                    ego_depth = needed
-                    ego_depth_grew += 1
 
             bonded_positions = np.array(
                 [assigned_pos[i] for i in bonded], dtype=float
@@ -957,11 +920,16 @@ def find_multisites(
                 reactant, bonded, bonded_positions, G, pbc
             )
 
+            # Iso-class ego graph: the n_shells_pair-shell neighbourhood
+            # of every surface atom that is coordinated to an adsorbate
+            # atom (i.e. the union of all bonded cliques).  Default
+            # n_shells_pair = 1 → "neighbours of all coordinated surface
+            # atoms".
             union = set()
             for c in atom_cliques:
                 if c is not None:
                     union |= set(c)
-            ego = _build_clique_ego(G, frozenset(union), ego_depth)
+            ego = _build_clique_ego(G, frozenset(union), n_shells_pair)
 
             _try_merge_or_new(
                 multisites,
@@ -1022,12 +990,6 @@ def find_multisites(
                 f"  [depth={depth}] rejected {rejected_disconnected} placement(s) "
                 f"with bonded cliques unreachable within max_pair_shells="
                 f"{max_pair_shells}"
-            )
-        if verbose and ego_depth_grew:
-            print(
-                f"  [depth={depth}] grew ego depth above n_shells_pair="
-                f"{n_shells_pair} for {ego_depth_grew} placement(s) to keep "
-                "bonded cliques connected in the stored site graph"
             )
 
         return multisites
