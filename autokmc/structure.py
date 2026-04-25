@@ -84,6 +84,7 @@ Typical usage
 
 from __future__ import annotations
 
+import copy
 import math
 import os
 import warnings
@@ -95,6 +96,10 @@ from ase.build import bulk, make_supercell
 from ase.calculators.emt import EMT
 from ase.constraints import FixAtoms
 from ase.optimize import LBFGS
+
+from autokmc.logging_utils import get_logger
+
+_log = get_logger(__name__)
 
 # ExpCellFilter: newer ASE (≥3.23) ships it in ase.filters; fall back to
 # ase.constraints for older installations.
@@ -148,6 +153,7 @@ def build_nanoparticle(
     composition_seed: int = 69,
     calculator=None,
     fmax: float = 0.05,
+    vacuum: float = 10.0,
     logfile: Optional[str] = None,
     verbose: bool = True,
 ) -> Atoms:
@@ -179,6 +185,15 @@ def build_nanoparticle(
         Used for bulk relaxation and structure optimisation.  Defaults to EMT.
     fmax : float
         Force convergence criterion in eV/Å.
+    vacuum : float
+        Minimum vacuum gap (Å) between the nanoparticle and its periodic
+        images, applied along all three axes.  The unit cell is built as a
+        cube whose edge equals ``particle_extent + 2 * vacuum`` so that the
+        particle is centred with at least *vacuum* Å of empty space on every
+        side.  ``pbc`` is set to ``True`` along all axes — downstream code
+        (e.g. :func:`autokmc.graph.build_graph`) determines effective
+        periodicity by checking for bonds across cell images, not by reading
+        this flag.  Default 10.0 Å.
     logfile : str, optional
         Path to the LBFGS log file.  ``None`` silences output.
     verbose : bool
@@ -275,6 +290,30 @@ def build_nanoparticle(
         _print_divider()
 
     # ------------------------------------------------------------------
+    # 5b. Wrap in a periodic vacuum-padded box (per-axis bounding box)
+    # ------------------------------------------------------------------
+    # Use a tight per-axis bounding box rather than a single cubic edge —
+    # for elongated nanoparticles this saves significant cell volume (and
+    # therefore memory in any downstream calculator that scales with
+    # cell size, e.g. PW DFT).  Effective periodicity is determined later
+    # by build_graph (via cross-image bond detection), not by the flag.
+    pos = atoms.get_positions()
+    box = (pos.max(axis=0) - pos.min(axis=0)) + 2.0 * float(vacuum)
+    new_cell = np.diag(box.astype(float))
+    atoms.set_cell(new_cell)
+    atoms.set_pbc(True)
+    # Centre the particle inside the new cell.
+    com_shift = 0.5 * box - pos.mean(axis=0)
+    atoms.set_positions(pos + com_shift)
+
+    if verbose:
+        print(f"  Cell (box)     : {box[0]:.2f} × {box[1]:.2f} × {box[2]:.2f} Å"
+              f"  (vacuum={vacuum:.2f} Å)")
+        print(f"  PBC            : True (effective periodicity inferred "
+              "from bonding in build_graph)")
+        _print_divider()
+
+    # ------------------------------------------------------------------
     # 6. Optimise
     # ------------------------------------------------------------------
     atoms = optimise_structure(
@@ -323,7 +362,15 @@ def build_surface(
     crystal_structure : {"fcc", "bcc", "hcp"}
         Crystal structure of the metal.
     miller_index : tuple of int
-        Miller indices (h, k, l).
+        Miller indices ``(h, k, l)``.
+
+        .. note::
+            For HCP the slab is generated against the **3-index**
+            hexagonal Miller indices, *not* the 4-index Miller-Bravais
+            convention.  E.g. the basal plane usually written
+            ``(0001)`` in the literature must be passed here as
+            ``(0, 0, 1)`` (drop the redundant ``i = -(h+k)`` index).
+            This matches pymatgen's :class:`SlabGenerator` semantics.
     lattice_constant : float, dict, or None
         Lattice constant(s) in Å.  See module docstring for HCP format.
         If *None* the bulk is relaxed first.
@@ -573,80 +620,6 @@ def optimise_bulk(
     return bulk_atoms, lp_out
 
 
-def anneal_alloy(
-    atoms: Atoms,
-    calculator=None,
-    *,
-    t_start: float = 1200.0,
-    t_end: float = 300.0,
-    n_md_steps: int = 5000,
-    n_mc_swaps: int = 500,
-    timestep_fs: float = 2.0,
-    seed: int = 42,
-    logfile: Optional[str] = None,
-    verbose: bool = True,
-) -> Atoms:
-    """Optimise an alloy structure by simulated annealing (MD + MC swaps).
-
-    .. note::
-        **Not yet implemented.**  This is a placeholder that raises
-        :exc:`NotImplementedError`.  The intended algorithm is:
-
-        1. Attach *calculator* and run NVT molecular dynamics (Langevin
-           thermostat) from *t_start* down to *t_end*, progressively
-           lowering the temperature to explore phase space.
-        2. At regular intervals, attempt Monte Carlo atom-swap moves
-           (swap two atoms of different species) accepted/rejected via the
-           Metropolis criterion at the current temperature.
-        3. After annealing, perform a final geometry optimisation with LBFGS
-           to land at the nearest local minimum.
-
-        This allows the alloy to find a lower-energy chemical ordering
-        (e.g. surface segregation, ordered intermetallic regions) rather than
-        staying in the as-substituted random configuration produced by
-        :func:`build_nanoparticle` or :func:`build_surface`.
-
-    Parameters
-    ----------
-    atoms : Atoms
-        Input alloy structure (e.g. output of :func:`build_nanoparticle` or
-        :func:`build_surface`).  Must contain at least two distinct elements.
-    calculator : ASE calculator, optional
-        Energy/force calculator.  Defaults to EMT.
-    t_start : float
-        Starting temperature for the annealing schedule in K.
-    t_end : float
-        Final temperature in K.
-    n_md_steps : int
-        Total number of MD steps across the full annealing schedule.
-    n_mc_swaps : int
-        Number of Monte Carlo swap attempts per temperature step.
-    timestep_fs : float
-        MD integration timestep in femtoseconds.
-    seed : int
-        Random seed for reproducibility.
-    logfile : str, optional
-        Path to a log file.  ``None`` silences output.
-    verbose : bool
-        Print progress information.
-
-    Returns
-    -------
-    Atoms
-        Annealed and locally-optimised alloy structure.
-
-    Raises
-    ------
-    NotImplementedError
-        Always – this function is not yet implemented.
-    """
-    raise NotImplementedError(
-        "anneal_alloy is not yet implemented.  "
-        "It will use Langevin MD with Monte Carlo atom-swap moves "
-        "to find a low-energy chemical ordering for the alloy."
-    )
-
-
 def optimise_structure(
     atoms: Atoms,
     calculator=None,
@@ -684,14 +657,22 @@ def optimise_structure(
     result = atoms.copy()
 
     # atoms.copy() does NOT deep-copy the calculator; always attach a fresh
-    # one so we never mutate the caller's calculator state.
+    # one so we never mutate the caller's calculator state.  When the
+    # caller did not supply a calculator we deep-copy the existing one
+    # (preserving any constructor kwargs / loaded ML models) rather than
+    # blindly instantiating ``existing.__class__()`` — that pattern silently
+    # threw away things like a NequIP model path.
     if calculator is not None:
         result.calc = calculator
     else:
-        # Re-use the class of the existing calculator (default to EMT).
         existing = atoms.calc
         if existing is not None:
-            result.calc = existing.__class__()
+            try:
+                result.calc = copy.deepcopy(existing)
+            except Exception:
+                # Fall back to a fresh instance if deepcopy is unsupported
+                # (e.g. calculators wrapping un-picklable C handles).
+                result.calc = existing.__class__()
         else:
             result.calc = EMT()
 
@@ -872,13 +853,21 @@ def _build_primitive_cell(
     crystal_structure: str,
     lp: Dict[str, float],
 ) -> Atoms:
-    """Build a primitive bulk unit cell from lattice parameters."""
+    """Build a bulk unit cell from lattice parameters.
+
+    For FCC and BCC the **conventional cubic** cell is used (rather than
+    the primitive rhombohedral / body-centred cell) so that the cell
+    vectors are aligned with the cartesian axes — making lattice
+    constants trivially recoverable as ``cell[0, 0]`` after a relaxation
+    rather than reverse-engineered via factors of √2 / √3.  HCP returns
+    the primitive hexagonal cell.
+    """
     a = lp["a"]
     if crystal_structure == "hcp":
         c = lp.get("c", a * _HCP_IDEAL_CA)
         return bulk(symbol, crystalstructure="hcp", a=a, c=c)
-    # FCC and BCC
-    return bulk(symbol, crystalstructure=crystal_structure, a=a, cubic=False)
+    # FCC and BCC: use the conventional cubic cell.
+    return bulk(symbol, crystalstructure=crystal_structure, a=a, cubic=True)
 
 
 def _build_surface_parent_cell(
@@ -899,15 +888,16 @@ def _build_surface_parent_cell(
 
 
 def _extract_lp(atoms: Atoms, crystal_structure: str) -> Dict[str, float]:
-    """Extract lattice parameters from an optimised bulk Atoms object."""
+    """Extract lattice parameters from an optimised bulk Atoms object.
+
+    Both FCC and BCC are now built with conventional cubic cells (see
+    :func:`_build_primitive_cell`), so the lattice constant is simply
+    the length of the first cell vector — no √2 / √3 reverse-engineering
+    of the primitive-cell norm is required.
+    """
     cell = atoms.get_cell()
-    if crystal_structure == "fcc":
-        # Primitive FCC cell vector: |a_vec| = a/√2  →  a = |a_vec|·√2
-        a = float(np.linalg.norm(cell[0]) * np.sqrt(2))
-        return {"a": a}
-    if crystal_structure == "bcc":
-        # Primitive BCC cell vector: |a_vec| = a·√3/2  →  a = |a_vec|·2/√3
-        a = float(np.linalg.norm(cell[0]) * 2.0 / np.sqrt(3))
+    if crystal_structure in ("fcc", "bcc"):
+        a = float(np.linalg.norm(cell[0]))
         return {"a": a}
     # HCP: a from first cell vector, c from third
     a = float(np.linalg.norm(cell[0]))
@@ -992,12 +982,14 @@ def _orthogonalise_slab(
         abs(float(oc[2] @ ez)),         # c → z: projection of c onto new z
     ])
     new_pos = ortho.get_positions() @ R
-    frac = new_pos @ np.linalg.inv(new_cell) % 1.0
-    new_pos = frac @ new_cell
 
     ortho.set_cell(new_cell, scale_atoms=False)
     ortho.set_positions(new_pos)
     ortho.set_pbc(True)
+    # Use ASE's wrap() rather than a manual `% 1.0` on fractional
+    # coordinates: it handles the boundary edge case (positions at
+    # 1.0 - 1e-15) and respects per-axis PBC flags consistently.
+    ortho.wrap()
 
     return ortho, (n1, n2, m1, m2, int(best_size))
 

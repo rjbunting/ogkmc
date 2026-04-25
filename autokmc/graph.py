@@ -11,38 +11,30 @@ Each node represents one atom and carries:
 * ``type``           – one of ``"bulk"``, ``"surface"``, or ``"adsorbate"`` (str)
 * ``covalent_radius``– covalent radius in Å from ASE data (float)
 
-For **surface** nodes, additional attributes are stored after
-:func:`_annotate_surface_shells` runs:
+Each edge carries:
 
-* ``surf_wl_k{1..4}``  – WL-refinement hash at depth k on the surface-only
-                          subgraph (str).  Two surface atoms with equal hashes
-                          at depth k have the same chemical environment out to
-                          k bond-hops, ignoring all bulk/adsorbate atoms.
-* ``surf_nn_k{1..4}``  – minimum Cartesian distance (Å) from this node to any
-                          surface atom exactly k hops away (float).
+* ``distance`` – minimum-image bond length in Å (float)
+* ``offset``   – integer cell-image offset ``(i, j, k)`` of the partner
+  atom; ``(0, 0, 0)`` for in-cell bonds (tuple[int, int, int])
 
-These are used by :func:`~autokmc.site.find_adsorption_sites` to restrict
-probe-grid sampling to one representative per surface equivalence class.
+The ``type`` attribute is read from ``atoms.arrays["surface"]`` (int8):
 
-Typical usage
--------------
-::
+* ``0`` → ``"bulk"``
+* ``1`` → ``"surface"``
+* ``2`` → ``"adsorbate"``
 
-    from autokmc.surface import find_surface_atoms
-    from autokmc.graph import build_graph
-    from ase.build import fcc111
+Edges connect atoms whose covalent-radius neighbour-lists overlap (ASE
+:class:`~ase.neighborlist.NeighborList` with
+``mult=autokmc.constants.NL_MULT_DEFAULT``).
 
-    slab = fcc111("Cu", size=(4, 4, 4), vacuum=10.0, periodic=True)
-    find_surface_atoms(slab, tag_atoms=True)   # writes slab.arrays["surface"]
-    G = build_graph(slab)
+Graph-level metadata (``G.graph[...]``):
 
-    surface_nodes = [n for n, d in G.nodes(data=True) if d["type"] == "surface"]
-
-Public API
-----------
-* :func:`build_graph`       – main entry point
-* :func:`surface_subgraph`  – induced subgraph of surface nodes
-* :func:`ego_graph`         – node + its 1st-shell neighbours
+* ``"cell"`` – :class:`numpy.ndarray`, shape ``(3, 3)`` (rows = lattice vectors).
+* ``"pbc"``  – :class:`numpy.ndarray` of three :class:`bool`.  **Derived** from
+  the neighbour-list — an axis is True iff at least one bond crosses
+  the cell image along it (so a nanoparticle in a periodic cubic cell
+  with sufficient vacuum reports ``pbc=array([False, False, False])``).
+* ``"autokmc"`` – the :class:`~autokmc.cache.SiteCache` for this graph.
 """
 
 from __future__ import annotations
@@ -54,81 +46,11 @@ from ase import Atoms
 from ase.data import covalent_radii as ASE_COVALENT_RADII
 from ase.neighborlist import NeighborList, natural_cutoffs
 
+from autokmc.constants import NL_MULT_DEFAULT
+from autokmc.cache import get_cache
+from autokmc.logging_utils import get_logger
 
-# ---------------------------------------------------------------------------
-# Surface-shell annotation
-# ---------------------------------------------------------------------------
-
-def _annotate_surface_shells(G: nx.Graph, k_max: int = 4) -> None:
-    """Annotate every surface node with WL hashes and shell distances.
-
-    Only surface-to-surface edges are traversed, so bulk/adsorbate atoms
-    never influence the classification.
-
-    Attributes written
-    ------------------
-    ``surf_wl_k{k}`` (str)
-        WL-refinement label after *k* iterations on the surface-only
-        subgraph.  Atoms with equal labels at depth *k* have identical
-        chemical environments out to *k* bond-hops on the surface.
-    ``surf_nn_k{k}`` (float)
-        Minimum Cartesian distance (Å) to surface atoms at exactly *k*
-        hops from this node (the *k*-th coordination shell).
-
-    Graph-level summary
-    -------------------
-    ``G.graph["surf_nn_k{k}"]`` stores the minimum of ``surf_nn_k{k}``
-    over all surface atoms, allowing quick shell-distance look-up.
-    """
-    surf_nodes = [n for n, d in G.nodes(data=True) if d["type"] == "surface"]
-    if len(surf_nodes) < 2:
-        return
-
-    surf_set  = set(surf_nodes)
-    positions = {n: G.nodes[n]["position"] for n in surf_nodes}
-
-    # Surface-only adjacency — never traverse bulk or adsorbate edges
-    surf_adj: dict[int, list[int]] = {
-        n: [u for u in G.neighbors(n) if u in surf_set]
-        for n in surf_nodes
-    }
-
-    # ── Per-node BFS: record min distance to atoms at each shell ─────────
-    for n in surf_nodes:
-        visited: set[int] = {n}
-        frontier: list[int] = [n]
-        for hop in range(1, k_max + 1):
-            next_frontier: list[int] = []
-            for v in frontier:
-                for u in surf_adj[v]:
-                    if u not in visited:
-                        visited.add(u)
-                        next_frontier.append(u)
-            if next_frontier:
-                d_min = float(min(
-                    np.linalg.norm(positions[n] - positions[u])
-                    for u in next_frontier
-                ))
-                G.nodes[n][f"surf_nn_k{hop}"] = d_min
-            frontier = next_frontier
-
-    # ── WL refinement: k iterations on surface-only adjacency ────────────
-    wl: dict[int, str] = {n: G.nodes[n]["element"] for n in surf_nodes}
-    for k in range(1, k_max + 1):
-        new_wl: dict[int, str] = {}
-        for n in surf_nodes:
-            nbr = tuple(sorted(wl[u] for u in surf_adj[n]))
-            new_wl[n] = str((wl[n], nbr))
-        wl = new_wl
-        for n in surf_nodes:
-            G.nodes[n][f"surf_wl_k{k}"] = wl[n]
-
-    # ── Graph-level summary ───────────────────────────────────────────────
-    for k in range(1, k_max + 1):
-        vals = [G.nodes[n][f"surf_nn_k{k}"]
-                for n in surf_nodes if f"surf_nn_k{k}" in G.nodes[n]]
-        if vals:
-            G.graph[f"surf_nn_k{k}"] = float(min(vals))
+_log = get_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -138,7 +60,7 @@ def _annotate_surface_shells(G: nx.Graph, k_max: int = 4) -> None:
 def build_graph(
     atoms: Atoms,
     *,
-    nl_mult: float = 1.0,
+    nl_mult: float = NL_MULT_DEFAULT,
 ) -> nx.Graph:
     """Build an atom-connectivity graph from *atoms*.
 
@@ -151,32 +73,16 @@ def build_graph(
     ----------
     atoms : Atoms
         The structure to graph.  Must have ``atoms.arrays["surface"]``
-        populated (int8 array: 0 = bulk, 1 = surface).
+        populated (int8 array: 0 = bulk, 1 = surface, 2 = adsorbate).
     nl_mult : float
         Multiplier for ASE :func:`~ase.neighborlist.natural_cutoffs` used
-        to determine which atom pairs are bonded.  Default 1.1.
+        to determine which atom pairs are bonded.  Defaults to
+        :data:`autokmc.constants.NL_MULT_DEFAULT` (currently ``1.0``).
 
     Returns
     -------
     G : nx.Graph
-        Connectivity graph.
-
-        **Node attributes** (every node):
-
-        =========  ================================================
-        element          Chemical symbol (str)
-        position         Cartesian coordinates – np.ndarray, shape (3,)
-        index            Atom index in *atoms* (int)
-        type             ``"bulk"``, ``"surface"``, or ``"adsorbate"`` (str)
-        covalent_radius  Covalent radius in Å from ASE data (float)
-        =========  ================================================
-
-        **Graph attributes**:
-
-        ====  =============================================
-        cell  Unit-cell matrix – np.ndarray, shape (3, 3)
-        pbc   Periodic boundary conditions – list[bool]
-        ====  =============================================
+        Connectivity graph (see module docstring for full attribute list).
 
     Raises
     ------
@@ -194,20 +100,14 @@ def build_graph(
 
     _TYPE_MAP = {0: "bulk", 1: "surface", 2: "adsorbate"}
 
-    # ------------------------------------------------------------------
-    # Build neighbour list
-    # ------------------------------------------------------------------
     cutoffs = natural_cutoffs(atoms, mult=nl_mult)
     nl = NeighborList(cutoffs, self_interaction=False, bothways=True)
     nl.update(atoms)
 
-    # ------------------------------------------------------------------
-    # Assemble graph
-    # ------------------------------------------------------------------
     G = nx.Graph()
 
-    G.graph["cell"] = np.array(atoms.get_cell())
-    G.graph["pbc"]  = atoms.get_pbc().tolist()
+    cell_arr = np.array(atoms.get_cell(), dtype=float)
+    G.graph["cell"] = cell_arr
 
     positions      = atoms.get_positions()
     symbols        = atoms.get_chemical_symbols()
@@ -223,14 +123,45 @@ def build_graph(
             covalent_radius = float(ASE_COVALENT_RADII[atomic_numbers[i]]),
         )
 
-    for i in range(len(atoms)):
-        neighbours, _ = nl.get_neighbors(i)
-        for j in map(int, neighbours):
-            if j > i:
-                G.add_edge(i, j)
+    # Track per-axis whether *any* bond crosses an image — this defines the
+    # graph's effective periodicity.
+    pbc_effective = np.zeros(3, dtype=bool)
 
-    # Annotate surface nodes with WL hashes and shell distances.
-    # Used by find_adsorption_sites to restrict probe-grid sampling.
-    _annotate_surface_shells(G)
+    # Walk the bothways=True neighbour list and add each bond once (i<j),
+    # recording the integer cell offset of the partner atom and the MIC
+    # bond distance so downstream code can avoid re-deriving them.
+    for i in range(len(atoms)):
+        neighbours, offsets = nl.get_neighbors(i)
+        for jj, off in zip(map(int, neighbours), offsets):
+            off = np.asarray(off, dtype=int)
+            if np.any(off != 0):
+                pbc_effective |= (off != 0)
+            if jj <= i:
+                continue
+            # Cartesian displacement of the partner image relative to atom i.
+            dv = positions[jj] + off @ cell_arr - positions[i]
+            d = float(np.linalg.norm(dv))
+            G.add_edge(i, jj,
+                       distance=d,
+                       offset=(int(off[0]), int(off[1]), int(off[2])))
+
+    G.graph["pbc"] = pbc_effective
+
+    # Install (or refresh) the typed cache; aliases legacy G.graph["sites"]
+    # etc. to the typed dicts so existing code keeps working.
+    cache = get_cache(G)
+
+    # Re-use any hull computed by find_surface_atoms (nanoparticle path) so
+    # downstream code (default_sites.find_sites_for_element) need not
+    # rebuild it.  Stored as the (n_facets, 4) equations array; that is
+    # all the spurious-clique filter actually needs.
+    hull_eq = atoms.info.get("_hull_equations")
+    if hull_eq is not None:
+        cache.hull = np.asarray(hull_eq, dtype=float)
+
+    _log.debug(
+        "build_graph: %d nodes, %d edges, pbc=%s, nl_mult=%g",
+        G.number_of_nodes(), G.number_of_edges(), pbc_effective.tolist(), nl_mult,
+    )
 
     return G
