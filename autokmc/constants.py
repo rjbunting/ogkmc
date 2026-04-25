@@ -50,6 +50,21 @@ REPULSION_WEIGHT: float = 0.1
 #: surface) pair.  Matches the ``OPT_FACTOR`` semantics above.
 CONTACT_FACTOR: float = 0.9
 
+#: Standoff-bond scale used by
+#: :func:`autokmc.find_multisite.optimise_multisite_positions`: each
+#: bonded anchor is restrained toward a target ``standoff`` Å above the
+#: surface clique centroid along the local outward normal, where
+#: ``standoff = STANDOFF_FACTOR * (r_cov_a + <r_cov_s>)``.  Prevents the
+#: rigid molecule from being pulled into the surface plane.
+STANDOFF_FACTOR: float = 0.85
+
+#: Default number of rigid-body rotational restarts about the local
+#: outward surface normal used by
+#: :func:`autokmc.find_multisite.optimise_multisite_positions`.  Combats
+#: local minima for asymmetric adsorbates on bridge/hollow sites.  ``1``
+#: disables multi-start.
+N_MULTISITE_RESTARTS: int = 6
+
 #: Default radius (Å) of the spatial cutoff used to filter the non-bonded
 #: surface atoms that contribute to the repulsion sum in
 #: :func:`autokmc.default_sites._optimize_site_position`.  Only atoms

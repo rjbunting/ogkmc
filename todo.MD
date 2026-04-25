@@ -17,4 +17,6 @@ graph.py:
 Maybe add another flag to associate it with an adsorbate molecule... not sure yet
 
 Multi site:
+Set the tolerance to something reasonable. Can test this more later (probably too small)
+
 Solve beyond rigid molecule - can have variable orbits? maybe?
