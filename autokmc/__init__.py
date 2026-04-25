@@ -26,3 +26,9 @@ from autokmc.find_multisite import (  # noqa: F401
     find_multisites_for_reactant,
     optimise_multisite_positions,
 )
+from autokmc.opt_site import (  # noqa: F401
+    lateral_neighbour_atoms,
+    lateral_neighbour_subgraph,
+    optimise_multisites_ml,
+    seed_single_atom_multisites,
+)
