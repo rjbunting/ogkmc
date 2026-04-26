@@ -51,7 +51,7 @@ REPULSION_WEIGHT: float = 0.1
 CONTACT_FACTOR: float = 0.9
 
 #: Standoff-bond scale used by
-#: :func:`autokmc.find_multisite.optimise_adsorbate_site_positions`: each
+#: :func:`autokmc.find_adsorbate_site.optimise_adsorbate_site_positions`: each
 #: bonded anchor is restrained toward a target ``standoff`` Å above the
 #: surface clique centroid along the local outward normal, where
 #: ``standoff = STANDOFF_FACTOR * (r_cov_a + <r_cov_s>)``.  Prevents the
@@ -88,26 +88,18 @@ N_SHELLS_DEFAULT: int = 1
 # ---------------------------------------------------------------------------
 
 #: Typical metal nearest-neighbour distance (Å) used by
-#: :func:`autokmc.find_multisite._suggested_n_shells` to pick a default
+#: :func:`autokmc.find_adsorbate_site._suggested_n_shells` to pick a default
 #: ``n_shells_anchor`` from the molecular reach.
 NN_DISTANCE: float = 2.5
 
 #: Hard cap on the per-placement adaptive ego depth used when
 #: ``require_surface_connected`` is on in
-#: :func:`autokmc.find_multisite.find_adsorbate_sites`.
+#: :func:`autokmc.find_adsorbate_site.find_adsorbate_sites`.
 MAX_PAIR_SHELLS: int = 10
 
 #: Default tolerance (Å) when matching surface anchor-pair distances to
-#: intramolecular distances in :func:`autokmc.find_multisite.find_adsorbate_sites`.
+#: intramolecular distances in :func:`autokmc.find_adsorbate_site.find_adsorbate_sites`.
 BOND_TOLERANCE: float = 0.4
-
-# ---------------------------------------------------------------------------
-# Reactions
-# ---------------------------------------------------------------------------
-
-#: Energy offset (eV) placing the adsorption/desorption transition state above
-#: the higher-energy endpoint in :func:`autokmc.reaction.reaction_barriers`.
-TS_OFFSET_EV: float = 0.05
 
 # ---------------------------------------------------------------------------
 # Convex-hull / surface classification

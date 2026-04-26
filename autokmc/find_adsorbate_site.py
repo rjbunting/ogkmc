@@ -1,6 +1,6 @@
 """
-autokmc.find_multisite
-======================
+autokmc.find_adsorbate_site
+===========================
 N-atom adsorbate site enumeration on a surface graph.
 
 Where ``default_sites`` finds all single-atom adsorption sites for one
@@ -9,8 +9,8 @@ multi-atom *molecule* (a :class:`~autokmc.reactants.Reactant`).  A
 placement is stored as a *subgraph* — one surface clique per molecular
 atom — rather than a single node.
 
-The same code path handles diatomics, triatomics and arbitrary N-atom
-adsorbates: there is **one** universal enumerator,
+The same code path handles single atoms, diatomics, triatomics and
+arbitrary N-atom adsorbates: there is **one** universal enumerator,
 :func:`find_adsorbate_sites`.
 
 Strategy
@@ -66,8 +66,8 @@ Results are written to ``cache.adsorbate_sites[reactant.smiles]`` as a
 
 Public API
 ----------
-* :class:`AdsorbateSite`                   -- one iso-class of multi-atom placements
-* :func:`find_adsorbate_sites`             -- universal N-atom enumerator (N>=2)
+* :class:`AdsorbateSite`                   -- one iso-class of adsorbate placements
+* :func:`find_adsorbate_sites`             -- universal N-atom enumerator (N>=1)
 * :func:`optimise_adsorbate_site_positions` -- rigid-body refinement of positions
 """
 
@@ -112,7 +112,7 @@ _log = get_logger(__name__)
 
 @dataclass
 class AdsorbateSite:
-    """One isomorphism class of multi-atom adsorbate placements.
+    """One isomorphism class of adsorbate placements.
 
     Attributes
     ----------
@@ -928,9 +928,9 @@ def _materialise_adsorbate_anchors(
 
 
 def push_member_positions_to_graph(
-    G: nx.Graph, multisite: AdsorbateSite, member_index: int,
+    G: nx.Graph, adsorbate_site: AdsorbateSite, member_index: int,
 ) -> None:
-    """Write ``multisite.member_positions[member_index]`` into the graph.
+    """Write ``adsorbate_site.member_positions[member_index]`` into the graph.
 
     Use this from any downstream refinement (e.g.
     :func:`optimise_adsorbate_site_positions`,
@@ -939,11 +939,11 @@ def push_member_positions_to_graph(
     and the ``intra_adsorbate`` / ``anchor_bond`` edge distances stay in
     lock-step with the cached :class:`AdsorbateSite`.
     """
-    if member_index >= len(multisite.member_node_ids):
+    if member_index >= len(adsorbate_site.member_node_ids):
         return
-    node_ids = multisite.member_node_ids[member_index]
+    node_ids = adsorbate_site.member_node_ids[member_index]
     positions = np.asarray(
-        multisite.member_positions[member_index], dtype=float
+        adsorbate_site.member_positions[member_index], dtype=float
     )
     for i, nid in enumerate(node_ids):
         if nid not in G:
@@ -1155,7 +1155,7 @@ def find_adsorbate_sites(
                 flat.extend(classes)
             iso_classes_by_elem[el] = flat
 
-        multisites: list[AdsorbateSite] = []
+        adsorbate_sites: list[AdsorbateSite] = []
         seen_signatures: set = set()
 
         # Build the list of anchor subsets to enumerate.
@@ -1228,7 +1228,7 @@ def find_adsorbate_sites(
             ego = _build_clique_ego(G, frozenset(union), n_shells_pair)
 
             _try_merge_or_new(
-                multisites,
+                adsorbate_sites,
                 smiles          = reactant.smiles,
                 atom_cliques    = atom_cliques,
                 positions       = positions,
@@ -1288,14 +1288,14 @@ def find_adsorbate_sites(
                 f"{max_pair_shells}"
             )
 
-        return multisites
+        return adsorbate_sites
 
     # ── Retry loop: grow n_shells_anchor if any placement reaches further
     #    than the iso-class ego graph used to deduplicate first anchors. ─
-    multisites: list[AdsorbateSite] = _run_pass(n_shells_anchor_eff)
+    adsorbate_sites: list[AdsorbateSite] = _run_pass(n_shells_anchor_eff)
     retries = 0
     while auto_grow_shells and retries < max_shell_retries:
-        needed = _required_n_shells(G, multisites, apsp=apsp)
+        needed = _required_n_shells(G, adsorbate_sites, apsp=apsp)
         if needed <= n_shells_anchor_eff:
             break
         new_depth = needed
@@ -1306,11 +1306,11 @@ def find_adsorbate_sites(
                 f"{new_depth} and re-enumerating"
             )
         n_shells_anchor_eff = new_depth
-        multisites = _run_pass(n_shells_anchor_eff)
+        adsorbate_sites = _run_pass(n_shells_anchor_eff)
         retries += 1
     else:
         if auto_grow_shells and retries == max_shell_retries:
-            needed = _required_n_shells(G, multisites, apsp=apsp)
+            needed = _required_n_shells(G, adsorbate_sites, apsp=apsp)
             if needed > n_shells_anchor_eff and verbose:
                 print(
                     f"  ⚠  hit max_shell_retries={max_shell_retries}; "
@@ -1326,28 +1326,28 @@ def find_adsorbate_sites(
 
     if verbose:
         n_full = sum(
-            1 for ms in multisites
+            1 for ms in adsorbate_sites
             if all((ms.atom_cliques[i] is not None) for i in anchors)
         )
-        n_partial = len(multisites) - n_full
-        total_members = sum(len(ms.members) for ms in multisites)
+        n_partial = len(adsorbate_sites) - n_full
+        total_members = sum(len(ms.members) for ms in adsorbate_sites)
         print(
-            f"  → {len(multisites)} unique multisite iso-classes "
+            f"  → {len(adsorbate_sites)} unique adsorbate site iso-classes "
             f"({n_full} full-anchor + {n_partial} partial), "
             f"{total_members} placements total"
         )
 
     cache = get_cache(G)
-    cache.adsorbate_sites[reactant.smiles] = multisites
-    G.graph["adsorbate_sites"][reactant.smiles] = multisites
+    cache.adsorbate_sites[reactant.smiles] = adsorbate_sites
+    G.graph["adsorbate_sites"][reactant.smiles] = adsorbate_sites
 
     # Materialise every member as a connected adsorbate-anchor subgraph
     # on G.  Done last (after the iso-class enumeration is final) so the
     # iso-class ego graphs above are computed against a clean
     # surface-only graph and never see stale anchor nodes.
-    _materialise_adsorbate_anchors(G, reactant, multisites)
+    _materialise_adsorbate_anchors(G, reactant, adsorbate_sites)
 
-    return multisites
+    return adsorbate_sites
 
 
 # ---------------------------------------------------------------------------
@@ -1727,6 +1727,4 @@ def optimise_adsorbate_site_positions(
             )
 
     return adsorbate_sites
-
-
 

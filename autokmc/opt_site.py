@@ -2,7 +2,7 @@
 autokmc.opt_site
 ================
 Calculator-driven (ML potential) refinement of every unique
-:class:`~autokmc.find_multisite.AdsorbateSite` placement.
+:class:`~autokmc.find_adsorbate_site.AdsorbateSite` placement.
 
 Workflow
 --------
@@ -74,7 +74,7 @@ Public API
   consuming a shell), so an occupied snapshot's ego graph naturally
   contains every neighbouring adsorbate molecule.
 
-Optimization-populated fields on :class:`~autokmc.find_multisite.AdsorbateSite`
+Optimization-populated fields on :class:`~autokmc.find_adsorbate_site.AdsorbateSite`
 -----------------------------------------------------------------------------
 The optimiser populates these explicit ``AdsorbateSite`` dataclass fields:
 
@@ -839,7 +839,7 @@ def seed_single_atom_adsorbate_sites(
     ``cache.unique_sites[element][n_shells]`` for monatomic *reactant*.
 
     Single-atom adsorbates never enter the multi-atom enumerator
-    (:func:`autokmc.find_multisite.find_adsorbate_sites` requires
+    (:func:`autokmc.find_adsorbate_site.find_adsorbate_sites` requires
     ``n_atoms >= 2``); they are produced by the ``default_sites``
     pipeline as :class:`~autokmc.default_sites.IsoClass` objects under
     ``cache.unique_sites[element]``.  This adapter wraps each IsoClass
@@ -850,7 +850,7 @@ def seed_single_atom_adsorbate_sites(
 
     Lazily ensures the ``default_sites`` pipeline has been run for
     *reactant*'s element via
-    :func:`autokmc.find_multisite._ensure_default_sites`.
+    :func:`autokmc.find_adsorbate_site._ensure_default_sites`.
 
     Parameters
     ----------
@@ -872,8 +872,8 @@ def seed_single_atom_adsorbate_sites(
         ordered ``(k, iso_class)`` ascending so iso_class indices are
         unique within the list.
     """
-    # Local imports to avoid a circular dependency with find_multisite.
-    from autokmc.find_multisite import AdsorbateSite, _ensure_default_sites
+    # Local imports to avoid a circular dependency with find_adsorbate_site.
+    from autokmc.find_adsorbate_site import AdsorbateSite, _ensure_default_sites
 
     if len(reactant.atoms) != 1:
         raise ValueError(
@@ -1157,7 +1157,7 @@ def _run(
         ms.member_neighbour_atoms = member_neighbour
         ms.member_subgraphs = member_subgraphs
         if ms.member_node_ids:
-            from autokmc.find_multisite import push_member_positions_to_graph
+            from autokmc.find_adsorbate_site import push_member_positions_to_graph
             for member_index in range(len(member_positions)):
                 push_member_positions_to_graph(G, ms, member_index)
         # Record the rebuilt info on stable poses too — useful for

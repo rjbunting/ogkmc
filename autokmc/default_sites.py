@@ -926,7 +926,7 @@ def propagate_positions_to_iso_classes(G: nx.Graph, element: str) -> None:
     added to ``cache.unique_sites[element]`` after
     :func:`optimise_site_positions` has already run, otherwise the new
     iso-classes will carry ``position=None`` and downstream consumers
-    (e.g. :mod:`autokmc.find_multisite`) silently skip them.
+    (e.g. :mod:`autokmc.find_adsorbate_site`) silently skip them.
     """
     cache = get_cache(G)
     if element not in cache.unique_sites or element not in cache.site_positions:

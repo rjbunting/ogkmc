@@ -46,9 +46,6 @@ class SiteCache:
     site_positions : Dict[str, Dict[int, List[Any]]]                           = field(default_factory=dict)
     # smiles -> [AdsorbateSite]
     adsorbate_sites: Dict[str, List[Any]]                                      = field(default_factory=dict)
-    # smiles -> AdsorbateReactionSet; nested as adsorbate -> iso-class ->
-    # lateral-interaction graph records.
-    reactions      : Dict[str, Any]                                             = field(default_factory=dict)
     # element -> {k: [anchor_node_id]}; one entry per raw site clique, in the
     # *same order* as ``sites[element][k]``.  Anchor nodes are materialised on
     # the graph (type="anchor") by ``find_sites_for_element`` so that every
@@ -70,7 +67,6 @@ class SiteCache:
             self.unique_sites.clear()
             self.site_positions.clear()
             self.adsorbate_sites.clear()
-            self.reactions.clear()
             self.anchor_nodes.clear()
             self.hull = None
             self.surface_apsp = None
@@ -83,7 +79,6 @@ class SiteCache:
             self.anchor_nodes.pop(element, None)
         if smiles is not None:
             self.adsorbate_sites.pop(smiles, None)
-            self.reactions.pop(smiles, None)
 
     def summary(self) -> str:
         """Short human-readable description of what has been cached."""
@@ -102,10 +97,6 @@ class SiteCache:
         if self.adsorbate_sites:
             for sm, ms in self.adsorbate_sites.items():
                 lines.append(f"  adsorbate_sites[{sm!r}] : {len(ms)} iso-classes")
-        if self.reactions:
-            for sm, rs in self.reactions.items():
-                n_iso = len(getattr(rs, "iso_classes", {}))
-                lines.append(f"  reactions[{sm!r}]       : {n_iso} iso-classes")
         if self.hull is not None:
             lines.append("  hull                  : cached")
         if self.surface_apsp is not None:
