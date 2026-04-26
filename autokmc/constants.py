@@ -102,6 +102,14 @@ MAX_PAIR_SHELLS: int = 10
 BOND_TOLERANCE: float = 0.4
 
 # ---------------------------------------------------------------------------
+# Reactions
+# ---------------------------------------------------------------------------
+
+#: Energy offset (eV) placing the adsorption/desorption transition state above
+#: the higher-energy endpoint in :func:`autokmc.reaction.reaction_barriers`.
+TS_OFFSET_EV: float = 0.05
+
+# ---------------------------------------------------------------------------
 # Convex-hull / surface classification
 # ---------------------------------------------------------------------------
 
