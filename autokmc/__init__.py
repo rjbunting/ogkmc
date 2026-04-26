@@ -20,7 +20,14 @@ from autokmc.surface import (  # noqa: F401
     has_pbc_connectivity,
     tag_surface_atoms,
 )
-from autokmc.find_multisite import (  # noqa: F401
+from autokmc.sites import (  # noqa: F401
+    # Preferred new-name public API
+    AdsorbateSite,
+    find_adsorbate_sites,
+    find_adsorbate_sites_for_reactant,
+    optimise_adsorbate_site_positions,
+    push_member_positions_to_graph,
+    # Backward-compatible legacy aliases
     MultiSite,
     find_multisites,
     find_multisites_for_reactant,
@@ -29,6 +36,10 @@ from autokmc.find_multisite import (  # noqa: F401
 from autokmc.opt_site import (  # noqa: F401
     lateral_neighbour_atoms,
     lateral_neighbour_subgraph,
+    # Preferred names
+    optimise_adsorbate_sites_ml,
+    seed_single_atom_adsorbate_sites,
+    # Backward-compatible legacy aliases
     optimise_multisites_ml,
     seed_single_atom_multisites,
 )

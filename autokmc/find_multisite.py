@@ -137,16 +137,29 @@ class MultiSite:
     members : list[list[frozenset | None]]
         All raw ``atom_cliques`` tuples that were folded into this
         iso-class (the first entry is the representative).
+    member_positions : list[np.ndarray]
+        One ``(n_atoms, 3)`` Cartesian array per member, in the same
+        order as :attr:`members`.  Used both to materialise the
+        per-member adsorbate-anchor nodes on the graph and as a starting
+        guess for any downstream rigid-body / ML refinement.
+    member_node_ids : list[list[int]]
+        Per-member graph node ids for the materialised adsorbate-anchor
+        nodes (``len == n_atoms`` each, in reactant atom-index order).
+        Populated by :func:`_materialise_adsorbate_anchors`.  Use to
+        look up an iso-class member directly on the graph
+        (``[G.nodes[n] for n in member_node_ids[k]]``).
     ego_graph : nx.Graph | None
         ``n_shells_pair`` ego-subgraph used for isomorphism matching.
     """
-    smiles       : str
-    n_atoms      : int
-    atom_cliques : list
-    positions    : Any
-    iso_class    : int
-    members      : list   = field(default_factory=list)
-    ego_graph    : Any    = None
+    smiles           : str
+    n_atoms          : int
+    atom_cliques     : list
+    positions        : Any
+    iso_class        : int
+    members          : list   = field(default_factory=list)
+    member_positions : list   = field(default_factory=list)
+    member_node_ids  : list   = field(default_factory=list)
+    ego_graph        : Any    = None
 
 
 # ---------------------------------------------------------------------------
@@ -297,6 +310,12 @@ def _try_merge_or_new(
     (same surface cliques in the same atom slots) — important when the
     union-of-cliques ego graph collapses ``(A, B)`` and ``(B, A)`` for
     same-element/orbit diatomics.
+
+    The placement's full Cartesian geometry is stashed on the
+    ``MultiSite`` (``member_positions`` parallels ``members``) so that
+    every member can later be materialised on the graph as a connected
+    set of adsorbate-anchor nodes — see
+    :func:`_materialise_adsorbate_anchors`.
     """
     sig = _placement_signature(atom_cliques)
     if sig in seen_signatures:
@@ -305,6 +324,8 @@ def _try_merge_or_new(
 
     bonded_pattern = tuple(c is None for c in atom_cliques)
     fkey = _iso_prefilter_key(ego_graph)
+
+    pos_arr = np.asarray(positions, dtype=float)
 
     for ms in multisites:
         if tuple(c is None for c in ms.atom_cliques) != bonded_pattern:
@@ -317,16 +338,18 @@ def _try_merge_or_new(
             ego_graph, ms.ego_graph, node_match=node_match
         ).is_isomorphic():
             ms.members.append(list(atom_cliques))
+            ms.member_positions.append(pos_arr.copy())
             return
 
     multisites.append(MultiSite(
-        smiles       = smiles,
-        n_atoms      = len(atom_cliques),
-        atom_cliques = list(atom_cliques),
-        positions    = np.asarray(positions, dtype=float),
-        iso_class    = len(multisites),
-        members      = [list(atom_cliques)],
-        ego_graph    = ego_graph,
+        smiles           = smiles,
+        n_atoms          = len(atom_cliques),
+        atom_cliques     = list(atom_cliques),
+        positions        = pos_arr,
+        iso_class        = len(multisites),
+        members          = [list(atom_cliques)],
+        member_positions = [pos_arr.copy()],
+        ego_graph        = ego_graph,
     ))
 
 
@@ -472,9 +495,15 @@ def _clique_to_clique_max_hops(
         if target.issubset(dist):
             break
         for m in G.neighbors(n):
-            if m not in dist:
-                dist[m] = dist[n] + 1
-                q.append(m)
+            if m in dist:
+                continue
+            # Skip anchor nodes (materialised by default_sites) — they would
+            # otherwise act as 1-hop shortcuts between every clique that
+            # touches the same anchor.
+            if G.nodes[m].get("type") == "anchor":
+                continue
+            dist[m] = dist[n] + 1
+            q.append(m)
     if any(b not in dist for b in target):
         return 10 ** 6
     return max(dist[b] for b in target)
@@ -632,9 +661,13 @@ def _shortest_path_between_cliques(
         if n in target:
             return dist[n]
         for m in G.neighbors(n):
-            if m not in dist:
-                dist[m] = dist[n] + 1
-                q.append(m)
+            if m in dist:
+                continue
+            # Skip anchor nodes (see _clique_to_clique_max_hops).
+            if G.nodes[m].get("type") == "anchor":
+                continue
+            dist[m] = dist[n] + 1
+            q.append(m)
     return 10**6
 
 
@@ -670,6 +703,251 @@ def _min_ego_depth_for_connectivity(
             if d > max_d:
                 max_d = d
     return max_d
+
+
+# ---------------------------------------------------------------------------
+# Adsorbate-site anchor materialisation on G
+# ---------------------------------------------------------------------------
+
+def _next_anchor_id(G: nx.Graph) -> int:
+    """Smallest integer node id strictly greater than every existing one.
+
+    Mirrors :func:`autokmc.default_sites._next_anchor_id` but kept local
+    to avoid creating a circular import.  Adsorbate-anchor and
+    single-atom anchor nodes share the integer key namespace used by
+    :func:`autokmc.graph.build_graph`, so collisions are impossible by
+    construction.
+    """
+    if not G.nodes:
+        return 0
+    return int(max(int(n) for n in G.nodes if isinstance(n, (int, np.integer)))) + 1
+
+
+def _remove_adsorbate_anchor_nodes(G: nx.Graph, smiles: str) -> None:
+    """Drop every adsorbate-anchor node carrying ``smiles == smiles``.
+
+    Re-running :func:`find_multisites` for the same SMILES allocates
+    fresh node ids; the old ones must be removed first or the graph
+    accumulates orphaned anchors that would still be discoverable via
+    ``cache.multisites[smiles]`` from previous runs.
+    """
+    stale = [n for n, d in G.nodes(data=True)
+             if d.get("type") == "anchor" and d.get("smiles") == smiles]
+    if stale:
+        G.remove_nodes_from(stale)
+
+
+def _build_clique_position_index(
+    G: nx.Graph, elements: list[str]
+) -> dict[str, dict[frozenset, np.ndarray]]:
+    """``element -> {clique: optimised_position}`` for every cached site.
+
+    Used to recover per-atom Cartesians for *every* member of an
+    iso-class when materialising adsorbate-anchor nodes.  Entries are
+    only present for elements whose ``cache.site_positions`` has been
+    populated by :func:`autokmc.default_sites.optimise_site_positions`.
+    """
+    cache = get_cache(G)
+    out: dict[str, dict[frozenset, np.ndarray]] = {}
+    for el in set(elements):
+        sites_by_k = cache.sites.get(el, {})
+        pos_by_k   = cache.site_positions.get(el, {})
+        idx: dict[frozenset, np.ndarray] = {}
+        for k, cliques in sites_by_k.items():
+            positions = pos_by_k.get(k, [])
+            for clq, p in zip(cliques, positions):
+                idx[frozenset(clq)] = np.asarray(p, dtype=float)
+        out[el] = idx
+    return out
+
+
+def _member_positions(
+    G: nx.Graph,
+    reactant,
+    atom_cliques: list,
+    pos_index: dict[str, dict[frozenset, np.ndarray]],
+    elements: list[str],
+    pbc: np.ndarray,
+) -> np.ndarray | None:
+    """Reconstruct ``(n_atoms, 3)`` Cartesians for one member.
+
+    Returns ``None`` if any bonded atom's clique has no cached optimised
+    position (the iso-class representative still has its own
+    ``MultiSite.positions`` from the original enumeration; only secondary
+    members go through this path).
+    """
+    bonded: list[int] = []
+    bonded_pos: list[np.ndarray] = []
+    for i, clq in enumerate(atom_cliques):
+        if clq is None:
+            continue
+        p = pos_index.get(elements[i], {}).get(frozenset(clq))
+        if p is None:
+            return None
+        bonded.append(i)
+        bonded_pos.append(p)
+    if not bonded:
+        return None
+    return _full_adsorbate_positions(
+        reactant, bonded, np.array(bonded_pos, dtype=float), G, pbc
+    )
+
+
+def _materialise_adsorbate_anchors(
+    G: nx.Graph,
+    reactant,
+    multisites: list[MultiSite],
+) -> None:
+    """Create one connected adsorbate-anchor subgraph per member placement.
+
+    For every :class:`MultiSite` and every member, ``n_atoms`` anchor
+    nodes are added to *G* (``type="anchor"``, ``smiles=reactant.smiles``,
+    ``iso_class=ms.iso_class``, ``element=<reactant atom element>``).
+    Edges within the placement mirror ``reactant.graph`` (carrying
+    ``intra_adsorbate=True``); each *bonded* anchor is additionally
+    wired to every surface atom in its clique with ``anchor_bond=True``.
+
+    Each node also caches a ``siblings`` tuple containing the other
+    ``n_atoms - 1`` node ids in the same placement, so a single graph
+    lookup is enough to fetch the whole adsorbate site.
+
+    Node ids are pushed onto ``ms.member_node_ids`` (one list of
+    ``n_atoms`` ids per member, matching the order of
+    ``ms.members`` and ``ms.member_positions``).
+    """
+    smiles    = reactant.smiles
+    react_atoms   = reactant.atoms
+    react_symbols = react_atoms.get_chemical_symbols()
+    react_radii   = [
+        float(d.get("covalent_radius", 0.0))
+        for _, d in reactant.graph.nodes(data=True)
+    ] if reactant.graph is not None else [0.0] * len(react_symbols)
+    intra_edges = (list(reactant.graph.edges()) if reactant.graph is not None
+                   else [])
+
+    # Always wipe any leftover anchors for this SMILES first so re-running
+    # the enumerator is destructive in the same way as the single-atom
+    # path (default_sites._remove_anchor_nodes).
+    _remove_adsorbate_anchor_nodes(G, smiles)
+
+    pos_index = _build_clique_position_index(G, react_symbols)
+
+    cache = get_cache(G)
+    pbc = np.asarray(G.graph.get("pbc", [True, True, False]), dtype=bool)
+
+    for ms in multisites:
+        ms.member_node_ids = []
+        # Make sure the member_positions list is at least len(members).
+        # The enumerator always appends one position per member, but
+        # callers that reuse a half-built list shouldn't crash here.
+        while len(ms.member_positions) < len(ms.members):
+            ms.member_positions.append(None)  # type: ignore[arg-type]
+
+        for m_idx, atom_cliques in enumerate(ms.members):
+            positions = ms.member_positions[m_idx]
+            if positions is None:
+                positions = _member_positions(
+                    G, reactant, atom_cliques, pos_index, react_symbols, pbc
+                )
+            if positions is None:
+                # Fall back to the iso-class representative geometry —
+                # downstream optimisation can still refine it, and
+                # leaving a member with no graph nodes would silently
+                # break iso-class lookups by node id.
+                positions = np.asarray(ms.positions, dtype=float)
+            positions = np.asarray(positions, dtype=float)
+            ms.member_positions[m_idx] = positions
+
+            # Allocate N fresh ids in one go so they form a contiguous
+            # block (purely cosmetic but makes the ids easy to spot).
+            base = _next_anchor_id(G)
+            node_ids = [base + i for i in range(len(react_symbols))]
+
+            for i, nid in enumerate(node_ids):
+                clq = atom_cliques[i]
+                G.add_node(
+                    nid,
+                    element         = react_symbols[i],
+                    position        = positions[i].copy(),
+                    index           = nid,
+                    type            = "anchor",
+                    covalent_radius = react_radii[i],
+                    smiles          = smiles,
+                    iso_class       = int(ms.iso_class),
+                    reactant_index  = int(i),
+                    clique          = (frozenset(clq) if clq is not None else None),
+                    k               = (len(clq) if clq is not None else 0),
+                    is_bonded       = clq is not None,
+                    siblings        = tuple(n for n in node_ids if n != nid),
+                    optimised       = False,
+                )
+
+            # Intramolecular edges: copy reactant.graph topology onto the
+            # newly-allocated node ids.  ``intra_adsorbate=True`` lets
+            # consumers distinguish them from the surface bonds in G.
+            for u, v in intra_edges:
+                if u >= len(node_ids) or v >= len(node_ids):
+                    continue
+                a, b = node_ids[int(u)], node_ids[int(v)]
+                d = float(np.linalg.norm(positions[int(u)] - positions[int(v)]))
+                G.add_edge(a, b, distance=d, offset=(0, 0, 0),
+                           intra_adsorbate=True)
+
+            # Surface attachment: bonded atoms get anchor_bond edges to
+            # their clique members (mirrors single-atom anchors).
+            for i, nid in enumerate(node_ids):
+                clq = atom_cliques[i]
+                if clq is None:
+                    continue
+                for surf_id in clq:
+                    if surf_id not in G:
+                        continue
+                    d = float(np.linalg.norm(
+                        np.asarray(G.nodes[surf_id]["position"], dtype=float)
+                        - positions[i]
+                    ))
+                    G.add_edge(nid, surf_id, distance=d, offset=(0, 0, 0),
+                               anchor_bond=True)
+
+            ms.member_node_ids.append(node_ids)
+
+    # Make the typed cache point at the canonical list (it already does
+    # via the legacy alias, but be explicit so future callers don't have
+    # to chase the aliasing).
+    cache.multisites[smiles] = multisites
+
+
+def push_member_positions_to_graph(
+    G: nx.Graph, multisite: MultiSite, member_index: int,
+) -> None:
+    """Write ``multisite.member_positions[member_index]`` into the graph.
+
+    Use this from any downstream refinement (e.g.
+    :func:`optimise_multisite_positions`,
+    :func:`autokmc.opt_site.optimise_multisites_ml`) after updating a
+    member's Cartesian geometry, so that ``G.nodes[nid]["position"]``
+    and the ``intra_adsorbate`` / ``anchor_bond`` edge distances stay in
+    lock-step with the cached :class:`MultiSite`.
+    """
+    if member_index >= len(multisite.member_node_ids):
+        return
+    node_ids = multisite.member_node_ids[member_index]
+    positions = np.asarray(
+        multisite.member_positions[member_index], dtype=float
+    )
+    for i, nid in enumerate(node_ids):
+        if nid not in G:
+            continue
+        G.nodes[nid]["position"]  = positions[i].copy()
+        G.nodes[nid]["optimised"] = True
+    # Refresh edge distances (intra + anchor_bond).
+    for nid_a in node_ids:
+        if nid_a not in G:
+            continue
+        p_a = np.asarray(G.nodes[nid_a]["position"], dtype=float)
+        for nid_b in G.neighbors(nid_a):
+            p_b = np.asarray(G.nodes[nid_b]["position"], dtype=float)
+            G.edges[nid_a, nid_b]["distance"] = float(np.linalg.norm(p_a - p_b))
 
 
 def find_multisites(
@@ -800,6 +1078,12 @@ def find_multisites(
         if require_anchors:
             raise ValueError("Reactant has no anchor atoms.")
         return []
+
+    # Wipe any adsorbate-anchor nodes left over from a previous call for
+    # this SMILES.  Done up-front (before the surface-APSP / iso-class
+    # ego graphs are built) so the enumeration sees a clean graph; on
+    # the first run this is a no-op.
+    _remove_adsorbate_anchor_nodes(G, reactant.smiles)
 
     elements = {i: reactant.graph.nodes[i]["element"] for i in range(n_atoms)}
     react_pos = np.asarray(reactant.atoms.get_positions(), dtype=float)
@@ -1045,6 +1329,13 @@ def find_multisites(
 
     G.graph.setdefault("multisites", {})[reactant.smiles] = multisites
     get_cache(G).multisites[reactant.smiles] = multisites
+
+    # Materialise every member as a connected adsorbate-anchor subgraph
+    # on G.  Done last (after the iso-class enumeration is final) so the
+    # iso-class ego graphs above are computed against a clean
+    # surface-only graph and never see stale anchor nodes.
+    _materialise_adsorbate_anchors(G, reactant, multisites)
+
     return multisites
 
 
@@ -1061,6 +1352,25 @@ def find_multisites_for_reactant(*args, **kwargs):
     use :func:`find_multisites` directly.
     """
     return find_multisites(*args, **kwargs)
+
+
+# ---------------------------------------------------------------------------
+# New-name public aliases (preferred public API; see ``autokmc.sites``)
+# ---------------------------------------------------------------------------
+#
+# The pre-rename names (``MultiSite``, ``find_multisites``,
+# ``optimise_multisite_positions``) remain the canonical *implementation*
+# names inside this module — exhaustive find-and-replace would churn ~50
+# unrelated lines of docstrings and type hints — but every public surface
+# is also re-exported under the ``adsorbate_site`` spelling.  Prefer the
+# new names in new code; the old ones will be kept as aliases.
+
+AdsorbateSite = MultiSite
+find_adsorbate_sites = find_multisites
+find_adsorbate_sites_for_reactant = find_multisites_for_reactant
+# ``optimise_adsorbate_site_positions`` is defined later in this module
+# (after :func:`optimise_multisite_positions`) so its alias is bound at
+# the very bottom of the file.
 
 
 # ---------------------------------------------------------------------------
@@ -1421,6 +1731,15 @@ def optimise_multisite_positions(
             (new_pos - np.asarray(ms.positions))**2, axis=1
         ))))
         ms.positions = new_pos
+        # Keep the representative member (index 0) and the materialised
+        # graph nodes in lock-step with the refined geometry.  Other
+        # members are rotated/translated by downstream propagation
+        # (e.g. opt_site.optimise_multisites_ml's Kabsch step), which
+        # should call ``push_member_positions_to_graph`` itself.
+        if ms.member_positions:
+            ms.member_positions[0] = new_pos.copy()
+        if ms.member_node_ids:
+            push_member_positions_to_graph(G, ms, 0)
         if verbose:
             n_runs = max(1, int(n_restarts)) * (2 if try_flip else 1)
             print(
@@ -1430,4 +1749,10 @@ def optimise_multisite_positions(
             )
 
     return multisites
+
+
+# Public new-name alias (paired with :class:`AdsorbateSite` /
+# :func:`find_adsorbate_sites` above).
+optimise_adsorbate_site_positions = optimise_multisite_positions
+
 

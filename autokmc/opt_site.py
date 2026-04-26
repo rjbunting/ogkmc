@@ -1194,3 +1194,12 @@ def _run(
     )
     return multisites
 
+
+# ---------------------------------------------------------------------------
+# New-name public aliases (preferred — see ``autokmc.sites``)
+# ---------------------------------------------------------------------------
+
+optimise_adsorbate_sites_ml = optimise_multisites_ml
+seed_single_atom_adsorbate_sites = seed_single_atom_multisites
+
+

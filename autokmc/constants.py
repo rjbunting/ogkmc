@@ -60,10 +60,13 @@ STANDOFF_FACTOR: float = 0.85
 
 #: Default number of rigid-body rotational restarts about the local
 #: outward surface normal used by
-#: :func:`autokmc.find_multisite.optimise_multisite_positions`.  Combats
+#: :func:`autokmc.sites.optimise_adsorbate_site_positions`.  Combats
 #: local minima for asymmetric adsorbates on bridge/hollow sites.  ``1``
 #: disables multi-start.
-N_MULTISITE_RESTARTS: int = 6
+N_ADSORBATE_RESTARTS: int = 6
+
+#: Backward-compatible alias for the pre-rename name.
+N_MULTISITE_RESTARTS: int = N_ADSORBATE_RESTARTS
 
 #: Default radius (Å) of the spatial cutoff used to filter the non-bonded
 #: surface atoms that contribute to the repulsion sum in

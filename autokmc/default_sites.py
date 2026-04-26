@@ -79,6 +79,11 @@ class IsoClass:
     position : np.ndarray | None
         Optimised adsorbate Cartesian position (Å); ``None`` until
         :func:`optimise_site_positions` has been run.
+    member_node_ids : list[int]
+        Anchor node ids in *G* (one per element of :attr:`members`, in the
+        same order) for the materialised anchor nodes created by
+        :func:`find_sites_for_element`.  Use these to look up an
+        iso-class member directly on the graph (``G.nodes[node_id]``).
     """
     k              : int
     iso_class      : int
@@ -88,6 +93,7 @@ class IsoClass:
     centroid       : Any  = None
     ego_graph      : Any  = None
     position       : Any  = None
+    member_node_ids: list = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -240,14 +246,20 @@ def _build_clique_ego(
 
     Expands outward shell by shell from the clique nodes through the full
     graph (all node types, so subsurface atoms contribute at n_shells>=2).
+    Anchor-typed nodes (materialised by :func:`find_sites_for_element`)
+    are skipped during expansion so iso-class discrimination is based on
+    the underlying metal connectivity only.
     """
-    frontier: set[int] = set(clique)
-    visited:  set[int] = set(clique)
+    frontier: set = set(clique)
+    visited:  set = set(clique)
 
     for _ in range(n_shells):
-        next_shell: set[int] = set()
+        next_shell: set = set()
         for n in frontier:
-            next_shell.update(surface_graph.neighbors(n))
+            for nb in surface_graph.neighbors(n):
+                if surface_graph.nodes[nb].get("type") == "anchor":
+                    continue
+                next_shell.add(nb)
         frontier = next_shell - visited
         visited |= frontier
 
@@ -477,6 +489,87 @@ def _optimize_site_position(
 # Public API
 # ---------------------------------------------------------------------------
 
+def _next_anchor_id(G: nx.Graph) -> int:
+    """Smallest int id strictly greater than every existing node id.
+
+    Anchor nodes share the integer key namespace as the atom nodes
+    written by :func:`autokmc.graph.build_graph` (atoms 0..N-1) so that
+    downstream code that assumes integer node ids continues to work.
+    """
+    if not G.nodes:
+        return 0
+    return int(max(int(n) for n in G.nodes if isinstance(n, (int, np.integer)))) + 1
+
+
+def _remove_anchor_nodes(G: nx.Graph, element: str) -> None:
+    """Drop anchor nodes previously created by :func:`find_sites_for_element`
+    for *element* (and forget them in the cache).
+
+    Re-running site discovery for the same element is destructive: the
+    old anchor ids become stale and must be wiped from *G* before new
+    ones are allocated, otherwise the graph accumulates orphaned anchors
+    across calls.
+    """
+    cache = get_cache(G)
+    nodes = cache.anchor_nodes.pop(element, None)
+    if not nodes:
+        # Defensive: also catch any stray anchors tagged for this element
+        # that are not (or no longer) in the registry.
+        stray = [n for n, d in G.nodes(data=True)
+                 if d.get("type") == "anchor" and d.get("element") == element]
+        G.remove_nodes_from(stray)
+        return
+    for by_k in nodes.values():
+        G.remove_nodes_from(by_k)
+
+
+def _add_anchor_node(
+    G: nx.Graph,
+    *,
+    element: str,
+    r_cov_ads: float,
+    clique: frozenset,
+    centroid: np.ndarray,
+    k: int,
+) -> int:
+    """Create and connect a single anchor node for one site clique.
+
+    The anchor lives at the MIC clique centroid (the position will be
+    moved by :func:`optimise_site_positions`).  An undirected
+    ``anchor_bond`` edge is added to every surface atom in *clique* so
+    the site's coordination is queryable directly from the graph.
+    """
+    nid = _next_anchor_id(G)
+    G.add_node(
+        nid,
+        element         = element,
+        position        = np.asarray(centroid, dtype=float).copy(),
+        index           = nid,
+        type            = "anchor",
+        covalent_radius = float(r_cov_ads),
+        clique          = clique,
+        k               = int(k),
+        # The following are populated later by reduce_sites_by_isomorphism
+        # / optimise_site_positions and are surfaced here as ``None``/False
+        # so consumers can rely on the keys existing.
+        n_shells        = None,
+        ego_subgraph    = None,
+        iso_class       = None,
+        optimised       = False,
+    )
+    for surf_id in clique:
+        # MIC distance for the anchor_bond edge so neighbour walks that
+        # consult ``edge["distance"]`` keep working.
+        if surf_id not in G:
+            continue
+        d = float(np.linalg.norm(
+            np.asarray(G.nodes[surf_id]["position"], dtype=float) - centroid
+        ))
+        G.add_edge(nid, surf_id,
+                   distance=d, offset=(0, 0, 0), anchor_bond=True)
+    return nid
+
+
 def k_max_for_radius(
     surface_graph: nx.Graph,
     r_cov_ads: float,
@@ -524,10 +617,27 @@ def find_sites_for_element(
     Stored at ``G.graph['sites'][element]`` (and on the typed
     :class:`~autokmc.cache.SiteCache`).  Each site is a frozenset of
     surface-atom global indices.
+
+    Side effect — anchor nodes
+    --------------------------
+    For every emitted site, an *anchor node* is also added to *G*
+    (``type="anchor"``, ``element=element``, ``covalent_radius=r_cov_ads``)
+    and connected to every surface atom in the site's clique with an
+    ``anchor_bond=True`` edge.  Anchor node ids are recorded in
+    ``cache.anchor_nodes[element][k]`` (parallel to
+    ``cache.sites[element][k]``).  Re-running this function for the
+    same *element* first removes any previously-added anchor nodes —
+    callers therefore get a fresh, consistent set of anchors.
     """
     if element not in ASE_ATOMIC_NUMBERS:
         raise KeyError(f"Unknown element '{element}'.")
     cache = get_cache(G)
+
+    # Idempotency: drop any anchor nodes from a previous call before we
+    # allocate fresh ids (otherwise stale anchors would accumulate and
+    # `cache.anchor_nodes` would lose its 1-to-1 alignment with
+    # `cache.sites`).
+    _remove_anchor_nodes(G, element)
 
     r_cov = float(ASE_COVALENT_RADII[ASE_ATOMIC_NUMBERS[element]])
 
@@ -596,6 +706,23 @@ def find_sites_for_element(
 
     cache.k_max[element] = k_max
     cache.sites[element] = sites
+
+    # Materialise an anchor node on G for every accepted clique, in the
+    # same per-k order as ``sites[element][k]`` so callers can index into
+    # ``cache.anchor_nodes[element][k]`` with the same offset.
+    anchor_nodes: dict[int, list[int]] = {}
+    for k, cliques in sorted(sites.items()):
+        ids: list[int] = []
+        for clq in cliques:
+            centroid = _clique_centroid(G, clq, cell, cell_inv, pbc, use_mic)
+            nid = _add_anchor_node(
+                G,
+                element=element, r_cov_ads=r_cov,
+                clique=clq, centroid=centroid, k=k,
+            )
+            ids.append(nid)
+        anchor_nodes[k] = ids
+    cache.anchor_nodes[element] = anchor_nodes
     return sites
 
 
@@ -656,20 +783,36 @@ def reduce_sites_by_isomorphism(
                     iso_ids.append(len(class_reps) - 1)
 
             classes: list[IsoClass] = []
+            anchor_ids_by_k = cache.anchor_nodes.get(element, {}).get(k, [])
             for cid in range(len(class_reps)):
-                members  = [cliques[i] for i, iso in enumerate(iso_ids) if iso == cid]
+                member_local_idxs = [i for i, iso in enumerate(iso_ids) if iso == cid]
+                members  = [cliques[i] for i in member_local_idxs]
+                member_node_ids = [int(anchor_ids_by_k[i])
+                                   for i in member_local_idxs
+                                   if i < len(anchor_ids_by_k)]
                 rep      = members[0]
                 pos_arr  = np.array([surf_pos[n] for n in rep if n in surf_pos])
                 centroid = pos_arr.mean(axis=0) if len(pos_arr) else None
+                ego_g    = class_reps[cid]
                 classes.append(IsoClass(
-                    k              = k,
-                    iso_class      = cid,
-                    n_shells       = n_shells,
-                    representative = rep,
-                    members        = members,
-                    centroid       = centroid,
-                    ego_graph      = class_reps[cid],
+                    k               = k,
+                    iso_class       = cid,
+                    n_shells        = n_shells,
+                    representative  = rep,
+                    members         = members,
+                    centroid        = centroid,
+                    ego_graph       = ego_g,
+                    member_node_ids = member_node_ids,
                 ))
+                # Stamp the iso-class identity onto every anchor node so
+                # ``G.nodes[anchor_id]`` is self-describing.  ``ego_subgraph``
+                # is the iso-class representative ego (shared object — cheap;
+                # the ego is read-only data downstream).
+                for nid in member_node_ids:
+                    if nid in G:
+                        G.nodes[nid]["iso_class"]    = cid
+                        G.nodes[nid]["n_shells"]     = n_shells
+                        G.nodes[nid]["ego_subgraph"] = ego_g
             unique[k] = classes
 
             label = _LABELS.get(k, f"{k}-fold")
@@ -727,10 +870,12 @@ def optimise_site_positions(
 
         positions: dict[int, list[np.ndarray]] = {}
         _LABELS = {1: "top", 2: "bridge", 3: "hollow"}
+        anchors_by_k = cache.anchor_nodes.get(element, {})
 
         for k, cliques in sorted(sites_by_k.items()):
             pos_list: list[np.ndarray] = []
-            for clique in cliques:
+            anchor_ids = anchors_by_k.get(k, [])
+            for idx, clique in enumerate(cliques):
                 p = _optimize_site_position(
                     G, clique, r_cov,
                     opt_factor=opt_factor,
@@ -739,6 +884,21 @@ def optimise_site_positions(
                     repulsion_cutoff=repulsion_cutoff,
                 )
                 pos_list.append(p)
+                # Move the materialised anchor node to the optimised position
+                # and flag it.  Done here (rather than in a separate pass)
+                # so the graph and the cache stay in lock-step.
+                if idx < len(anchor_ids):
+                    nid = anchor_ids[idx]
+                    if nid in G:
+                        G.nodes[nid]["position"]  = np.asarray(p, dtype=float).copy()
+                        G.nodes[nid]["optimised"] = True
+                        # Refresh anchor_bond edge distances so callers that
+                        # consult ``edge["distance"]`` see the updated value.
+                        for surf_id in clique:
+                            if G.has_edge(nid, surf_id):
+                                G.edges[nid, surf_id]["distance"] = float(np.linalg.norm(
+                                    np.asarray(G.nodes[surf_id]["position"], dtype=float) - p
+                                ))
             positions[k] = pos_list
             label = _LABELS.get(k, f"{k}-fold")
             _log.debug("  k=%d %-8s %4d positions optimised",

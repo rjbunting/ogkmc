@@ -20,3 +20,6 @@ Multi site:
 Set the tolerance to something reasonable. Can test this more later (probably too small)
 
 Solve beyond rigid molecule - can have variable orbits? maybe?
+
+reactants.py:
+Can remove excess premutation trials for really big an expensive molecules by just saying one face of the convex hull can be connected at one time. This is just a speed up but I don't think it is a big win.

@@ -45,11 +45,28 @@ class SiteCache:
     unique_sites   : Dict[str, Dict[int, Dict[int, List[Any]]]]                = field(default_factory=dict)
     # element -> {k: [np.ndarray]}
     site_positions : Dict[str, Dict[int, List[Any]]]                           = field(default_factory=dict)
-    # smiles -> [MultiSite]
-    multisites     : Dict[str, List[Any]]                                      = field(default_factory=dict)
+    # smiles -> [AdsorbateSite]
+    adsorbate_sites: Dict[str, List[Any]]                                      = field(default_factory=dict)
+    # element -> {k: [anchor_node_id]}; one entry per raw site clique, in the
+    # *same order* as ``sites[element][k]``.  Anchor nodes are materialised on
+    # the graph (type="anchor") by ``find_sites_for_element`` so that every
+    # site is addressable by a stable graph node id.
+    anchor_nodes   : Dict[str, Dict[int, List[int]]]                           = field(default_factory=dict)
     # cached convex hull (nanoparticles only) and surface APSP
     hull           : Any                                                       = None
     surface_apsp   : Any                                                       = None  # nx-style dict-of-dicts
+
+    # Backward-compatible alias for the pre-rename ``multisites`` field.
+    # Reads/writes proxy to :attr:`adsorbate_sites` so callers using either
+    # name see the same dict object — important because legacy code stamps
+    # entries onto ``cache.multisites[smiles]`` directly.
+    @property
+    def multisites(self) -> Dict[str, List[Any]]:
+        return self.adsorbate_sites
+
+    @multisites.setter
+    def multisites(self, value: Dict[str, List[Any]]) -> None:
+        self.adsorbate_sites = value
 
     # ------------------------------------------------------------------
     # Convenience helpers
@@ -62,7 +79,8 @@ class SiteCache:
             self.sites.clear()
             self.unique_sites.clear()
             self.site_positions.clear()
-            self.multisites.clear()
+            self.adsorbate_sites.clear()
+            self.anchor_nodes.clear()
             self.hull = None
             self.surface_apsp = None
             return
@@ -71,8 +89,9 @@ class SiteCache:
             self.sites.pop(element, None)
             self.unique_sites.pop(element, None)
             self.site_positions.pop(element, None)
+            self.anchor_nodes.pop(element, None)
         if smiles is not None:
-            self.multisites.pop(smiles, None)
+            self.adsorbate_sites.pop(smiles, None)
 
     def summary(self) -> str:
         """Short human-readable description of what has been cached."""
@@ -88,9 +107,9 @@ class SiteCache:
         if self.site_positions:
             for el in self.site_positions:
                 lines.append(f"  site_positions[{el!r}] : present")
-        if self.multisites:
-            for sm, ms in self.multisites.items():
-                lines.append(f"  multisites[{sm!r}]    : {len(ms)} iso-classes")
+        if self.adsorbate_sites:
+            for sm, ms in self.adsorbate_sites.items():
+                lines.append(f"  adsorbate_sites[{sm!r}] : {len(ms)} iso-classes")
         if self.hull is not None:
             lines.append("  hull                  : cached")
         if self.surface_apsp is not None:
@@ -104,7 +123,8 @@ class SiteCache:
 # Accessor that also keeps the legacy top-level keys in sync
 # ---------------------------------------------------------------------------
 
-_LEGACY_KEYS = ("k_max", "sites", "unique_sites", "site_positions", "multisites")
+_LEGACY_KEYS = ("k_max", "sites", "unique_sites", "site_positions",
+                "adsorbate_sites", "multisites")
 
 
 def get_cache(G: nx.Graph) -> SiteCache:

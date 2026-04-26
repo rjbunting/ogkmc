@@ -8,7 +8,11 @@ Each node represents one atom and carries:
 * ``element``        – chemical symbol (str)
 * ``position``       – Cartesian coordinates (np.ndarray, shape (3,))
 * ``index``          – atom index in the original :class:`~ase.Atoms` object (int)
-* ``type``           – one of ``"bulk"``, ``"surface"``, or ``"adsorbate"`` (str)
+* ``type``           – one of ``"bulk"``, ``"surface"``, ``"adsorbate"``,
+  or ``"anchor"`` (str).  The first three are written here from
+  ``atoms.arrays["surface"]``; ``"anchor"`` nodes are added later by
+  :func:`autokmc.default_sites.find_sites_for_element` (one node per
+  raw site clique).
 * ``covalent_radius``– covalent radius in Å from ASE data (float)
 
 Each edge carries:
