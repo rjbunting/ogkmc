@@ -11,8 +11,7 @@ atom — rather than a single node.
 
 The same code path handles diatomics, triatomics and arbitrary N-atom
 adsorbates: there is **one** universal enumerator,
-:func:`find_multisites`.  ``find_multisites_for_reactant`` is kept as a
-thin back-compat wrapper.
+:func:`find_adsorbate_sites`.
 
 Strategy
 --------
@@ -53,24 +52,23 @@ Strategy
    placement has bonded cliques further apart than the iso-class ego
    graph could see, the enumeration is repeated at a larger depth.
 
-7. **Optional rigid-body refinement.**  :func:`optimise_multisite_positions`
+7. **Optional rigid-body refinement.**  :func:`optimise_adsorbate_site_positions`
    does a calculator-free L-BFGS-B refinement of each placement's 6
    rigid-body DOF, restraining bonded atoms toward their site targets
    while penalising adsorbate ↔ surface clipping.
 
 Storage
 -------
-Results are written to ``G.graph["multisites"][reactant.smiles]`` as a
-``list[MultiSite]``.  The single-atom data in
+Results are written to ``cache.adsorbate_sites[reactant.smiles]`` as a
+``list[AdsorbateSite]``.  The single-atom data in
 ``G.graph["sites"]`` / ``["unique_sites"]`` / ``["site_positions"]`` is
 **never mutated**.
 
 Public API
 ----------
-* :class:`MultiSite`                       -- one iso-class of multi-atom placements
-* :func:`find_multisites`                  -- universal N-atom enumerator (N>=2)
-* :func:`find_multisites_for_reactant`     -- back-compat alias
-* :func:`optimise_multisite_positions`     -- rigid-body refinement of MultiSite.positions
+* :class:`AdsorbateSite`                   -- one iso-class of multi-atom placements
+* :func:`find_adsorbate_sites`             -- universal N-atom enumerator (N>=2)
+* :func:`optimise_adsorbate_site_positions` -- rigid-body refinement of positions
 """
 
 from __future__ import annotations
@@ -97,7 +95,7 @@ from autokmc.constants import (
     CONTACT_FACTOR,
     MAX_PAIR_SHELLS,
     NN_DISTANCE,
-    N_MULTISITE_RESTARTS,
+    N_ADSORBATE_RESTARTS,
     N_SHELLS_DEFAULT,
     OPT_FACTOR,
     REPULSION_WEIGHT,
@@ -113,7 +111,7 @@ _log = get_logger(__name__)
 # ---------------------------------------------------------------------------
 
 @dataclass
-class MultiSite:
+class AdsorbateSite:
     """One isomorphism class of multi-atom adsorbate placements.
 
     Attributes
@@ -205,7 +203,7 @@ def _ensure_default_sites(
         # iso-classes we just created at the new depth carry
         # position=None.  Inject the cached site positions into them so
         # downstream code (which skips position=None classes) actually
-        # sees them.  Without this, e.g. find_multisites for OCS — whose
+        # sees them.  Without this, e.g. find_adsorbate_sites for OCS — whose
         # reach forces n_shells_anchor=2 — would silently produce zero
         # placements after a previous depth-1 default_sites pass.
         propagate_positions_to_iso_classes(G, element)
@@ -295,7 +293,7 @@ def _placement_signature(atom_cliques) -> tuple:
 
 
 def _try_merge_or_new(
-    multisites: list[MultiSite],
+    adsorbate_sites: list[AdsorbateSite],
     *,
     smiles: str,
     atom_cliques: list,
@@ -312,7 +310,7 @@ def _try_merge_or_new(
     same-element/orbit diatomics.
 
     The placement's full Cartesian geometry is stashed on the
-    ``MultiSite`` (``member_positions`` parallels ``members``) so that
+    ``AdsorbateSite`` (``member_positions`` parallels ``members``) so that
     every member can later be materialised on the graph as a connected
     set of adsorbate-anchor nodes — see
     :func:`_materialise_adsorbate_anchors`.
@@ -327,7 +325,7 @@ def _try_merge_or_new(
 
     pos_arr = np.asarray(positions, dtype=float)
 
-    for ms in multisites:
+    for ms in adsorbate_sites:
         if tuple(c is None for c in ms.atom_cliques) != bonded_pattern:
             continue
         if ms.ego_graph is None:
@@ -341,12 +339,12 @@ def _try_merge_or_new(
             ms.member_positions.append(pos_arr.copy())
             return
 
-    multisites.append(MultiSite(
+    adsorbate_sites.append(AdsorbateSite(
         smiles           = smiles,
         n_atoms          = len(atom_cliques),
         atom_cliques     = list(atom_cliques),
         positions        = pos_arr,
-        iso_class        = len(multisites),
+        iso_class        = len(adsorbate_sites),
         members          = [list(atom_cliques)],
         member_positions = [pos_arr.copy()],
         ego_graph        = ego_graph,
@@ -465,7 +463,7 @@ def _clique_to_clique_max_hops(
     *clique_b* via the surface graph.
 
     Uses cached all-pairs shortest paths (``apsp``) when available — the
-    typical path through :func:`find_multisites`, which calls
+    typical path through :func:`find_adsorbate_sites`, which calls
     :func:`_get_surface_apsp` once per enumeration pass.  Falls back to
     a multi-source BFS when no cache is provided.
     """
@@ -509,10 +507,10 @@ def _clique_to_clique_max_hops(
     return max(dist[b] for b in target)
 
 
-def _required_n_shells(G: nx.Graph, multisites: list[MultiSite],
+def _required_n_shells(G: nx.Graph, adsorbate_sites: list[AdsorbateSite],
                        *, apsp: dict | None = None) -> int:
     """Largest depth needed for the iso-class ego graph to actually
-    contain every other bonded clique seen in *multisites*.
+    contain every other bonded clique seen in *adsorbate_sites*.
 
     The first bonded reactant atom is the one whose clique seeds the
     ego subgraph used for iso-class discrimination; for every emitted
@@ -520,7 +518,7 @@ def _required_n_shells(G: nx.Graph, multisites: list[MultiSite],
     bonded cliques sit from that seed and return the max.
     """
     needed = 0
-    for ms in multisites:
+    for ms in adsorbate_sites:
         bonded = [c for c in ms.atom_cliques if c is not None]
         if len(bonded) < 2:
             continue
@@ -726,10 +724,10 @@ def _next_anchor_id(G: nx.Graph) -> int:
 def _remove_adsorbate_anchor_nodes(G: nx.Graph, smiles: str) -> None:
     """Drop every adsorbate-anchor node carrying ``smiles == smiles``.
 
-    Re-running :func:`find_multisites` for the same SMILES allocates
+    Re-running :func:`find_adsorbate_sites` for the same SMILES allocates
     fresh node ids; the old ones must be removed first or the graph
     accumulates orphaned anchors that would still be discoverable via
-    ``cache.multisites[smiles]`` from previous runs.
+    ``cache.adsorbate_sites[smiles]`` from previous runs.
     """
     stale = [n for n, d in G.nodes(data=True)
              if d.get("type") == "anchor" and d.get("smiles") == smiles]
@@ -773,7 +771,7 @@ def _member_positions(
 
     Returns ``None`` if any bonded atom's clique has no cached optimised
     position (the iso-class representative still has its own
-    ``MultiSite.positions`` from the original enumeration; only secondary
+    ``AdsorbateSite.positions`` from the original enumeration; only secondary
     members go through this path).
     """
     bonded: list[int] = []
@@ -796,11 +794,11 @@ def _member_positions(
 def _materialise_adsorbate_anchors(
     G: nx.Graph,
     reactant,
-    multisites: list[MultiSite],
+    adsorbate_sites: list[AdsorbateSite],
 ) -> None:
     """Create one connected adsorbate-anchor subgraph per member placement.
 
-    For every :class:`MultiSite` and every member, ``n_atoms`` anchor
+    For every :class:`AdsorbateSite` and every member, ``n_atoms`` anchor
     nodes are added to *G* (``type="anchor"``, ``smiles=reactant.smiles``,
     ``iso_class=ms.iso_class``, ``element=<reactant atom element>``).
     Edges within the placement mirror ``reactant.graph`` (carrying
@@ -835,7 +833,7 @@ def _materialise_adsorbate_anchors(
     cache = get_cache(G)
     pbc = np.asarray(G.graph.get("pbc", [True, True, False]), dtype=bool)
 
-    for ms in multisites:
+    for ms in adsorbate_sites:
         ms.member_node_ids = []
         # Make sure the member_positions list is at least len(members).
         # The enumerator always appends one position per member, but
@@ -911,23 +909,21 @@ def _materialise_adsorbate_anchors(
 
             ms.member_node_ids.append(node_ids)
 
-    # Make the typed cache point at the canonical list (it already does
-    # via the legacy alias, but be explicit so future callers don't have
-    # to chase the aliasing).
-    cache.multisites[smiles] = multisites
+    # Make the typed cache point at the canonical list.
+    cache.adsorbate_sites[smiles] = adsorbate_sites
 
 
 def push_member_positions_to_graph(
-    G: nx.Graph, multisite: MultiSite, member_index: int,
+    G: nx.Graph, multisite: AdsorbateSite, member_index: int,
 ) -> None:
     """Write ``multisite.member_positions[member_index]`` into the graph.
 
     Use this from any downstream refinement (e.g.
-    :func:`optimise_multisite_positions`,
-    :func:`autokmc.opt_site.optimise_multisites_ml`) after updating a
+    :func:`optimise_adsorbate_site_positions`,
+    :func:`autokmc.opt_site.optimise_adsorbate_sites_ml`) after updating a
     member's Cartesian geometry, so that ``G.nodes[nid]["position"]``
     and the ``intra_adsorbate`` / ``anchor_bond`` edge distances stay in
-    lock-step with the cached :class:`MultiSite`.
+    lock-step with the cached :class:`AdsorbateSite`.
     """
     if member_index >= len(multisite.member_node_ids):
         return
@@ -950,7 +946,7 @@ def push_member_positions_to_graph(
             G.edges[nid_a, nid_b]["distance"] = float(np.linalg.norm(p_a - p_b))
 
 
-def find_multisites(
+def find_adsorbate_sites(
     G: nx.Graph,
     reactant,
     *,
@@ -967,7 +963,7 @@ def find_multisites(
     require_surface_connected: bool = True,
     max_pair_shells: int = MAX_PAIR_SHELLS,
     verbose: bool = False,
-) -> list[MultiSite]:
+) -> list[AdsorbateSite]:
     """Universal N-atom adsorbate site enumerator (handles N >= 2).
 
     Single code path for diatomics, triatomics and arbitrary multi-atom
@@ -1064,13 +1060,13 @@ def find_multisites(
 
     Returns
     -------
-    list[MultiSite]
-        Also stored in ``G.graph["multisites"][reactant.smiles]``.
+    list[AdsorbateSite]
+        Also stored in ``cache.adsorbate_sites[reactant.smiles]``.
     """
     n_atoms = len(reactant.atoms)
     if n_atoms < 2:
         raise ValueError(
-            f"find_multisites needs >=2 atoms, got {n_atoms}."
+            f"find_adsorbate_sites needs >=2 atoms, got {n_atoms}."
         )
 
     anchors = sorted(int(i) for i in reactant.anchor_atoms)
@@ -1103,7 +1099,7 @@ def find_multisites(
 
     if verbose:
         print(
-            f"find_multisites: smiles={reactant.smiles!r}  "
+            f"find_adsorbate_sites: smiles={reactant.smiles!r}  "
             f"N={n_atoms}  anchors={anchors}  "
             f"n_shells_anchor={n_shells_anchor_eff}  "
             f"n_shells_pair={n_shells_pair}  tol={bond_tolerance} Å"
@@ -1121,7 +1117,7 @@ def find_multisites(
     apsp = _get_surface_apsp(G, cutoff=max_pair_shells) \
         if require_surface_connected else None
 
-    def _run_pass(depth: int) -> list[MultiSite]:
+    def _run_pass(depth: int) -> list[AdsorbateSite]:
         """One enumeration pass at iso-class depth ``depth``."""
         for el in anchor_elements:
             _ensure_default_sites(
@@ -1145,7 +1141,7 @@ def find_multisites(
                 flat.extend(classes)
             iso_classes_by_elem[el] = flat
 
-        multisites: list[MultiSite] = []
+        multisites: list[AdsorbateSite] = []
         seen_signatures: set = set()
 
         # Build the list of anchor subsets to enumerate.
@@ -1282,7 +1278,7 @@ def find_multisites(
 
     # ── Retry loop: grow n_shells_anchor if any placement reaches further
     #    than the iso-class ego graph used to deduplicate first anchors. ─
-    multisites: list[MultiSite] = _run_pass(n_shells_anchor_eff)
+    multisites: list[AdsorbateSite] = _run_pass(n_shells_anchor_eff)
     retries = 0
     while auto_grow_shells and retries < max_shell_retries:
         needed = _required_n_shells(G, multisites, apsp=apsp)
@@ -1327,8 +1323,9 @@ def find_multisites(
             f"{total_members} placements total"
         )
 
-    G.graph.setdefault("multisites", {})[reactant.smiles] = multisites
-    get_cache(G).multisites[reactant.smiles] = multisites
+    cache = get_cache(G)
+    cache.adsorbate_sites[reactant.smiles] = multisites
+    G.graph["adsorbate_sites"][reactant.smiles] = multisites
 
     # Materialise every member as a connected adsorbate-anchor subgraph
     # on G.  Done last (after the iso-class enumeration is final) so the
@@ -1340,41 +1337,7 @@ def find_multisites(
 
 
 # ---------------------------------------------------------------------------
-# Backward-compatibility alias
-# ---------------------------------------------------------------------------
-
-def find_multisites_for_reactant(*args, **kwargs):
-    """Deprecated alias for :func:`find_multisites`.
-
-    The N-atom and 2-atom enumerators have been merged into a single
-    universal :func:`find_multisites`.  This shim is retained so that
-    existing notebooks and call-sites continue to work; new code should
-    use :func:`find_multisites` directly.
-    """
-    return find_multisites(*args, **kwargs)
-
-
-# ---------------------------------------------------------------------------
-# New-name public aliases (preferred public API; see ``autokmc.sites``)
-# ---------------------------------------------------------------------------
-#
-# The pre-rename names (``MultiSite``, ``find_multisites``,
-# ``optimise_multisite_positions``) remain the canonical *implementation*
-# names inside this module — exhaustive find-and-replace would churn ~50
-# unrelated lines of docstrings and type hints — but every public surface
-# is also re-exported under the ``adsorbate_site`` spelling.  Prefer the
-# new names in new code; the old ones will be kept as aliases.
-
-AdsorbateSite = MultiSite
-find_adsorbate_sites = find_multisites
-find_adsorbate_sites_for_reactant = find_multisites_for_reactant
-# ``optimise_adsorbate_site_positions`` is defined later in this module
-# (after :func:`optimise_multisite_positions`) so its alias is bound at
-# the very bottom of the file.
-
-
-# ---------------------------------------------------------------------------
-# Rigid-body refinement of MultiSite.positions
+# Rigid-body refinement of AdsorbateSite.positions
 # ---------------------------------------------------------------------------
 
 def _rotation_from_axis_angle(rotvec: np.ndarray) -> np.ndarray:
@@ -1417,7 +1380,7 @@ def _surface_atoms_array(G: nx.Graph) -> tuple[np.ndarray, np.ndarray, list]:
     )
 
 
-def optimise_multisite_positions(
+def optimise_adsorbate_site_positions(
     G: nx.Graph,
     smiles: str,
     reactant,
@@ -1426,13 +1389,13 @@ def optimise_multisite_positions(
     repulsion_weight: float = 1.0,
     contact_factor: float = CONTACT_FACTOR,
     standoff_factor: float = STANDOFF_FACTOR,
-    n_restarts: int = N_MULTISITE_RESTARTS,
+    n_restarts: int = N_ADSORBATE_RESTARTS,
     try_flip: bool = True,
     max_iter: int = 100,
     verbose: bool = False,
-) -> list[MultiSite]:
-    """Rigid-body refinement of every ``MultiSite.positions`` for
-    ``G.graph["multisites"][smiles]``.
+) -> list[AdsorbateSite]:
+    """Rigid-body refinement of every ``AdsorbateSite.positions`` for
+    ``cache.adsorbate_sites[smiles]``.
 
     Each placement is treated as 6 rigid-body DOF — 3 translation and 3
     axis-angle rotation — applied to the gas-phase reactant geometry
@@ -1486,9 +1449,9 @@ def optimise_multisite_positions(
     Parameters
     ----------
     G : nx.Graph
-        Surface graph with multisites already enumerated.
+        Surface graph with adsorbate sites already enumerated.
     smiles : str
-        Key into ``G.graph['multisites']``.
+        Key into ``cache.adsorbate_sites``.
     reactant : :class:`autokmc.reactants.Reactant`
         Gas-phase reactant whose ``atoms.get_positions()`` defines the
         rigid-body reference geometry ``q_i``.  Must match *smiles*.
@@ -1506,7 +1469,7 @@ def optimise_multisite_positions(
         original "restrain onto the clique centroid" behaviour.
     n_restarts : int
         Number of rigid-body rotational restarts about the local
-        outward normal.  Default ``N_MULTISITE_RESTARTS`` (6).
+        outward normal.  Default ``N_ADSORBATE_RESTARTS`` (6).
     try_flip : bool
         If True (default), also try each rotational restart with the
         molecule flipped 180° about an in-plane axis.  Required for
@@ -1521,35 +1484,36 @@ def optimise_multisite_positions(
 
     Returns
     -------
-    list[MultiSite]
-        The same list stored in ``G.graph['multisites'][smiles]``;
-        ``MultiSite.positions`` is updated in place.
+    list[AdsorbateSite]
+        The same list stored in ``cache.adsorbate_sites[smiles]``;
+        ``AdsorbateSite.positions`` is updated in place.
 
     Raises
     ------
     ImportError
         If ``scipy`` is not installed.
     KeyError
-        If ``smiles`` is not present in ``G.graph['multisites']`` or if
+        If ``smiles`` is not present in ``cache.adsorbate_sites`` or if
         the bonded cliques cannot be located in ``G.graph['sites']``.
     """
     try:
         from scipy.optimize import minimize
     except ImportError as e:
         raise ImportError(
-            "optimise_multisite_positions requires scipy "
+            "optimise_adsorbate_site_positions requires scipy "
             "(install with `pip install scipy`)."
         ) from e
 
-    if "multisites" not in G.graph or smiles not in G.graph["multisites"]:
+    cache = get_cache(G)
+    if smiles not in cache.adsorbate_sites:
         raise KeyError(
-            f"No multisites enumerated for SMILES {smiles!r}; "
-            "call find_multisites first."
+            f"No adsorbate sites enumerated for SMILES {smiles!r}; "
+            "call find_adsorbate_sites first."
         )
 
-    multisites: list[MultiSite] = G.graph["multisites"][smiles]
-    if not multisites:
-        return multisites
+    adsorbate_sites: list[AdsorbateSite] = cache.adsorbate_sites[smiles]
+    if not adsorbate_sites:
+        return adsorbate_sites
 
     # ── Reference geometry & per-atom covalent radii ────────────────────
     from ase.data import covalent_radii as _RC, atomic_numbers as _AN
@@ -1580,7 +1544,7 @@ def optimise_multisite_positions(
 
     cell, cell_inv, pbc, use_mic = _resolve_cell(G)
 
-    def _refine(ms: MultiSite) -> tuple[np.ndarray, float, float, int]:
+    def _refine(ms: AdsorbateSite) -> tuple[np.ndarray, float, float, int]:
         """Refine one placement; returns (new_positions, E0, E_final, best_restart)."""
         bonded_idx = [i for i, c in enumerate(ms.atom_cliques) if c is not None]
 
@@ -1712,15 +1676,15 @@ def optimise_multisite_positions(
     if verbose:
         n_runs_per = max(1, int(n_restarts)) * (2 if try_flip else 1)
         print(
-            f"optimise_multisite_positions: smiles={smiles!r}  "
-            f"placements={len(multisites)}  "
+            f"optimise_adsorbate_site_positions: smiles={smiles!r}  "
+            f"placements={len(adsorbate_sites)}  "
             f"restraint_weight={restraint_weight} repulsion_weight={repulsion_weight} "
             f"contact_factor={contact_factor} standoff_factor={standoff_factor} "
             f"n_restarts={n_restarts} try_flip={try_flip} "
             f"(runs/placement={n_runs_per})"
         )
 
-    for ms in multisites:
+    for ms in adsorbate_sites:
         try:
             new_pos, E0, Ef, best_idx = _refine(ms)
         except Exception as exc:
@@ -1734,7 +1698,7 @@ def optimise_multisite_positions(
         # Keep the representative member (index 0) and the materialised
         # graph nodes in lock-step with the refined geometry.  Other
         # members are rotated/translated by downstream propagation
-        # (e.g. opt_site.optimise_multisites_ml's Kabsch step), which
+        # (e.g. opt_site.optimise_adsorbate_sites_ml's Kabsch step), which
         # should call ``push_member_positions_to_graph`` itself.
         if ms.member_positions:
             ms.member_positions[0] = new_pos.copy()
@@ -1748,11 +1712,7 @@ def optimise_multisite_positions(
                 f"(best run {best_idx}/{n_runs})"
             )
 
-    return multisites
+    return adsorbate_sites
 
-
-# Public new-name alias (paired with :class:`AdsorbateSite` /
-# :func:`find_adsorbate_sites` above).
-optimise_adsorbate_site_positions = optimise_multisite_positions
 
 

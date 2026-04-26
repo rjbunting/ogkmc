@@ -2,14 +2,14 @@
 autokmc.opt_site
 ================
 Calculator-driven (ML potential) refinement of every unique
-:class:`~autokmc.find_multisite.MultiSite` placement.
+:class:`~autokmc.find_multisite.AdsorbateSite` placement.
 
 Workflow
 --------
-For every iso-class in ``cache.multisites[smiles]``:
+For every iso-class in ``cache.adsorbate_sites[smiles]``:
 
 1. **Build combined Atoms.**  Append the gas-phase reactant geometry,
-   translated to ``MultiSite.positions``, to a copy of the slab / NP
+   translated to ``AdsorbateSite.positions``, to a copy of the slab / NP
    ``atoms_template``.
 2. **Constrain frozen surface atoms.**  ``FixAtoms`` on
    ``atoms_template.info["frozen_indices"]`` (populated by
@@ -25,8 +25,8 @@ For every iso-class in ``cache.multisites[smiles]``:
      clique,
    * non-anchor reactant atoms do **not** acquire a surface contact.
 
-   Failure flags ``MultiSite.stable = False``; success continues.
-5. **Save relaxed adsorbate geometry** onto ``MultiSite.positions``.
+   Failure flags ``AdsorbateSite.stable = False``; success continues.
+5. **Save relaxed adsorbate geometry** onto ``AdsorbateSite.positions``.
 6. **Propagate to every other member** of the iso-class by rigid
    alignment of the **n_shells=1 ego subgraph** of the anchor cliques.
    Algorithm:
@@ -48,24 +48,24 @@ For every iso-class in ``cache.multisites[smiles]``:
    Single-anchor placements with no extra ego neighbours degenerate to
    a pure MIC translation (rotation is undetermined and any choice is
    equivalent under the iso-class symmetry).  The propagated
-   Cartesians land on ``MultiSite.member_positions[k]``, the ego atom
-   set of every member lands on ``MultiSite.member_neighbour_atoms[k]``
+   Cartesians land on ``AdsorbateSite.member_positions[k]``, the ego atom
+   set of every member lands on ``AdsorbateSite.member_neighbour_atoms[k]``
    (``frozenset[int]`` of node ids in *G*), and the materialised
    ego subgraph (a stand-alone ``nx.Graph`` copy) lands on
-   ``MultiSite.member_subgraphs[k]`` — the canonical
+   ``AdsorbateSite.member_subgraphs[k]`` — the canonical
    lateral-interaction signature, suitable for hashing,
    isomorphism-matching against future KMC snapshots, or building
    higher-order interaction tables.
 7. **Adsorption energy:**
    ``E_ads = E_relaxed − E_clean − E_gas`` stored on
-   ``MultiSite.adsorption_energy`` (eV).  ``E_clean`` is computed once
+   ``AdsorbateSite.adsorption_energy`` (eV).  ``E_clean`` is computed once
    on the bare ``atoms_template``; ``E_gas`` is taken from
    ``reactant.energy`` if present, otherwise re-evaluated.
 
 Public API
 ----------
-* :func:`optimise_multisites_ml` — main entry point; mutates
-  ``cache.multisites[smiles]`` in place and returns the list.
+* :func:`optimise_adsorbate_sites_ml` — main entry point; mutates
+  ``cache.adsorbate_sites[smiles]`` in place and returns the list.
 * :func:`lateral_neighbour_atoms` / :func:`lateral_neighbour_subgraph`
   — graph helpers that compute a placement's lateral-interaction
   environment.  Surface-only n-shell BFS, plus optional **transitive
@@ -74,9 +74,9 @@ Public API
   consuming a shell), so an occupied snapshot's ego graph naturally
   contains every neighbouring adsorbate molecule.
 
-Side-effects on :class:`~autokmc.find_multisite.MultiSite`
+Side-effects on :class:`~autokmc.find_multisite.AdsorbateSite`
 ----------------------------------------------------------
-Nine attributes are attached dynamically (``MultiSite`` is a
+Nine attributes are attached dynamically (``AdsorbateSite`` is a
 non-frozen dataclass):
 
 * ``stable : bool``                                     — connectivity preserved & site unchanged?
@@ -457,7 +457,7 @@ def lateral_neighbour_atoms(
         "adsorbate"}``).
     anchor_nodes : iterable[int]
         Node ids to start the BFS from (typically the union of the
-        ``MultiSite.atom_cliques`` for one member).
+        ``AdsorbateSite.atom_cliques`` for one member).
     n_shells : int
         Surface-only BFS radius.  Default 1.
     follow_adsorbate_chains : bool
@@ -683,7 +683,7 @@ def _propagate_to_members(
         use_mic=use_mic, cell=cell, cell_inv=cell_inv, pbc=pbc,
     )
     if rep_cent.shape[0] == 0:
-        # Should not happen: a MultiSite with no bonded anchors.
+        # Should not happen: an AdsorbateSite with no bonded anchors.
         return ([np.asarray(relaxed_ads, dtype=float)] * len(ms.members),
                 [frozenset()] * len(ms.members),
                 [nx.Graph()] * len(ms.members))
@@ -789,9 +789,9 @@ def _propagate_to_members(
 
 def _find_collapse_target(
     unstable_subgraph: nx.Graph,
-    stable_multisites: list[Any],
+    stable_adsorbate_sites: list[Any],
 ) -> int | None:
-    """Return the ``iso_class`` of the first stable MultiSite whose
+    """Return the ``iso_class`` of the first stable AdsorbateSite whose
     representative lateral subgraph is element-isomorphic to
     *unstable_subgraph*; or ``None`` if no match is found.
 
@@ -807,7 +807,7 @@ def _find_collapse_target(
     except Exception:
         return None
     nm = categorical_node_match("element", "X")
-    for ms in stable_multisites:
+    for ms in stable_adsorbate_sites:
         ref = getattr(ms, "member_subgraphs", None)
         if not ref:
             continue
@@ -825,10 +825,10 @@ def _find_collapse_target(
 
 
 # ---------------------------------------------------------------------------
-# Single-atom adapter: synthesise MultiSites from IsoClasses
+# Single-atom adapter: synthesise AdsorbateSites from IsoClasses
 # ---------------------------------------------------------------------------
 
-def seed_single_atom_multisites(
+def seed_single_atom_adsorbate_sites(
     G: nx.Graph,
     reactant,
     *,
@@ -836,17 +836,17 @@ def seed_single_atom_multisites(
     overwrite: bool = False,
     verbose: bool = False,
 ) -> list[Any]:
-    """Build :class:`MultiSite`-shaped wrappers from
+    """Build :class:`AdsorbateSite`-shaped wrappers from
     ``cache.unique_sites[element][n_shells]`` for monatomic *reactant*.
 
     Single-atom adsorbates never enter the multi-atom enumerator
-    (:func:`autokmc.find_multisite.find_multisites` requires
+    (:func:`autokmc.find_multisite.find_adsorbate_sites` requires
     ``n_atoms >= 2``); they are produced by the ``default_sites``
     pipeline as :class:`~autokmc.default_sites.IsoClass` objects under
     ``cache.unique_sites[element]``.  This adapter wraps each IsoClass
-    in a :class:`MultiSite` (one anchor = the IsoClass clique; one
+    in a :class:`AdsorbateSite` (one anchor = the IsoClass clique; one
     member per IsoClass member) so that
-    :func:`optimise_multisites_ml` can relax single-atom and
+    :func:`optimise_adsorbate_sites_ml` can relax single-atom and
     multi-atom adsorbates through the **same** code path.
 
     Lazily ensures the ``default_sites`` pipeline has been run for
@@ -863,29 +863,29 @@ def seed_single_atom_multisites(
         Iso-class shell depth to read from
         ``cache.unique_sites[element]``.  Default ``N_SHELLS_DEFAULT``.
     overwrite : bool
-        If False (default) and ``cache.multisites[reactant.smiles]`` is
+        If False (default) and ``cache.adsorbate_sites[reactant.smiles]`` is
         already populated, this is a no-op.
 
     Returns
     -------
-    list[MultiSite]
-        Same list stored in ``cache.multisites[reactant.smiles]``;
+    list[AdsorbateSite]
+        Same list stored in ``cache.adsorbate_sites[reactant.smiles]``;
         ordered ``(k, iso_class)`` ascending so iso_class indices are
         unique within the list.
     """
     # Local imports to avoid a circular dependency with find_multisite.
-    from autokmc.find_multisite import MultiSite, _ensure_default_sites
+    from autokmc.find_multisite import AdsorbateSite, _ensure_default_sites
 
     if len(reactant.atoms) != 1:
         raise ValueError(
-            "seed_single_atom_multisites is only for monatomic reactants; "
+            "seed_single_atom_adsorbate_sites is only for monatomic reactants; "
             f"got {len(reactant.atoms)} atoms."
         )
 
     cache = get_cache(G)
     smiles = reactant.smiles
-    if not overwrite and cache.multisites.get(smiles):
-        return cache.multisites[smiles]
+    if not overwrite and cache.adsorbate_sites.get(smiles):
+        return cache.adsorbate_sites[smiles]
 
     element = reactant.atoms.get_chemical_symbols()[0]
     _ensure_default_sites(G, element, n_shells, verbose=verbose)
@@ -897,12 +897,12 @@ def seed_single_atom_multisites(
             "even after _ensure_default_sites; nothing to seed."
         )
 
-    multisites: list[Any] = []
+    adsorbate_sites: list[Any] = []
     iso_idx = 0
     for k in sorted(by_n[n_shells]):
         for iso in by_n[n_shells][k]:
             pos = iso.position if iso.position is not None else iso.centroid
-            ms = MultiSite(
+            ms = AdsorbateSite(
                 smiles       = smiles,
                 n_atoms      = 1,
                 atom_cliques = [iso.representative],
@@ -915,21 +915,21 @@ def seed_single_atom_multisites(
             # read the optimisation results from the canonical home.
             ms.iso_class_ref = iso  # type: ignore[attr-defined]
             ms.coordination = k     # type: ignore[attr-defined]
-            multisites.append(ms)
+            adsorbate_sites.append(ms)
             iso_idx += 1
 
-    cache.multisites[smiles] = multisites
+    cache.adsorbate_sites[smiles] = adsorbate_sites
     _log.info(
-        "seed_single_atom_multisites(%r): synthesised %d MultiSites "
+        "seed_single_atom_adsorbate_sites(%r): synthesised %d AdsorbateSites "
         "from cache.unique_sites[%r][%d]",
-        smiles, len(multisites), element, n_shells,
+        smiles, len(adsorbate_sites), element, n_shells,
     )
-    return multisites
+    return adsorbate_sites
 
 
 # ---------------------------------------------------------------------------
 
-def optimise_multisites_ml(
+def optimise_adsorbate_sites_ml(
     G: nx.Graph,
     smiles: str,
     reactant,
@@ -945,10 +945,10 @@ def optimise_multisites_ml(
     only_iso_classes: list[int] | None = None,
     verbose: bool = False,
 ) -> list[Any]:
-    """Relax every :class:`MultiSite` in ``cache.multisites[smiles]`` with *calculator*.
+    """Relax every :class:`AdsorbateSite` in ``cache.adsorbate_sites[smiles]`` with *calculator*.
 
     For each iso-class, this constructs ``slab + adsorbate`` from
-    *atoms_template* and ``MultiSite.positions``, runs an ASE
+    *atoms_template* and ``AdsorbateSite.positions``, runs an ASE
     optimiser, verifies adsorbate–adsorbate and adsorbate–surface
     connectivity (using the same neighbour-list cutoff convention as
     :func:`autokmc.graph.build_graph`), and on success writes back the
@@ -961,9 +961,9 @@ def optimise_multisites_ml(
     Parameters
     ----------
     G : nx.Graph
-        Surface graph carrying ``cache.multisites[smiles]``.
+        Surface graph carrying ``cache.adsorbate_sites[smiles]``.
     smiles : str
-        SMILES key into the multisites cache.
+        SMILES key into the adsorbate-sites cache.
     reactant : :class:`~autokmc.reactants.Reactant`
         Gas-phase reactant whose ``atoms`` provides element identities
         (positions are overwritten by ``ms.positions``) and whose
@@ -991,7 +991,7 @@ def optimise_multisites_ml(
         Neighbour-list cutoff multiplier for the connectivity check.
         Defaults to ``NL_MULT_DEFAULT`` (1.0) — same as ``build_graph``.
     only_iso_classes : list[int], optional
-        If given, only relax the specified ``MultiSite.iso_class``
+        If given, only relax the specified ``AdsorbateSite.iso_class``
         indices; useful for incremental / debugging runs.
     verbose : bool
         Wraps the call in :func:`verbose_scope` (DEBUG logging on).
@@ -999,9 +999,9 @@ def optimise_multisites_ml(
     Notes
     -----
     **Single-atom adsorbates** (``len(reactant.atoms) == 1``) are
-    handled too: if ``cache.multisites[smiles]`` is empty, the
-    function lazily calls :func:`seed_single_atom_multisites`, which
-    synthesises one :class:`MultiSite` per IsoClass in
+    handled too: if ``cache.adsorbate_sites[smiles]`` is empty, the
+    function lazily calls :func:`seed_single_atom_adsorbate_sites`, which
+    synthesises one :class:`AdsorbateSite` per IsoClass in
     ``cache.unique_sites[element][N_SHELLS_DEFAULT]``.  The
     relaxation, connectivity check and member propagation then run
     through the same code path as multi-atom adsorbates — connectivity
@@ -1011,15 +1011,15 @@ def optimise_multisites_ml(
 
     Returns
     -------
-    list[MultiSite]
-        The same list stored in ``cache.multisites[smiles]``.  Each
+    list[AdsorbateSite]
+        The same list stored in ``cache.adsorbate_sites[smiles]``.  Each
         entry is mutated in place with new dynamic attributes
         ``stable``, ``adsorption_energy`` and ``member_positions``.
     """
     cache = get_cache(G)
-    if (smiles not in cache.multisites or not cache.multisites[smiles]) \
+    if (smiles not in cache.adsorbate_sites or not cache.adsorbate_sites[smiles]) \
             and len(reactant.atoms) == 1:
-        seed_single_atom_multisites(G, reactant, verbose=verbose)
+        seed_single_atom_adsorbate_sites(G, reactant, verbose=verbose)
     with verbose_scope(_log, verbose):
         return _run(
             G, smiles, reactant, atoms_template, calculator,
@@ -1039,14 +1039,14 @@ def _run(
         optimizer = BFGS
 
     cache = get_cache(G)
-    if smiles not in cache.multisites:
+    if smiles not in cache.adsorbate_sites:
         raise KeyError(
-            f"No multisites enumerated for SMILES {smiles!r}; "
-            "call find_multisites first."
+            f"No adsorbate sites enumerated for SMILES {smiles!r}; "
+            "call find_adsorbate_sites first."
         )
-    multisites = cache.multisites[smiles]
-    if not multisites:
-        return multisites
+    adsorbate_sites = cache.adsorbate_sites[smiles]
+    if not adsorbate_sites:
+        return adsorbate_sites
 
     # ── Reference energies ────────────────────────────────────────────────
     if clean_energy is None:
@@ -1071,8 +1071,8 @@ def _run(
     n_stable = 0
     n_site_changed = 0
     n_broken = 0
-    for ms in multisites:
-        # Default-initialise the dynamic attributes so every MultiSite
+    for ms in adsorbate_sites:
+        # Default-initialise the dynamic attributes so every AdsorbateSite
         # carries a uniform shape regardless of outcome.
         ms.relaxed_graph = None              # type: ignore[attr-defined]
         ms.relaxed_cliques = None            # type: ignore[attr-defined]
@@ -1164,8 +1164,8 @@ def _run(
         )
 
     # ── Cross-iso-class sanity check ─────────────────────────���──────────
-    stable_list = [ms for ms in multisites if getattr(ms, "stable", False)]
-    for ms in multisites:
+    stable_list = [ms for ms in adsorbate_sites if getattr(ms, "stable", False)]
+    for ms in adsorbate_sites:
         if getattr(ms, "stable", False):
             continue
         if getattr(ms, "relaxed_lateral_subgraph", None) is None:
@@ -1188,18 +1188,10 @@ def _run(
             )
 
     _log.info(
-        "optimise_multisites_ml(%r): %d stable, %d site-changed, %d broken "
+        "optimise_adsorbate_sites_ml(%r): %d stable, %d site-changed, %d broken "
         "(of %d total)",
-        smiles, n_stable, n_site_changed, n_broken, len(multisites),
+        smiles, n_stable, n_site_changed, n_broken, len(adsorbate_sites),
     )
-    return multisites
-
-
-# ---------------------------------------------------------------------------
-# New-name public aliases (preferred — see ``autokmc.sites``)
-# ---------------------------------------------------------------------------
-
-optimise_adsorbate_sites_ml = optimise_multisites_ml
-seed_single_atom_adsorbate_sites = seed_single_atom_multisites
+    return adsorbate_sites
 
 

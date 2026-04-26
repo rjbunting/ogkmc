@@ -2,17 +2,16 @@
 autokmc.cache
 =============
 Typed wrapper around the formerly-loose ``G.graph[...]`` dict that the
-site / multisite pipeline used to scribble its caches into.
+site / adsorbate-site pipeline used to scribble its caches into.
 
 Goals
 -----
 * Single attribute (``G.graph["autokmc"]``) carrying every cached stage.
 * Typed access (auto-completion in editors; mypy-checked).
 * Cheap to introspect (``cache.summary()``) and reset (``cache.invalidate("O")``).
-* Backwards compatible — the old top-level keys
-  (``G.graph["sites"]``, ``["unique_sites"]``, ``["site_positions"]``,
-  ``["multisites"]``, ``["k_max"]``) are still kept in sync via property
-  setters so legacy code that pokes them directly continues to work.
+* Keeps the documented graph-level aliases (``G.graph["sites"]``,
+  ``["unique_sites"]``, ``["site_positions"]``, ``["adsorbate_sites"]``,
+  ``["k_max"]``) pointing at the typed cache dictionaries.
 """
 
 from __future__ import annotations
@@ -55,18 +54,6 @@ class SiteCache:
     # cached convex hull (nanoparticles only) and surface APSP
     hull           : Any                                                       = None
     surface_apsp   : Any                                                       = None  # nx-style dict-of-dicts
-
-    # Backward-compatible alias for the pre-rename ``multisites`` field.
-    # Reads/writes proxy to :attr:`adsorbate_sites` so callers using either
-    # name see the same dict object — important because legacy code stamps
-    # entries onto ``cache.multisites[smiles]`` directly.
-    @property
-    def multisites(self) -> Dict[str, List[Any]]:
-        return self.adsorbate_sites
-
-    @multisites.setter
-    def multisites(self, value: Dict[str, List[Any]]) -> None:
-        self.adsorbate_sites = value
 
     # ------------------------------------------------------------------
     # Convenience helpers
@@ -123,17 +110,15 @@ class SiteCache:
 # Accessor that also keeps the legacy top-level keys in sync
 # ---------------------------------------------------------------------------
 
-_LEGACY_KEYS = ("k_max", "sites", "unique_sites", "site_positions",
-                "adsorbate_sites", "multisites")
+_GRAPH_ALIAS_KEYS = ("k_max", "sites", "unique_sites", "site_positions",
+                     "adsorbate_sites")
 
 
 def get_cache(G: nx.Graph) -> SiteCache:
     """Return the :class:`SiteCache` attached to *G*, creating it if absent.
 
-    Also installs a one-time alias so that legacy code reading
-    ``G.graph["sites"]`` (etc.) sees the same dict object backing the
-    typed attribute.  This lets existing notebooks continue to work
-    unchanged while new code uses the typed interface.
+    Also installs aliases so ``G.graph["sites"]`` (etc.) sees the same dict
+    object backing the typed attribute.
     """
     cache = G.graph.get("autokmc")
     if isinstance(cache, SiteCache):
@@ -143,13 +128,13 @@ def get_cache(G: nx.Graph) -> SiteCache:
     G.graph["autokmc"] = cache
     # Re-bind any pre-existing legacy keys into the typed cache so that
     # code that mixed-and-matched access patterns sees a consistent state.
-    for key in _LEGACY_KEYS:
+    for key in _GRAPH_ALIAS_KEYS:
         if key in G.graph:
             existing = G.graph[key]
             if isinstance(existing, dict):
                 getattr(cache, key).update(existing)
     # Now alias: the legacy keys *are* the typed dicts (same object).
-    for key in _LEGACY_KEYS:
+    for key in _GRAPH_ALIAS_KEYS:
         G.graph[key] = getattr(cache, key)
     return cache
 

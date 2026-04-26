@@ -45,13 +45,13 @@ OPT_FACTOR: float = 0.85
 REPULSION_WEIGHT: float = 0.1
 
 #: Steric-contact scale used by
-#: :func:`autokmc.find_multisite.optimise_multisite_positions` —
+#: :func:`autokmc.find_multisite.optimise_adsorbate_site_positions` —
 #: ``R_min = CONTACT_FACTOR * (r_cov_a + r_cov_s)`` for every (adsorbate,
 #: surface) pair.  Matches the ``OPT_FACTOR`` semantics above.
 CONTACT_FACTOR: float = 0.9
 
 #: Standoff-bond scale used by
-#: :func:`autokmc.find_multisite.optimise_multisite_positions`: each
+#: :func:`autokmc.find_multisite.optimise_adsorbate_site_positions`: each
 #: bonded anchor is restrained toward a target ``standoff`` Å above the
 #: surface clique centroid along the local outward normal, where
 #: ``standoff = STANDOFF_FACTOR * (r_cov_a + <r_cov_s>)``.  Prevents the
@@ -65,8 +65,6 @@ STANDOFF_FACTOR: float = 0.85
 #: disables multi-start.
 N_ADSORBATE_RESTARTS: int = 6
 
-#: Backward-compatible alias for the pre-rename name.
-N_MULTISITE_RESTARTS: int = N_ADSORBATE_RESTARTS
 
 #: Default radius (Å) of the spatial cutoff used to filter the non-bonded
 #: surface atoms that contribute to the repulsion sum in
@@ -86,7 +84,7 @@ SITE_REPULSION_CUTOFF: float = 6.0
 N_SHELLS_DEFAULT: int = 1
 
 # ---------------------------------------------------------------------------
-# Multisite enumeration
+# Adsorbate-site enumeration
 # ---------------------------------------------------------------------------
 
 #: Typical metal nearest-neighbour distance (Å) used by
@@ -96,11 +94,11 @@ NN_DISTANCE: float = 2.5
 
 #: Hard cap on the per-placement adaptive ego depth used when
 #: ``require_surface_connected`` is on in
-#: :func:`autokmc.find_multisite.find_multisites`.
+#: :func:`autokmc.find_multisite.find_adsorbate_sites`.
 MAX_PAIR_SHELLS: int = 10
 
 #: Default tolerance (Å) when matching surface anchor-pair distances to
-#: intramolecular distances in :func:`autokmc.find_multisite.find_multisites`.
+#: intramolecular distances in :func:`autokmc.find_multisite.find_adsorbate_sites`.
 BOND_TOLERANCE: float = 0.4
 
 # ---------------------------------------------------------------------------
