@@ -74,10 +74,9 @@ Public API
   consuming a shell), so an occupied snapshot's ego graph naturally
   contains every neighbouring adsorbate molecule.
 
-Side-effects on :class:`~autokmc.find_multisite.AdsorbateSite`
-----------------------------------------------------------
-Nine attributes are attached dynamically (``AdsorbateSite`` is a
-non-frozen dataclass):
+Optimization-populated fields on :class:`~autokmc.find_multisite.AdsorbateSite`
+-----------------------------------------------------------------------------
+The optimiser populates these explicit ``AdsorbateSite`` dataclass fields:
 
 * ``stable : bool``                                     — connectivity preserved & site unchanged?
 * ``adsorption_energy : float | None``                  — eV (``None`` if unstable)
@@ -1013,8 +1012,9 @@ def optimise_adsorbate_sites_ml(
     -------
     list[AdsorbateSite]
         The same list stored in ``cache.adsorbate_sites[smiles]``.  Each
-        entry is mutated in place with new dynamic attributes
-        ``stable``, ``adsorption_energy`` and ``member_positions``.
+        entry selected for optimisation is updated in place with result
+        fields such as ``stable``, ``adsorption_energy`` and
+        ``member_positions``.
     """
     cache = get_cache(G)
     if (smiles not in cache.adsorbate_sites or not cache.adsorbate_sites[smiles]) \
@@ -1071,16 +1071,30 @@ def _run(
     n_stable = 0
     n_site_changed = 0
     n_broken = 0
+    site_changed_this_run: list[Any] = []
     for ms in adsorbate_sites:
+        if selected is not None and ms.iso_class not in selected:
+            continue
+
+        original_positions = np.asarray(ms.positions, dtype=float).copy()
+        original_member_positions = [
+            (None if p is None else np.asarray(p, dtype=float).copy())
+            for p in (ms.member_positions or [])
+        ]
+
         # Default-initialise the dynamic attributes so every AdsorbateSite
-        # carries a uniform shape regardless of outcome.
+        # selected for optimisation carries a uniform outcome shape.  Start
+        # pessimistically: a selected site is unstable until the relaxed
+        # connectivity check proves otherwise.  Its geometry is restored on
+        # every non-stable outcome below.
+        ms.stable = False
+        ms.adsorption_energy = None
+        ms.member_neighbour_atoms = None
+        ms.member_subgraphs = None
         ms.relaxed_graph = None              # type: ignore[attr-defined]
         ms.relaxed_cliques = None            # type: ignore[attr-defined]
         ms.relaxed_lateral_subgraph = None   # type: ignore[attr-defined]
         ms.collapsed_into_iso_class = None   # type: ignore[attr-defined]
-
-        if selected is not None and ms.iso_class not in selected:
-            continue
 
         try:
             combined, ads_indices = _build_combined_atoms(
@@ -1093,11 +1107,8 @@ def _run(
         except Exception as exc:
             _log.warning("iso-class %d: relaxation failed (%r)",
                          ms.iso_class, exc)
-            ms.stable = False
-            ms.adsorption_energy = None
-            ms.member_positions = None
-            ms.member_neighbour_atoms = None
-            ms.member_subgraphs = None
+            ms.positions = original_positions.copy()
+            ms.member_positions = original_member_positions
             n_broken += 1
             continue
 
@@ -1111,11 +1122,8 @@ def _run(
             _log.info(
                 "iso-class %d: discarded (%s)", ms.iso_class, reason,
             )
-            ms.stable = False
-            ms.adsorption_energy = None
-            ms.member_positions = None
-            ms.member_neighbour_atoms = None
-            ms.member_subgraphs = None
+            ms.positions = original_positions.copy()
+            ms.member_positions = original_member_positions
             n_broken += 1
             continue
 
@@ -1124,16 +1132,14 @@ def _run(
                 "iso-class %d: marked unstable due to site migration (%s)",
                 ms.iso_class, reason,
             )
-            ms.stable = False
-            ms.adsorption_energy = None
-            ms.member_positions = None
-            ms.member_neighbour_atoms = None
-            ms.member_subgraphs = None
+            ms.positions = original_positions.copy()
+            ms.member_positions = original_member_positions
             # Stash the rebuilt graph + new clique pattern for the
             # downstream cross-iso-class sanity check.
             ms.relaxed_graph = G_rel
             ms.relaxed_cliques = actual_cliques
             ms.relaxed_lateral_subgraph = lateral_sub
+            site_changed_this_run.append(ms)
             n_site_changed += 1
             continue
 
@@ -1150,6 +1156,10 @@ def _run(
         ms.member_positions = member_positions
         ms.member_neighbour_atoms = member_neighbour
         ms.member_subgraphs = member_subgraphs
+        if ms.member_node_ids:
+            from autokmc.find_multisite import push_member_positions_to_graph
+            for member_index in range(len(member_positions)):
+                push_member_positions_to_graph(G, ms, member_index)
         # Record the rebuilt info on stable poses too — useful for
         # downstream lateral-interaction tabulation.
         ms.relaxed_graph = G_rel
@@ -1163,11 +1173,9 @@ def _run(
             [len(s) for s in member_neighbour],
         )
 
-    # ── Cross-iso-class sanity check ─────────────────────────���──────────
+    # ── Cross-iso-class sanity check ─────────────────────────────────────
     stable_list = [ms for ms in adsorbate_sites if getattr(ms, "stable", False)]
-    for ms in adsorbate_sites:
-        if getattr(ms, "stable", False):
-            continue
+    for ms in site_changed_this_run:
         if getattr(ms, "relaxed_lateral_subgraph", None) is None:
             continue
         target = _find_collapse_target(

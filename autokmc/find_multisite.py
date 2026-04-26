@@ -148,6 +148,12 @@ class AdsorbateSite:
         (``[G.nodes[n] for n in member_node_ids[k]]``).
     ego_graph : nx.Graph | None
         ``n_shells_pair`` ego-subgraph used for isomorphism matching.
+    stable : bool | None
+        ML/ASE optimisation outcome. ``None`` means not attempted,
+        ``True`` means the relaxed placement stayed on the same site, and
+        ``False`` means relaxation failed, broke connectivity, or migrated.
+    adsorption_energy : float | None
+        Adsorption energy in eV for stable ML/ASE optimisations.
     """
     smiles           : str
     n_atoms          : int
@@ -158,6 +164,14 @@ class AdsorbateSite:
     member_positions : list   = field(default_factory=list)
     member_node_ids  : list   = field(default_factory=list)
     ego_graph        : Any    = None
+    stable           : bool | None = None
+    adsorption_energy: float | None = None
+    member_neighbour_atoms: list | None = None
+    member_subgraphs : list | None = None
+    relaxed_graph    : Any = None
+    relaxed_cliques  : list | None = None
+    relaxed_lateral_subgraph: Any = None
+    collapsed_into_iso_class: int | None = None
 
 
 # ---------------------------------------------------------------------------
