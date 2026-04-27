@@ -2,7 +2,7 @@
 # # AutoKMC2 — Anchor‑Site Pipeline Demo
 #
 # Walks through every stage of the anchor‑site workflow, showing each step
-# visually:
+# visually in **3‑D (Plotly)**:
 #
 # 1. **Build** a Cu(111) FCC surface slab
 # 2. **Find** surface atoms via ray‑casting
@@ -13,27 +13,17 @@
 #    on the graph, and visualise the full result
 
 # %% ── 0. Imports & helpers ──────────────────────────────────────────────────
-import sys
-import os
 from pathlib import Path
 
 import numpy as np
-import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
-import networkx as nx
 import torch
+import plotly.graph_objects as go
 from nequip.ase import NequIPCalculator
 
-# # ── Make the workspace root importable so `autokmc` resolves ──
-# _HERE = os.path.dirname(os.path.abspath(__file__))
-# _ROOT = os.path.abspath(os.path.join(_HERE, "..", ".."))
-# if _ROOT not in sys.path:
-#     sys.path.insert(0, _ROOT)
-
-from autokmc.structure import build_surface          # noqa: E402
-from autokmc.surface   import find_surface_atoms      # noqa: E402
-from autokmc.graph     import build_graph             # noqa: E402
-from autokmc.find_anchors import find_anchor_sites    # noqa: E402
+from autokmc.structure import build_surface
+from autokmc.surface   import find_surface_atoms
+from autokmc.graph     import build_graph
+from autokmc.find_anchors import find_anchor_sites
 
 _DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 _MODEL_FILE = "asehcocuau.nequip.pt2" if _DEVICE == "cuda" else "cpuhcocuau.nequip.pth"
@@ -54,19 +44,14 @@ calc = make_calc()
 print(f"Calculator : {calc.__class__.__name__}")
 print(f"Model      : {_MODEL_PATH}")
 
-# ── Notebook‑friendly matplotlib (magic is a no‑op when run as plain .py) ──
-try:
-    get_ipython().run_line_magic("matplotlib", "inline")   # type: ignore[name-defined]
-except NameError:
-    pass
-plt.rcParams.update({"figure.dpi": 110, "font.size": 9})
-
-# ── Visual palette ──────────────────────────────────────────────────────────
+# ── Visual palette ──────────────────��───────────────────────────────────────
 _ELEM_COL    = {"Cu": "#B87333", "Pt": "#C0C0C0", "Au": "#FFD700"}
-_TYPE_COL    = {"bulk": "#cccccc", "surface": "#4A90D9"}
+_BULK_COL    = "#aaaaaa"
+_SURF_COL    = "#4A90D9"
 _K_COL       = {1: "#27AE60", 2: "#E67E22", 3: "#8E44AD", 4: "#E74C3C"}
 _K_LABEL     = {1: "top (k=1)", 2: "bridge (k=2)", 3: "hollow (k=3)", 4: "4‑fold (k=4)"}
-_ELEM_MARKER = {"C": "D", "O": "^"}
+_ELEM_ANCHOR_COL = {"C": "#2ECC71", "O": "#E74C3C"}
+_ELEM_ANCHOR_SYM = {"C": "diamond", "O": "cross"}
 
 
 def _ecolor(sym: str) -> str:
@@ -76,6 +61,66 @@ def _ecolor(sym: str) -> str:
 def _section(title: str) -> None:
     bar = "─" * 60
     print(f"\n{bar}\n  {title}\n{bar}")
+
+
+def _atom_scatter3d(pos, colors, sizes, names, opacity=1.0, symbol="circle",
+                    line_color="black", line_width=0.5,
+                    name="", showlegend=True):
+    """Return a Scatter3d trace for a set of atoms."""
+    return go.Scatter3d(
+        x=pos[:, 0], y=pos[:, 1], z=pos[:, 2],
+        mode="markers",
+        marker=dict(
+            size=sizes,
+            color=colors,
+            symbol=symbol,
+            opacity=opacity,
+            line=dict(color=line_color, width=line_width),
+        ),
+        text=names,
+        hovertemplate="%{text}<br>x=%{x:.3f} y=%{y:.3f} z=%{z:.3f}<extra></extra>",
+        name=name,
+        showlegend=showlegend,
+    )
+
+
+def _bond_lines3d(p_from, p_to, color="rgba(160,160,160,0.4)", width=1,
+                  name="", showlegend=False):
+    """Return a Scatter3d trace drawing lines between pairs of points.
+
+    *p_from* and *p_to* are (N, 3) arrays.  Plotly draws lines via NaN
+    separators so we interleave the pairs with NaN rows.
+    """
+    n = len(p_from)
+    x = np.empty(n * 3); y = np.empty(n * 3); z = np.empty(n * 3)
+    x[0::3] = p_from[:, 0]; y[0::3] = p_from[:, 1]; z[0::3] = p_from[:, 2]
+    x[1::3] = p_to[:, 0];   y[1::3] = p_to[:, 1];   z[1::3] = p_to[:, 2]
+    x[2::3] = np.nan;        y[2::3] = np.nan;        z[2::3] = np.nan
+    return go.Scatter3d(
+        x=x, y=y, z=z,
+        mode="lines",
+        line=dict(color=color, width=width),
+        hoverinfo="skip",
+        name=name,
+        showlegend=showlegend,
+    )
+
+
+def _layout(title, scene_equal=True):
+    """Common 3‑D layout."""
+    layout = dict(
+        title=dict(text=title, font=dict(size=14)),
+        showlegend=True,
+        scene=dict(
+            xaxis_title="x (Å)",
+            yaxis_title="y (Å)",
+            zaxis_title="z (Å)",
+            aspectmode="data" if scene_equal else "auto",
+        ),
+        margin=dict(l=0, r=0, t=60, b=0),
+        template="plotly_white",
+    )
+    return layout
 
 
 # %% [markdown]
@@ -94,10 +139,10 @@ atoms = build_surface(
     crystal_structure="fcc",
     miller_index=(1, 1, 1),
     lattice_constant=3.615,   # Å — EMT‑optimised; skips bulk relax
-    min_slab_size=7.0,
+    min_slab_size=10.0,
     min_vacuum_size=12.0,
-    goal_x=10.0,
-    goal_y=10.0,
+    goal_x=20.0,
+    goal_y=20.0,
     n_freeze_layers=2,
     calculator=calc,
     verbose=True,
@@ -106,35 +151,24 @@ atoms = build_surface(
 print(f"\nSlab built  : {len(atoms)} atoms")
 print(f"Cell diag   : {np.diag(atoms.get_cell()).round(3)} Å")
 
-# ── Visualise ────────────────────────────────────────────────────────────────
 pos  = atoms.get_positions()
 syms = np.array(atoms.get_chemical_symbols())
-cols = [_ecolor(s) for s in syms]
 
-fig, axes = plt.subplots(1, 2, figsize=(11, 4))
-fig.suptitle("Stage 1 — Built Structure", fontweight="bold")
+fig = go.Figure()
+for sym in np.unique(syms):
+    mask = syms == sym
+    fig.add_trace(_atom_scatter3d(
+        pos[mask],
+        colors=[_ecolor(sym)] * int(mask.sum()),
+        sizes=6,
+        names=[f"{sym} ({i})" for i in np.where(mask)[0]],
+        opacity=0.85,
+        name=sym,
+        showlegend=True,
+    ))
 
-# Side view (x–z)
-ax = axes[0]
-ax.scatter(pos[:, 0], pos[:, 2], c=cols, s=60,
-           edgecolors="k", linewidths=0.4, zorder=2)
-ax.set_xlabel("x (Å)"); ax.set_ylabel("z (Å)")
-ax.set_title("Side view (x–z)")
-patches = [mpatches.Patch(color=_ecolor(s), label=s)
-           for s in np.unique(syms)]
-ax.legend(handles=patches, fontsize=8)
-
-# Top view (x–y) coloured by z‑height to reveal layers
-ax = axes[1]
-sc = ax.scatter(pos[:, 0], pos[:, 1], c=pos[:, 2],
-                cmap="viridis", s=60, edgecolors="k", linewidths=0.4)
-plt.colorbar(sc, ax=ax, label="z (Å)")
-ax.set_aspect("equal")
-ax.set_xlabel("x (Å)"); ax.set_ylabel("y (Å)")
-ax.set_title("Top view (x–y), coloured by layer height")
-
-plt.tight_layout()
-plt.show()
+fig.update_layout(**_layout("Stage 1 — Built Structure"))
+fig.show()
 
 # %% [markdown]
 # ---
@@ -150,31 +184,32 @@ _section("STAGE 2 — Find surface atoms")
 surf_result = find_surface_atoms(atoms, tag_atoms=True)
 surf_mask   = surf_result.mask
 surf_idx    = surf_result.indices
+bulk_mask   = ~surf_mask
 
 print(f"Method        : {surf_result.method}")
 print(f"Surface atoms : {surf_mask.sum()} / {len(atoms)}")
-print(f"Bulk atoms    : {(~surf_mask).sum()}")
+print(f"Bulk atoms    : {bulk_mask.sum()}")
 
-# ── Visualise ────────────────────────────────────────────────────────────────
-bulk_mask = ~surf_mask
+fig = go.Figure()
 
-fig, ax = plt.subplots(figsize=(6, 5))
-fig.suptitle("Stage 2 — Surface Atom Identification", fontweight="bold")
+# Bulk atoms (small, grey, semi-transparent)
+if bulk_mask.any():
+    fig.add_trace(_atom_scatter3d(
+        pos[bulk_mask], colors=_BULK_COL,
+        sizes=4, names=[f"bulk {i}" for i in np.where(bulk_mask)[0]],
+        opacity=0.35, name="bulk", showlegend=True,
+    ))
 
-ax.scatter(pos[bulk_mask, 0], pos[bulk_mask, 1],
-           c=_TYPE_COL["bulk"], s=45, edgecolors="k",
-           linewidths=0.3, label="bulk", zorder=2)
-ax.scatter(pos[surf_mask, 0], pos[surf_mask, 1],
-           c=_TYPE_COL["surface"], s=100, edgecolors="k",
-           linewidths=0.5, label="surface", zorder=3)
+# Surface atoms (larger, blue)
+if surf_mask.any():
+    fig.add_trace(_atom_scatter3d(
+        pos[surf_mask], colors=_SURF_COL,
+        sizes=8, names=[f"surface {i}" for i in surf_idx],
+        opacity=0.95, name="surface", showlegend=True,
+    ))
 
-ax.set_aspect("equal")
-ax.set_xlabel("x (Å)"); ax.set_ylabel("y (Å)")
-ax.set_title(f"Top‑down view  —  {surf_mask.sum()} surface  /  "
-             f"{bulk_mask.sum()} bulk")
-ax.legend(fontsize=8)
-plt.tight_layout()
-plt.show()
+fig.update_layout(**_layout("Stage 2 — Surface Atom Identification"))
+fig.show()
 
 # %% [markdown]
 # ---
@@ -196,27 +231,46 @@ print(f"Nodes : {G.number_of_nodes()}  ({n_surf_g} surface, {n_bulk_g} bulk)")
 print(f"Edges : {G.number_of_edges()}")
 print(f"PBC   : {G.graph['pbc'].tolist()}")
 
-# ── Visualise — surface subgraph in x–y ─────────────────────────────────────
+# Collect surface-subgraph bond endpoints
 surf_nodes = [n for n, d in G.nodes(data=True) if d["type"] == "surface"]
 Gsub = G.subgraph(surf_nodes)
-pos_dict = {n: (G.nodes[n]["position"][0], G.nodes[n]["position"][1])
-            for n in Gsub.nodes}
+bond_from, bond_to = [], []
+for u, v in Gsub.edges():
+    bond_from.append(G.nodes[u]["position"])
+    bond_to.append(G.nodes[v]["position"])
 
-fig, ax = plt.subplots(figsize=(7, 6))
-fig.suptitle("Stage 3 — Surface Connectivity Subgraph", fontweight="bold")
+surf_pos_all = np.array([G.nodes[n]["position"] for n in surf_nodes])
 
-nx.draw_networkx_edges(Gsub, pos_dict, ax=ax, alpha=0.35,
-                       edge_color="#888888", width=0.8)
-nx.draw_networkx_nodes(Gsub, pos_dict, ax=ax, node_size=80,
-                       node_color=_TYPE_COL["surface"],
-                       edgecolors="k", linewidths=0.5)
+fig = go.Figure()
 
-ax.set_xlabel("x (Å)"); ax.set_ylabel("y (Å)")
-ax.set_title(f"Surface subgraph — {len(surf_nodes)} nodes, "
-             f"{Gsub.number_of_edges()} edges")
-ax.set_aspect("equal")
-plt.tight_layout()
-plt.show()
+# Bulk atom backdrop (all layers visible in 3-D)
+if bulk_mask.any():
+    fig.add_trace(_atom_scatter3d(
+        pos[bulk_mask], colors=_BULK_COL,
+        sizes=3, names=[f"bulk {i}" for i in np.where(bulk_mask)[0]],
+        opacity=0.2, name="bulk", showlegend=True,
+    ))
+
+# Bond lines (surface subgraph only)
+if bond_from:
+    fig.add_trace(_bond_lines3d(
+        np.array(bond_from), np.array(bond_to),
+        color="rgba(140,140,140,0.4)", width=2,
+        name="bond", showlegend=False,
+    ))
+
+# Surface atoms
+fig.add_trace(_atom_scatter3d(
+    surf_pos_all, colors=_SURF_COL,
+    sizes=7, names=[f"surf {n}" for n in surf_nodes],
+    name="surface", showlegend=True,
+))
+
+fig.update_layout(**_layout(
+    f"Stage 3 — Surface Connectivity Subgraph "
+    f"({len(surf_nodes)} nodes, {Gsub.number_of_edges()} edges)"
+))
+fig.show()
 
 # %% [markdown]
 # ---
@@ -247,62 +301,69 @@ for elem, sites in [("C", sites_C), ("O", sites_O)]:
 
 # %% [markdown]
 # ---
-# ## Stage 5 — Optimised Representative Positions
+# ## Stage 5 — Optimised Representative Positions (3‑D)
 #
 # Each `AnchorSite.position` is the geometrically optimised position for the
-# *representative* clique of that iso‑class.  Sites are coloured by **k**
-# and shown on top of the surface atom layer.
+# *representative* clique.  Sites are labelled by iso‑class index and coloured
+# by **k** (coordination number).
 
 # %% ── 5. Plot representative positions ──────────────────────────────────────
 _section("STAGE 5 — Optimised representative positions")
 
 surf_pos = pos[surf_mask]
 
-fig, axes = plt.subplots(1, 2, figsize=(12, 5), sharey=True)
-fig.suptitle("Stage 5 — Optimised Representative Positions", fontweight="bold")
+for elem, sites in [("C", sites_C), ("O", sites_O)]:
+    fig = go.Figure()
 
-for ax, (elem, sites) in zip(axes, [("C", sites_C), ("O", sites_O)]):
-    # Surface atom backdrop
-    ax.scatter(surf_pos[:, 0], surf_pos[:, 1],
-               c="#dddddd", s=50, edgecolors="#aaaaaa",
-               linewidths=0.3, zorder=1, label="surface")
+    # Full slab backdrop: bulk atoms (small, grey, transparent) + surface layer
+    if bulk_mask.any():
+        fig.add_trace(_atom_scatter3d(
+            pos[bulk_mask], colors=_BULK_COL,
+            sizes=4, names=[f"bulk {i}" for i in np.where(bulk_mask)[0]],
+            opacity=0.2, name="bulk", showlegend=True,
+        ))
+    fig.add_trace(_atom_scatter3d(
+        surf_pos, colors=_SURF_COL,
+        sizes=6, names=["Cu surf"] * len(surf_pos),
+        opacity=0.6, name="surface Cu", showlegend=True,
+    ))
 
-    # Unique representative per iso‑class
-    plotted_labels: set = set()
+    # One scatter trace per k value so the legend labels are clean
+    by_k: dict[int, list] = {}
     for iso in sites:
-        p   = iso.position
-        col = _K_COL.get(iso.k, "#333333")
-        lbl = _K_LABEL.get(iso.k, f"k={iso.k}")
-        ax.scatter(p[0], p[1], c=col, s=220,
-                   marker=_ELEM_MARKER.get(elem, "*"),
-                   edgecolors="k", linewidths=0.7, zorder=4,
-                   label=lbl if lbl not in plotted_labels else "")
-        plotted_labels.add(lbl)
-        ax.annotate(f"cls {iso.iso_class}", (p[0], p[1]),
-                    fontsize=6, ha="center", va="bottom",
-                    xytext=(0, 6), textcoords="offset points")
+        by_k.setdefault(iso.k, []).append(iso)
 
-    ax.set_aspect("equal")
-    ax.set_xlabel("x (Å)")
-    ax.set_title(f"{elem} — {len(sites)} unique anchor site(s)")
-    ax.legend(fontsize=7, loc="upper right")
+    for k, iso_list in sorted(by_k.items()):
+        rep_pos_k = np.array([iso.position for iso in iso_list])
+        labels    = [f"{elem} cls {iso.iso_class} k={iso.k}" for iso in iso_list]
+        fig.add_trace(_atom_scatter3d(
+            rep_pos_k,
+            colors=_K_COL.get(k, "#333333"),
+            sizes=12,
+            names=labels,
+            symbol=_ELEM_ANCHOR_SYM.get(elem, "circle"),
+            line_color="black",
+            line_width=1,
+            name=_K_LABEL.get(k, f"k={k}"),
+            showlegend=True,
+        ))
 
-axes[0].set_ylabel("y (Å)")
-plt.tight_layout()
-plt.show()
+    fig.update_layout(**_layout(
+        f"Stage 5 — {elem} Representative Anchor Positions "
+        f"({len(sites)} iso‑classes)"
+    ))
+    fig.show()
 
 # %% [markdown]
 # ---
-# ## Stage 6 — Propagate Representative → All Matching Anchor Nodes
+# ## Stage 6 — Propagate Representative → All Matching Anchor Nodes (3‑D)
 #
-# `find_anchor_sites` already propagated the representative's position to
-# every member via Kabsch ego‑alignment and wrote it into the graph.  Here
-# we **explicitly read those positions back** from `G` and confirm that
-# every `iso.node_ids[i]` carries a position consistent with the iso‑class.
+# `find_anchor_sites` already Kabsch-propagated the representative to every
+# member and stored the positions on the graph.  Here we read them back and
+# show:
 #
-# The plots show:
-# * ★ gold star — optimised representative position (`iso.position`)
-# * ○ coloured circle — each member anchor node position from `G`
+# * ★ gold star — optimised representative (`iso.position`)
+# * coloured dots — each member anchor node position from `G`
 # * thin grey lines — representative → member
 
 # %% ── 6a. Propagation table ─────────────────────────────────────────────────
@@ -312,7 +373,7 @@ for elem, sites in [("C", sites_C), ("O", sites_O)]:
     print(f"\nElement: {elem}")
     print(f"  {'iso':>4}  {'k':>3}  {'members':>7}  "
           f"{'rep_pos':>32}  first_member_pos")
-    print("  " + "─" * 85)
+    print("  " + "─" * 90)
     for iso in sites:
         rep_p = iso.position
         mem_p = (G.nodes[iso.node_ids[0]]["position"]
@@ -320,131 +381,143 @@ for elem, sites in [("C", sites_C), ("O", sites_O)]:
         print(f"  {iso.iso_class:>4}  {iso.k:>3}  {len(iso.members):>7}"
               f"  {np.round(rep_p, 3)}  {np.round(mem_p, 3)}")
 
-# %% ── 6b. Per‑iso‑class propagation plots ───────────────────────────────────
+# %% ── 6b. Per‑element propagation 3‑D plot ───────────────────────────────────
 for elem, sites in [("C", sites_C), ("O", sites_O)]:
-    ncols = min(len(sites), 4)
-    nrows = (len(sites) + ncols - 1) // ncols
-    fig, axes = plt.subplots(nrows, ncols,
-                             figsize=(4 * ncols, 3.8 * nrows),
-                             squeeze=False)
-    fig.suptitle(
-        f"Stage 6 — {elem} propagation:  representative ★  vs  all members ○",
-        fontweight="bold",
-    )
+    fig = go.Figure()
 
-    for ax_flat, iso in zip(axes.ravel(), sites):
-        col = _K_COL.get(iso.k, "#333333")
+    # Full slab backdrop
+    if bulk_mask.any():
+        fig.add_trace(_atom_scatter3d(
+            pos[bulk_mask], colors=_BULK_COL,
+            sizes=4, names=[f"bulk {i}" for i in np.where(bulk_mask)[0]],
+            opacity=0.2, name="bulk", showlegend=True,
+        ))
+    fig.add_trace(_atom_scatter3d(
+        surf_pos, colors=_SURF_COL,
+        sizes=6, names=["Cu surf"] * len(surf_pos),
+        opacity=0.5, name="surface Cu", showlegend=True,
+    ))
 
-        # Surface backdrop
-        ax_flat.scatter(surf_pos[:, 0], surf_pos[:, 1],
-                        c="#e8e8e8", s=30, edgecolors="#bbbbbb",
-                        linewidths=0.3, zorder=1)
+    for iso in sites:
+        col   = _K_COL.get(iso.k, "#333333")
+        rep_p = np.asarray(iso.position, dtype=float)
 
-        # Member anchor nodes (from G)
-        for nid in iso.node_ids:
-            mp = G.nodes[nid]["position"]
-            ax_flat.scatter(mp[0], mp[1], c=col, s=80, marker="o",
-                            edgecolors="k", linewidths=0.5, zorder=3)
+        # Member positions from G
+        mem_positions = np.array(
+            [G.nodes[nid]["position"] for nid in iso.node_ids]
+        ) if iso.node_ids else np.empty((0, 3))
 
-        # Representative — gold star
-        rp = iso.position
-        ax_flat.scatter(rp[0], rp[1], c="gold", s=360,
-                        marker="*", edgecolors="k",
-                        linewidths=0.8, zorder=5)
+        # Bond lines: rep → each member
+        if len(mem_positions):
+            rep_broadcast = np.tile(rep_p, (len(mem_positions), 1))
+            fig.add_trace(_bond_lines3d(
+                rep_broadcast, mem_positions,
+                color="rgba(180,180,180,0.5)", width=1,
+                showlegend=False,
+            ))
 
-        # Lines: representative → each member
-        for nid in iso.node_ids:
-            mp = G.nodes[nid]["position"]
-            ax_flat.plot([rp[0], mp[0]], [rp[1], mp[1]],
-                         color="gray", lw=0.6, alpha=0.55, zorder=2)
+            # Member dots
+            fig.add_trace(_atom_scatter3d(
+                mem_positions, colors=col,
+                sizes=6,
+                names=[f"{elem} cls{iso.iso_class} k={iso.k} mem {i}"
+                       for i in range(len(mem_positions))],
+                opacity=0.85,
+                symbol="circle",
+                line_color="black", line_width=0.5,
+                name=f"{_K_LABEL.get(iso.k, f'k={iso.k}')} cls{iso.iso_class}",
+                showlegend=True,
+            ))
 
-        lbl = _K_LABEL.get(iso.k, f"k={iso.k}")
-        ax_flat.set_aspect("equal")
-        ax_flat.set_title(f"{elem}  {lbl}  cls {iso.iso_class}\n"
-                          f"{len(iso.members)} members", fontsize=8)
-        ax_flat.set_xlabel("x (Å)", fontsize=7)
-        ax_flat.set_ylabel("y (Å)", fontsize=7)
-        ax_flat.tick_params(labelsize=7)
+        # Representative — gold diamond
+        fig.add_trace(go.Scatter3d(
+            x=[rep_p[0]], y=[rep_p[1]], z=[rep_p[2]],
+            mode="markers",
+            marker=dict(size=14, color="gold", symbol="diamond",
+                        line=dict(color="black", width=1)),
+            text=[f"{elem} cls{iso.iso_class} rep"],
+            hovertemplate="%{text}<br>x=%{x:.3f} y=%{y:.3f} z=%{z:.3f}<extra></extra>",
+            name=f"rep cls{iso.iso_class}",
+            showlegend=True,
+        ))
 
-    # Hide spare axes
-    for ax_flat in axes.ravel()[len(sites):]:
-        ax_flat.set_visible(False)
-
-    plt.tight_layout()
-    plt.show()
+    fig.update_layout(**_layout(
+        f"Stage 6 — {elem} Propagation: representative ★ vs all members ●"
+    ))
+    fig.show()
 
 # %% [markdown]
 # ---
-# ## Final Summary — Full Graph with All Anchor Nodes
-#
-# `G` now contains anchor nodes for both C and O.  Below we overlay every
-# anchor node on the surface subgraph, colouring by element and k.
+# ## Final Summary — Full Graph with All C & O Anchor Nodes (3‑D)
 
 # %% ── Final: full graph with anchor nodes ───────────────────────────────────
 _section("FINAL — Surface graph + all C / O anchor nodes")
 
-anchor_C = [n for n, d in G.nodes(data=True)
+anchor_C = [(n, G.nodes[n]) for n, d in G.nodes(data=True)
             if d["type"] == "anchor" and d["element"] == "C"]
-anchor_O = [n for n, d in G.nodes(data=True)
+anchor_O = [(n, G.nodes[n]) for n, d in G.nodes(data=True)
             if d["type"] == "anchor" and d["element"] == "O"]
 
 print(f"Anchor nodes in G :  C → {len(anchor_C)},  O → {len(anchor_O)}")
 
-fig, ax = plt.subplots(figsize=(8, 7))
-fig.suptitle("Final — Surface Graph + All Anchor Nodes (C & O)",
-             fontweight="bold")
+fig = go.Figure()
+
+# Full slab backdrop
+if bulk_mask.any():
+    fig.add_trace(_atom_scatter3d(
+        pos[bulk_mask], colors=_BULK_COL,
+        sizes=4, names=[f"bulk {i}" for i in np.where(bulk_mask)[0]],
+        opacity=0.2, name="bulk", showlegend=True,
+    ))
 
 # Surface atoms
-ax.scatter(surf_pos[:, 0], surf_pos[:, 1],
-           c=_TYPE_COL["surface"], s=55, edgecolors="k",
-           linewidths=0.4, zorder=2)
+fig.add_trace(_atom_scatter3d(
+    surf_pos, colors=_SURF_COL,
+    sizes=6, names=["Cu"] * len(surf_pos), opacity=0.65,
+    name="surface Cu", showlegend=True,
+))
 
-# Anchor‑bond edges
-for nid in anchor_C + anchor_O:
+# Anchor-bond edges for both elements
+all_anchor_ids = [n for n, _ in anchor_C + anchor_O]
+bond_from_a, bond_to_a = [], []
+for nid in all_anchor_ids:
     ap = G.nodes[nid]["position"]
     for nb in G.neighbors(nid):
         if G.nodes[nb]["type"] != "surface":
             continue
-        sp = G.nodes[nb]["position"]
-        ax.plot([ap[0], sp[0]], [ap[1], sp[1]],
-                color="#999999", lw=0.5, alpha=0.35, zorder=1)
+        bond_from_a.append(ap)
+        bond_to_a.append(G.nodes[nb]["position"])
 
-# C anchor nodes (diamonds, coloured by k)
-if anchor_C:
-    cp  = np.array([G.nodes[n]["position"] for n in anchor_C])
-    ck  = [G.nodes[n]["k"] for n in anchor_C]
-    ax.scatter(cp[:, 0], cp[:, 1],
-               c=[_K_COL.get(k, "#333") for k in ck],
-               s=110, marker="D", edgecolors="darkgreen",
-               linewidths=0.8, zorder=4)
+if bond_from_a:
+    fig.add_trace(_bond_lines3d(
+        np.array(bond_from_a), np.array(bond_to_a),
+        color="rgba(160,160,160,0.3)", width=1,
+        showlegend=False,
+    ))
 
-# O anchor nodes (triangles, coloured by k)
-if anchor_O:
-    op  = np.array([G.nodes[n]["position"] for n in anchor_O])
-    ok  = [G.nodes[n]["k"] for n in anchor_O]
-    ax.scatter(op[:, 0], op[:, 1],
-               c=[_K_COL.get(k, "#333") for k in ok],
-               s=110, marker="^", edgecolors="darkred",
-               linewidths=0.8, zorder=4)
+for elem, anchor_list, sym in [("C", anchor_C, "diamond"), ("O", anchor_O, "cross")]:
+    if not anchor_list:
+        continue
+    by_k: dict[int, list[np.ndarray]] = {}
+    for _nid, d in anchor_list:
+        by_k.setdefault(d["k"], []).append(np.asarray(d["position"]))
+    for k, pts in sorted(by_k.items()):
+        pts_arr = np.array(pts)
+        fig.add_trace(_atom_scatter3d(
+            pts_arr,
+            colors=_K_COL.get(k, "#333"),
+            sizes=9,
+            names=[f"{elem} k={k}"] * len(pts_arr),
+            symbol=sym,
+            line_color="black", line_width=0.8,
+            name=f"{elem} {_K_LABEL.get(k, f'k={k}')}",
+            showlegend=True,
+        ))
 
-# Legend
-type_handles = [
-    mpatches.Patch(color=_TYPE_COL["surface"], label="surface atom"),
-    plt.Line2D([0], [0], marker="D", color="w", markerfacecolor="#27AE60",
-               markeredgecolor="darkgreen", markersize=9, label="C anchor"),
-    plt.Line2D([0], [0], marker="^", color="w", markerfacecolor="#27AE60",
-               markeredgecolor="darkred", markersize=9, label="O anchor"),
-]
-k_handles = [mpatches.Patch(color=col, label=_K_LABEL[k])
-             for k, col in _K_COL.items() if k <= 4]
-ax.legend(handles=type_handles + k_handles, fontsize=7,
-          loc="upper right", framealpha=0.9)
-
-ax.set_aspect("equal")
-ax.set_xlabel("x (Å)"); ax.set_ylabel("y (Å)")
-ax.set_title(f"Surface + C ({len(anchor_C)}) + O ({len(anchor_O)}) anchor nodes")
-plt.tight_layout()
-plt.show()
+fig.update_layout(**_layout(
+    f"Final — Surface + C ({len(anchor_C)}) + O ({len(anchor_O)}) anchor nodes"
+))
+fig.show()
 
 print("\nPipeline complete.")
 

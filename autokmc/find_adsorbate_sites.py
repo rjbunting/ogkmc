@@ -64,7 +64,7 @@ Public API
 
 from __future__ import annotations
 
-import logging
+import warnings
 from dataclasses import dataclass, field
 from itertools import combinations
 from typing import Any
@@ -79,10 +79,12 @@ from autokmc.find_anchors import (
     _kabsch_align_ego,
     _get_cell,
     _kabsch,
+    _next_node_id,
     AnchorSite,
 )
+from autokmc.logging_utils import get_logger
 
-_log = logging.getLogger(__name__)
+_log = get_logger(__name__)
 
 # ---------------------------------------------------------------------------
 # Tuneable defaults — single source of truth in :mod:`autokmc.constants`.
@@ -152,12 +154,18 @@ class AdsorbateSite:
 
     reactant        : str
     n_atoms         : int
-    atom_cliques    : list
+    atom_cliques    : list[frozenset | None]
     positions       : Any
     iso_class       : int
-    members         : list    = field(default_factory=list)
-    member_node_ids : list    = field(default_factory=list)
-    ego_graph       : Any     = None
+    members         : list[list[frozenset | None]] = field(default_factory=list)
+    member_node_ids : list[list[int]]              = field(default_factory=list)
+    ego_graph       : Any                          = None
+    #: Ego depth at which this iso-class was discovered after any
+    #: ``auto_grow_shells`` retries inside :func:`find_adsorbate_sites`.
+    #: Re-used by :func:`optimise_adsorbate_site_positions` so that
+    #: representative→member Kabsch propagation uses an ego depth large
+    #: enough to span every bonded clique pair.
+    n_shells_settled: int                          = 0
 
     # ------------------------------------------------------------------
     # Occupancy helpers
@@ -421,142 +429,6 @@ def _required_n_shells(
 # Anchor-site management
 # ---------------------------------------------------------------------------
 
-class _AnchorKDTree:
-    """KD-tree over anchor positions with MIC-aware annulus queries.
-
-    Built once per (element, pass) and queried during chain placement to
-    replace the O(N) scan over every anchor position with an O(log N + h)
-    range query, where *h* is the number of anchors lying within
-    ``[D - bond_tolerance, D + bond_tolerance]`` of the query point.
-
-    Three internal layouts depending on cell shape:
-
-    * **orthogonal periodic** — :class:`scipy.spatial.cKDTree` with native
-      ``boxsize`` so distances returned by the query are already the
-      minimum-image distances.
-    * **non-orthogonal periodic** — positions tiled across ±1 cell images
-      along every periodic axis (up to 27 copies); duplicates are mapped
-      back to original indices on output.
-    * **non-periodic (nanoparticle)** — plain kd-tree.
-    """
-
-    def __init__(
-        self,
-        positions: np.ndarray,
-        cliques: list,
-        cell: np.ndarray,
-        cell_inv: np.ndarray | None,
-        pbc: np.ndarray,
-        use_mic: bool,
-    ) -> None:
-        from scipy.spatial import cKDTree
-
-        self.positions = np.asarray(positions, dtype=float).reshape(-1, 3)
-        self.cliques   = list(cliques)
-        self.pbc       = pbc
-        self.use_mic   = use_mic
-        self._is_ortho = False
-        self._boxsize: np.ndarray | None = None
-        self._tile_index: np.ndarray | None = None
-
-        if len(self.positions) == 0:
-            self._tree = None
-            return
-
-        is_ortho = (
-            use_mic and np.allclose(cell - np.diag(np.diag(cell)), 0.0)
-        )
-
-        if is_ortho:
-            boxsize = np.where(pbc, np.diag(cell), 0.0).astype(float)
-            wrap = self.positions.copy()
-            for ax in range(3):
-                if pbc[ax] and boxsize[ax] > 0:
-                    wrap[:, ax] = np.mod(wrap[:, ax], boxsize[ax])
-            self._tree     = cKDTree(
-                wrap, boxsize=np.where(boxsize > 0, boxsize, 0.0)
-            )
-            self._is_ortho = True
-            self._boxsize  = boxsize
-        elif use_mic:
-            offsets: list[np.ndarray] = []
-            for dx in (-1, 0, 1):
-                for dy in (-1, 0, 1):
-                    for dz in (-1, 0, 1):
-                        if dx and not pbc[0]:
-                            continue
-                        if dy and not pbc[1]:
-                            continue
-                        if dz and not pbc[2]:
-                            continue
-                        offsets.append(np.array([dx, dy, dz], dtype=int))
-            tiled: list[np.ndarray] = []
-            tile_idx: list[int]     = []
-            for off in offsets:
-                tiled.append(self.positions + off @ cell)
-                tile_idx.extend(range(len(self.positions)))
-            self._tree       = cKDTree(np.concatenate(tiled))
-            self._tile_index = np.asarray(tile_idx, dtype=int)
-        else:
-            self._tree = cKDTree(self.positions)
-
-    def query_annulus(
-        self,
-        p_query: np.ndarray,
-        r_min: float,
-        r_max: float,
-    ) -> list[int]:
-        """Return indices into :attr:`positions` whose MIC distance to
-        *p_query* lies in ``[r_min, r_max]``.
-
-        Negative ``r_min`` is treated as zero.
-        """
-        if self._tree is None:
-            return []
-        r_min = max(0.0, float(r_min))
-        r_max = float(r_max)
-
-        if self._is_ortho and self._boxsize is not None:
-            q = np.asarray(p_query, dtype=float).copy()
-            for ax in range(3):
-                if self.pbc[ax] and self._boxsize[ax] > 0:
-                    q[ax] = q[ax] % self._boxsize[ax]
-            hits = self._tree.query_ball_point(q, r=r_max)
-            if not hits:
-                return []
-            data = self._tree.data[np.asarray(hits, dtype=int)]
-            d = np.linalg.norm(data - q, axis=1)
-            keep = d >= r_min
-            return [int(hits[i]) for i in np.where(keep)[0]]
-
-        if self._tile_index is not None:
-            hits = self._tree.query_ball_point(p_query, r=r_max)
-            if not hits:
-                return []
-            hits = np.asarray(hits, dtype=int)
-            d    = np.linalg.norm(self._tree.data[hits] - p_query, axis=1)
-            keep = (d >= r_min) & (d <= r_max)
-            seen: set[int] = set()
-            out: list[int] = []
-            for h, k in zip(hits, keep):
-                if not k:
-                    continue
-                orig = int(self._tile_index[h])
-                if orig in seen:
-                    continue
-                seen.add(orig)
-                out.append(orig)
-            return out
-
-        hits = self._tree.query_ball_point(p_query, r=r_max)
-        if not hits:
-            return []
-        hits = np.asarray(hits, dtype=int)
-        d    = np.linalg.norm(self.positions[hits] - p_query, axis=1)
-        keep = (d >= r_min) & (d <= r_max)
-        return [int(hits[i]) for i in np.where(keep)[0]]
-
-
 def _ensure_anchor_sites(
     G: nx.Graph,
     element: str,
@@ -702,12 +574,6 @@ def _try_merge_or_new(
 # Graph materialisation
 # ---------------------------------------------------------------------------
 
-def _next_node_id(G: nx.Graph) -> int:
-    """Smallest integer node id strictly greater than all existing ids."""
-    if not G.nodes:
-        return 0
-    return int(max(int(n) for n in G.nodes if isinstance(n, (int, np.integer)))) + 1
-
 
 def _remove_adsorbate_nodes(G: nx.Graph, smiles: str) -> None:
     """Drop all adsorbate-site nodes carrying ``reactant == smiles``."""
@@ -776,12 +642,33 @@ def _materialise_adsorbate_nodes(
     """
     smiles      = reactant.smiles
     react_sym   = reactant.atoms.get_chemical_symbols()
-    react_radii = (
-        [float(d.get("covalent_radius", 0.0))
-         for _, d in reactant.graph.nodes(data=True)]
-        if reactant.graph is not None
-        else [0.0] * len(react_sym)
-    )
+    if reactant.graph is not None:
+        react_radii: list[float] = []
+        missing: list[tuple[int, str]] = []
+        for n, d in reactant.graph.nodes(data=True):
+            r = d.get("covalent_radius")
+            if r is None:
+                missing.append((int(n), str(d.get("element", "?"))))
+                react_radii.append(0.0)
+            else:
+                react_radii.append(float(r))
+        if missing:
+            # This should not happen for any standard element produced by
+            # ``build_reactant`` (which routes through ``build_graph`` →
+            # ``ase.data.covalent_radii``), but exotic / non-standard
+            # elements or hand-built graphs may be missing the attribute.
+            warnings.warn(
+                f"_materialise_adsorbate_nodes: reactant {smiles!r} has "
+                f"{len(missing)} node(s) without a 'covalent_radius' "
+                f"attribute (atoms: {missing}); using r_cov=0.0 for these "
+                "atoms — steric exclusion against the surface will be "
+                "weakened.  Check that every reactant atom is a standard "
+                "element recognised by ase.data.covalent_radii.",
+                RuntimeWarning,
+                stacklevel=3,
+            )
+    else:
+        react_radii = [0.0] * len(react_sym)
     intra_edges = (
         list(reactant.graph.edges())
         if reactant.graph is not None else []
@@ -1064,23 +951,6 @@ def find_adsorbate_sites(
             el: _all_raw_sites_with_positions(G, el) for el in anchor_elements
         }
 
-        # Build one kd-tree per anchor element so the inner chain-placement
-        # loop becomes O(log N + h) instead of O(N) per step.  The tree
-        # handles MIC for orthogonal periodic cells natively (boxsize),
-        # tiles ±1 images for non-orthogonal periodic cells, and falls
-        # back to a plain tree for nanoparticles.
-        kdtree_by_elem: dict[str, _AnchorKDTree] = {}
-        for el, raws in raw_by_elem.items():
-            if raws:
-                positions = np.array([p for _c, p in raws], dtype=float)
-                cliques   = [c for c, _p in raws]
-            else:
-                positions = np.empty((0, 3), dtype=float)
-                cliques   = []
-            kdtree_by_elem[el] = _AnchorKDTree(
-                positions, cliques, cell, cell_inv, pbc, use_mic,
-            )
-
         adsorbate_sites: list[AdsorbateSite] = []
         seen_signatures: set = set()
         rejected_disconnected = 0
@@ -1132,42 +1002,35 @@ def find_adsorbate_sites(
             idx: int,
             assigned_pos: dict[int, np.ndarray],
             assigned_clique: dict[int, frozenset],
-            last_atom: int,
         ) -> None:
+            """Plain O(N) backtracking chain placement.
+
+            For each remaining anchor atom we iterate every raw anchor of the
+            target element and check the MIC distance against *every* prior
+            placed anchor (not just the most recent one).  This is the
+            straightforward, easy-to-audit version; a per-element kd-tree
+            prefilter (see :file:`todo.MD`) used to wrap this loop with an
+            O(log N + h) annulus query but had a correctness bug and was
+            removed.
+            """
             if idx == len(bonded):
                 _emit(bonded, assigned_pos, assigned_clique)
                 return
             next_atom = bonded[idx]
             next_el   = elements[next_atom]
-            kd        = kdtree_by_elem[next_el]
+            candidates = raw_by_elem.get(next_el, [])
 
-            # KD-tree prefilter: query the annulus around the most recently
-            # placed anchor only.  All other distance constraints are then
-            # verified explicitly on the (small) candidate set.
-            p_anchor = assigned_pos[last_atom]
-            target   = float(D[last_atom, next_atom])
-            r_min    = target - bond_tolerance
-            r_max    = target + bond_tolerance
-            candidates = kd.query_annulus(p_anchor, r_min, r_max)
-
-            for cand_idx in candidates:
-                clique = kd.cliques[cand_idx]
-                pos    = kd.positions[cand_idx]
-
+            for clique, pos in candidates:
                 # No two adsorbate atoms may share the same surface clique.
                 if any(clique == c for c in assigned_clique.values()):
                     continue
 
-                # Verify remaining distance constraints (every prior anchor
-                # other than ``last_atom``, which the kd-tree already
-                # checked).
+                # Verify the MIC distance to every prior placed anchor.
                 ok = True
                 for prev_idx, p_prev in assigned_pos.items():
-                    if prev_idx == last_atom:
-                        continue
-                    target_prev = float(D[prev_idx, next_atom])
+                    target = float(D[prev_idx, next_atom])
                     d = _mic_distance(p_prev, pos, cell, cell_inv, pbc, use_mic)
-                    if abs(d - target_prev) > bond_tolerance:
+                    if abs(d - target) > bond_tolerance:
                         ok = False
                         break
                 if not ok:
@@ -1175,8 +1038,7 @@ def find_adsorbate_sites(
 
                 assigned_pos[next_atom]    = pos
                 assigned_clique[next_atom] = clique
-                _recurse(bonded, idx + 1, assigned_pos, assigned_clique,
-                         last_atom=next_atom)
+                _recurse(bonded, idx + 1, assigned_pos, assigned_clique)
                 del assigned_pos[next_atom]
                 del assigned_clique[next_atom]
 
@@ -1195,8 +1057,7 @@ def find_adsorbate_sites(
                     continue
                 assigned_pos    = {first: np.asarray(iso_first.position, float)}
                 assigned_clique = {first: iso_first.representative}
-                _recurse(bonded, 1, assigned_pos, assigned_clique,
-                         last_atom=first)
+                _recurse(bonded, 1, assigned_pos, assigned_clique)
 
         if verbose and rejected_disconnected:
             print(
@@ -1236,6 +1097,11 @@ def find_adsorbate_sites(
         )
 
     # ── Materialise nodes, then persist to G.graph ───────────────────────
+    # Stamp the settled shell depth on every iso-class so that downstream
+    # refinement (optimise_adsorbate_site_positions) can re-use it.
+    for ms in adsorbate_sites:
+        ms.n_shells_settled = int(n_shells_eff)
+
     _materialise_adsorbate_nodes(G, reactant, adsorbate_sites)
     G.graph.setdefault("adsorbate_sites", {})[reactant.smiles] = adsorbate_sites
 
@@ -1354,7 +1220,14 @@ def optimise_adsorbate_site_positions(
     max_iter : int
         L-BFGS-B iteration cap per restart.  Default 100.
     n_shells_pair : int
-        Ego depth for Kabsch propagation to members.  Default 1.
+        Lower bound on the ego depth used to propagate the refined
+        representative onto every other member via Kabsch ego-alignment.
+        Each :class:`AdsorbateSite` carries its own ``n_shells_settled``
+        recorded during :func:`find_adsorbate_sites` (after any
+        ``auto_grow_shells`` retries); the propagation depth is
+        ``max(n_shells_pair, ms.n_shells_settled)`` so that members whose
+        bonded cliques span more hops than this kwarg are still aligned
+        through an ego large enough to contain every clique pair.
     verbose : bool
 
     Returns
@@ -1461,19 +1334,27 @@ def optimise_adsorbate_site_positions(
                     disp = p[bonded_idx] - target_arr
                     E += restraint_weight * float(np.einsum("ij,ij->", disp, disp))
                 if free_pos.size:
-                    for ai in range(n_atoms):
-                        dv = free_pos - p[ai]
-                        if use_mic and cell_inv is not None:
-                            frac = dv @ cell_inv
-                            for ax in range(3):
-                                if pbc[ax]:
-                                    frac[:, ax] -= np.round(frac[:, ax])
-                            dv = frac @ cell
-                        d2    = np.einsum("ij,ij->i", dv, dv)
-                        R_min = contact_factor * (ads_rcov[ai] + free_r)
-                        delta = R_min - np.sqrt(d2 + 1e-12)
-                        pos_c = np.maximum(delta, 0.0)
-                        E += repulsion_weight * float(np.dot(pos_c, pos_c))
+                    # Vectorised pairwise (adsorbate, free-surface) repulsion.
+                    # ``dv`` has shape (n_atoms, n_surf, 3); MIC-wrapping is
+                    # applied once on the whole tensor instead of per-atom
+                    # (the previous implementation looped on ``ai`` in
+                    # Python, which dominated the L-BFGS-B objective cost).
+                    dv = free_pos[None, :, :] - p[:, None, :]
+                    if use_mic and cell_inv is not None:
+                        frac = dv @ cell_inv
+                        for ax in range(3):
+                            if pbc[ax]:
+                                frac[..., ax] -= np.round(frac[..., ax])
+                        dv = frac @ cell
+                    d2    = np.einsum("ijk,ijk->ij", dv, dv)
+                    R_min = contact_factor * (
+                        ads_rcov[:, None] + free_r[None, :]
+                    )
+                    delta = R_min - np.sqrt(d2 + 1e-12)
+                    pos_c = np.maximum(delta, 0.0)
+                    E += repulsion_weight * float(np.einsum(
+                        "ij,ij->", pos_c, pos_c
+                    ))
                 return E
             return _energy
 
@@ -1491,6 +1372,7 @@ def optimise_adsorbate_site_positions(
                 bases.append(R_flip @ R_b)
 
         best_E, best_pose, best_k = np.inf, None, 0
+        last_exc: Exception | None = None
         for k, R_base in enumerate(bases):
             energy_k = _make_energy(_make_pose(R_base))
             try:
@@ -1498,13 +1380,18 @@ def optimise_adsorbate_site_positions(
                                options={"maxiter": max_iter, "ftol": 1e-7})
                 E_k = float(res.fun)
                 p_k = _make_pose(R_base)(res.x)
-            except Exception:
+            except Exception as exc:
+                last_exc = exc
                 continue
             if E_k < best_E:
                 best_E, best_pose, best_k = E_k, p_k, k
 
         if best_pose is None:
-            return cur_pos, E0, E0, 0
+            raise RuntimeError(
+                f"optimise_adsorbate_site_positions: every one of "
+                f"{len(bases)} rigid-body restarts failed for iso-class "
+                f"{ms.iso_class} of {smiles!r}.  Last exception: {last_exc!r}"
+            )
         return best_pose, E0, best_E, best_k
 
     if verbose:
@@ -1541,6 +1428,12 @@ def optimise_adsorbate_site_positions(
             )
             if rep_seed:
                 cell_arr, cell_inv_arr, pbc_arr, use_mic_arr = _get_cell(G)
+                # Use whichever depth is larger: the kwarg floor, or the
+                # depth ``find_adsorbate_sites`` settled on for *this*
+                # iso-class.  Without this, members whose bonded cliques
+                # span more hops than ``n_shells_pair`` would silently
+                # fail to align (rep / mem ego non-isomorphic).
+                depth = max(int(n_shells_pair), int(ms.n_shells_settled))
                 for m_idx in range(1, len(ms.members)):
                     mem_seed: frozenset = frozenset(
                         int(n)
@@ -1551,7 +1444,7 @@ def optimise_adsorbate_site_positions(
                         continue
                     R, t = _kabsch_align_ego(
                         G,
-                        rep_seed, mem_seed, n_shells_pair,
+                        rep_seed, mem_seed, depth,
                         cell_arr, cell_inv_arr, pbc_arr, use_mic_arr,
                     )
                     if R is None or t is None:

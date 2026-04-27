@@ -98,6 +98,8 @@ from ase.calculators.emt import EMT
 from ase.constraints import FixAtoms
 from ase.optimize import LBFGS
 
+from autokmc.constants import RANDOM_SEED
+
 _log = logging.getLogger(__name__)
 
 # ExpCellFilter: newer ASE (≥3.23) ships it in ase.filters; fall back to
@@ -149,7 +151,7 @@ def build_nanoparticle(
     lattice_constant: LatticeParams = None,
     surface_energies: Optional[Dict[Tuple[int, int, int], float]] = None,
     target_atoms: int = 600,
-    composition_seed: int = 69,
+    composition_seed: int = RANDOM_SEED,
     calculator=None,
     fmax: float = 0.05,
     vacuum: float = 10.0,
@@ -337,7 +339,7 @@ def build_surface(
     center_slab: bool = True,
     orthogonalise: bool = True,
     n_freeze_layers: int = 2,
-    composition_seed: int = 69,
+    composition_seed: int = RANDOM_SEED,
     calculator=None,
     fmax: float = 0.05,
     logfile: Optional[str] = None,
@@ -527,8 +529,7 @@ def build_surface(
     # 6. Freeze bottom layers and optimise
     # ------------------------------------------------------------------
     if n_freeze_layers > 0:
-        a_val = float(lp["a"])
-        fixed_indices = _get_bottom_layer_indices(atoms, n_freeze_layers, a_val)
+        fixed_indices = _get_bottom_layer_indices(atoms, n_freeze_layers)
         atoms.set_constraint(FixAtoms(indices=fixed_indices))
         # Store frozen indices in info so downstream code can reuse them
         # without re-running the layer-detection heuristic.
@@ -730,7 +731,7 @@ def _primary_element(composition: Dict[str, float]) -> str:
 def _apply_composition(
     atoms: Atoms,
     composition: Dict[str, float],
-    seed: int = 69,
+    seed: int = RANDOM_SEED,
     verbose: bool = True,
 ) -> Atoms:
     """Randomly substitute atoms to match target composition fractions.
@@ -996,7 +997,6 @@ def _orthogonalise_slab(
 def _get_bottom_layer_indices(
     atoms: Atoms,
     n_layers: int,
-    lattice_constant_a: float,
 ) -> list:
     """Return atom indices belonging to the bottom *n_layers* layers.
 
@@ -1014,8 +1014,6 @@ def _get_bottom_layer_indices(
     atoms : Atoms
     n_layers : int
         Number of bottom layers to identify.
-    lattice_constant_a : float
-        Unused (retained for backwards-compat / future tolerance use).
     """
     # Local import to avoid a circular dep (surface.py imports from us
     # only indirectly via the constants module).

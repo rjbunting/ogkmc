@@ -2,7 +2,7 @@
 # # AutoKMC2 — Adsorbate‑Site Pipeline Demo
 #
 # Walks through every stage of the multi‑atom adsorbate workflow for a **CO**
-# molecule on a Cu(111) FCC slab, showing each step visually:
+# molecule on a Cu(111) FCC slab, showing each step visually in **3‑D (Plotly)**:
 #
 # 1. **Build** a Cu(111) FCC surface slab
 # 2. **Find** surface atoms via ray‑casting
@@ -16,68 +16,21 @@
 #    final graph
 
 # %% ── 0. Imports & helpers ──────────────────────────────────────────────────
-import sys
-import os
 from pathlib import Path
 
 import numpy as np
-import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
-import networkx as nx
 import torch
+import plotly.graph_objects as go
 from nequip.ase import NequIPCalculator
 
-# ── Make the workspace root importable so `autokmc` resolves ──
-_HERE = os.path.dirname(os.path.abspath(__file__))
-_ROOT = os.path.abspath(os.path.join(_HERE, "..", ".."))
-if _ROOT not in sys.path:
-    sys.path.insert(0, _ROOT)
-
-from autokmc.structure import build_surface                          # noqa: E402
-from autokmc.surface   import find_surface_atoms                     # noqa: E402
-from autokmc.graph     import build_graph                            # noqa: E402
-from autokmc.reactants import build_reactant                         # noqa: E402
-from autokmc.find_adsorbate_sites import (                           # noqa: E402
+from autokmc.structure import build_surface
+from autokmc.surface   import find_surface_atoms
+from autokmc.graph     import build_graph
+from autokmc.reactants import build_reactant
+from autokmc.find_adsorbate_sites import (
     find_adsorbate_sites,
     optimise_adsorbate_site_positions,
 )
-
-# ── Notebook‑friendly matplotlib (magic is a no‑op when run as plain .py) ──
-try:
-    get_ipython().run_line_magic("matplotlib", "inline")   # type: ignore[name-defined]
-except NameError:
-    pass
-plt.rcParams.update({"figure.dpi": 110, "font.size": 9})
-
-# ── Visual palette ──────────────────────────────────────────────────────────
-_SURF_COL   = "#4A90D9"       # surface atoms
-_BULK_COL   = "#cccccc"       # bulk atoms
-_ADS_COL    = {"C": "#2ECC71", "O": "#E74C3C"}   # adsorbate atom colours
-_ADS_MARKER = {"C": "D",       "O": "^"}          # adsorbate markers
-_ISO_CMAP   = plt.get_cmap("tab10")               # one colour per iso‑class
-
-_ELEM_COL = {"Cu": "#B87333", "Pt": "#C0C0C0", "Au": "#FFD700"}
-
-
-def _ecolor(sym: str) -> str:
-    return _ELEM_COL.get(sym, "#888888")
-
-
-def _section(title: str) -> None:
-    bar = "─" * 60
-    print(f"\n{bar}\n  {title}\n{bar}")
-
-
-# %% [markdown]
-# ---
-# ## Stage 1 — Build a Cu(111) FCC Slab
-#
-# `build_surface` generates a pymatgen slab, orthogonalises it, tiles to
-# ~10 × 10 Å and relaxes with the Allegro NequIP calculator.
-# A fixed `lattice_constant` skips the bulk‑relaxation step.
-
-# %% ── 1. Build structure ────────────────────────────────────────────────────
-_section("STAGE 1 — Build Cu(111) FCC slab")
 
 _DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 _MODEL_FILE = "asehcocuau.nequip.pt2" if _DEVICE == "cuda" else "cpuhcocuau.nequip.pth"
@@ -98,15 +51,119 @@ calc = make_calc()
 print(f"Calculator : {calc.__class__.__name__}")
 print(f"Model      : {_MODEL_PATH}")
 
+# ── Visual palette ───────────────────────────────────────────────────────────
+_ELEM_COL  = {"Cu": "#B87333", "Pt": "#C0C0C0", "Au": "#FFD700"}
+_BULK_COL  = "#aaaaaa"
+_SURF_COL  = "#4A90D9"
+_ADS_COL   = {"C": "#2ECC71", "O": "#E74C3C"}
+_ADS_SYM   = {"C": "diamond", "O": "cross"}
+# Ten distinct colours for iso‑classes (wraps with % 10)
+_ISO_COLS  = [
+    "#E6194B", "#3CB44B", "#4363D8", "#F58231",
+    "#911EB4", "#42D4F4", "#F032E6", "#BCF60C",
+    "#FABEBE", "#008080",
+]
+
+
+def _iso_col(iso_class: int) -> str:
+    return _ISO_COLS[iso_class % len(_ISO_COLS)]
+
+
+def _ecolor(sym: str) -> str:
+    return _ELEM_COL.get(sym, "#888888")
+
+
+def _section(title: str) -> None:
+    bar = "─" * 60
+    print(f"\n{bar}\n  {title}\n{bar}")
+
+
+def _atom_scatter3d(pos, colors, sizes, names, opacity=1.0, symbol="circle",
+                    line_color="black", line_width=0.5,
+                    name="", showlegend=True):
+    """Return a Scatter3d trace for a set of atoms."""
+    return go.Scatter3d(
+        x=pos[:, 0], y=pos[:, 1], z=pos[:, 2],
+        mode="markers",
+        marker=dict(
+            size=sizes,
+            color=colors,
+            symbol=symbol,
+            opacity=opacity,
+            line=dict(color=line_color, width=line_width),
+        ),
+        text=names,
+        hovertemplate="%{text}<br>x=%{x:.3f} y=%{y:.3f} z=%{z:.3f}<extra></extra>",
+        name=name,
+        showlegend=showlegend,
+    )
+
+
+def _bond_lines3d(p_from, p_to, color="rgba(160,160,160,0.4)", width=1,
+                  name="", showlegend=False):
+    """Return a Scatter3d line trace for bond pairs (NaN-separated)."""
+    n = len(p_from)
+    x = np.empty(n * 3); y = np.empty(n * 3); z = np.empty(n * 3)
+    x[0::3] = p_from[:, 0]; y[0::3] = p_from[:, 1]; z[0::3] = p_from[:, 2]
+    x[1::3] = p_to[:, 0];   y[1::3] = p_to[:, 1];   z[1::3] = p_to[:, 2]
+    x[2::3] = np.nan;        y[2::3] = np.nan;        z[2::3] = np.nan
+    return go.Scatter3d(
+        x=x, y=y, z=z,
+        mode="lines",
+        line=dict(color=color, width=width),
+        hoverinfo="skip",
+        name=name,
+        showlegend=showlegend,
+    )
+
+
+def _layout(title: str, scene_equal: bool = True) -> dict:
+    """Common 3‑D layout dict."""
+    return dict(
+        title=dict(text=title, font=dict(size=14)),
+        showlegend=True,
+        scene=dict(
+            xaxis_title="x (Å)",
+            yaxis_title="y (Å)",
+            zaxis_title="z (Å)",
+            aspectmode="data" if scene_equal else "auto",
+        ),
+        margin=dict(l=0, r=0, t=60, b=0),
+        template="plotly_white",
+    )
+
+
+def _add_slab_backdrop(fig: go.Figure, pos, bulk_mask, surf_pos) -> None:
+    """Add bulk (transparent) + surface atom backdrop traces to *fig*."""
+    if bulk_mask.any():
+        fig.add_trace(_atom_scatter3d(
+            pos[bulk_mask], colors=_BULK_COL,
+            sizes=3, names=[f"bulk {i}" for i in np.where(bulk_mask)[0]],
+            opacity=0.2, name="bulk", showlegend=True,
+        ))
+    fig.add_trace(_atom_scatter3d(
+        surf_pos, colors=_SURF_COL,
+        sizes=6, names=["Cu surf"] * len(surf_pos),
+        opacity=0.55, name="surface Cu", showlegend=True,
+    ))
+
+
+# %% [markdown]
+# ---
+# ## Stage 1 — Build a Cu(111) FCC Slab
+
+# %% ── 1. Build structure ────────────────────────────────────────────────────
+_section("STAGE 1 — Build Cu(111) FCC slab")
+
 atoms = build_surface(
     composition="Cu",
     crystal_structure="fcc",
     miller_index=(1, 1, 1),
-    lattice_constant=3.615,   # Å — fixed; skips bulk relax
-    min_slab_size=7.0,
+    lattice_constant=3.615,
+    min_slab_size=10.0,
     min_vacuum_size=12.0,
-    goal_x=10.0,
-    goal_y=10.0,
+    goal_x=20.0,
+    goal_y=20.0,
     n_freeze_layers=2,
     calculator=calc,
     verbose=True,
@@ -115,72 +172,59 @@ atoms = build_surface(
 print(f"\nSlab built  : {len(atoms)} atoms")
 print(f"Cell diag   : {np.diag(atoms.get_cell()).round(3)} Å")
 
-# ── Visualise ────────────────────────────────────────────────────────────────
 pos  = atoms.get_positions()
 syms = np.array(atoms.get_chemical_symbols())
 
-fig, axes = plt.subplots(1, 2, figsize=(11, 4))
-fig.suptitle("Stage 1 — Built Structure", fontweight="bold")
-
-ax = axes[0]
-ax.scatter(pos[:, 0], pos[:, 2], c=[_ecolor(s) for s in syms],
-           s=60, edgecolors="k", linewidths=0.4)
-ax.set_xlabel("x (Å)"); ax.set_ylabel("z (Å)")
-ax.set_title("Side view (x–z)")
-ax.legend(handles=[mpatches.Patch(color=_ecolor(s), label=s)
-                   for s in np.unique(syms)], fontsize=8)
-
-ax = axes[1]
-sc = ax.scatter(pos[:, 0], pos[:, 1], c=pos[:, 2],
-                cmap="viridis", s=60, edgecolors="k", linewidths=0.4)
-plt.colorbar(sc, ax=ax, label="z (Å)")
-ax.set_aspect("equal")
-ax.set_xlabel("x (Å)"); ax.set_ylabel("y (Å)")
-ax.set_title("Top view (x–y), coloured by layer height")
-
-plt.tight_layout()
-plt.show()
+fig = go.Figure()
+for sym in np.unique(syms):
+    mask = syms == sym
+    fig.add_trace(_atom_scatter3d(
+        pos[mask],
+        colors=[_ecolor(sym)] * int(mask.sum()),
+        sizes=6,
+        names=[f"{sym} ({i})" for i in np.where(mask)[0]],
+        opacity=0.85,
+        name=sym, showlegend=True,
+    ))
+fig.update_layout(**_layout("Stage 1 — Built Structure"))
+fig.show()
 
 # %% [markdown]
 # ---
 # ## Stage 2 — Find Surface Atoms
-#
-# `find_surface_atoms` auto‑detects the geometry (slab → ray‑casting) and
-# tags atoms in `atoms.arrays["surface"]` for `build_graph`.
 
 # %% ── 2. Find surface atoms ─────────────────────────────────────────────────
 _section("STAGE 2 — Find surface atoms")
 
 surf_result = find_surface_atoms(atoms, tag_atoms=True)
 surf_mask   = surf_result.mask
+surf_idx    = surf_result.indices
+bulk_mask   = ~surf_mask
+surf_pos    = pos[surf_mask]
 
 print(f"Method        : {surf_result.method}")
 print(f"Surface atoms : {surf_mask.sum()} / {len(atoms)}")
+print(f"Bulk atoms    : {bulk_mask.sum()}")
 
-bulk_mask = ~surf_mask
-surf_pos  = pos[surf_mask]
-
-fig, ax = plt.subplots(figsize=(6, 5))
-fig.suptitle("Stage 2 — Surface Atom Identification", fontweight="bold")
-ax.scatter(pos[bulk_mask, 0], pos[bulk_mask, 1],
-           c=_BULK_COL, s=45, edgecolors="k", linewidths=0.3,
-           label="bulk", zorder=2)
-ax.scatter(surf_pos[:, 0], surf_pos[:, 1],
-           c=_SURF_COL, s=100, edgecolors="k", linewidths=0.5,
-           label="surface", zorder=3)
-ax.set_aspect("equal")
-ax.set_xlabel("x (Å)"); ax.set_ylabel("y (Å)")
-ax.set_title(f"Top‑down  —  {surf_mask.sum()} surface  /  {bulk_mask.sum()} bulk")
-ax.legend(fontsize=8)
-plt.tight_layout()
-plt.show()
+fig = go.Figure()
+if bulk_mask.any():
+    fig.add_trace(_atom_scatter3d(
+        pos[bulk_mask], colors=_BULK_COL,
+        sizes=4, names=[f"bulk {i}" for i in np.where(bulk_mask)[0]],
+        opacity=0.35, name="bulk", showlegend=True,
+    ))
+if surf_mask.any():
+    fig.add_trace(_atom_scatter3d(
+        surf_pos, colors=_SURF_COL,
+        sizes=8, names=[f"surface {i}" for i in surf_idx],
+        opacity=0.95, name="surface", showlegend=True,
+    ))
+fig.update_layout(**_layout("Stage 2 — Surface Atom Identification"))
+fig.show()
 
 # %% [markdown]
 # ---
 # ## Stage 3 — Build the Connectivity Graph
-#
-# `build_graph` converts the tagged `Atoms` into a NetworkX graph.  Every
-# node is one atom; every edge is a covalent bond.
 
 # %% ── 3. Build graph ────────────────────────────────────────────────────────
 _section("STAGE 3 — Build connectivity graph")
@@ -193,38 +237,49 @@ print(f"Nodes : {G.number_of_nodes()}  ({n_surf_g} surface, {n_bulk_g} bulk)")
 print(f"Edges : {G.number_of_edges()}")
 print(f"PBC   : {G.graph['pbc'].tolist()}")
 
-surf_nodes = [n for n, d in G.nodes(data=True) if d["type"] == "surface"]
-Gsub       = G.subgraph(surf_nodes)
-pos_dict   = {n: (G.nodes[n]["position"][0], G.nodes[n]["position"][1])
-              for n in Gsub.nodes}
+surf_nodes   = [n for n, d in G.nodes(data=True) if d["type"] == "surface"]
+Gsub         = G.subgraph(surf_nodes)
+surf_pos_all = np.array([G.nodes[n]["position"] for n in surf_nodes])
+bond_from, bond_to = [], []
+for u, v in Gsub.edges():
+    bond_from.append(G.nodes[u]["position"])
+    bond_to.append(G.nodes[v]["position"])
 
-fig, ax = plt.subplots(figsize=(7, 6))
-fig.suptitle("Stage 3 — Surface Connectivity Subgraph", fontweight="bold")
-nx.draw_networkx_edges(Gsub, pos_dict, ax=ax, alpha=0.35,
-                       edge_color="#888888", width=0.8)
-nx.draw_networkx_nodes(Gsub, pos_dict, ax=ax, node_size=80,
-                       node_color=_SURF_COL, edgecolors="k", linewidths=0.5)
-ax.set_xlabel("x (Å)"); ax.set_ylabel("y (Å)")
-ax.set_title(f"Surface subgraph — {len(surf_nodes)} nodes, "
-             f"{Gsub.number_of_edges()} edges")
-ax.set_aspect("equal")
-plt.tight_layout()
-plt.show()
+fig = go.Figure()
+if bulk_mask.any():
+    fig.add_trace(_atom_scatter3d(
+        pos[bulk_mask], colors=_BULK_COL,
+        sizes=3, names=[f"bulk {i}" for i in np.where(bulk_mask)[0]],
+        opacity=0.2, name="bulk", showlegend=True,
+    ))
+if bond_from:
+    fig.add_trace(_bond_lines3d(
+        np.array(bond_from), np.array(bond_to),
+        color="rgba(140,140,140,0.4)", width=2,
+        name="bond", showlegend=False,
+    ))
+fig.add_trace(_atom_scatter3d(
+    surf_pos_all, colors=_SURF_COL,
+    sizes=7, names=[f"surf {n}" for n in surf_nodes],
+    name="surface", showlegend=True,
+))
+fig.update_layout(**_layout(
+    f"Stage 3 — Surface Connectivity Subgraph "
+    f"({len(surf_nodes)} nodes, {Gsub.number_of_edges()} edges)"
+))
+fig.show()
 
 # %% [markdown]
 # ---
 # ## Stage 4 — Build the CO Reactant
 #
 # `build_reactant` parses the SMILES string with RDKit, embeds a 3‑D
-# conformer (ETKDGv3 + MMFF94), tags every atom as `adsorbate`, builds its
-# connectivity graph, computes intramolecular automorphism orbits and marks
-# the convex‑hull‑exposed **anchor atoms** eligible to bond to the surface.
+# conformer (ETKDGv3 + MMFF94), computes automorphism orbits and marks the
+# convex‑hull‑exposed **anchor atoms** eligible to bond to the surface.
 
 # %% ── 4. Build CO reactant ──────────────────────────────────────────────────
 _section("STAGE 4 — Build CO reactant")
 
-# CO: carbon bonded to oxygen via triple bond.
-# [C-]#[O+] is the standard Lewis‑structure SMILES for carbon monoxide.
 co = build_reactant("[C-]#[O+]", add_hydrogens=False)
 
 print(f"Formula       : {co.atoms.get_chemical_formula()}")
@@ -237,56 +292,45 @@ print(f"Anchor orbits : {co.anchor_orbit}")
 print(f"Gas energy    : {co.energy:.4f} eV"
       if not np.isnan(co.energy) else "Gas energy    : (no calculator — NaN)")
 
-# ── Visualise gas‑phase CO geometry ─────────────────────────────────────────
 react_pos  = co.atoms.get_positions()
 react_syms = co.atoms.get_chemical_symbols()
 
-fig, axes = plt.subplots(1, 2, figsize=(9, 4))
-fig.suptitle("Stage 4 — CO Reactant (gas phase)", fontweight="bold")
-
-# 3‑D scatter as two orthogonal projections
-for ax, (xi, yi, xlabel, ylabel, title) in zip(axes, [
-    (0, 2, "x (Å)", "z (Å)", "x–z view"),
-    (0, 1, "x (Å)", "y (Å)", "x–y view"),
-]):
-    for i, (sym, p) in enumerate(zip(react_syms, react_pos)):
-        col = _ADS_COL.get(sym, "#888888")
-        mrk = _ADS_MARKER.get(sym, "o")
-        ax.scatter(p[xi], p[yi], c=col, s=300, marker=mrk,
-                   edgecolors="k", linewidths=0.8, zorder=3, label=sym)
-        ax.annotate(f" {sym}{i}", (p[xi], p[yi]), fontsize=9)
-    # Bond line
-    ax.plot([react_pos[0, xi], react_pos[1, xi]],
-            [react_pos[0, yi], react_pos[1, yi]],
-            color="#555555", lw=2, zorder=2)
-    # Highlight anchor atoms with a circle
-    for i in co.anchor_atoms:
-        ax.scatter(react_pos[i, xi], react_pos[i, yi],
-                   s=600, facecolors="none", edgecolors="gold",
-                   linewidths=2.0, zorder=4, label="anchor" if i == co.anchor_atoms[0] else "")
-    ax.set_xlabel(xlabel); ax.set_ylabel(ylabel)
-    ax.set_title(title)
-    handles = [mpatches.Patch(color=_ADS_COL[s], label=s) for s in react_syms]
-    handles += [plt.Line2D([0], [0], marker="o", color="w", markerfacecolor="none",
-                            markeredgecolor="gold", markersize=10,
-                            markeredgewidth=2, label="anchor")]
-    ax.legend(handles=handles, fontsize=8, loc="upper right")
-
-plt.tight_layout()
-plt.show()
+# 3‑D plot of the gas-phase molecule
+fig = go.Figure()
+for i, (sym, p) in enumerate(zip(react_syms, react_pos)):
+    col = _ADS_COL.get(sym, "#888888")
+    sym3d = _ADS_SYM.get(sym, "circle")
+    is_anchor = (i in co.anchor_atoms)
+    fig.add_trace(go.Scatter3d(
+        x=[p[0]], y=[p[1]], z=[p[2]],
+        mode="markers",
+        marker=dict(
+            size=18 if is_anchor else 14,
+            color=col,
+            symbol=sym3d,
+            line=dict(color="gold" if is_anchor else "black",
+                      width=3 if is_anchor else 1),
+        ),
+        text=[f"{sym}{i}{'  ★anchor' if is_anchor else ''}"],
+        hovertemplate="%{text}<br>x=%{x:.3f} y=%{y:.3f} z=%{z:.3f}<extra></extra>",
+        name=f"{sym}{i}{'  (anchor)' if is_anchor else ''}",
+        showlegend=True,
+    ))
+# Bond line
+if len(react_pos) >= 2:
+    fig.add_trace(_bond_lines3d(
+        react_pos[:1], react_pos[1:2],
+        color="#555555", width=6, name="C≡O bond", showlegend=True,
+    ))
+fig.update_layout(**_layout("Stage 4 — CO Reactant (gas phase)"))
+fig.show()
 
 # %% [markdown]
 # ---
 # ## Stage 5 — Find Adsorbate Sites
 #
-# `find_adsorbate_sites` runs the full pipeline:
-#
-# 1. Lazily compute single‑atom anchor sites for every anchor element
-# 2. Enumerate all orbit‑canonicalised anchor subsets
-# 3. Backtracking chain placement (intramolecular distance filter)
-# 4. Surface‑connectivity guard (APSP BFS)
-# 5. Reduce to iso‑classes via ego‑subgraph isomorphism
-# 6. Materialise one `type="adsorbate"` node per reactant atom per member on *G*
+# `find_adsorbate_sites` runs the full backtracking + iso‑class pipeline:
+# anchor placement → surface connectivity guard → ego isomorphism → materialise.
 
 # %% ── 5. Find adsorbate sites ───────────────────────────────────────────────
 _section("STAGE 5 — Find adsorbate sites for CO")
@@ -303,171 +347,157 @@ for site in sites_CO:
           f"  members={len(site.members):<4d}"
           f"  rep_pos[C]={np.round(site.positions[0], 2)}")
 
-# ── Visualise all member placements top‑down, coloured by iso‑class ─────────
+# All member placements — one trace per iso‑class per element
 ads_nodes = [(n, d) for n, d in G.nodes(data=True)
              if d.get("type") == "adsorbate" and d.get("reactant") == co.smiles]
 
-fig, ax = plt.subplots(figsize=(8, 7))
-fig.suptitle("Stage 5 — All CO Placements (top‑down by iso‑class)",
-             fontweight="bold")
+fig = go.Figure()
+_add_slab_backdrop(fig, pos, bulk_mask, surf_pos)
 
-# Surface backdrop
-ax.scatter(surf_pos[:, 0], surf_pos[:, 1],
-           c=_SURF_COL, s=55, edgecolors="k", linewidths=0.4,
-           zorder=1, label="surface Cu")
-
-# Draw anchor‑bond edges
+# Anchor-bond edges (surface ↔ bonded adsorbate atom)
+bond_from_a, bond_to_a = [], []
 for n, d in ads_nodes:
     if not d.get("is_bonded"):
         continue
-    p_ads = d["position"]
     for nb in G.neighbors(n):
         if G.nodes[nb].get("type") != "surface":
             continue
-        p_s = G.nodes[nb]["position"]
-        ax.plot([p_ads[0], p_s[0]], [p_ads[1], p_s[1]],
-                color="#aaaaaa", lw=0.5, alpha=0.4, zorder=2)
+        bond_from_a.append(d["position"])
+        bond_to_a.append(G.nodes[nb]["position"])
+if bond_from_a:
+    fig.add_trace(_bond_lines3d(
+        np.array(bond_from_a), np.array(bond_to_a),
+        color="rgba(160,160,160,0.3)", width=1,
+        showlegend=False,
+    ))
 
-# Draw adsorbate atoms and intra‑molecular bonds
+# Intra-molecular bonds
+drawn_pairs: set = set()
 for n, d in ads_nodes:
-    sym      = d["element"]
-    p        = d["position"]
-    iso_cls  = d["iso_class"]
-    col      = _ISO_CMAP(iso_cls % 10)
-    filled   = d.get("is_bonded", False)
-    ax.scatter(p[0], p[1],
-               c=[col], s=90,
-               marker=_ADS_MARKER.get(sym, "o"),
-               edgecolors="k" if filled else col,
-               linewidths=0.8 if filled else 1.5,
-               facecolors=[col] if filled else "none",
-               zorder=4)
+    for nb in G.neighbors(n):
+        if not G.edges[n, nb].get("intra_adsorbate"):
+            continue
+        key = (min(n, nb), max(n, nb))
+        if key in drawn_pairs:
+            continue
+        drawn_pairs.add(key)
+        iso_cls = d["iso_class"]
+        pa = np.asarray(d["position"])
+        pb = np.asarray(G.nodes[nb]["position"])
+        fig.add_trace(_bond_lines3d(
+            pa[np.newaxis], pb[np.newaxis],
+            color=_iso_col(iso_cls), width=3,
+            showlegend=False,
+        ))
 
-ax.set_aspect("equal")
-ax.set_xlabel("x (Å)"); ax.set_ylabel("y (Å)")
-ax.set_title(f"{len(sites_CO)} iso‑classes  ·  "
-             f"{sum(len(s.members) for s in sites_CO)} total placements")
+# Adsorbate atoms, one trace per (iso_class, element, bonded?)
+grp: dict[tuple, list] = {}
+for n, d in ads_nodes:
+    key = (d["iso_class"], d["element"], bool(d.get("is_bonded")))
+    grp.setdefault(key, []).append(d["position"])
 
-iso_patches = [
-    mpatches.Patch(color=_ISO_CMAP(i % 10), label=f"iso {i}")
-    for i in range(len(sites_CO))
-]
-type_handles = [
-    plt.Line2D([0], [0], marker="D", color="w", markerfacecolor="#555",
-               markeredgecolor="k", markersize=8, label="C (bonded, filled)"),
-    plt.Line2D([0], [0], marker="^", color="w", markerfacecolor="#555",
-               markeredgecolor="k", markersize=8, label="O (bonded, filled)"),
-    plt.Line2D([0], [0], marker="o", color="w", markerfacecolor="none",
-               markeredgecolor="#555", markersize=8, markeredgewidth=1.5,
-               label="floating (open)"),
-]
-ax.legend(handles=iso_patches + type_handles, fontsize=7,
-          loc="upper right", ncol=2, framealpha=0.9)
-plt.tight_layout()
-plt.show()
+seen_legend: set = set()
+for (iso_cls, sym, bonded), pts in sorted(grp.items()):
+    pts_arr = np.array(pts)
+    sym3d   = _ADS_SYM.get(sym, "circle")
+    col     = _iso_col(iso_cls)
+    legend_key = (iso_cls, sym)
+    lbl = f"iso {iso_cls}  {sym} ({'bonded' if bonded else 'float'})"
+    fig.add_trace(_atom_scatter3d(
+        pts_arr,
+        colors=col,
+        sizes=8 if bonded else 5,
+        names=[f"iso{iso_cls} {sym}" ] * len(pts_arr),
+        opacity=0.9 if bonded else 0.5,
+        symbol=sym3d,
+        line_color="black" if bonded else col,
+        line_width=0.8 if bonded else 0.0,
+        name=lbl,
+        showlegend=(legend_key not in seen_legend),
+    ))
+    seen_legend.add(legend_key)
+
+fig.update_layout(**_layout(
+    f"Stage 5 — All CO Placements  ({len(sites_CO)} iso‑classes, "
+    f"{sum(len(s.members) for s in sites_CO)} total)"
+))
+fig.show()
 
 # %% [markdown]
 # ---
-# ## Stage 6 — Representative Positions per Iso‑Class
+# ## Stage 6 — Representative Positions per Iso‑Class (3‑D)
 #
 # Each `AdsorbateSite.positions` (shape `(n_atoms, 3)`) holds the Cartesian
-# positions for the **representative** member of that iso‑class.  The atoms
-# are shown on top of the surface layer, with the iso‑class ego‑subgraph
-# drawn for context.
+# positions for the **representative** member.  One figure per iso‑class.
 
 # %% ── 6. Representative positions ───────────────────────────────────────────
 _section("STAGE 6 — Representative positions per iso‑class")
 
-n_iso  = len(sites_CO)
-ncols  = min(n_iso, 4)
-nrows  = (n_iso + ncols - 1) // ncols
+for site in sites_CO:
+    col      = _iso_col(site.iso_class)
+    rep_pos  = np.asarray(site.positions, dtype=float)
+    rep_syms = [react_syms[i] for i in range(site.n_atoms)]
+    bonded   = [c is not None for c in site.atom_cliques]
+    ks_str   = "+".join(str(len(c)) for c in site.atom_cliques if c is not None) or "none"
 
-fig, axes = plt.subplots(nrows, ncols,
-                         figsize=(4 * ncols, 3.8 * nrows),
-                         squeeze=False)
-fig.suptitle("Stage 6 — Representative Positions per Iso‑Class",
-             fontweight="bold")
+    fig = go.Figure()
+    _add_slab_backdrop(fig, pos, bulk_mask, surf_pos)
 
-for ax_flat, site in zip(axes.ravel(), sites_CO):
-    col = _ISO_CMAP(site.iso_class % 10)
-
-    # Surface backdrop
-    ax_flat.scatter(surf_pos[:, 0], surf_pos[:, 1],
-                    c="#e0e0e0", s=35, edgecolors="#aaaaaa",
-                    linewidths=0.3, zorder=1)
-
-    # Ego‑subgraph surface atoms (border highlight)
+    # Ego‑subgraph surface atoms highlighted in yellow
     if site.ego_graph is not None:
-        ego_surf = [
+        ego_surf_pos = np.array([
             G.nodes[n]["position"] for n in site.ego_graph.nodes
             if n in G and G.nodes[n].get("type") == "surface"
-        ]
-        if ego_surf:
-            ego_arr = np.array(ego_surf)
-            ax_flat.scatter(ego_arr[:, 0], ego_arr[:, 1],
-                            c="#f5c518", s=60, edgecolors="k",
-                            linewidths=0.5, zorder=2, label="ego surf")
+        ])
+        if len(ego_surf_pos):
+            fig.add_trace(_atom_scatter3d(
+                ego_surf_pos, colors="#F5C518",
+                sizes=9, names=["ego surf"] * len(ego_surf_pos),
+                opacity=0.9, name="ego surf", showlegend=True,
+            ))
 
-    # Representative adsorbate atoms
-    rep_pos  = np.asarray(site.positions, dtype=float)
-    rep_syms = [co.atoms.get_chemical_symbols()[i] for i in range(site.n_atoms)]
-    bonded   = [c is not None for c in site.atom_cliques]
-
-    # Intra‑molecular bond line
+    # Intra-molecular bond
     if site.n_atoms >= 2:
-        ax_flat.plot([rep_pos[0, 0], rep_pos[1, 0]],
-                     [rep_pos[0, 1], rep_pos[1, 1]],
-                     color=col, lw=2.0, zorder=4, alpha=0.8)
+        fig.add_trace(_bond_lines3d(
+            rep_pos[:1], rep_pos[1:2],
+            color=col, width=5, name="C≡O", showlegend=True,
+        ))
 
+    # Adsorbate atoms
     for i, (sym, p, is_b) in enumerate(zip(rep_syms, rep_pos, bonded)):
-        mrk = _ADS_MARKER.get(sym, "o")
-        fc  = col if is_b else "none"
-        ec  = "k" if is_b else col
-        ax_flat.scatter(p[0], p[1], c=[col] if is_b else [[0, 0, 0, 0]],
-                        s=220, marker=mrk,
-                        facecolors=fc, edgecolors=ec,
-                        linewidths=1.5, zorder=5)
-        ax_flat.annotate(f" {sym}", (p[0], p[1]), fontsize=7, va="center")
+        sym3d = _ADS_SYM.get(sym, "circle")
+        fig.add_trace(go.Scatter3d(
+            x=[p[0]], y=[p[1]], z=[p[2]],
+            mode="markers",
+            marker=dict(
+                size=14, color=col, symbol=sym3d,
+                opacity=1.0,
+                line=dict(color="black" if is_b else col, width=2 if is_b else 0),
+            ),
+            text=[f"{sym}{'  (bonded)' if is_b else '  (float)'}"],
+            hovertemplate="%{text}<br>x=%{x:.3f} y=%{y:.3f} z=%{z:.3f}<extra></extra>",
+            name=f"{sym} {'bonded' if is_b else 'float'}",
+            showlegend=True,
+        ))
 
-    n_bonded  = sum(1 for c in site.atom_cliques if c is not None)
-    ks        = [len(c) for c in site.atom_cliques if c is not None]
-    ks_str    = "+".join(str(k) for k in ks) if ks else "none"
-    ax_flat.set_aspect("equal")
-    ax_flat.set_title(
-        f"iso {site.iso_class}  ·  {n_bonded}/{site.n_atoms} bonded  "
-        f"(k={ks_str})\n{len(site.members)} members",
-        fontsize=8,
-    )
-    ax_flat.set_xlabel("x (Å)", fontsize=7)
-    ax_flat.set_ylabel("y (Å)", fontsize=7)
-    ax_flat.tick_params(labelsize=7)
-
-for ax_flat in axes.ravel()[n_iso:]:
-    ax_flat.set_visible(False)
-
-plt.tight_layout()
-plt.show()
+    n_bonded = sum(bonded)
+    fig.update_layout(**_layout(
+        f"Stage 6 — iso {site.iso_class}  |  "
+        f"{n_bonded}/{site.n_atoms} bonded (k={ks_str})  |  "
+        f"{len(site.members)} members"
+    ))
+    fig.show()
 
 # %% [markdown]
 # ---
 # ## Stage 7 — Optimise Representative Positions
 #
-# `optimise_adsorbate_site_positions` treats each placement as 6 rigid‑body
-# DOF (3 translation + 3 axis‑angle rotation) and minimises a
-# calculator‑free objective:
-#
-# ```
-# E = restraint × Σ_{bonded i} ‖p_i − p*_i‖²
-#   + repulsion × Σ_{i,s}       max(0, R_min − d_is)²
-# ```
-#
-# After refining the representative, Kabsch ego‑alignment propagates the new
-# geometry to every other member.
+# `optimise_adsorbate_site_positions` runs 6‑DOF rigid‑body L‑BFGS‑B
+# (restraint + steric repulsion), then Kabsch‑propagates to every member.
 
 # %% ── 7. Optimise positions ──────────────────────────────────────────────────
 _section("STAGE 7 — Optimise representative positions")
 
-# Store pre‑optimisation representative positions for comparison.
 pre_opt = {site.iso_class: np.asarray(site.positions, dtype=float).copy()
            for site in sites_CO}
 
@@ -480,75 +510,68 @@ sites_CO = optimise_adsorbate_site_positions(
     verbose=True,
 )
 
-# ── Visualise before / after per iso‑class ───────────────────────────────────
-ncols = min(n_iso, 4)
-nrows = (n_iso + ncols - 1) // ncols
-
-fig, axes = plt.subplots(nrows, ncols,
-                         figsize=(4 * ncols, 3.8 * nrows),
-                         squeeze=False)
-fig.suptitle("Stage 7 — Before (open ◌) vs After (filled ●) Optimisation",
-             fontweight="bold")
-
-for ax_flat, site in zip(axes.ravel(), sites_CO):
-    col     = _ISO_CMAP(site.iso_class % 10)
+# Before / after comparison, one figure per iso‑class
+for site in sites_CO:
+    col     = _iso_col(site.iso_class)
     pre     = pre_opt[site.iso_class]
     post    = np.asarray(site.positions, dtype=float)
-    rep_sym = [co.atoms.get_chemical_symbols()[i] for i in range(site.n_atoms)]
+    rep_sym = [react_syms[i] for i in range(site.n_atoms)]
+    rms     = float(np.sqrt(np.mean(np.sum((post - pre) ** 2, axis=1))))
 
-    # Surface backdrop
-    ax_flat.scatter(surf_pos[:, 0], surf_pos[:, 1],
-                    c="#e0e0e0", s=35, edgecolors="#aaaaaa",
-                    linewidths=0.3, zorder=1)
+    fig = go.Figure()
+    _add_slab_backdrop(fig, pos, bulk_mask, surf_pos)
 
-    # Before — open markers with dashed bond
+    # Before — open markers, dashed bond
     if site.n_atoms >= 2:
-        ax_flat.plot([pre[0, 0], pre[1, 0]], [pre[0, 1], pre[1, 1]],
-                     color=col, lw=1.5, ls="--", alpha=0.5, zorder=3)
+        fig.add_trace(_bond_lines3d(
+            pre[:1], pre[1:2],
+            color=f"rgba({int(col[1:3],16)},{int(col[3:5],16)},{int(col[5:7],16)},0.4)",
+            width=3, name="before bond", showlegend=True,
+        ))
     for i, sym in enumerate(rep_sym):
-        mrk = _ADS_MARKER.get(sym, "o")
-        ax_flat.scatter(pre[i, 0], pre[i, 1],
-                        facecolors="none", edgecolors=col,
-                        s=140, marker=mrk, linewidths=1.5,
-                        zorder=4, alpha=0.7)
+        sym3d = _ADS_SYM.get(sym, "circle")
+        fig.add_trace(go.Scatter3d(
+            x=[pre[i, 0]], y=[pre[i, 1]], z=[pre[i, 2]],
+            mode="markers",
+            marker=dict(size=10, color="white", symbol=sym3d,
+                        line=dict(color=col, width=2)),
+            text=[f"{sym} before"],
+            hovertemplate="%{text}<br>x=%{x:.3f} y=%{y:.3f} z=%{z:.3f}<extra></extra>",
+            name=f"{sym} before",
+            showlegend=True,
+        ))
 
-    # After — filled markers with solid bond
+    # After — filled markers, solid bond
     if site.n_atoms >= 2:
-        ax_flat.plot([post[0, 0], post[1, 0]], [post[0, 1], post[1, 1]],
-                     color=col, lw=2.0, zorder=5)
+        fig.add_trace(_bond_lines3d(
+            post[:1], post[1:2],
+            color=col, width=5, name="after bond", showlegend=True,
+        ))
     for i, sym in enumerate(rep_sym):
-        mrk = _ADS_MARKER.get(sym, "o")
-        ax_flat.scatter(post[i, 0], post[i, 1],
-                        c=[col], s=200, marker=mrk,
-                        edgecolors="k", linewidths=0.8, zorder=6)
-        ax_flat.annotate(f" {sym}", (post[i, 0], post[i, 1]),
-                         fontsize=7, va="center")
+        sym3d = _ADS_SYM.get(sym, "circle")
+        fig.add_trace(go.Scatter3d(
+            x=[post[i, 0]], y=[post[i, 1]], z=[post[i, 2]],
+            mode="markers",
+            marker=dict(size=14, color=col, symbol=sym3d,
+                        line=dict(color="black", width=1)),
+            text=[f"{sym} after"],
+            hovertemplate="%{text}<br>x=%{x:.3f} y=%{y:.3f} z=%{z:.3f}<extra></extra>",
+            name=f"{sym} after",
+            showlegend=True,
+        ))
 
-    rms = float(np.sqrt(np.mean(np.sum((post - pre) ** 2, axis=1))))
-    ax_flat.set_aspect("equal")
-    ax_flat.set_title(f"iso {site.iso_class}  ·  ΔRMS {rms:.3f} Å", fontsize=8)
-    ax_flat.set_xlabel("x (Å)", fontsize=7)
-    ax_flat.set_ylabel("y (Å)", fontsize=7)
-    ax_flat.tick_params(labelsize=7)
-
-for ax_flat in axes.ravel()[n_iso:]:
-    ax_flat.set_visible(False)
-
-plt.tight_layout()
-plt.show()
+    fig.update_layout(**_layout(
+        f"Stage 7 — iso {site.iso_class}  |  ΔRMS = {rms:.3f} Å"
+    ))
+    fig.show()
 
 # %% [markdown]
 # ---
-# ## Stage 8 — Propagation: Representative → All Members
+# ## Stage 8 — Propagation: Representative → All Members (3‑D)
 #
-# After optimisation, `member_node_ids[0]` holds the representative's nodes
-# (already updated on *G*).  Every subsequent member was Kabsch‑propagated
-# from the representative's ego‑alignment.  Here we read the positions back
-# directly from *G* and show:
-#
-# * ★ gold star — optimised representative position
-# * ○ coloured circles — all other member positions from *G*
-# * thin lines — representative → each member
+# * ★ gold diamond — optimised representative
+# * coloured circles — all member positions from *G*
+# * thin grey lines — representative C → member C
 
 # %% ── 8a. Propagation table ──────────────────────────────────────────────────
 _section("STAGE 8 — Propagation: representative → all members")
@@ -557,86 +580,81 @@ print(f"\n{'iso':>4}  {'n_atoms':>7}  {'n_members':>9}  "
       f"{'rep_pos[C]':>30}  first_other_member_pos[C]")
 print("─" * 90)
 for site in sites_CO:
-    rep_p  = site.positions[0]          # C atom in representative
-    if len(site.member_node_ids) > 1:
-        mem1_p = G.nodes[site.member_node_ids[1][0]]["position"]   # C of member 1
-    else:
-        mem1_p = np.full(3, np.nan)
+    rep_p  = site.positions[0]
+    mem1_p = (G.nodes[site.member_node_ids[1][0]]["position"]
+              if len(site.member_node_ids) > 1 else np.full(3, np.nan))
     print(f"  {site.iso_class:>2}   {site.n_atoms:>7}  {len(site.members):>9}  "
           f"  {np.round(rep_p, 3)}  {np.round(mem1_p, 3)}")
 
-# %% ── 8b. Per‑iso‑class propagation plots ────────────────────────────────────
-ncols = min(n_iso, 4)
-nrows = (n_iso + ncols - 1) // ncols
+# %% ── 8b. Per‑iso‑class propagation 3‑D plots ───────────────────────────────
+for site in sites_CO:
+    col     = _iso_col(site.iso_class)
+    rep_sym = list(react_syms)
 
-fig, axes = plt.subplots(nrows, ncols,
-                         figsize=(4 * ncols, 3.8 * nrows),
-                         squeeze=False)
-fig.suptitle("Stage 8 — Propagation:  representative ★  vs  all members ○",
-             fontweight="bold")
-
-for ax_flat, site in zip(axes.ravel(), sites_CO):
-    col     = _ISO_CMAP(site.iso_class % 10)
-    rep_sym = co.atoms.get_chemical_symbols()
-
-    ax_flat.scatter(surf_pos[:, 0], surf_pos[:, 1],
-                    c="#e0e0e0", s=30, edgecolors="#bbbbbb",
-                    linewidths=0.3, zorder=1)
+    fig = go.Figure()
+    _add_slab_backdrop(fig, pos, bulk_mask, surf_pos)
 
     # All member placements from G
     for m_idx, node_ids in enumerate(site.member_node_ids):
         m_pos = np.array([G.nodes[nid]["position"] for nid in node_ids])
-        for i, (sym, p) in enumerate(zip(rep_sym, m_pos)):
-            mrk = _ADS_MARKER.get(sym, "o")
-            fc  = col if m_idx == 0 else "none"
-            ax_flat.scatter(p[0], p[1],
-                            facecolors=fc, edgecolors=col,
-                            s=80, marker=mrk, linewidths=1.0, zorder=3)
+        is_rep = (m_idx == 0)
+
+        # Intra-molecular bond
         if len(m_pos) >= 2:
-            ax_flat.plot([m_pos[0, 0], m_pos[1, 0]],
-                         [m_pos[0, 1], m_pos[1, 1]],
-                         color=col, lw=0.9, alpha=0.5, zorder=2)
+            fig.add_trace(_bond_lines3d(
+                m_pos[:1], m_pos[1:2],
+                color=col if is_rep else f"rgba({int(col[1:3],16)},{int(col[3:5],16)},{int(col[5:7],16)},0.35)",
+                width=4 if is_rep else 1,
+                showlegend=False,
+            ))
 
-    # Representative — large gold star per atom
-    rep_p = np.asarray(site.positions, dtype=float)
-    for i, sym in enumerate(rep_sym):
-        ax_flat.scatter(rep_p[i, 0], rep_p[i, 1],
-                        c="gold", s=320, marker="*",
-                        edgecolors="k", linewidths=0.8, zorder=5)
+        for i, (sym, p) in enumerate(zip(rep_sym, m_pos)):
+            sym3d = _ADS_SYM.get(sym, "circle")
+            if is_rep:
+                # rep: gold diamond
+                fig.add_trace(go.Scatter3d(
+                    x=[p[0]], y=[p[1]], z=[p[2]],
+                    mode="markers",
+                    marker=dict(size=16, color="gold", symbol="diamond",
+                                line=dict(color="black", width=1)),
+                    text=[f"rep {sym} iso{site.iso_class}"],
+                    hovertemplate="%{text}<br>x=%{x:.3f} y=%{y:.3f} z=%{z:.3f}<extra></extra>",
+                    name=f"rep {sym}" if i == 0 else f"rep {sym}",
+                    showlegend=(i == 0),
+                ))
+            else:
+                fig.add_trace(_atom_scatter3d(
+                    p[np.newaxis],
+                    colors=col, sizes=6,
+                    names=[f"mem{m_idx} {sym}"],
+                    opacity=0.7,
+                    symbol=sym3d,
+                    line_color="black", line_width=0.5,
+                    name=f"members {sym}" if (m_idx == 1 and i == 0) else f"members {sym}",
+                    showlegend=(m_idx == 1 and i == 0),
+                ))
 
-    # Lines: representative C atom → member C atoms
-    rep_c = rep_p[0]
-    for node_ids in site.member_node_ids[1:]:
-        mem_c = G.nodes[node_ids[0]]["position"]
-        ax_flat.plot([rep_c[0], mem_c[0]], [rep_c[1], mem_c[1]],
-                     color="gray", lw=0.6, alpha=0.5, zorder=2)
+    # Lines: rep C → every member C
+    rep_c = np.asarray(site.positions[0])
+    mem_c_list = [G.nodes[nids[0]]["position"]
+                  for nids in site.member_node_ids[1:] if nids]
+    if mem_c_list:
+        rep_broadcast = np.tile(rep_c, (len(mem_c_list), 1))
+        fig.add_trace(_bond_lines3d(
+            rep_broadcast, np.array(mem_c_list),
+            color="rgba(180,180,180,0.5)", width=1,
+            showlegend=False,
+        ))
 
-    ax_flat.set_aspect("equal")
-    ax_flat.set_title(
-        f"iso {site.iso_class}  ·  {len(site.members)} members\n"
-        "filled = rep  ·  open = other  ·  ★ = optimised rep",
-        fontsize=7.5,
-    )
-    ax_flat.set_xlabel("x (Å)", fontsize=7)
-    ax_flat.set_ylabel("y (Å)", fontsize=7)
-    ax_flat.tick_params(labelsize=7)
-
-for ax_flat in axes.ravel()[n_iso:]:
-    ax_flat.set_visible(False)
-
-plt.tight_layout()
-plt.show()
+    fig.update_layout(**_layout(
+        f"Stage 8 — iso {site.iso_class}  |  "
+        f"{len(site.members)} members  ★ = rep"
+    ))
+    fig.show()
 
 # %% [markdown]
 # ---
-# ## Final Summary — Full Graph with All CO Adsorbate Nodes
-#
-# `G` now contains `type="adsorbate"` nodes for every CO placement.  The
-# final plot overlays all of them on the surface subgraph, using:
-#
-# * **◆ diamond** → C atom    (coloured by iso‑class)
-# * **▲ triangle** → O atom   (coloured by iso‑class)
-# * filled = bonded to surface,  open = floating
+# ## Final Summary — Full Graph with All CO Adsorbate Nodes (3‑D)
 
 # %% ── Final: full graph with adsorbate nodes ─────────────────────────────────
 _section("FINAL — Full graph with all CO adsorbate nodes")
@@ -652,28 +670,27 @@ print(f"Adsorbate nodes in G : {total_ads}  ({n_bonded} bonded, "
 print(f"Iso‑classes          : {len(sites_CO)}")
 print(f"Total placements     : {sum(len(s.members) for s in sites_CO)}")
 
-fig, ax = plt.subplots(figsize=(8, 7))
-fig.suptitle("Final — Surface Graph + All CO Adsorbate Nodes", fontweight="bold")
-
-# Surface atoms
-ax.scatter(surf_pos[:, 0], surf_pos[:, 1],
-           c=_SURF_COL, s=55, edgecolors="k", linewidths=0.4,
-           zorder=2, label="surface Cu")
+fig = go.Figure()
+_add_slab_backdrop(fig, pos, bulk_mask, surf_pos)
 
 # Anchor‑bond edges
+bond_from_f, bond_to_f = [], []
 for n, d in ads_nodes_final:
     if not d.get("is_bonded"):
         continue
-    ap = d["position"]
     for nb in G.neighbors(n):
         if G.nodes[nb].get("type") != "surface":
             continue
-        sp = G.nodes[nb]["position"]
-        ax.plot([ap[0], sp[0]], [ap[1], sp[1]],
-                color="#999999", lw=0.5, alpha=0.4, zorder=1)
+        bond_from_f.append(d["position"])
+        bond_to_f.append(G.nodes[nb]["position"])
+if bond_from_f:
+    fig.add_trace(_bond_lines3d(
+        np.array(bond_from_f), np.array(bond_to_f),
+        color="rgba(150,150,150,0.3)", width=1, showlegend=False,
+    ))
 
 # Intra‑molecular bonds
-drawn_pairs: set = set()
+drawn_pairs = set()
 for n, d in ads_nodes_final:
     for nb in G.neighbors(n):
         if not G.edges[n, nb].get("intra_adsorbate"):
@@ -682,51 +699,46 @@ for n, d in ads_nodes_final:
         if key in drawn_pairs:
             continue
         drawn_pairs.add(key)
-        pa = d["position"]
-        pb = G.nodes[nb]["position"]
         iso_cls = d["iso_class"]
-        ax.plot([pa[0], pb[0]], [pa[1], pb[1]],
-                color=_ISO_CMAP(iso_cls % 10), lw=1.2, alpha=0.7, zorder=3)
+        pa = np.asarray(d["position"])
+        pb = np.asarray(G.nodes[nb]["position"])
+        fig.add_trace(_bond_lines3d(
+            pa[np.newaxis], pb[np.newaxis],
+            color=_iso_col(iso_cls), width=3, showlegend=False,
+        ))
 
-# Adsorbate atoms
+# Adsorbate atoms — one trace per (iso_class, element, bonded?)
+grp_f: dict[tuple, list] = {}
 for n, d in ads_nodes_final:
-    sym     = d["element"]
-    p       = d["position"]
-    iso_cls = d["iso_class"]
-    col     = _ISO_CMAP(iso_cls % 10)
-    mrk     = _ADS_MARKER.get(sym, "o")
-    filled  = d.get("is_bonded", False)
-    ax.scatter(p[0], p[1],
-               facecolors=[col] if filled else "none",
-               edgecolors=[col] if not filled else "k",
-               s=100, marker=mrk,
-               linewidths=1.5 if not filled else 0.8,
-               zorder=4)
+    key = (d["iso_class"], d["element"], bool(d.get("is_bonded")))
+    grp_f.setdefault(key, []).append(d["position"])
 
-# Legend
-iso_patches = [
-    mpatches.Patch(color=_ISO_CMAP(i % 10), label=f"iso {i}")
-    for i in range(len(sites_CO))
-]
-type_handles = [
-    mpatches.Patch(color=_SURF_COL, label="surface Cu"),
-    plt.Line2D([0], [0], marker="D", color="w", markerfacecolor="#27AE60",
-               markeredgecolor="k", markersize=9, label="C (bonded)"),
-    plt.Line2D([0], [0], marker="^", color="w", markerfacecolor="#E74C3C",
-               markeredgecolor="k", markersize=9, label="O (bonded)"),
-    plt.Line2D([0], [0], marker="o", color="w", markerfacecolor="none",
-               markeredgecolor="#555", markersize=9, markeredgewidth=1.5,
-               label="floating"),
-]
-ax.legend(handles=type_handles + iso_patches, fontsize=7,
-          loc="upper right", ncol=2, framealpha=0.9)
+seen_f: set = set()
+for (iso_cls, sym, bonded), pts in sorted(grp_f.items()):
+    pts_arr = np.array(pts)
+    sym3d   = _ADS_SYM.get(sym, "circle")
+    col     = _iso_col(iso_cls)
+    lk      = (iso_cls, sym)
+    lbl     = f"iso {iso_cls}  {sym} ({'bonded' if bonded else 'float'})"
+    fig.add_trace(_atom_scatter3d(
+        pts_arr,
+        colors=col,
+        sizes=9 if bonded else 5,
+        names=[f"iso{iso_cls} {sym}"] * len(pts_arr),
+        opacity=0.95 if bonded else 0.45,
+        symbol=sym3d,
+        line_color="black" if bonded else col,
+        line_width=0.8 if bonded else 0.0,
+        name=lbl,
+        showlegend=(lk not in seen_f),
+    ))
+    seen_f.add(lk)
 
-ax.set_aspect("equal")
-ax.set_xlabel("x (Å)"); ax.set_ylabel("y (Å)")
-ax.set_title(f"Surface + {total_ads} CO adsorbate nodes across "
-             f"{len(sites_CO)} iso‑classes")
-plt.tight_layout()
-plt.show()
+fig.update_layout(**_layout(
+    f"Final — Surface + {total_ads} CO adsorbate nodes  "
+    f"({len(sites_CO)} iso‑classes)"
+))
+fig.show()
 
 print("\nPipeline complete.")
 

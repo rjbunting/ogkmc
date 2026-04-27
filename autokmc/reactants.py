@@ -55,7 +55,7 @@ from ase.data import covalent_radii as ASE_COVALENT_RADII
 from ase.optimize import LBFGS
 
 from autokmc.graph import build_graph
-from autokmc.constants import NL_MULT_DEFAULT
+from autokmc.constants import NL_MULT_DEFAULT, RANDOM_SEED
 from autokmc.logging_utils import get_logger
 
 _log = get_logger(__name__)
@@ -163,7 +163,7 @@ def _smiles_to_atoms(smiles: str, *, add_hydrogens: bool = True) -> Atoms:
             mol = Chem.AddHs(mol, onlyOnAtoms=only_atoms)
 
     params = AllChem.ETKDGv3()
-    params.randomSeed = 69
+    params.randomSeed = RANDOM_SEED
     result = AllChem.EmbedMolecule(mol, params)
     if result == -1:
         # Fall back to random embedding

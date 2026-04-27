@@ -45,6 +45,8 @@ Graph-level metadata (``G.graph[...]``):
 from __future__ import annotations
 
 import logging
+import warnings
+
 import numpy as np
 import networkx as nx
 
@@ -164,7 +166,6 @@ def build_graph(
         # convention and is silent.
         unexpected = (~user_pbc) & pbc_effective
         if unexpected.any():
-            import warnings
             warnings.warn(
                 f"build_graph: cross-image bonds detected along axes "
                 f"{np.where(unexpected)[0].tolist()} where atoms.pbc was "

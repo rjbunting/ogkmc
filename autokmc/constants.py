@@ -17,6 +17,17 @@ the consumer modules, or per-call via the explicit keyword arguments on
 from __future__ import annotations
 
 # ---------------------------------------------------------------------------
+# Random seed
+# ---------------------------------------------------------------------------
+
+#: Single random seed used by **every** stochastic step in the package
+#: (alloy substitution in :func:`autokmc.structure._apply_composition`,
+#: RDKit ETKDGv3 conformer embedding in
+#: :func:`autokmc.reactants._smiles_to_atoms`, …).  Centralised so a single
+#: change makes every workflow reproducibly different.
+RANDOM_SEED: int = 69
+
+# ---------------------------------------------------------------------------
 # Neighbour-list / co-bonding
 # ---------------------------------------------------------------------------
 
@@ -120,4 +131,32 @@ BOND_TOLERANCE: float = 0.4
 #: "inside" the nanoparticle convex hull and discarded as a wrap-around
 #: spurious site in :func:`autokmc.find_anchors._enumerate_cliques`.
 HULL_TOL: float = -0.2
+
+# ---------------------------------------------------------------------------
+# Surface ray-casting (slabs)
+# ---------------------------------------------------------------------------
+
+#: Default per-disc coverage fraction required to mark an atom as
+#: "exposed" in :func:`autokmc.surface.find_surface_atoms_raycasting`.
+#: Used by both the dispatcher (:func:`autokmc.surface.find_surface_atoms`)
+#: and the reverse-ray-casting layer-freezing helper
+#: (:func:`autokmc.structure._get_bottom_layer_indices`) so the same
+#: threshold is applied everywhere.
+RAYCAST_COVERAGE_THRESHOLD: float = 0.7
+
+#: Default ray-disc resolution (per axis) in
+#: :func:`autokmc.surface.find_surface_atoms_raycasting`.  ``n_disc_sample=10``
+#: yields ``≈ π·10²/4 ≈ 78`` rays per atom.
+RAYCAST_N_DISC_SAMPLE: int = 10
+
+# ---------------------------------------------------------------------------
+# Kabsch ego-alignment
+# ---------------------------------------------------------------------------
+
+#: Hard cap on the number of automorphisms enumerated by
+#: :func:`autokmc.find_anchors._kabsch_align_ego` when searching for the
+#: lowest-RMSD mapping between a representative and a member ego-graph.
+#: 6969 is plenty for any chemically meaningful symmetry group while
+#: still bounding pathological complete-graph blow-ups.
+KABSCH_MAX_MAPPINGS: int = 6969
 

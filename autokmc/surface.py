@@ -32,7 +32,11 @@ from ase.data import covalent_radii as ASE_COVALENT_RADII
 from scipy.spatial import ConvexHull
 
 from autokmc.results import SurfaceClassification
-from autokmc.constants import NL_MULT_DEFAULT
+from autokmc.constants import (
+    NL_MULT_DEFAULT,
+    RAYCAST_COVERAGE_THRESHOLD,
+    RAYCAST_N_DISC_SAMPLE,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -108,8 +112,8 @@ def find_surface_atoms(
     # ray-casting kwargs
     surf_radius_factor: float = 1.0,
     which: str = "top",
-    coverage_threshold: float = 0.7,
-    n_disc_sample: int = 10,
+    coverage_threshold: float = RAYCAST_COVERAGE_THRESHOLD,
+    n_disc_sample: int = RAYCAST_N_DISC_SAMPLE,
     # convex-hull kwargs
     hull_tol_factor: float = 0.5,
     return_diagnostics: bool = False,
@@ -201,8 +205,8 @@ def find_surface_atoms_raycasting(
     *,
     surf_radius_factor: float = 1.0,
     which: str = "top",
-    coverage_threshold: float = 0.5,
-    n_disc_sample: int = 5,
+    coverage_threshold: float = RAYCAST_COVERAGE_THRESHOLD,
+    n_disc_sample: int = RAYCAST_N_DISC_SAMPLE,
 ):
     """Classify surface atoms by per-atom disc-coverage ray-casting.
 

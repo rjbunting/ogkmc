@@ -65,7 +65,6 @@ Public API
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -79,7 +78,9 @@ from ase.data import (
     atomic_numbers as _ASE_AN,
 )
 
-_log = logging.getLogger(__name__)
+from autokmc.logging_utils import get_logger
+
+_log = get_logger(__name__)
 
 # ---------------------------------------------------------------------------
 # Tuneable defaults — single source of truth in :mod:`autokmc.constants`.
@@ -96,7 +97,15 @@ from autokmc.constants import (
     SITE_REPULSION_CUTOFF as REPULSION_CUTOFF,
     N_SHELLS_DEFAULT as N_SHELLS,
     HULL_TOL,
+    KABSCH_MAX_MAPPINGS,
 )
+
+# ---------------------------------------------------------------------------
+# Module-level lookup tables
+# ---------------------------------------------------------------------------
+
+#: Human-readable coordination labels used in verbose / log output.
+COORD_LABELS: dict[int, str] = {1: "top", 2: "bridge", 3: "hollow"}
 
 
 # ---------------------------------------------------------------------------
@@ -138,12 +147,12 @@ class AnchorSite:
     k            : int
     iso_class    : int
     n_shells     : int
-    representative: frozenset
-    members      : list              = field(default_factory=list)
-    centroid     : Any               = None
-    ego_graph    : Any               = None
-    position     : Any               = None
-    node_ids     : list              = field(default_factory=list)
+    representative: frozenset[int]
+    members      : list[frozenset[int]] = field(default_factory=list)
+    centroid     : Any                  = None
+    ego_graph    : Any                  = None
+    position     : Any                  = None
+    node_ids     : list[int]            = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -424,12 +433,15 @@ def _kabsch_align_ego(
     pbc: np.ndarray,
     use_mic: bool,
     rmsd_tol: float = 1e-4,
+    max_mappings: int = KABSCH_MAX_MAPPINGS,
 ) -> tuple[np.ndarray | None, np.ndarray | None]:
     """Rigid transform mapping the representative ego frame onto a member ego frame.
 
     Builds the ego-graph of each clique, tags seed membership, finds the
     best isomorphism by iterating all consistent mappings and picking the one
-    with the lowest Kabsch RMSD.
+    with the lowest Kabsch RMSD.  At most *max_mappings* automorphisms are
+    tried (defaults to :data:`autokmc.constants.KABSCH_MAX_MAPPINGS`) so that
+    pathological high-symmetry egos cannot blow up the runtime.
 
     Returns ``(R, t)`` or ``(None, None)`` if the egos are not isomorphic.
     Apply as::
@@ -445,6 +457,11 @@ def _kabsch_align_ego(
     mem_ego = _build_ego_graph(G, mem_seed, n_shells)
 
     # Tag seed membership so the mapping is forced to send seed → seed.
+    # NOTE: we mutate ``_seed`` on the *copies* returned by
+    # :func:`_build_ego_graph` (which calls ``G.subgraph(...).copy()``).
+    # The parent graph *G* is therefore never touched; the egos themselves
+    # are throw-away locals and are not cached anywhere, so the stale
+    # ``_seed`` attribute cannot leak across calls.
     for n in rep_ego.nodes:
         rep_ego.nodes[n]["_seed"] = (n in rep_seed)
     for n in mem_ego.nodes:
@@ -517,7 +534,9 @@ def _optimise_position(
     where i loops over bonded atoms in *clique*, j over nearby non-bonded
     surface atoms (restricted to the n-shell ego and within *repulsion_cutoff*).
 
-    Periodic slabs use L-BFGS-B with a floor at the highest bonded-atom z.
+    Periodic slabs use L-BFGS-B with a hard z-floor at the highest bonded-atom
+    z coordinate (valid for the orthogonalised slabs produced by
+    :mod:`autokmc.structure` where the surface normal is aligned with +z).
     Nanoparticles use SLSQP constrained to the outward half-space.
     """
     from scipy.optimize import minimize
@@ -564,8 +583,10 @@ def _optimise_position(
         return E
 
     if use_mic:
-        # Slab: start above the highest bonded atom.
-        if use_mic and cell_inv is not None:
+        # Slab: start above the highest bonded atom along +z (valid because
+        # :func:`autokmc.structure._orthogonalise_slab` guarantees the
+        # surface normal is aligned with the cartesian z-axis).
+        if cell_inv is not None:
             dv_b = b_pos - b_pos[0]
             frac = dv_b @ cell_inv
             for ax in range(3):
@@ -601,10 +622,17 @@ def _optimise_position(
 # ---------------------------------------------------------------------------
 
 def _next_node_id(G: nx.Graph) -> int:
-    """Smallest integer node id strictly greater than all existing ids."""
+    """Smallest integer node id strictly greater than all existing ids.
+
+    Accepts both Python ``int`` and ``numpy.integer`` ids so callers
+    that produce ids from numpy ranges (``np.arange``) interoperate
+    cleanly with callers using plain ``int``.
+    """
     if not G.nodes:
         return 0
-    return int(max(int(n) for n in G.nodes if isinstance(n, int))) + 1
+    return int(max(
+        int(n) for n in G.nodes if isinstance(n, (int, np.integer))
+    )) + 1
 
 
 def _remove_anchor_nodes(G: nx.Graph, element: str) -> None:
@@ -668,8 +696,17 @@ def _enumerate_cliques(
 ) -> dict[int, list[frozenset]]:
     """Return ``{k: [frozenset_of_node_ids, …]}`` for every clique size 1…k_max.
 
-    Cliques whose centroid sits inside the nanoparticle convex hull
-    (``hull_tol`` check) are dropped as wrap-around artefacts.
+    Two geometric filters drop spurious wrap-around / sub-surface cliques:
+
+    * **Nanoparticles** — the convex hull of the *surface* atoms is used as
+      the boundary of the particle.  A clique whose MIC-aware centroid sits
+      strictly inside the hull (signed distance below :data:`HULL_TOL`) is
+      a wrap-around artefact (e.g. an "anchor site" buried at the centre
+      of a periodic image of the NP) and is dropped.
+    * **Slabs** — a clique whose centroid sits below the lowest surface
+      atom along the local outward normal is similarly buried beneath the
+      surface and dropped.  The outward normal is just ``+z`` for the
+      orthogonalised slabs that :mod:`autokmc.structure` produces.
     """
     cbg = _build_co_bond_graph(G, r_cov_ads, co_factor)
     if cbg.number_of_nodes() == 0:
@@ -678,19 +715,38 @@ def _enumerate_cliques(
     k_max = max((len(c) for c in nx.find_cliques(cbg)), default=1)
     cell, cell_inv, pbc, use_mic = _get_cell(G)
 
-    # Convex hull filter (nanoparticles only)
+    # ------------------------------------------------------------------
+    # Geometric "is this clique buried?" filter.  Built once per call.
+    # ------------------------------------------------------------------
+    surf_pos = np.array(
+        [d["position"] for _, d in G.nodes(data=True)
+         if d.get("type") == "surface"],
+        dtype=float,
+    )
+
     hull_eq: np.ndarray | None = None
+    z_floor: float | None      = None
+
     if not use_mic:
+        # ── Nanoparticle: convex hull of surface atoms ────────────────
         hull_eq = G.graph.get("hull_equations")
-        if hull_eq is None and hasattr(G, "graph"):
+        if hull_eq is None and len(surf_pos) >= 4:
             try:
                 from scipy.spatial import ConvexHull
-                all_pos = np.array([d["position"] for _, d in G.nodes(data=True)],
-                                   dtype=float)
-                hull_eq = np.asarray(ConvexHull(all_pos).equations, dtype=float)
+                hull_eq = np.asarray(
+                    ConvexHull(surf_pos).equations, dtype=float,
+                )
                 G.graph["hull_equations"] = hull_eq
             except Exception:
-                pass
+                hull_eq = None
+    else:
+        # ── Slab: drop cliques whose centroid is below the surface ────
+        # All builders orthogonalise the slab cell (surface ‖ xy plane,
+        # outward normal = +z), so a simple z-floor is sufficient and
+        # cheap.  ``HULL_TOL`` is reused as the (negative) Å tolerance
+        # below the lowest surface atom that we still accept.
+        if len(surf_pos):
+            z_floor = float(surf_pos[:, 2].min()) + HULL_TOL
 
     sites: dict[int, list[frozenset]] = {k: [] for k in range(1, k_max + 1)}
     seen: set[frozenset] = set()
@@ -701,12 +757,16 @@ def _enumerate_cliques(
         key = frozenset(clique)
         if key in seen:
             continue
-        if hull_eq is not None:
-            c = _clique_centroid(G, key, cell, cell_inv, pbc, use_mic)
-            if float(np.max(hull_eq[:, :3] @ c + hull_eq[:, 3])) < HULL_TOL:
-                seen.add(key)
-                continue
         seen.add(key)
+
+        if hull_eq is not None or z_floor is not None:
+            c = _clique_centroid(G, key, cell, cell_inv, pbc, use_mic)
+            if hull_eq is not None:
+                if float(np.max(hull_eq[:, :3] @ c + hull_eq[:, 3])) < HULL_TOL:
+                    continue   # buried inside the NP hull
+            elif z_floor is not None and c[2] < z_floor:
+                continue       # buried beneath the slab surface
+
         sites[k].append(key)
 
     return {k: v for k, v in sites.items() if v}
@@ -727,7 +787,6 @@ def _reduce_by_isomorphism(
     are graph-isomorphic under element-label matching.
     """
     node_match = isomorphism.categorical_node_match("element", "X")
-    COORD_LABELS = {1: "top", 2: "bridge", 3: "hollow"}
     unique: dict[int, list[AnchorSite]] = {}
 
     cell, cell_inv, pbc, use_mic = _get_cell(G)
@@ -902,7 +961,6 @@ def find_anchor_sites(
 
     cell, cell_inv, pbc, use_mic = _get_cell(G)
 
-    COORD_LABELS = {1: "top", 2: "bridge", 3: "hollow"}
 
     # ── Step 4 + 5: optimise representative, propagate to members ─────────
     all_sites: list[AnchorSite] = []
@@ -1006,7 +1064,6 @@ def find_anchor_sites(
     G.graph.setdefault("raw_cliques",  {})[element]  = sites_by_k
 
     if verbose:
-        COORD_LABELS = {1: "top", 2: "bridge", 3: "hollow"}
         print(f"  {'k':>3}  {'type':<10}  {'raw':>6}  {'unique':>6}")
         print(f"  {'-'*32}")
         for k, classes in sorted(unique_by_k.items()):
