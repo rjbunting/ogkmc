@@ -124,6 +124,19 @@ MAX_PAIR_SHELLS: int = 10
 BOND_TOLERANCE: float = 0.4
 
 # ---------------------------------------------------------------------------
+# Stability pruning
+# ---------------------------------------------------------------------------
+
+#: Force convergence threshold (eV/Å) for the ML-potential relaxation used by
+#: :func:`autokmc.find_adsorbate_sites.prune_unstable_adsorbate_sites` to
+#: decide whether a representative placement is stable.
+PRUNE_FMAX: float = 0.05
+
+#: Maximum LBFGS steps for the ML-potential relaxation used by
+#: :func:`autokmc.find_adsorbate_sites.prune_unstable_adsorbate_sites`.
+PRUNE_MAX_STEPS: int = 500
+
+# ---------------------------------------------------------------------------
 # Convex-hull / surface classification
 # ---------------------------------------------------------------------------
 

@@ -48,6 +48,7 @@ from autokmc.find_adsorbate_sites import (
     find_adsorbate_sites,
     optimise_adsorbate_site_positions,
     push_member_positions_to_graph,
+    prune_unstable_adsorbate_sites,
 )
 from autokmc.check_adsorbate_sites import (
     check_adsorbate_site_lateral,
@@ -75,6 +76,7 @@ __all__ = [
     # adsorbate sites
     "AdsorbateSite", "AdsorbateSiteLateral", "find_adsorbate_sites",
     "optimise_adsorbate_site_positions", "push_member_positions_to_graph",
+    "prune_unstable_adsorbate_sites",
     # lateral interactions
     "check_adsorbate_site_lateral", "check_site_stability",
     "SiteStabilityError", "SurfaceConnectivityError",

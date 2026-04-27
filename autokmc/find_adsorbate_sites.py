@@ -65,6 +65,7 @@ Public API
 
 from __future__ import annotations
 
+import copy
 import warnings
 from dataclasses import dataclass, field
 from itertools import combinations
@@ -103,6 +104,9 @@ from autokmc.constants import (
     CONTACT_FACTOR,
     STANDOFF_FACTOR,
     N_ADSORBATE_RESTARTS as N_RESTARTS,
+    NL_MULT_DEFAULT,
+    PRUNE_FMAX,
+    PRUNE_MAX_STEPS,
 )
 
 
@@ -803,6 +807,318 @@ def _materialise_adsorbate_nodes(
 
 
 # ---------------------------------------------------------------------------
+# Stability-pruning helpers
+# ---------------------------------------------------------------------------
+
+def _build_pruning_atoms(
+    G: nx.Graph,
+    ms: AdsorbateSite,
+    react_sym: list[str],
+    *,
+    frozen_indices: list[int] | None = None,
+):
+    """Build an ASE Atoms object for a bare (no lateral neighbours) stability check.
+
+    Slab atoms are taken from *G* (bulk + surface, sorted by original ASE
+    ``index``).  Adsorbate atoms are placed at the representative positions
+    ``ms.positions``.
+
+    Returns
+    -------
+    atoms : Atoms
+    n_slab : int
+    n_ads : int
+    """
+    from ase import Atoms
+    from ase.constraints import FixAtoms
+
+    slab_nodes = sorted(
+        (n for n, d in G.nodes(data=True) if d.get("type") in ("bulk", "surface")),
+        key=lambda n: G.nodes[n].get("index", n),
+    )
+    slab_sym = [G.nodes[n]["element"]  for n in slab_nodes]
+    slab_pos = [G.nodes[n]["position"] for n in slab_nodes]
+
+    ads_pos = np.asarray(ms.positions, dtype=float)  # (n_atoms, 3)
+
+    symbols   = slab_sym + list(react_sym)
+    positions = slab_pos + [ads_pos[i].tolist() for i in range(len(react_sym))]
+
+    cell = np.array(G.graph["cell"], dtype=float)
+    pbc  = np.asarray(G.graph.get("pbc", [True, True, False]), dtype=bool)
+
+    atoms = Atoms(symbols=symbols, positions=positions, cell=cell, pbc=pbc)
+    if frozen_indices:
+        atoms.set_constraint(FixAtoms(indices=list(frozen_indices)))
+
+    return atoms, len(slab_nodes), len(react_sym)
+
+
+def _bond_set_pruning(atoms, nl_mult: float) -> set:
+    """Return the set of bonded atom-index pairs as frozensets."""
+    from ase.neighborlist import NeighborList, natural_cutoffs
+
+    cutoffs = natural_cutoffs(atoms, mult=nl_mult)
+    nl_obj  = NeighborList(cutoffs, self_interaction=False, bothways=False)
+    nl_obj.update(atoms)
+    bonds: set = set()
+    for i in range(len(atoms)):
+        for j in nl_obj.get_neighbors(i)[0]:
+            bonds.add(frozenset((int(i), int(j))))
+    return bonds
+
+
+def _remove_iso_class_nodes(G: nx.Graph, ms: AdsorbateSite) -> None:
+    """Remove all materialised G-nodes for *ms* (no-op if absent)."""
+    to_remove = [
+        nid
+        for node_ids in ms.member_node_ids
+        for nid in node_ids
+        if nid in G
+    ]
+    if to_remove:
+        G.remove_nodes_from(to_remove)
+
+
+# ---------------------------------------------------------------------------
+# Public API — prune_unstable_adsorbate_sites
+# ---------------------------------------------------------------------------
+
+def prune_unstable_adsorbate_sites(
+    G: nx.Graph,
+    adsorbate_sites: list[AdsorbateSite],
+    reactant,
+    calculator,
+    *,
+    frozen_indices: list[int] | None = None,
+    fmax: float = PRUNE_FMAX,
+    max_steps: int = PRUNE_MAX_STEPS,
+    nl_mult: float = NL_MULT_DEFAULT,
+    verbose: bool = False,
+) -> list[AdsorbateSite]:
+    """Remove iso-classes whose representative placement is unstable under ML relaxation.
+
+    For each iso-class in *adsorbate_sites*:
+
+    1. Builds a bare slab + adsorbate :class:`~ase.Atoms` from the
+       representative positions (``ms.positions``).
+    2. Records the bond topology before relaxation.
+    3. Runs a full ML relaxation via
+       :func:`~autokmc.structure.optimise_structure`.
+    4. If the bond topology changed, or optimisation did not converge, the
+       iso-class is considered **unstable** and excluded from the returned list,
+       and any materialised G-nodes belonging to it are removed.
+    5. For **stable** iso-classes the adsorbate atom positions from the
+       ML-relaxed structure are extracted and written back to
+       ``ms.positions`` (step 5 of the pipeline), then
+       :func:`push_member_positions_to_graph` is called for the
+       representative (member 0) and Kabsch ego-alignment propagates the new
+       geometry to every other member (step 6).
+
+    ``G.graph["adsorbate_sites"][reactant.smiles]`` is updated in place with
+    the surviving list.
+
+    Parameters
+    ----------
+    G : nx.Graph
+        Surface graph from :func:`~autokmc.graph.build_graph`.
+    adsorbate_sites : list[AdsorbateSite]
+        Iso-classes to check (typically the return value of
+        :func:`find_adsorbate_sites`).
+    reactant : Reactant
+        Gas-phase molecule that produced *adsorbate_sites*.
+    calculator
+        Any ASE-compatible ML/empirical potential.  A
+        :func:`copy.deepcopy` is made for each iso-class so the caller's
+        instance is never mutated.
+    frozen_indices : list[int] | None
+        0-based indices into the **slab** portion (bulk + surface nodes sorted
+        by their original ASE atom ``index``) to freeze during relaxation.
+        Pass ``atoms.info["frozen_indices"]`` from the slab directly.
+    fmax : float
+        Force convergence threshold (eV/Å).  Default :data:`~autokmc.constants.PRUNE_FMAX`.
+    max_steps : int
+        Maximum LBFGS steps.  Default :data:`~autokmc.constants.PRUNE_MAX_STEPS`.
+    nl_mult : float
+        Neighbour-list cutoff multiplier for the connectivity comparison.
+        Default :data:`~autokmc.constants.NL_MULT_DEFAULT`.
+    verbose : bool
+        Print per-iso-class outcomes (stable ✓ / pruned ✗) to stdout.
+
+    Returns
+    -------
+    list[AdsorbateSite]
+        Only the stable iso-classes, in their original order.  The iso_class
+        integer labels are **not** renumbered.
+    """
+    from autokmc.structure import optimise_structure  # avoid circular at module level
+
+    react_sym = list(reactant.atoms.get_chemical_symbols())
+    stable: list[AdsorbateSite] = []
+    n_pruned = 0
+
+    if verbose:
+        print(
+            f"\nprune_unstable_adsorbate_sites: {len(adsorbate_sites)} iso-class(es)  "
+            f"fmax={fmax} eV/Å  max_steps={max_steps}"
+        )
+
+    for ms in adsorbate_sites:
+        # ── Build initial Atoms ───────────────────────────────────────────
+        try:
+            atoms_init, n_slab, n_ads = _build_pruning_atoms(
+                G, ms, react_sym, frozen_indices=frozen_indices,
+            )
+        except Exception as exc:
+            _log.warning(
+                "prune_unstable_adsorbate_sites: iso_class=%d build failed (%s) "
+                "— keeping.", ms.iso_class, exc,
+            )
+            if verbose:
+                print(f"  ? iso={ms.iso_class}: build failed ({exc}) — kept")
+            stable.append(ms)
+            continue
+
+        bonds_before = _bond_set_pruning(atoms_init, nl_mult)
+
+        # ── ML relaxation ─────────────────────────────────────────────────
+        try:
+            calc_copy  = copy.deepcopy(calculator)
+            atoms_opt  = optimise_structure(
+                atoms_init,
+                calculator = calc_copy,
+                fmax       = fmax,
+                steps      = max_steps,
+                verbose    = False,
+            )
+        except Exception as exc:
+            _log.debug(
+                "prune_unstable_adsorbate_sites: iso_class=%d relaxation raised %s",
+                ms.iso_class, exc,
+            )
+            if verbose:
+                print(f"  ✗ iso={ms.iso_class}: relaxation failed ({exc}) — pruned")
+            n_pruned += 1
+            _remove_iso_class_nodes(G, ms)
+            continue
+
+        # ── Convergence check ─────────────────────────────────────────────
+        forces = atoms_opt.get_forces()
+        if frozen_indices:
+            free_mask = np.ones(len(atoms_opt), dtype=bool)
+            free_mask[list(frozen_indices)] = False
+            max_force = float(np.linalg.norm(forces[free_mask], axis=1).max())
+        else:
+            max_force = float(np.linalg.norm(forces, axis=1).max())
+
+        if max_force > fmax:
+            if verbose:
+                print(
+                    f"  ✗ iso={ms.iso_class}: not converged "
+                    f"(max|F|={max_force:.4f} eV/Å > {fmax}) — pruned"
+                )
+            n_pruned += 1
+            _remove_iso_class_nodes(G, ms)
+            continue
+
+        # ── Connectivity check ────────────────────────────────────────────
+        bonds_after = _bond_set_pruning(atoms_opt, nl_mult)
+        if bonds_before != bonds_after:
+            added   = len(bonds_after - bonds_before)
+            removed = len(bonds_before - bonds_after)
+            if verbose:
+                print(
+                    f"  ✗ iso={ms.iso_class}: bonds changed "
+                    f"(+{added}/-{removed}) — pruned"
+                )
+            n_pruned += 1
+            _remove_iso_class_nodes(G, ms)
+            continue
+
+        E = float(atoms_opt.get_potential_energy())
+
+        # ── Update positions from ML-relaxed geometry ─���───────────────────
+        # Extract the adsorbate atoms (last n_ads rows of atoms_opt) and
+        # write them back as the new representative positions for this
+        # iso-class.  The ordering produced by _build_pruning_atoms matches
+        # reactant atom-index order, so ms.positions can be replaced directly.
+        new_pos: np.ndarray = np.asarray(
+            atoms_opt.get_positions()[n_slab : n_slab + n_ads], dtype=float
+        )
+        ms.positions = new_pos
+
+        # ── Propagate to all members via Kabsch ego-alignment ─────────────
+        if ms.member_node_ids:
+            # Push representative (member 0) to G.
+            push_member_positions_to_graph(G, ms, 0, new_pos)
+
+            # Kabsch-propagate to every other member.
+            rep_seed: frozenset = frozenset(
+                int(n)
+                for c in ms.atom_cliques if c is not None
+                for n in c
+            )
+            if rep_seed and len(ms.members) > 1:
+                cell_arr, cell_inv_arr, pbc_arr, use_mic_arr = _get_cell(G)
+                depth = max(1, int(ms.n_shells_settled))
+                n_propagated = 0
+                for m_idx in range(1, len(ms.members)):
+                    mem_seed: frozenset = frozenset(
+                        int(n)
+                        for c in ms.members[m_idx] if c is not None
+                        for n in c
+                    )
+                    if not mem_seed:
+                        continue
+                    R, t = _kabsch_align_ego(
+                        G,
+                        rep_seed, mem_seed, depth,
+                        cell_arr, cell_inv_arr, pbc_arr, use_mic_arr,
+                    )
+                    if R is None or t is None:
+                        continue
+                    push_member_positions_to_graph(
+                        G, ms, m_idx, new_pos @ R.T + t
+                    )
+                    n_propagated += 1
+                if verbose:
+                    print(
+                        f"  ✓ iso={ms.iso_class}: stable  "
+                        f"E={E:.4f} eV  max|F|={max_force:.4f} eV/Å  "
+                        f"propagated {n_propagated}/{max(0, len(ms.members) - 1)} members"
+                    )
+            else:
+                if verbose:
+                    print(
+                        f"  ✓ iso={ms.iso_class}: stable  "
+                        f"E={E:.4f} eV  max|F|={max_force:.4f} eV/Å"
+                    )
+        else:
+            if verbose:
+                print(
+                    f"  ✓ iso={ms.iso_class}: stable  "
+                    f"E={E:.4f} eV  max|F|={max_force:.4f} eV/Å  (no members yet)"
+                )
+
+        stable.append(ms)
+
+    if verbose:
+        print(
+            f"  Pruning complete: {len(stable)}/{len(adsorbate_sites)} "
+            f"iso-class(es) survived  ({n_pruned} pruned)"
+        )
+
+    _log.debug(
+        "prune_unstable_adsorbate_sites: %r  %d/%d iso-classes survived",
+        reactant.smiles, len(stable), len(adsorbate_sites),
+    )
+
+    # Persist to graph so G is always consistent with the returned list.
+    G.graph.setdefault("adsorbate_sites", {})[reactant.smiles] = stable
+    return stable
+
+
+# ---------------------------------------------------------------------------
 # push_member_positions_to_graph
 # ---------------------------------------------------------------------------
 
@@ -872,6 +1188,12 @@ def find_adsorbate_sites(
     max_shell_retries: int = 3,
     require_surface_connected: bool = True,
     max_pair_shells: int = MAX_PAIR_SHELLS,
+    # ── Stability pruning ──────────────────────────────────────────────────
+    prune_stable_only: bool = True,
+    calculator=None,
+    frozen_indices: list[int] | None = None,
+    prune_fmax: float = PRUNE_FMAX,
+    prune_max_steps: int = PRUNE_MAX_STEPS,
     verbose: bool = False,
 ) -> list[AdsorbateSite]:
     """Universal N-atom adsorbate site enumerator (N ≥ 2).
@@ -911,6 +1233,27 @@ def find_adsorbate_sites(
         surface edges within *max_pair_shells* hops.  Default True.
     max_pair_shells : int
         Hard cap on the per-placement connectivity check.  Default 10.
+    prune_stable_only : bool
+        If ``True`` (default), run an ML-potential relaxation on the
+        representative geometry of every iso-class after enumeration and
+        discard any iso-class whose bond topology changes or whose relaxation
+        does not converge.  Requires *calculator* to be set; if *calculator*
+        is ``None`` a :class:`RuntimeWarning` is issued and pruning is skipped.
+    calculator
+        ASE-compatible ML or empirical potential used for stability pruning.
+        A :func:`copy.deepcopy` is made for each iso-class so the caller's
+        instance is never mutated.  ``None`` disables pruning even when
+        *prune_stable_only* is ``True``.
+    frozen_indices : list[int] | None
+        Atom indices into the **slab** portion (0-based, sorted by original
+        ASE atom ``index``) to freeze during the pruning relaxation.  Pass
+        ``atoms.info["frozen_indices"]`` directly for slab structures.
+    prune_fmax : float
+        Force convergence threshold (eV/Å) for pruning relaxations.
+        Default :data:`~autokmc.constants.PRUNE_FMAX` (0.05).
+    prune_max_steps : int
+        Maximum LBFGS steps for pruning relaxations.
+        Default :data:`~autokmc.constants.PRUNE_MAX_STEPS` (200).
     verbose : bool
         Print per-step progress to stdout.
 
@@ -1153,14 +1496,61 @@ def find_adsorbate_sites(
             f"{total_members} placements total"
         )
 
-    # ── Materialise nodes, then persist to G.graph ───────────────────────
-    # Stamp the settled shell depth on every iso-class so that downstream
-    # refinement (optimise_adsorbate_site_positions) can re-use it.
+    # ── Stage A: stamp shell depth, materialise nodes, persist ──────────
+    # Nodes must exist on G before geometric optimisation can run, so
+    # materialisation always happens here — before any pruning.
     for ms in adsorbate_sites:
         ms.n_shells_settled = int(n_shells_eff)
 
     _materialise_adsorbate_nodes(G, reactant, adsorbate_sites)
     G.graph.setdefault("adsorbate_sites", {})[reactant.smiles] = adsorbate_sites
+
+    # ── Stage B: geometric optimisation → ML stability → prune → propagate
+    if prune_stable_only:
+        if calculator is not None:
+            # B-1: calculator-free rigid-body geometry optimisation.
+            # Refines representative positions and Kabsch-propagates to every
+            # member so that the ML relaxation in B-2 starts from a sensible
+            # geometry rather than the raw clique-centroid positions.
+            if verbose:
+                print(
+                    "\n  ──────────────────────────────────────────────────────\n"
+                    "  Stage B-1 : calc-free geometric optimisation\n"
+                    "  ──────────────────────────────────────────────────────"
+                )
+            optimise_adsorbate_site_positions(
+                G, reactant.smiles, reactant, verbose=verbose,
+            )
+
+            # B-2: ML-potential stability check.  Prunes unstable iso-classes,
+            # extracts the relaxed adsorbate positions, updates ms.positions,
+            # and Kabsch-propagates the new geometry to every member.
+            if verbose:
+                print(
+                    "\n  ──────────────────────────────────────────────────────\n"
+                    "  Stage B-2 : ML stability check, pruning & position update\n"
+                    "  ──────────────────────────────────────────────────────"
+                )
+            adsorbate_sites = prune_unstable_adsorbate_sites(
+                G, adsorbate_sites, reactant, calculator,
+                frozen_indices = frozen_indices,
+                fmax           = prune_fmax,
+                max_steps      = prune_max_steps,
+                verbose        = verbose,
+            )
+            # prune_unstable_adsorbate_sites already updates G.graph; keep
+            # the local variable consistent.
+            G.graph.setdefault("adsorbate_sites", {})[reactant.smiles] = adsorbate_sites
+        else:
+            warnings.warn(
+                "find_adsorbate_sites: prune_stable_only=True but calculator=None "
+                "— stability pruning skipped.  Pass calculator=<your_calc> to "
+                "enable pruning, or set prune_stable_only=False to suppress this "
+                "warning.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+
 
     _log.debug(
         "find_adsorbate_sites: %r done — %d iso-classes, %d total placements",
