@@ -24,17 +24,17 @@ Utilities for identifying surface atoms in two geometries:
 
 from __future__ import annotations
 
+import logging
 import numpy as np
 
 from ase import Atoms
 from ase.data import covalent_radii as ASE_COVALENT_RADII
 from scipy.spatial import ConvexHull
 
-from autokmc.constants import NL_MULT_DEFAULT
-from autokmc.logging_utils import get_logger
 from autokmc.results import SurfaceClassification
+from autokmc.constants import NL_MULT_DEFAULT
 
-_log = get_logger(__name__)
+_log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -214,7 +214,8 @@ def find_surface_atoms_raycasting(
 
     pos      = atoms.get_positions()          # (N, 3)
     cell     = np.array(atoms.get_cell())     # (3, 3)
-    cell_inv = np.linalg.inv(cell)
+    cell_inv = np.linalg.inv(cell)            # full 3×3 inverse: handles
+    #                                          # tilted slab cells correctly.
     N        = len(atoms)
 
     # Per-atom capture radius from covalent radii
@@ -228,15 +229,21 @@ def find_surface_atoms_raycasting(
     unit_pts = unit_pts[(unit_pts ** 2).sum(axis=1) <= 1.0]        # (K, 2) in disc
     K = len(unit_pts)
 
-    rays_xy = (pos[:, np.newaxis, :2]
-               + surf_radii[:, np.newaxis, np.newaxis] * unit_pts[np.newaxis, :, :])
-    rays_xy    = rays_xy.reshape(-1, 2)                            # (N*K, 2)
+    # Rays placed in the xy plane around each atom.  We embed them in 3-D
+    # at z=0 so the full 3×3 inverse can wrap them correctly even when the
+    # cell has off-diagonal terms (e.g. a non-orthogonalised slab cell).
+    rays_xy3 = np.zeros((N, K, 3), dtype=float)
+    rays_xy3[..., 0] = (pos[:, np.newaxis, 0]
+                        + surf_radii[:, np.newaxis] * unit_pts[np.newaxis, :, 0])
+    rays_xy3[..., 1] = (pos[:, np.newaxis, 1]
+                        + surf_radii[:, np.newaxis] * unit_pts[np.newaxis, :, 1])
+    rays_xy3 = rays_xy3.reshape(-1, 3)                              # (N*K, 3)
 
-    rays_frac  = rays_xy @ cell_inv[:2, :2]                        # (N*K, 2)
-    atom_frac  = (pos @ cell_inv)[:, :2]                           # (N, 2)
+    rays_frac3 = rays_xy3 @ cell_inv                                # (N*K, 3)
+    atom_frac3 = pos @ cell_inv                                     # (N, 3)
     z_vals     = pos[:, 2]
 
-    n_rays = len(rays_xy)
+    n_rays = len(rays_xy3)
     _CHUNK = 4096
 
     wins_top = np.zeros(N, dtype=np.int32)
@@ -244,12 +251,15 @@ def find_surface_atoms_raycasting(
 
     for start in range(0, n_rays, _CHUNK):
         sl         = slice(start, start + _CHUNK)
-        chunk_frac = rays_frac[sl]                                 # (C, 2)
+        chunk_frac = rays_frac3[sl]                                 # (C, 3)
 
-        dfrac  = atom_frac[np.newaxis, :, :] - chunk_frac[:, np.newaxis, :]
-        dfrac -= np.round(dfrac)
-        dxy    = dfrac @ cell[:2, :2]                              # (C, N, 2)
-        xy_dist = np.sqrt((dxy ** 2).sum(axis=2))                  # (C, N)
+        # MIC wrap in *full* 3-D fractional space, then drop the z axis
+        # back to Cartesian xy for the in-plane distance check.
+        dfrac3 = atom_frac3[np.newaxis, :, :] - chunk_frac[:, np.newaxis, :]
+        dfrac3 -= np.round(dfrac3)
+        d_cart = dfrac3 @ cell                                      # (C, N, 3)
+        dxy    = d_cart[..., :2]                                    # (C, N, 2)
+        xy_dist = np.sqrt((dxy ** 2).sum(axis=2))                   # (C, N)
 
         within  = xy_dist <= surf_radii[np.newaxis, :]             # (C, N)
         has_any = within.any(axis=1)                               # (C,)

@@ -1,68 +1,77 @@
 """
 autokmc.results
 ===============
-Public dataclasses returned from the analysis stages.
+Lightweight result containers shared across the package.
 
-These replace the previous variable-length tuple returns (e.g. the
-``surface_mask, surface_indices, [hull, [diagnostics,]] method`` tuple
-from :func:`autokmc.surface.find_surface_atoms`) so call-sites do not
-have to count tuple positions.
+Currently:
 
-The dataclasses are *iterable* — i.e. ``mask, indices, method = result``
-still works — so existing call-sites do not need to change.  New code
-should prefer attribute access (``result.method``).
+* :class:`SurfaceClassification` — return type of
+  :func:`autokmc.surface.find_surface_atoms`.  Behaves like a regular
+  dataclass (``.mask``, ``.indices``, ``.method``, ``.hull``,
+  ``.diagnostics``) **and** is iterable in the legacy variable-length-
+  tuple order so existing callers keep working::
+
+      mask, indices, method = find_surface_atoms(slab)         # raycasting
+      mask, indices, hull, method = find_surface_atoms(np_)    # convexhull
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Iterator, Optional
+from dataclasses import dataclass, field
+from typing import Any, Iterator
 
 import numpy as np
 
 
 @dataclass
 class SurfaceClassification:
-    """Result of :func:`autokmc.surface.find_surface_atoms`.
+    """Surface-atom classification result.
 
     Attributes
     ----------
-    mask : np.ndarray[bool], shape (N,)
-        ``True`` for atoms classified as surface.
-    indices : np.ndarray[int]
-        ``np.where(mask)[0]`` — the surface atom indices.
+    mask : np.ndarray, shape (N,), dtype bool
+        ``True`` where the atom is on the surface.
+    indices : np.ndarray, shape (k,), dtype int
+        Indices of surface atoms (``np.where(mask)[0]``).
     method : str
-        ``"raycasting"`` (periodic slab) or ``"convexhull"`` (nanoparticle).
-    hull : Any | None
-        :class:`scipy.spatial.ConvexHull` for the nanoparticle path,
-        otherwise ``None``.
-    diagnostics : dict | None
-        Per-atom signed distances etc. for the nanoparticle path when
-        ``return_diagnostics=True`` was passed; otherwise ``None``.
-    """
-    mask        : np.ndarray
-    indices     : np.ndarray
-    method      : str
-    hull        : Optional[Any]   = None
-    diagnostics : Optional[dict]  = None
+        Algorithm used: ``"raycasting"`` (slabs) or ``"convexhull"``
+        (nanoparticles).
+    hull : Any, optional
+        :class:`scipy.spatial.ConvexHull` instance — only set on the
+        nanoparticle path.  ``None`` for slabs.
+    diagnostics : dict, optional
+        Per-atom intermediates from the convex-hull path when
+        ``return_diagnostics=True`` was requested.  ``None`` otherwise.
 
-    # Backwards-compatible iteration: lets callers keep doing
-    #   mask, indices, method = find_surface_atoms(...)
-    #   mask, indices, hull, method = find_surface_atoms(...)            (NP, no diag)
-    #   mask, indices, hull, diag, method = find_surface_atoms(...)      (NP, with diag)
-    # by emitting the same tuple shape the legacy implementation did.
+    Iteration order
+    ---------------
+    Raycasting (no hull):       ``(mask, indices, method)``
+    Convex-hull (with hull):    ``(mask, indices, hull, method)``
+
+    This matches the legacy variable-length tuple returned by the
+    pre-dataclass version of :func:`~autokmc.surface.find_surface_atoms`.
+    """
+
+    mask: np.ndarray
+    indices: np.ndarray
+    method: str
+    hull: Any = None
+    diagnostics: Any = None
+
+    # ------------------------------------------------------------------
+    # Iteration / unpacking compatibility
+    # ------------------------------------------------------------------
     def __iter__(self) -> Iterator[Any]:
-        if self.method == "raycasting":
+        if self.hull is not None:
+            yield self.mask
+            yield self.indices
+            yield self.hull
+            yield self.method
+        else:
             yield self.mask
             yield self.indices
             yield self.method
-            return
-        # convexhull
-        yield self.mask
-        yield self.indices
-        if self.hull is not None:
-            yield self.hull
-        if self.diagnostics is not None:
-            yield self.diagnostics
-        yield self.method
+
+    def __len__(self) -> int:
+        return 4 if self.hull is not None else 3
 

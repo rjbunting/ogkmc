@@ -85,6 +85,7 @@ Typical usage
 from __future__ import annotations
 
 import copy
+import logging
 import math
 import os
 import warnings
@@ -97,9 +98,7 @@ from ase.calculators.emt import EMT
 from ase.constraints import FixAtoms
 from ase.optimize import LBFGS
 
-from autokmc.logging_utils import get_logger
-
-_log = get_logger(__name__)
+_log = logging.getLogger(__name__)
 
 # ExpCellFilter: newer ASE (≥3.23) ships it in ase.filters; fall back to
 # ase.constraints for older installations.
@@ -731,7 +730,7 @@ def _primary_element(composition: Dict[str, float]) -> str:
 def _apply_composition(
     atoms: Atoms,
     composition: Dict[str, float],
-    seed: int = 42,
+    seed: int = 69,
     verbose: bool = True,
 ) -> Atoms:
     """Randomly substitute atoms to match target composition fractions.
@@ -1001,65 +1000,71 @@ def _get_bottom_layer_indices(
 ) -> list:
     """Return atom indices belonging to the bottom *n_layers* layers.
 
-    Layers are detected by clustering z-coordinates with tolerance
-    ``lattice_constant_a / (4·√2)``.
+    Uses **iterative reverse ray-casting**: identify the current
+    bottom-most surface (via :func:`autokmc.surface.find_surface_atoms_raycasting`
+    with ``which="bottom"``), record those atoms, drop them from the
+    working set, and repeat *n_layers* times.
+
+    This is robust on stepped / kinked surfaces (e.g. fcc(211)) where the
+    old z-clustering heuristic would either collapse multiple layers into
+    one or split a single layer in two.
+
+    Parameters
+    ----------
+    atoms : Atoms
+    n_layers : int
+        Number of bottom layers to identify.
+    lattice_constant_a : float
+        Unused (retained for backwards-compat / future tolerance use).
     """
-    pos = atoms.get_positions()
+    # Local import to avoid a circular dep (surface.py imports from us
+    # only indirectly via the constants module).
+    from autokmc.surface import find_surface_atoms_raycasting
 
-    # Detect layers along the *actual slab normal* (cross(a, b)) rather than
-    # global z. This is more robust for non-orthogonal and transformed cells.
-    cell = np.array(atoms.get_cell())
-    normal = np.cross(cell[0], cell[1])
-    normal_norm = float(np.linalg.norm(normal))
-    if normal_norm < 1e-12:
-        # Defensive fallback for malformed cells.
-        layer_axis = pos[:, 2].copy()
-    else:
-        normal /= normal_norm
-        layer_axis = pos @ normal
+    if n_layers <= 0:
+        return []
 
-    # Start from the old physics-based heuristic, then tighten adaptively so
-    # high-index surfaces (e.g. 211) do not collapse into a single "layer".
-    fallback_tol = lattice_constant_a / (4.0 * np.sqrt(2))
-    axis_sorted = np.sort(layer_axis)
-    diffs = np.diff(axis_sorted)
-    # Ignore near-zero spacing from numerical noise / same-plane atoms.
-    positive_diffs = diffs[diffs > 1e-4]
-    if positive_diffs.size > 0:
-        small_gap = float(np.percentile(positive_diffs, 25))
-        layer_tol = max(0.05, min(fallback_tol, 0.45 * small_gap))
-    else:
-        layer_tol = fallback_tol
+    # Track original indices into *atoms* across iterative removal.
+    remaining_idx = np.arange(len(atoms), dtype=int)
+    work = atoms.copy()
+    # Strip any per-atom calculator results / constraints so the working
+    # copy is purely geometric and ray-casting sees nothing exotic.
+    work.calc = None
+    work.set_constraint()
 
-    z_sorted = axis_sorted
-    layers: list = []
-    current = [float(z_sorted[0])]
-    for z in z_sorted[1:]:
-        if z - current[-1] < layer_tol:
-            current.append(float(z))
-        else:
-            layers.append(current)
-            current = [float(z)]
-    layers.append(current)
+    frozen: list[int] = []
+    for layer in range(n_layers):
+        if len(work) == 0:
+            warnings.warn(
+                f"_get_bottom_layer_indices: ran out of atoms after "
+                f"{layer} layer(s); requested {n_layers}.",
+                RuntimeWarning,
+                stacklevel=3,
+            )
+            break
 
-    if n_layers > len(layers):
-        warnings.warn(
-            f"n_freeze_layers={n_layers} exceeds the number of detected "
-            f"layers ({len(layers)}).  All layers will be frozen.",
-            RuntimeWarning,
-            stacklevel=3,
+        mask, local_indices = find_surface_atoms_raycasting(
+            work, which="bottom",
         )
-        n_layers = len(layers)
+        if not local_indices.size:
+            warnings.warn(
+                f"_get_bottom_layer_indices: ray-casting found no bottom "
+                f"surface atoms at layer {layer + 1}/{n_layers}.  Stopping.",
+                RuntimeWarning,
+                stacklevel=3,
+            )
+            break
 
-    # Vectorised: for each bottom layer find atoms whose z is within tolerance
-    # of the layer's z-range.  This replaces the previous O(n²) double loop.
-    freeze_mask = np.zeros(len(layer_axis), dtype=bool)
-    for lyr in layers[:n_layers]:
-        z_lo = float(min(lyr)) - layer_tol
-        z_hi = float(max(lyr)) + layer_tol
-        freeze_mask |= (layer_axis >= z_lo) & (layer_axis <= z_hi)
+        # Record original-atom indices for this layer's bottom surface.
+        frozen.extend(int(i) for i in remaining_idx[local_indices])
 
-    return list(np.where(freeze_mask)[0])
+        # Drop those atoms and continue with the next layer beneath.
+        keep = np.ones(len(work), dtype=bool)
+        keep[local_indices] = False
+        remaining_idx = remaining_idx[keep]
+        work = work[keep]
+
+    return sorted(set(frozen))
 
 
 # ---------------------------------------------------------------------------

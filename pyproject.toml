@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "autokmc"
+version = "0.1.0"
+description = "Surface kinetic Monte Carlo input generation from atomic structures"
+readme = "AGENTS.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "onlinekmc contributors" }]
+keywords = ["kmc", "kinetic-monte-carlo", "surface", "catalysis", "ase"]
+
+dependencies = [
+    "ase>=3.22",
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "networkx>=3.0",
+    "pymatgen>=2023.10.0",
+    "wulffpack>=1.7",
+    "rdkit>=2023.3",
+]
+
+[project.optional-dependencies]
+ml = ["nequip", "torch"]
+dev = ["matplotlib", "jupyter"]
+
+[tool.setuptools.packages.find]
+include = ["autokmc*"]
+exclude = ["autokmc.dev*", "autokmc.__pycache__*"]
+
+[tool.setuptools.package-data]
+autokmc = ["py.typed"]
+
