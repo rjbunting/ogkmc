@@ -197,6 +197,48 @@ def _is_occupied(G, site: AdsorbateSite, member_index: int) -> bool:
     return site._member_is_occupied(G, site.member_node_ids[member_index])
 
 
+def _is_clique_blocked(G, site: AdsorbateSite, member_index: int) -> bool:
+    """Return True if any OTHER occupied adsorbate shares an exact bonding clique.
+
+    Two adsorbate atoms that bind to exactly the same set of surface atoms
+    cannot physically co-exist.  If the current member's bonding clique(s) are
+    already claimed by an occupied neighbour, the site is blocked and neither
+    adsorption (for an empty site) nor any lateral-class classification should
+    be attempted.
+
+    This check is O(adsorbate nodes on G) and is very cheap compared with an
+    ML relaxation, so it is always applied before ``check_adsorbate_site_lateral``.
+    """
+    node_ids      = site.member_node_ids[member_index]
+    member_id_set = frozenset(node_ids)
+
+    # Collect the surface cliques bonded by this member's atoms.
+    member_cliques: set[frozenset] = set()
+    for nid in node_ids:
+        if nid not in G:
+            continue
+        clq = G.nodes[nid].get("clique")
+        if clq is not None:
+            member_cliques.add(frozenset(clq))
+
+    if not member_cliques:
+        return False
+
+    # Scan every other occupied adsorbate node for a clique collision.
+    for n, d in G.nodes(data=True):
+        if n in member_id_set:
+            continue
+        if d.get("type") != "adsorbate":
+            continue
+        if not d.get("occupied", False):
+            continue
+        clq = d.get("clique")
+        if clq is not None and frozenset(clq) in member_cliques:
+            return True
+
+    return False
+
+
 def get_possible_reactions(
     G,
     adsorbate_sites: list[AdsorbateSite],
@@ -241,9 +283,21 @@ def get_possible_reactions(
     reactions: list[Reaction] = []
     n_new_checks = 0
     n_unstable   = 0
+    n_blocked    = 0
 
     for site in adsorbate_sites:
         for m_idx in range(len(site.member_node_ids)):
+            # ── Clique-collision guard ───────────────────────────────────
+            # If any other occupied adsorbate is bonded to the same surface
+            # atom(s) as this member, the site is physically blocked — skip
+            # it immediately without any lateral classification or ML work.
+            if _is_clique_blocked(G, site, m_idx):
+                n_blocked += 1
+                if verbose:
+                    print(f"  ⛔ iso={site.iso_class} m={m_idx}: "
+                          f"clique blocked by occupied neighbour — skipped")
+                continue
+
             # ── Lateral classification ───────────────────────────────────
             try:
                 lc = check_adsorbate_site_lateral(G, site, m_idx)
@@ -292,9 +346,9 @@ def get_possible_reactions(
             rate = float(np.exp(-max(delta_e, 0.0) / _kT))
             reactions.append(Reaction(kind, site, m_idx, lc, delta_e, rate))
 
-    if verbose and n_new_checks:
+    if verbose and (n_new_checks or n_blocked):
         print(f"  → {n_new_checks} new lateral classes checked  "
-              f"({n_unstable} unstable)")
+              f"({n_unstable} unstable)  {n_blocked} site(s) clique-blocked")
 
     # Sort: adsorption first (most exothermic first), then desorption
     reactions.sort(key=lambda r: (r.kind != "adsorption", r.delta_e))

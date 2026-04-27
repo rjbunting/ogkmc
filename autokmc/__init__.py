@@ -58,6 +58,25 @@ from autokmc.check_adsorbate_sites import (
     AdsorbateDissociationError,
     OptimisationFailedError,
 )
+from autokmc.kmc_reactions import (
+    Reaction,
+    KB_EV,
+    H_EV_S,
+    EA_MIN,
+    DEFAULT_TRANSMISSION_COEFFICIENT,
+    is_clique_blocked,
+    get_applicable_reactions,
+    compute_all_reactions,
+    gather_all_applicable_reactions,
+    fast_reaction_for_member,
+)
+from autokmc.kmc_simulation import (
+    total_rate,
+    sample_tau,
+    choose_reaction,
+    execute_reaction,
+    run_kmc_steps,
+)
 
 __all__ = [
     "__version__",
@@ -81,5 +100,13 @@ __all__ = [
     "check_adsorbate_site_lateral", "check_site_stability",
     "SiteStabilityError", "SurfaceConnectivityError",
     "AdsorbateDissociationError", "OptimisationFailedError",
+    # KMC reactions
+    "Reaction", "KB_EV", "H_EV_S", "EA_MIN", "DEFAULT_TRANSMISSION_COEFFICIENT",
+    "is_clique_blocked", "get_applicable_reactions",
+    "compute_all_reactions", "gather_all_applicable_reactions",
+    "fast_reaction_for_member",
+    # KMC simulation
+    "total_rate", "sample_tau", "choose_reaction",
+    "execute_reaction", "run_kmc_steps",
 ]
 

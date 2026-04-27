@@ -1505,6 +1505,51 @@ def find_adsorbate_sites(
     _materialise_adsorbate_nodes(G, reactant, adsorbate_sites)
     G.graph.setdefault("adsorbate_sites", {})[reactant.smiles] = adsorbate_sites
 
+    # ── Reverse indexes for the KMC fast paths ─���───────────────────────────
+    # See suggestion.MD #4 / #8 / #9.  Every adsorbate node already carries
+    # its bonded surface clique as a frozenset under the "clique" attribute
+    # (set in :func:`_materialise_adsorbate_nodes`), so downstream code can
+    # use it directly without re-wrapping with ``frozenset(...)``.
+    #
+    #   G.graph["clique_to_members"]
+    #       dict[frozenset, list[(AdsorbateSite, m_idx)]]
+    #       Maps every bonded surface clique to every (site, member) pair
+    #       that touches it.  Used by ``execute_reaction`` to find affected
+    #       members in O(1) per affected clique instead of an O(sites *
+    #       members) scan.
+    #
+    #   G.graph["occupied_by_clique"]
+    #       dict[frozenset, set[node_id]]
+    #       Per-clique set of currently-occupied adsorbate node ids.
+    #       Maintained by ``_set_member_occupied`` so that
+    #       ``is_clique_blocked`` is O(1) instead of an O(N_nodes) scan.
+    #
+    #   G.graph["n_occupied"]
+    #       Running total of currently-occupied members across all sites,
+    #       so the per-step KMC log line is O(1) instead of O(total members).
+    #
+    #   site._member_cliques[m_idx] : tuple[frozenset, ...]
+    #       Cached per-member tuple of bonded-surface frozensets.  Avoids
+    #       re-scanning the member's adsorbate node ids to rebuild the same
+    #       frozensets every KMC step.
+    clique_to_members: dict = G.graph.setdefault("clique_to_members", {})
+    occupied_by_clique: dict = G.graph.setdefault("occupied_by_clique", {})
+    G.graph.setdefault("n_occupied", 0)
+    for ms in adsorbate_sites:
+        ms._member_cliques = []  # type: ignore[attr-defined]
+        for m_idx, node_ids in enumerate(ms.member_node_ids):
+            cliques: list = []
+            for nid in node_ids:
+                if nid not in G:
+                    continue
+                clq = G.nodes[nid].get("clique")  # already a frozenset
+                if clq is None:
+                    continue
+                cliques.append(clq)
+                clique_to_members.setdefault(clq, []).append((ms, m_idx))
+                occupied_by_clique.setdefault(clq, set())
+            ms._member_cliques.append(tuple(cliques))  # type: ignore[attr-defined]
+
     # ── Stage B: geometric optimisation → ML stability → prune → propagate
     if prune_stable_only:
         if calculator is not None:
