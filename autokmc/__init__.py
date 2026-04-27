@@ -44,9 +44,18 @@ from autokmc.find_anchors import (
 )
 from autokmc.find_adsorbate_sites import (
     AdsorbateSite,
+    AdsorbateSiteLateral,
     find_adsorbate_sites,
     optimise_adsorbate_site_positions,
     push_member_positions_to_graph,
+)
+from autokmc.check_adsorbate_sites import (
+    check_adsorbate_site_lateral,
+    check_site_stability,
+    SiteStabilityError,
+    SurfaceConnectivityError,
+    AdsorbateDissociationError,
+    OptimisationFailedError,
 )
 
 __all__ = [
@@ -64,7 +73,11 @@ __all__ = [
     # anchors
     "AnchorSite", "find_anchor_sites", "k_max_for_element",
     # adsorbate sites
-    "AdsorbateSite", "find_adsorbate_sites",
+    "AdsorbateSite", "AdsorbateSiteLateral", "find_adsorbate_sites",
     "optimise_adsorbate_site_positions", "push_member_positions_to_graph",
+    # lateral interactions
+    "check_adsorbate_site_lateral", "check_site_stability",
+    "SiteStabilityError", "SurfaceConnectivityError",
+    "AdsorbateDissociationError", "OptimisationFailedError",
 ]
 

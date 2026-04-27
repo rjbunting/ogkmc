@@ -111,6 +111,57 @@ from autokmc.constants import (
 # ---------------------------------------------------------------------------
 
 @dataclass
+class AdsorbateSiteLateral:
+    """One distinct lateral-interaction environment of an :class:`AdsorbateSite`.
+
+    A lateral-interaction environment is the local surface-graph pattern
+    around a specific member placement, **including** the pattern of occupied
+    neighbouring adsorbate sites.  Two members share a lateral class when
+    their local environments are graph-isomorphic (element-matched for surface
+    nodes; element + iso_class + reactant matched for occupied adsorbate leaf
+    nodes).
+
+    Lateral classes are built on demand by
+    :func:`autokmc.check_adsorbate_sites.check_adsorbate_site_lateral` — one
+    call per occupied member — and are stored on the parent
+    :class:`AdsorbateSite` under ``lateral_classes``.
+
+    Attributes
+    ----------
+    lateral_class : int
+        0-based index within the parent :class:`AdsorbateSite`'s
+        ``lateral_classes`` list.
+    ego_graph : nx.Graph | None
+        The ``n_shells``-shell ego-subgraph of the surface atoms bonded to
+        this placement, built by
+        :func:`autokmc.check_adsorbate_sites._build_lateral_ego_graph`.
+        Surface nodes carry an ``element`` attribute; occupied adsorbate leaf
+        nodes additionally carry ``iso_class`` and ``reactant``.
+    n_shells : int
+        Shell depth used to build :attr:`ego_graph`.
+    members : list[int]
+        Indices into the parent :class:`AdsorbateSite`'s
+        ``member_node_ids`` list — every member whose current local
+        environment is isomorphic to this lateral class.
+    """
+    lateral_class : int
+    ego_graph     : Any              = None
+    n_shells      : int              = 0
+    members       : list[int]        = field(default_factory=list)
+    #: Energy (eV) of the slab + lateral neighbours + **this site occupied**,
+    #: set by :func:`autokmc.check_adsorbate_sites.check_site_stability`.
+    energy_occupied   : float | None = None
+    #: Energy (eV) of the slab + lateral neighbours with **this site empty**,
+    #: set by :func:`autokmc.check_adsorbate_sites.check_site_stability`.
+    energy_unoccupied : float | None = None
+    #: ``True`` when both the occupied and unoccupied relaxations passed the
+    #: connectivity stability check (no bonds appeared or disappeared).
+    #: ``None`` until :func:`autokmc.check_adsorbate_sites.check_site_stability`
+    #: has been run successfully.
+    stable            : bool | None  = None
+
+
+@dataclass
 class AdsorbateSite:
     """One isomorphism class of N-atom molecule placements on a surface.
 
@@ -166,6 +217,10 @@ class AdsorbateSite:
     #: representative→member Kabsch propagation uses an ego depth large
     #: enough to span every bonded clique pair.
     n_shells_settled: int                          = 0
+    #: Lateral-interaction classes discovered so far for this iso-class
+    #: (populated on demand by
+    #: :func:`autokmc.check_adsorbate_sites.check_adsorbate_site_lateral`).
+    lateral_classes : list[AdsorbateSiteLateral]   = field(default_factory=list)
 
     # ------------------------------------------------------------------
     # Occupancy helpers
