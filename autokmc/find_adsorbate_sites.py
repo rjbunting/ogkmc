@@ -25,8 +25,9 @@ Strategy
 3. **Backtracking chain placement.**  For every orbit-canonicalised non-empty
    subset of anchors:
 
-   * The first anchor is placed at every unique ``AnchorSite`` iso-class for
-     its element (seeds from :func:`~autokmc.find_anchors.find_anchor_sites`).
+   * The first anchor is placed at every raw anchor-node position of its
+     element (i.e. all members across all iso-classes, seeds from
+     :func:`~autokmc.find_anchors.find_anchor_sites`).
    * Subsequent anchors are placed at any *raw* anchor-node position of their
      element whose MIC distance to every already-placed anchor matches the
      intramolecular distance within ``bond_tolerance``.
@@ -80,7 +81,6 @@ from autokmc.find_anchors import (
     _get_cell,
     _kabsch,
     _next_node_id,
-    AnchorSite,
 )
 from autokmc.logging_utils import get_logger
 
@@ -944,9 +944,6 @@ def find_adsorbate_sites(
                 verbose=verbose,
             )
 
-        iso_by_elem: dict[str, list[AnchorSite]] = {
-            el: G.graph["anchor_sites"][el] for el in anchor_elements
-        }
         raw_by_elem: dict[str, list[tuple[frozenset, np.ndarray]]] = {
             el: _all_raw_sites_with_positions(G, el) for el in anchor_elements
         }
@@ -1052,11 +1049,16 @@ def find_adsorbate_sites(
             bonded   = sorted(sub)
             first    = bonded[0]
             first_el = elements[first]
-            for iso_first in iso_by_elem[first_el]:
-                if iso_first.position is None:
-                    continue
-                assigned_pos    = {first: np.asarray(iso_first.position, float)}
-                assigned_clique = {first: iso_first.representative}
+            # Iterate over ALL raw anchor sites for the first atom so that
+            # every surface site gets tried, not just the iso-class
+            # representative.  Equivalent placements are still folded into
+            # the same AdsorbateSite by _try_merge_or_new via isomorphism.
+            # (Previously only iso_by_elem[first_el] was iterated, which
+            # seeds only one position per iso-class and therefore misses all
+            # non-representative members as the first anchor.)
+            for clique, pos in raw_by_elem.get(first_el, []):
+                assigned_pos    = {first: pos}
+                assigned_clique = {first: clique}
                 _recurse(bonded, 1, assigned_pos, assigned_clique)
 
         if verbose and rejected_disconnected:
