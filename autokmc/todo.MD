@@ -68,3 +68,6 @@ one ``numpy.random.Generator`` and popping from a ring buffer would
 remove the per-step Python/NumPy boundary cost and the ``isinstance``
 check on ``rng``.  Benefit is small — only worth doing once the
 segment-tree sampler is the dominant per-step cost.
+
+structure.py (nanoparticle generation):
+Calculate surface energies to pass into Wulff Construction

@@ -36,7 +36,7 @@ RANDOM_SEED: int = 69
 #: and :func:`autokmc.reactants.build_reactant`.  A single value is used
 #: across the package so that "is this bond a cross-image bond?" gives the
 #: same answer everywhere.
-NL_MULT_DEFAULT: float = 1.0
+NL_MULT_DEFAULT: float = 1.00
 
 #: Co-bonding cutoff scale used by
 #: :func:`autokmc.find_anchors._build_co_bond_graph`: two surface atoms can
@@ -173,3 +173,54 @@ RAYCAST_N_DISC_SAMPLE: int = 10
 #: still bounding pathological complete-graph blow-ups.
 KABSCH_MAX_MAPPINGS: int = 6969
 
+# ---------------------------------------------------------------------------
+# Persistence / CLI / output (consumed by autokmc.persistence + autokmc.cli)
+# ---------------------------------------------------------------------------
+
+#: Schema version stamped onto every reaction event and summary JSON document
+#: written by :mod:`autokmc.persistence`.  Bump on any breaking schema change.
+PERSISTENCE_SCHEMA_VERSION: str = "1"
+
+#: Default config-file schema version expected by :mod:`autokmc.config`.
+CONFIG_SCHEMA_VERSION: str = "1"
+
+#: Default cadence for :class:`autokmc.persistence.TrajectoryWriter` — write
+#: an ASE ``.traj`` frame every N executed KMC steps.  ``0`` disables.
+TRAJ_DUMP_EVERY: int = 10
+
+#: Default BFS depth used by
+#: :func:`autokmc.check_adsorbate_sites.check_adsorbate_site_lateral` when
+#: building the *lateral ego-graph* around a member's bonded surface clique.
+#:
+#: ``0`` (default) — only adsorbates that bond to an **exact member** of the
+#: site's bonded surface clique are counted as lateral neighbours.  This is
+#: the "sharing surface atoms" criterion: two adsorbates interact laterally
+#: only when they compete for the same surface atom(s).  Sets the number of
+#: distinct lateral classes to a minimum and avoids picking up far-away
+#: adsorbates.
+#:
+#: Raise to ``1`` to also include adsorbates on first-nearest-neighbour Cu
+#: atoms (one surface hop from the bonded clique), or ``2`` for second-NN,
+#: etc.  The :mod:`autokmc.kmc_simulation` incremental trigger radius is
+#: automatically derived from this value.
+LATERAL_SHELLS_DEFAULT: int = 0
+
+#: Default basenames written by :func:`autokmc.cli.run_from_config`.
+REACTIONS_FILENAME:   str = "events.jsonl"
+SUMMARY_FILENAME:     str = "summary.json"
+TRAJECTORY_FILENAME:  str = "kmc.extxyz"
+REACTIONS_DIR:        str = "reactions"
+DEFAULT_OUTPUT_DIR:   str = "autokmc_run"
+
+#: Backwards-compat alias — older code referred to per-event sidecars under
+#: ``frames/``; the new layout writes per-lateral-class folders under
+#: ``reactions/`` instead, but the constant is kept so external callers do
+#: not break.
+ATOMS_SIDECAR_DIR:    str = REACTIONS_DIR
+
+#: Template used to build the human-readable ``description`` field on a
+#: persisted reaction event.  See :class:`autokmc.persistence.ReactionRecord`.
+REACTION_DESCRIPTION_FMT: str = (
+    "{kind} of {smiles} at iso={iso} m={member} lat={lateral} "
+    "(ΔE={delta_e:+.4f} eV, Ea={barrier:.4f} eV, k={rate:.3e} Hz)"
+)

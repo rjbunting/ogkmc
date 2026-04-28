@@ -77,6 +77,28 @@ from autokmc.kmc_simulation import (
     execute_reaction,
     run_kmc_steps,
 )
+from autokmc.persistence import (
+    ReactionRecord,
+    ReactionWriter,
+    TrajectoryWriter,
+    ReactionSummary,
+    atoms_from_graph,
+    make_run_meta,
+)
+from autokmc.config import (
+    RunConfig,
+    OutputCfg,
+    StructureCfg,
+    ReactantCfg,
+    CalculatorCfg,
+    AdsorbateSitesCfg,
+    KMCCfg,
+    ConfigError,
+    load_config,
+    build_calculator,
+    calculator_meta,
+)
+from autokmc.cli import run_from_config
 
 __all__ = [
     "__version__",
@@ -108,5 +130,13 @@ __all__ = [
     # KMC simulation
     "total_rate", "sample_tau", "choose_reaction",
     "execute_reaction", "run_kmc_steps",
+    # persistence
+    "ReactionRecord", "ReactionWriter", "TrajectoryWriter",
+    "ReactionSummary", "atoms_from_graph", "make_run_meta",
+    # config / CLI
+    "RunConfig", "OutputCfg", "StructureCfg", "ReactantCfg",
+    "CalculatorCfg", "AdsorbateSitesCfg", "KMCCfg", "ConfigError",
+    "load_config", "build_calculator", "calculator_meta",
+    "run_from_config",
 ]
 

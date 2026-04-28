@@ -73,7 +73,7 @@ calc = make_calc()
 
 # %% ── 2. KMC parameters ────────────────────────────────────────────────────
 TEMPERATURE_K   : float = 500.0     # simulation temperature (K)
-N_KMC_STEPS     : int   = 1000        # max KMC events
+N_KMC_STEPS     : int   = 10000        # max KMC events
 FMAX            : float = 0.05      # ML force convergence (eV/Å)
 MAX_OPT_STEPS   : int   = 500       # max LBFGS steps per relaxation
 RANDOM_SEED     : int   = 69

@@ -90,7 +90,7 @@ from ase.constraints import FixAtoms
 from ase.neighborlist import NeighborList, natural_cutoffs
 
 from autokmc.find_adsorbate_sites import AdsorbateSite, AdsorbateSiteLateral
-from autokmc.constants import NL_MULT_DEFAULT
+from autokmc.constants import NL_MULT_DEFAULT, LATERAL_SHELLS_DEFAULT
 from autokmc.logging_utils import get_logger
 
 if TYPE_CHECKING:
@@ -330,9 +330,11 @@ def check_adsorbate_site_lateral(
         placement to classify.
     n_shells : int | None
         BFS depth for the lateral ego-graph.  ``None`` (default) uses
-        ``max(1, adsorbate_site.n_shells_settled)`` so the surface window
-        matches the depth settled during
-        :func:`~autokmc.find_adsorbate_sites.find_adsorbate_sites`.
+        :data:`~autokmc.constants.LATERAL_SHELLS_DEFAULT` (``0``), meaning
+        only adsorbates that bond to the **same surface atoms** as the member
+        are counted as lateral neighbours (clique-sharing criterion).  Pass
+        ``1`` to also include adsorbates on first-nearest-neighbour surface
+        atoms, etc.
 
     Returns
     -------
@@ -367,8 +369,7 @@ def check_adsorbate_site_lateral(
         )
 
     # ── Determine BFS depth ───────────────────────────────────────────────
-    depth: int = max(1, int(adsorbate_site.n_shells_settled)) \
-        if n_shells is None else int(n_shells)
+    depth: int = LATERAL_SHELLS_DEFAULT if n_shells is None else int(n_shells)
 
     # ── Derive seed clique and self node ids ────────────────────────��─────
     node_ids: list[int] = adsorbate_site.member_node_ids[member_index]
@@ -609,6 +610,7 @@ def _check_connectivity_stable(
     nl_mult:      float,
     *,
     relevant_indices: set[int] | None = None,
+    n_lat: int = 0,
 ) -> None:
     """Raise a :class:`SiteStabilityError` subclass if bond topology changed.
 
@@ -619,7 +621,9 @@ def _check_connectivity_stable(
     n_slab : int
         Number of slab atoms (indices ``0 … n_slab-1``).
     n_ads : int
-        Number of adsorbate atoms (indices ``n_slab … n_slab+n_ads-1``).
+        Number of adsorbate atoms total (indices ``n_slab … n_slab+n_ads-1``).
+        This covers **both** lateral-neighbour atoms (first ``n_lat``) and the
+        site's own atoms (last ``n_ads - n_lat``).
     state_label : str
         ``"occupied"`` or ``"unoccupied"`` — used only for the error message.
     nl_mult : float
@@ -627,6 +631,12 @@ def _check_connectivity_stable(
     relevant_indices : set[int] | None
         Forwarded to :func:`_bond_set`.  When set, only bonds touching one
         of these indices are compared.  See suggestion.MD #6.
+    n_lat : int
+        Number of lateral-neighbour adsorbate atoms at the start of the
+        adsorbate block (indices ``n_slab … n_slab+n_lat-1``).  Used to
+        produce a more informative error message distinguishing whether a
+        bond change involved the lateral neighbours or the site under test.
+        Default ``0`` (no distinction made).
 
     Raises
     ------
@@ -634,6 +644,8 @@ def _check_connectivity_stable(
         A bond between two slab atoms appeared or disappeared.
     AdsorbateDissociationError
         A bond involving at least one adsorbate atom appeared or disappeared.
+        The message identifies whether the affected atom belongs to a lateral
+        neighbour or to the site being checked.
     """
     before = _bond_set(atoms_before, nl_mult=nl_mult,
                        relevant_indices=relevant_indices)
@@ -647,8 +659,10 @@ def _check_connectivity_stable(
     if not changed:
         return
 
-    slab_set = set(range(n_slab))
-    ads_set  = set(range(n_slab, n_slab + n_ads))
+    slab_set     = set(range(n_slab))
+    ads_set      = set(range(n_slab, n_slab + n_ads))
+    lat_set      = set(range(n_slab, n_slab + n_lat))        # lateral neighbours
+    site_set     = set(range(n_slab + n_lat, n_slab + n_ads)) # site's own atoms
 
     # Classify by which groups are involved in each changed bond.
     surf_changes = [b for b in changed if b <= slab_set]   # both in slab
@@ -662,11 +676,31 @@ def _check_connectivity_stable(
             + ("…" if len(surf_changes) > 5 else "")
         )
     if ads_changes:
-        pairs = ", ".join(f"{{{min(b)},{max(b)}}}" for b in ads_changes[:5])
+        # Distinguish whether the bond change involves a lateral-neighbour
+        # adsorbate or the site under test — important for debugging which
+        # occupied neighbour is destabilising the configuration.
+        lat_changes  = [b for b in ads_changes if b & lat_set  and not (b & site_set)]
+        site_changes = [b for b in ads_changes if b & site_set]
+        mixed        = [b for b in ads_changes
+                        if b not in lat_changes and b not in site_changes]
+
+        parts: list[str] = []
+        if site_changes:
+            pairs = ", ".join(f"{{{min(b)},{max(b)}}}" for b in site_changes[:3])
+            parts.append(f"site-under-test bonds: {pairs}"
+                         + ("…" if len(site_changes) > 3 else ""))
+        if lat_changes:
+            pairs = ", ".join(f"{{{min(b)},{max(b)}}}" for b in lat_changes[:3])
+            parts.append(f"lateral-neighbour bonds: {pairs}"
+                         + ("…" if len(lat_changes) > 3 else ""))
+        if mixed:
+            pairs = ", ".join(f"{{{min(b)},{max(b)}}}" for b in mixed[:3])
+            parts.append(f"cross-group bonds: {pairs}"
+                         + ("…" if len(mixed) > 3 else ""))
+
         raise AdsorbateDissociationError(
             f"[{state_label}] Adsorbate connectivity changed after relaxation. "
-            f"Changed pairs (atom indices): {pairs}"
-            + ("…" if len(ads_changes) > 5 else "")
+            + "  ".join(parts)
         )
 
 
@@ -776,11 +810,26 @@ def check_site_stability(
             frozen_indices  = frozen_indices,
         )
 
-        # suggestion.MD #6: only bonds touching the adsorbate region (and its
-        # immediate surface coordination) can change under a stable potential.
-        # The slab-internal NeighborList is the dominant cost of _bond_set;
-        # restricting to adsorbate indices only is ~5–20× faster for large
-        # slabs and never raises false negatives in practice.
+        # n_lat = number of lateral-neighbour adsorbate atoms.
+        # The Atoms ordering is: [slab | lat_neighbours | self].
+        # The site's own atoms are at the tail of the adsorbate block.
+        n_lat: int = n_ads - len(self_node_ids) if include_self else n_ads
+
+        # ads_indices covers BOTH the lateral-neighbour adsorbate atoms
+        # (indices n_slab … n_slab+n_lat-1) AND the site's own atoms
+        # (indices n_slab+n_lat … n_slab+n_ads-1).
+        #
+        # This means the connectivity check after relaxation enforces:
+        #   • The site's bonds to the surface are unchanged           (stability of site)
+        #   • The lateral neighbours' bonds to the surface are unchanged (they must
+        #     remain coordinated to the same surface atoms as before relaxation)
+        #   • Intramolecular bonds of all adsorbates are unchanged   (no dissociation)
+        #
+        # If a lateral neighbour desorbs, migrates to a different clique, or
+        # dissociates during the ML relaxation, the bond-set comparison detects
+        # the change and raises AdsorbateDissociationError, marking this lateral
+        # class as unstable.  The error message identifies whether the site or a
+        # lateral neighbour caused the instability (see _check_connectivity_stable).
         ads_indices: set[int] = set(range(n_slab, n_slab + n_ads))
 
         bonds_before = _bond_set(atoms_init, nl_mult=nl_mult,
@@ -789,18 +838,12 @@ def check_site_stability(
         if verbose:
             print(
                 f"  [{state}]  atoms={len(atoms_init)}  "
-                f"(slab={n_slab}, ads={n_ads})  "
+                f"(slab={n_slab}, lat_neighbours={n_lat}, "
+                f"site={n_ads - n_lat})  "
                 f"bonds_before={len(bonds_before)}"
             )
 
-        # suggestion.MD #1: do NOT deep-copy *calculator* per call.  For ML
-        # potentials (NequIP / MACE / …) the deep-copy clones every model
-        # parameter tensor and triggers a CUDA sync, which dominates wall
-        # time when this function is called thousands of times.  The
-        # NequIP / MACE wrappers are stateless w.r.t. ``atoms`` after model
-        # load, so a single module-resident calculator is reused across
-        # every relaxation.  ``optimise_structure`` only attaches the
-        # reference (``result.calc = calculator``) without copying.
+        # suggestion.MD #1: do NOT deep-copy *calculator* per call.
         atoms_opt = optimise_structure(
             atoms_init,
             calculator = calculator,
@@ -829,6 +872,7 @@ def check_site_stability(
         _check_connectivity_stable(
             atoms_init, atoms_opt, n_slab, n_ads, state, nl_mult,
             relevant_indices=ads_indices,
+            n_lat=n_lat,
         )
 
         energy = float(atoms_opt.get_potential_energy())
@@ -842,13 +886,17 @@ def check_site_stability(
                 f"max|F|={max_force:.4f} eV/Å  ✓ stable"
             )
 
-        return energy
+        return energy, atoms_opt
 
-    E_occ   = _relax_and_check(include_self=True)
-    E_unocc = _relax_and_check(include_self=False)
+    E_occ,   atoms_occ   = _relax_and_check(include_self=True)
+    E_unocc, atoms_unocc = _relax_and_check(include_self=False)
 
     lateral_class.energy_occupied   = E_occ
     lateral_class.energy_unoccupied = E_unocc
+    # Persisted later by autokmc.persistence.ReactionWriter as
+    # reactions/iso{N}_lat{M}/{occupied,unoccupied}.extxyz.
+    lateral_class.atoms_occupied    = atoms_occ
+    lateral_class.atoms_unoccupied  = atoms_unocc
     lateral_class.stable            = True
 
     _log.debug(

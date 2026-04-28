@@ -46,7 +46,9 @@ from autokmc.kmc_reactions import (
     get_applicable_reactions,
     fast_reaction_for_member,
 )
+from autokmc.check_adsorbate_sites import _surface_bfs_shells
 from autokmc.logging_utils import get_logger
+from autokmc.constants import LATERAL_SHELLS_DEFAULT
 
 _log = get_logger(__name__)
 
@@ -344,6 +346,70 @@ def _affected_members_for_cliques(
     return out
 
 
+def _lateral_shell_members(
+    G: nx.Graph,
+    affected_cliques: set,
+    active_site_ids: set[int] | None,
+    max_n_shells: int,
+) -> list[tuple[AdsorbateSite, int]]:
+    """Return every (site, member) pair whose lateral ego-graph may include
+    any of the toggled adsorbate nodes.
+
+    A member M is laterally affected by a toggle at clique C when the
+    minimum surface-graph distance from any atom in C to any atom in M's
+    seed clique is ≤ M's ``n_shells_settled``.  We conservatively expand C
+    by ``max_n_shells`` BFS hops through surface nodes, then look up all
+    members bonded to any surface node in the expanded set — these are
+    exactly the members whose lateral ego-graph overlaps with the shell
+    around C.
+
+    Uses ``G.graph["surface_node_to_members"]`` built by
+    :func:`~autokmc.find_adsorbate_sites.find_adsorbate_sites`.
+
+    Parameters
+    ----------
+    G : nx.Graph
+    affected_cliques : set[frozenset]
+        Bonded surface cliques of the member that was just toggled.
+    active_site_ids : set[int] | None
+        ``id(site)`` for every site registered in the segment-tree index.
+        Pruned sites from ``G.graph["surface_node_to_members"]`` are filtered
+        out.  Pass ``None`` to skip filtering.
+    max_n_shells : int
+        BFS expansion depth — use the maximum ``n_shells_settled`` across
+        all active adsorbate sites.
+
+    Returns
+    -------
+    list[tuple[AdsorbateSite, int]]
+        Deduplicated list of (site, member_index) pairs to re-evaluate.
+    """
+    surface_node_to_members: dict | None = G.graph.get("surface_node_to_members")
+    if not surface_node_to_members or not affected_cliques:
+        return []
+
+    # Seed: the union of all surface atoms in the toggled member's cliques.
+    seed = frozenset(s for clq in affected_cliques for s in clq)
+
+    # Expand through surface-only BFS to capture all nodes within n_shells.
+    # _surface_bfs_shells is cached per (seed, n_shells) so repeated calls
+    # within the same step are free.
+    expanded: frozenset = _surface_bfs_shells(G, seed, max_n_shells)
+
+    seen: set[tuple[int, int]] = set()
+    out: list[tuple[AdsorbateSite, int]] = []
+    for surf_id in expanded:
+        for site, m_idx in surface_node_to_members.get(surf_id, ()):
+            if active_site_ids is not None and id(site) not in active_site_ids:
+                continue
+            key = (id(site), int(m_idx))
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append((site, m_idx))
+    return out
+
+
 def _recompute_affected_sites(
     G: nx.Graph,
     adsorbate_sites: list[AdsorbateSite],
@@ -357,36 +423,46 @@ def _recompute_affected_sites(
     fmax: float,
     max_steps: int,
     verbose: bool,
+    max_n_shells: int = 1,
     rxn_index: _ReactionIndex | None = None,
 ) -> None:
-    """Recompute applicable reactions for every member touching one of
-    *affected_cliques* and write the new rates into *rxn_index*.
+    """Recompute lateral classes and rates for every member in the lateral
+    shell of the just-toggled member.
 
-    Uses the suggestion.MD #4 reverse index to find affected members in
-    O(affected_members) instead of scanning every site.
+    **Why the full lateral shell, not just clique-touching members:**
+    A toggle at surface clique C changes the occupancy leaf of every member
+    whose lateral ego-graph reaches C.  That ego-graph extends up to
+    ``n_shells_settled`` surface hops from the member's seed clique.
+    Conversely, all members whose seed clique is within ``n_shells`` hops of
+    C are potentially affected.  Using only clique-touching members (as the
+    previous implementation did) misses members 1+ hops away, silently
+    freezing their lateral class at a stale value.
 
-    For each affected member we attempt the suggestion.MD #12 fast path:
-    if the member already has a cached lateral class on the parent site
-    (populated on a previous full ``get_applicable_reactions`` pass), we
-    just look up the cached forward / reverse rate via
-    :func:`~autokmc.kmc_reactions.fast_reaction_for_member` — no
-    GraphMatcher, no ML calls.  This is correct because clique-collision
-    members can never be lateral neighbours of the toggled member (they
-    share the same surface clique, so the toggled member sits in their
-    *seed* clique, not their lateral leaf set), so the lateral-class
-    identity for clique-touching members is invariant under a flip.
-
-    Members that fail the fast path (no cached lateral class yet, or no
-    cached lateral class for this specific m_idx) fall back to the slow
-    per-site ``get_applicable_reactions`` path so the cache is populated
-    for subsequent flips.
+    **Why the slow path (get_applicable_reactions) is always used here:**
+    The fast path (``fast_reaction_for_member``) looks up a cached lateral
+    class without calling ``check_adsorbate_site_lateral``.  After a
+    neighbouring member is toggled the cached lateral class is stale —
+    re-classification via ``check_adsorbate_site_lateral`` is required to
+    detect whether the member maps to an existing or a new lateral class.
+    When the new class has already been ML-relaxed the call is O(GraphMatcher);
+    only truly novel occupancy patterns trigger an ML evaluation.
     """
     if not affected_cliques:
         return
 
-    affected = _affected_members_for_cliques(G, affected_cliques)
+    active_site_ids: set[int] | None = (
+        set(rxn_index.base.keys()) if rxn_index is not None else None
+    )
+
+    # Find all laterally-affected members via the n_shells surface expansion.
+    affected = _lateral_shell_members(
+        G, affected_cliques, active_site_ids, max_n_shells,
+    )
+
     if not affected:
-        # No reverse index available — fall back to the legacy per-site loop.
+        # Reverse index not yet built (e.g. called before find_adsorbate_sites
+        # ran).  Fall back to scanning the active sites list and checking
+        # clique-overlap only — corrected output is still better than nothing.
         for site in adsorbate_sites:
             for m_idx in range(len(site.member_node_ids)):
                 cliques_m = _affected_surface_cliques(G, site, m_idx)
@@ -405,19 +481,14 @@ def _recompute_affected_sites(
                     break
         return
 
-    # Group affected members by site so that any site needing a slow-path
-    # rebuild is only rebuilt once.
-    sites_needing_slow_pass: dict[int, AdsorbateSite] = {}
-    for site, m_idx in affected:
-        member_lc: dict | None = getattr(site, "_member_lc", None)
-        if member_lc is None or m_idx not in member_lc:
-            sites_needing_slow_pass[id(site)] = site
+    # Deduplicate at the site level — get_applicable_reactions refreshes
+    # ALL members of a site in one call, so calling it once per site is
+    # both correct and cheaper than one call per (site, member) pair.
+    sites_to_update: dict[int, AdsorbateSite] = {}
+    for site, _ in affected:
+        sites_to_update[id(site)] = site
 
-    # Slow path first: rebuild every site that has even one cache-miss
-    # member.  This refreshes ``site.applicable_reactions`` and
-    # ``site._member_lc`` for *all* its members in one go, which keeps the
-    # segment-tree consistent with the cached reaction list.
-    for site in sites_needing_slow_pass.values():
+    for site in sites_to_update.values():
         rxns = get_applicable_reactions(
             G, site, calculator, gas_energies,
             temperature              = temperature,
@@ -430,18 +501,6 @@ def _recompute_affected_sites(
         if rxn_index is not None:
             rxn_index.install_site(site, rxns)
 
-    # Fast path for the remaining (site, member) pairs.
-    if rxn_index is None:
-        return
-    for site, m_idx in affected:
-        if id(site) in sites_needing_slow_pass:
-            continue  # already handled in the slow pass above
-        new_rxn = fast_reaction_for_member(
-            G, site, m_idx, gas_energies,
-            temperature              = temperature,
-            transmission_coefficient = transmission_coefficient,
-        )
-        rxn_index.install(new_rxn, site, m_idx)
 
 
 # ---------------------------------------------------------------------------
@@ -463,6 +522,10 @@ def run_kmc_steps(
     rng: random.Random | np.random.Generator | int | None = None,
     log_every: int = 1,
     verbose: bool = True,
+    # ── Optional persistence hooks (autokmc.persistence) ──────────────────
+    reaction_writer=None,
+    trajectory_writer=None,
+    summary_collector=None,
 ) -> dict:
     """Run a KMC simulation in place on *G* for up to ``n_steps`` events.
 
@@ -496,6 +559,16 @@ def run_kmc_steps(
     log_every : int
         Print a log line every N steps.  Set to 0/None to silence per-step output.
     verbose : bool
+    reaction_writer : autokmc.persistence.ReactionWriter | None
+        Optional writer.  When supplied, every executed event is persisted
+        as one JSON line + sidecar XYZ snapshots of the pre/post Atoms.
+    trajectory_writer : autokmc.persistence.TrajectoryWriter | None
+        Optional writer.  Initial state plus every Nth state is written to
+        an ASE ``.traj`` (cadence configured on the writer itself).
+    summary_collector : autokmc.persistence.ReactionSummary | None
+        Optional aggregator.  When supplied, ``.add()`` is called for each
+        executed event so per-reaction-type statistics are available at the
+        end of the run via ``summary_collector.to_dict()``.
 
     Returns
     -------
@@ -542,6 +615,24 @@ def run_kmc_steps(
         rxns = getattr(site, "applicable_reactions", None) or []
         rxn_index.install_site(site, rxns)
 
+    def _persist_all_known_reactions(step_for_discovery: int) -> None:
+        """Materialise per-(iso, lat) folders for every currently-known
+        applicable reaction.  Idempotent — the writer short-circuits on the
+        second sighting of any (iso, lat)."""
+        if reaction_writer is None:
+            return
+        for rxn in rxn_index.reactions:
+            if rxn is None:
+                continue
+            try:
+                reaction_writer.ensure_reaction(
+                    rxn, step=step_for_discovery, gas_energies=gas_energies,
+                )
+            except Exception as exc:  # pragma: no cover
+                _log.warning("reaction_writer.ensure_reaction failed: %s", exc)
+
+    _persist_all_known_reactions(step_for_discovery=0)
+
     # Initialise the graph-level occupancy counter (suggestion.MD #9).
     if "n_occupied" not in G.graph:
         G.graph["n_occupied"] = sum(
@@ -557,10 +648,27 @@ def run_kmc_steps(
                 if any(nid in G and G.nodes[nid].get("occupied", False) for nid in nids)
             )
 
+    # max_n_shells for the lateral-shell expansion in _recompute_affected_sites.
+    # This must match the BFS depth used by check_adsorbate_site_lateral so that
+    # the incremental trigger radius is consistent with the lateral environment
+    # actually being evaluated.  Both are driven by LATERAL_SHELLS_DEFAULT.
+    max_n_shells: int = LATERAL_SHELLS_DEFAULT
+
     history: list[tuple] = []
     reaction_counts: dict[str, int] = {"adsorption": 0, "desorption": 0}
     current_time = 0.0
     steps_executed = 0
+
+    # Optional: trajectory writer (extxyz append) needs an atoms snapshot.
+    # The reaction writer does NOT — it pulls atoms straight from
+    # ``reaction.lateral_class.atoms_{occupied,unoccupied}`` (the relaxed
+    # structures stamped on by check_site_stability).
+    if trajectory_writer is not None:
+        try:
+            from autokmc.persistence import atoms_from_graph
+            trajectory_writer.maybe_write(atoms_from_graph(G), step=0)
+        except Exception as exc:  # pragma: no cover
+            _log.warning("trajectory_writer initial frame failed: %s", exc)
 
     for step in range(1, int(n_steps) + 1):
         q_total = rxn_index.total_rate()
@@ -569,8 +677,7 @@ def run_kmc_steps(
                 print(f"[KMC] Step {step}: total rate = 0 — stopping.")
             break
 
-        # Draw the uniform once and reuse for both τ and the sampler so
-        # that the segment-tree path is fully O(log R) per step.
+        # Draw two independent uniforms: one for reaction selection, one for τ.
         if isinstance(rng, np.random.Generator):
             u_pick = float(rng.random())
             u_tau  = float(rng.random())
@@ -592,6 +699,27 @@ def run_kmc_steps(
         affected = execute_reaction(G, chosen)
         steps_executed += 1
         reaction_counts[chosen.kind] = reaction_counts.get(chosen.kind, 0) + 1
+
+        # Persist the event — the reaction writer materialises the per-
+        # lateral-class folder lazily on first sighting and otherwise just
+        # appends a row to events.jsonl.
+        if reaction_writer is not None:
+            try:
+                reaction_writer.record(
+                    step          = step,
+                    time_s        = current_time,
+                    tau_s         = tau,
+                    reaction      = chosen,
+                    gas_energies  = gas_energies,
+                )
+            except Exception as exc:  # pragma: no cover
+                _log.warning("reaction_writer.record failed: %s", exc)
+
+        if summary_collector is not None:
+            try:
+                summary_collector.add(chosen, step=step)
+            except Exception as exc:  # pragma: no cover
+                _log.warning("summary_collector.add failed: %s", exc)
 
         history.append((
             step,
@@ -617,18 +745,13 @@ def run_kmc_steps(
                 f"k={chosen.rate:.2e} Hz  occ={n_occ}"
             )
 
-        # Incremental update — recompute only members touching the changed
-        # cliques (suggestion.MD #4) and prefer the cached fast path
-        # (suggestion.MD #12) over re-running GraphMatcher.
-        # First refresh the toggled member itself.
-        toggled_rxn = fast_reaction_for_member(
-            G, chosen.site, chosen.member_index, gas_energies,
-            temperature              = temperature,
-            transmission_coefficient = transmission_coefficient,
-        )
-        rxn_index.install(toggled_rxn, chosen.site, chosen.member_index)
-
-        # Then propagate to the rest of the affected (clique-collision) members.
+        # Incremental update — re-classify lateral environments for every
+        # member in the n_shells surface shell around the toggled clique.
+        # This includes the toggled member itself (0 hops), clique-collision
+        # neighbours (0 hops), and genuine lateral neighbours (1…n_shells).
+        # The slow path (get_applicable_reactions) is always used so that
+        # check_adsorbate_site_lateral is called and lateral classes are
+        # correctly updated.
         _recompute_affected_sites(
             G, adsorbate_sites, affected, calculator, gas_energies,
             temperature              = temperature,
@@ -637,8 +760,30 @@ def run_kmc_steps(
             fmax                     = fmax,
             max_steps                = max_steps,
             verbose                  = False,
+            max_n_shells             = max_n_shells,
             rxn_index                = rxn_index,
         )
+
+        # Persist every newly-discovered (iso, lat) reaction surfaced by the
+        # incremental rebuild.  ``ensure_reaction`` is a no-op once a folder
+        # exists, so the cost after the first few steps is just dict lookups.
+        _persist_all_known_reactions(step_for_discovery=step)
+
+        # Periodic trajectory dump (cadence enforced inside the writer).
+        # Writes one extended-XYZ frame to the trajectory_writer's output file.
+        if trajectory_writer is not None:
+            try:
+                from autokmc.persistence import atoms_from_graph
+                trajectory_writer.maybe_write(atoms_from_graph(G), step=step)
+            except Exception as exc:  # pragma: no cover
+                _log.warning("trajectory_writer.maybe_write failed: %s", exc)
+
+    # Close trajectory writer if we own a handle.
+    if trajectory_writer is not None:
+        try:
+            trajectory_writer.close()
+        except Exception:  # pragma: no cover
+            pass
 
     final_occupancy = {
         site.iso_class: int(getattr(site, "_n_occupied", 0))

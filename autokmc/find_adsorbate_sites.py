@@ -163,6 +163,14 @@ class AdsorbateSiteLateral:
     #: ``None`` until :func:`autokmc.check_adsorbate_sites.check_site_stability`
     #: has been run successfully.
     stable            : bool | None  = None
+    #: Relaxed ASE :class:`~ase.Atoms` snapshot of the **occupied** state used
+    #: in :func:`autokmc.check_adsorbate_sites.check_site_stability` (i.e. the
+    #: structure that produced ``energy_occupied``).  Persisted by
+    #: :class:`autokmc.persistence.ReactionWriter` as ``occupied.extxyz``
+    #: in the reaction's per-lateral-class folder.
+    atoms_occupied    : Any          = None
+    #: Relaxed ASE :class:`~ase.Atoms` snapshot of the **unoccupied** state.
+    atoms_unoccupied  : Any          = None
 
 
 @dataclass
@@ -1528,12 +1536,21 @@ def find_adsorbate_sites(
     #       Running total of currently-occupied members across all sites,
     #       so the per-step KMC log line is O(1) instead of O(total members).
     #
+    #   G.graph["surface_node_to_members"]
+    #       dict[int, list[(AdsorbateSite, m_idx)]]
+    #       Maps each individual surface atom id to every (site, member) pair
+    #       bonded to any clique containing that atom.  Used by the KMC
+    #       incremental update to find ALL members whose lateral ego-graph
+    #       may include the toggled member — those within n_shells surface
+    #       hops, not just clique-collision ones.
+    #
     #   site._member_cliques[m_idx] : tuple[frozenset, ...]
     #       Cached per-member tuple of bonded-surface frozensets.  Avoids
     #       re-scanning the member's adsorbate node ids to rebuild the same
     #       frozensets every KMC step.
     clique_to_members: dict = G.graph.setdefault("clique_to_members", {})
     occupied_by_clique: dict = G.graph.setdefault("occupied_by_clique", {})
+    surface_node_to_members: dict = G.graph.setdefault("surface_node_to_members", {})
     G.graph.setdefault("n_occupied", 0)
     for ms in adsorbate_sites:
         ms._member_cliques = []  # type: ignore[attr-defined]
@@ -1548,6 +1565,9 @@ def find_adsorbate_sites(
                 cliques.append(clq)
                 clique_to_members.setdefault(clq, []).append((ms, m_idx))
                 occupied_by_clique.setdefault(clq, set())
+                # Per-surface-atom reverse index for lateral-shell expansion.
+                for surf_id in clq:
+                    surface_node_to_members.setdefault(surf_id, []).append((ms, m_idx))
             ms._member_cliques.append(tuple(cliques))  # type: ignore[attr-defined]
 
     # ── Stage B: geometric optimisation → ML stability → prune → propagate
