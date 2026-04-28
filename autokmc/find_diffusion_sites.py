@@ -131,6 +131,7 @@ class DiffusionLateral:
     atoms_b       : Any              = None
     atoms_ts      : Any              = None
     atoms_neb_path: Any              = None
+    neb_path_energies: list[float] | None = None
     stable        : bool | None      = None
 
 

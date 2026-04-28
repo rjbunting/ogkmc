@@ -61,7 +61,7 @@ diffusion:
   n_images: 10
   climb: true
   spring_k: 0.1
-  interpolation: idpp
+  interpolation: linear   # "linear" (default) or "idpp"
   # When true, every NEB image (including intermediates) is stored on the
   # lateral class as `atoms_neb_path` and written to disk as a multi-frame
   # neb_path.extxyz inside the diffusion reaction folder, useful for

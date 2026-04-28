@@ -237,7 +237,7 @@ REACTION_DESCRIPTION_FMT: str = (
 #: :func:`autokmc.find_diffusion_sites.find_diffusion_sites`).  ``0`` requires
 #: clique overlap; ``1`` (default) means "share a surface atom OR are bonded
 #: surface-to-surface neighbours"; larger values allow longer hops.
-DIFFUSION_MAX_HOPS: int = 1
+DIFFUSION_MAX_HOPS: int = 0
 
 #: Number of *intermediate* NEB images (excluding the two endpoints) used by
 #: :func:`autokmc.check_diffusion_sites.check_diffusion_stability`.
@@ -259,7 +259,7 @@ NEB_SPRING_K: float = 0.1
 
 #: NEB initial-band interpolation method: ``"idpp"`` (image-dependent pair
 #: potential, ASE default for chemistry) or ``"linear"``.
-NEB_INTERPOLATION: str = "idpp"
+NEB_INTERPOLATION: str = "linear"
 
 #: Folder-name format for diffusion reaction folders persisted by
 #: :class:`autokmc.persistence.ReactionWriter`.  See
