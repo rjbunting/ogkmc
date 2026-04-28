@@ -32,8 +32,16 @@ from autokmc.constants import (
     PRUNE_FMAX,
     PRUNE_MAX_STEPS,
     RANDOM_SEED,
+    DIFFUSION_MAX_HOPS,
+    NEB_FMAX,
+    NEB_MAX_STEPS,
+    NEB_N_IMAGES,
+    NEB_CLIMB,
+    NEB_SPRING_K,
+    NEB_INTERPOLATION,
+    N_SHELLS_DEFAULT,
 )
-from autokmc.kmc_reactions import DEFAULT_TRANSMISSION_COEFFICIENT
+from autokmc.kmc_adsorption import DEFAULT_TRANSMISSION_COEFFICIENT
 
 
 # ---------------------------------------------------------------------------
@@ -116,6 +124,28 @@ class KMCCfg:
 
 
 @dataclass
+class DiffusionCfg:
+    """Diffusion (NEB) channel knobs.
+
+    When ``enabled=False`` (default) the KMC loop runs adsorption /
+    desorption only — exactly as before this channel was added — so
+    existing configs remain backwards-compatible.
+
+    All NEB defaults come from :mod:`autokmc.constants` (``NEB_*``).
+    """
+    enabled:          bool   = True
+    max_hops:         int    = DIFFUSION_MAX_HOPS
+    n_shells_pair:    int    = N_SHELLS_DEFAULT
+    fmax:             float  = NEB_FMAX
+    max_steps:        int    = NEB_MAX_STEPS
+    n_images:         int    = NEB_N_IMAGES
+    climb:            bool   = NEB_CLIMB
+    spring_k:         float  = NEB_SPRING_K
+    interpolation:    str    = NEB_INTERPOLATION
+    persist_neb_path: bool   = False
+
+
+@dataclass
 class RunConfig:
     schema_version: str = CONFIG_SCHEMA_VERSION
     output:           OutputCfg          = field(default_factory=OutputCfg)
@@ -124,6 +154,7 @@ class RunConfig:
     calculator:       CalculatorCfg      = field(default_factory=CalculatorCfg)
     adsorbate_sites:  AdsorbateSitesCfg  = field(default_factory=AdsorbateSitesCfg)
     kmc:              KMCCfg             = field(default_factory=KMCCfg)
+    diffusion:        DiffusionCfg       = field(default_factory=DiffusionCfg)
 
 
 # ---------------------------------------------------------------------------
@@ -155,6 +186,7 @@ def _coerce(cls, value: Any, *, path: str = ""):
             "calculator":      CalculatorCfg,
             "adsorbate_sites": AdsorbateSitesCfg,
             "kmc":             KMCCfg,
+            "diffusion":       DiffusionCfg,
         },
     }
     nested_for_cls = nested_map.get(cls.__name__, {})

@@ -227,3 +227,49 @@ REACTION_DESCRIPTION_FMT: str = (
     "{kind} of {smiles} at iso={iso} m={member} lat={lateral} "
     "(ΔE={delta_e:+.4f} eV, Ea={barrier:.4f} eV, k={rate:.3e} Hz)"
 )
+
+# ---------------------------------------------------------------------------
+# Diffusion / NEB
+# ---------------------------------------------------------------------------
+
+#: Maximum surface-graph hop distance allowed between the bonded surface
+#: cliques of the two endpoints of a diffusion pair (consumed by
+#: :func:`autokmc.find_diffusion_sites.find_diffusion_sites`).  ``0`` requires
+#: clique overlap; ``1`` (default) means "share a surface atom OR are bonded
+#: surface-to-surface neighbours"; larger values allow longer hops.
+DIFFUSION_MAX_HOPS: int = 0
+
+#: Number of *intermediate* NEB images (excluding the two endpoints) used by
+#: :func:`autokmc.check_diffusion_sites.check_diffusion_stability`.
+NEB_N_IMAGES: int = 10
+
+#: Force convergence threshold (eV/Å) for the NEB band relaxation in
+#: :func:`autokmc.check_diffusion_sites.check_diffusion_stability`.
+NEB_FMAX: float = 0.01
+
+#: Maximum optimiser steps for the NEB band relaxation.
+NEB_MAX_STEPS: int = 200
+
+#: Use climbing-image NEB (CI-NEB) so the highest-energy image converges
+#: directly onto the saddle point.
+NEB_CLIMB: bool = True
+
+#: NEB spring constant (eV / Å²).
+NEB_SPRING_K: float = 0.1
+
+#: NEB initial-band interpolation method: ``"idpp"`` (image-dependent pair
+#: potential, ASE default for chemistry) or ``"linear"``.
+NEB_INTERPOLATION: str = "linear"
+
+#: Folder-name format for diffusion reaction folders persisted by
+#: :class:`autokmc.persistence.ReactionWriter`.  See
+#: :func:`autokmc.persistence._diffusion_folder_name`.
+DIFFUSION_FOLDER_FMT: str = "diff_iso{iso}_lat{lat}"
+
+#: Description template for a diffusion event line.
+DIFFUSION_DESCRIPTION_FMT: str = (
+    "diffusion of {smiles} at diff_iso={iso} m={member} lat={lateral} "
+    "dir={direction} (ΔE={delta_e:+.4f} eV, Ea={barrier:.4f} eV, "
+    "k={rate:.3e} Hz)"
+)
+
