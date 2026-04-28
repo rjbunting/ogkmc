@@ -6,9 +6,15 @@ N-atom adsorbate site enumeration on a surface graph, built cleanly on top of
 
 Where :func:`~autokmc.find_anchors.find_anchor_sites` finds all single-atom
 adsorption *anchor* sites for one element, this module finds all geometrically
-feasible placements of a multi-atom *molecule* (a
-:class:`~autokmc.reactants.Reactant`).  A placement is stored as one surface
-clique per reactant atom rather than a single node.
+feasible placements of an arbitrary :class:`~autokmc.reactants.Reactant`
+(``N >= 1`` atoms).  A placement is stored as one surface clique per reactant
+atom rather than a single node.
+
+Single-atom reactants (``N == 1``) take a degenerate fast path: the lone
+anchor atom is placed at every raw anchor-node position of its element and
+iso-classes are deduplicated by ego-graph isomorphism around the bonded
+clique.  The rigid-body refinement step is skipped (no rotational DOF) and
+ML stability pruning runs as for any other reactant.
 
 Strategy
 --------
@@ -862,8 +868,24 @@ def _build_pruning_atoms(
     return atoms, len(slab_nodes), len(react_sym)
 
 
-def _bond_set_pruning(atoms, nl_mult: float) -> set:
-    """Return the set of bonded atom-index pairs as frozensets."""
+def _bond_set_pruning(atoms, nl_mult: float, n_slab: int) -> set:
+    """Bonds touching the adsorbate, as a set of ``frozenset({i, j})``.
+
+    *n_slab* is the number of slab (bulk + surface) atoms; adsorbate atoms
+    are at ASE indices ``n_slab … len(atoms)-1`` (the layout produced by
+    :func:`_build_pruning_atoms`).  Only bonds where **at least one
+    endpoint is an adsorbate atom** are returned — the goal of the
+    connectivity comparison is to detect adsorbate dissociation /
+    site-hopping / loss-or-gain of anchor bonds, not slab-internal
+    relaxation noise.
+
+    Including slab–slab bonds would make the check spuriously fail: under
+    a real ML potential the un-frozen surface / sub-surface metal atoms
+    relax by O(0.01–0.1 Å), and any metal–metal pair whose un-relaxed
+    separation was sitting right at the ``nl_mult × (r_i + r_j)`` natural
+    cutoff threshold flips in or out of the bond set across the
+    relaxation, even though nothing about the adsorbate has changed.
+    """
     from ase.neighborlist import NeighborList, natural_cutoffs
 
     cutoffs = natural_cutoffs(atoms, mult=nl_mult)
@@ -872,7 +894,11 @@ def _bond_set_pruning(atoms, nl_mult: float) -> set:
     bonds: set = set()
     for i in range(len(atoms)):
         for j in nl_obj.get_neighbors(i)[0]:
-            bonds.add(frozenset((int(i), int(j))))
+            ii, jj = int(i), int(j)
+            # Keep only bonds that touch an adsorbate atom.
+            if ii < n_slab and jj < n_slab:
+                continue
+            bonds.add(frozenset((ii, jj)))
     return bonds
 
 
@@ -1038,7 +1064,7 @@ def prune_unstable_adsorbate_sites(
             stable.append(ms)
             continue
 
-        bonds_before = _bond_set_pruning(atoms_init, nl_mult)
+        bonds_before = _bond_set_pruning(atoms_init, nl_mult, n_slab)
 
         # ── ML relaxation ─────────────────────────────────────────────────
         try:
@@ -1081,7 +1107,11 @@ def prune_unstable_adsorbate_sites(
             continue
 
         # ── Connectivity check ────────────────────────────────────────────
-        bonds_after = _bond_set_pruning(atoms_opt, nl_mult)
+        # Compare only bonds touching the adsorbate (see _bond_set_pruning).
+        # Slab–slab bonds are excluded so that small ML-driven relaxations
+        # of un-frozen metal atoms do not spuriously flip pairs across the
+        # natural-cutoff threshold and trigger false pruning.
+        bonds_after = _bond_set_pruning(atoms_opt, nl_mult, n_slab)
         if bonds_before != bonds_after:
             added   = len(bonds_after - bonds_before)
             removed = len(bonds_before - bonds_after)
@@ -1279,7 +1309,16 @@ def find_adsorbate_sites(
     prune_max_steps: int = PRUNE_MAX_STEPS,
     verbose: bool = False,
 ) -> list[AdsorbateSite]:
-    """Universal N-atom adsorbate site enumerator (N ≥ 2).
+    """Universal N-atom adsorbate site enumerator (N ≥ 1).
+
+    Single-atom reactants (``len(reactant.atoms) == 1``) are handled as a
+    degenerate fast path: the (single) anchor atom is placed at every raw
+    anchor-node position of its element, iso-classes are deduplicated by
+    ego-graph isomorphism around the bonded surface clique, and the
+    calculator-free rigid-body refinement is skipped (a single atom has no
+    rotational DOF and the anchor-site position is already the correct
+    initial geometry).  ML stability pruning still runs when *calculator*
+    is supplied.
 
     Parameters
     ----------
@@ -1347,9 +1386,9 @@ def find_adsorbate_sites(
         ``G.graph["adsorbate_sites"][reactant.smiles]``.
     """
     n_atoms = len(reactant.atoms)
-    if n_atoms < 2:
+    if n_atoms < 1:
         raise ValueError(
-            f"find_adsorbate_sites requires ≥ 2 atoms, got {n_atoms}."
+            f"find_adsorbate_sites requires ≥ 1 atom, got {n_atoms}."
         )
 
     anchors = sorted(int(i) for i in reactant.anchor_atoms)
@@ -1652,15 +1691,25 @@ def find_adsorbate_sites(
             # Refines representative positions and Kabsch-propagates to every
             # member so that the ML relaxation in B-2 starts from a sensible
             # geometry rather than the raw clique-centroid positions.
-            if verbose:
-                print(
-                    "\n  ──────────────────────────────────────────────────────\n"
-                    "  Stage B-1 : calc-free geometric optimisation\n"
-                    "  ──────────────────────────────────────────────────────"
+            #
+            # Skipped for single-atom reactants: a 1-atom adsorbate has no
+            # rotational DOF and the anchor-node position is already the
+            # correct initial geometry; the rigid-body objective (and the
+            # underlying Kabsch SVD) would also be degenerate on one point.
+            if n_atoms >= 2:
+                if verbose:
+                    print(
+                        "\n  ──────────────────────────────────────────────────────\n"
+                        "  Stage B-1 : calc-free geometric optimisation\n"
+                        "  ──────────────────────────────────────────────────────"
+                    )
+                optimise_adsorbate_site_positions(
+                    G, reactant.smiles, reactant, verbose=verbose,
                 )
-            optimise_adsorbate_site_positions(
-                G, reactant.smiles, reactant, verbose=verbose,
-            )
+            elif verbose:
+                print(
+                    "\n  Stage B-1 skipped (single-atom reactant — no rigid-body DOF)"
+                )
 
             # B-2: ML-potential stability check.  Prunes unstable iso-classes,
             # extracts the relaxed adsorbate positions, updates ms.positions,

@@ -71,3 +71,9 @@ segment-tree sampler is the dominant per-step cost.
 
 structure.py (nanoparticle generation):
 Calculate surface energies to pass into Wulff Construction
+
+check_adsorbate_sites.py (adsorbate site stability):
+Need to do cases when adsorbate bonds will stretch on the surface (oxygen)
+
+###
+Also need to do complete code review, going through code base very carefully. It is a garbage dump at the moment
