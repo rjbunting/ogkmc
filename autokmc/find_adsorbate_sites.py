@@ -837,11 +837,18 @@ def _build_pruning_atoms(
     ``index``).  Adsorbate atoms are placed at the representative positions
     ``ms.positions``.
 
+    The returned :class:`~ase.Atoms` carries an ``arrays["surface"]`` int8
+    array that mirrors :mod:`autokmc.graph` conventions (0=bulk, 1=surface,
+    2=adsorbate) so that :func:`autokmc.graph.build_graph` can be called
+    directly on the relaxed structure for the connectivity check.
+
     Returns
     -------
     atoms : Atoms
     n_slab : int
     n_ads : int
+    node_to_ase : dict[int, int]
+        Mapping from G surface/bulk node-id → ASE atom index in *atoms*.
     """
     from ase import Atoms
     from ase.constraints import FixAtoms
@@ -852,96 +859,86 @@ def _build_pruning_atoms(
     )
     slab_sym = [G.nodes[n]["element"]  for n in slab_nodes]
     slab_pos = [G.nodes[n]["position"] for n in slab_nodes]
+    slab_tag = [
+        1 if G.nodes[n].get("type") == "surface" else 0
+        for n in slab_nodes
+    ]
 
     ads_pos = np.asarray(ms.positions, dtype=float)  # (n_atoms, 3)
+    n_ads   = len(react_sym)
 
     symbols   = slab_sym + list(react_sym)
-    positions = slab_pos + [ads_pos[i].tolist() for i in range(len(react_sym))]
+    positions = slab_pos + [ads_pos[i].tolist() for i in range(n_ads)]
+    surface_array = np.asarray(slab_tag + [2] * n_ads, dtype=np.int8)
 
     cell = np.array(G.graph["cell"], dtype=float)
     pbc  = np.asarray(G.graph.get("pbc", [True, True, False]), dtype=bool)
 
     atoms = Atoms(symbols=symbols, positions=positions, cell=cell, pbc=pbc)
+    atoms.arrays["surface"] = surface_array
     if frozen_indices:
         atoms.set_constraint(FixAtoms(indices=list(frozen_indices)))
 
-    return atoms, len(slab_nodes), len(react_sym)
+    node_to_ase = {int(nid): i for i, nid in enumerate(slab_nodes)}
+    return atoms, len(slab_nodes), n_ads, node_to_ase
 
 
-def _bond_set_pruning(atoms, nl_mult: float, n_slab: int) -> set:
-    """Bonds touching the adsorbate, as a set of ``frozenset({i, j})``.
-
-    *n_slab* is the number of slab (bulk + surface) atoms; adsorbate atoms
-    are at ASE indices ``n_slab … len(atoms)-1`` (the layout produced by
-    :func:`_build_pruning_atoms`).  Only bonds where **at least one
-    endpoint is an adsorbate atom** are returned — the goal of the
-    connectivity comparison is to detect adsorbate dissociation /
-    site-hopping / loss-or-gain of anchor bonds, not slab-internal
-    relaxation noise.
-
-    Including slab–slab bonds would make the check spuriously fail: under
-    a real ML potential the un-frozen surface / sub-surface metal atoms
-    relax by O(0.01–0.1 Å), and any metal–metal pair whose un-relaxed
-    separation was sitting right at the ``nl_mult × (r_i + r_j)`` natural
-    cutoff threshold flips in or out of the bond set across the
-    relaxation, even though nothing about the adsorbate has changed.
-    """
-    from ase.neighborlist import NeighborList, natural_cutoffs
-
-    cutoffs = natural_cutoffs(atoms, mult=nl_mult)
-    nl_obj  = NeighborList(cutoffs, self_interaction=False, bothways=False)
-    nl_obj.update(atoms)
-    bonds: set = set()
-    for i in range(len(atoms)):
-        for j in nl_obj.get_neighbors(i)[0]:
-            ii, jj = int(i), int(j)
-            # Keep only bonds that touch an adsorbate atom.
-            if ii < n_slab and jj < n_slab:
-                continue
-            bonds.add(frozenset((ii, jj)))
-    return bonds
-
-
-def _check_intended_coordination(
-    atoms,
-    node_to_ase: dict,
-    ms: "AdsorbateSite",
+def _intended_adsorbate_edges(
+    ms: AdsorbateSite,
+    reactant,
     n_slab: int,
-    nl_mult: float,
-) -> tuple:
-    """Verify each bonded adsorbate atom is still bonded to its intended clique.
+    node_to_ase: dict[int, int],
+) -> set[frozenset]:
+    """Edge set the relaxed graph **must** contain in the adsorbate region.
 
-    In the *atoms* object, adsorbate atom at reactant index *i* sits at ASE
-    index ``n_slab + i`` (the ordering produced by :func:`_build_pruning_atoms`).
-    *node_to_ase* maps surface G-node ids to ASE slab indices (0 … n_slab-1).
+    Includes:
 
-    Returns
-    -------
-    ok : bool
-        ``True`` if every intended adsorbate–surface bond is present.
-    missing : list[tuple[int, int]]
-        ``(ase_ads_idx, ase_surf_idx)`` pairs for absent intended bonds.
-        Empty when *ok* is ``True``.
+    * Intramolecular bonds from ``reactant.graph`` (re-mapped to ASE indices
+      ``n_slab + reactant_atom_index``).
+    * Anchor bonds: for every reactant atom *i* with
+      ``ms.atom_cliques[i] is not None``, one edge from ``n_slab + i`` to
+      every surface atom in that clique (mapped via *node_to_ase*).
+
+    Used by :func:`prune_unstable_adsorbate_sites` to compare against the
+    edges actually produced by :func:`autokmc.graph.build_graph` on the
+    ML-relaxed structure.
     """
-    from ase.neighborlist import NeighborList, natural_cutoffs
+    edges: set[frozenset] = set()
 
-    cutoffs = natural_cutoffs(atoms, mult=nl_mult)
-    nl      = NeighborList(cutoffs, self_interaction=False, bothways=True)
-    nl.update(atoms)
+    if reactant.graph is not None:
+        for u, v in reactant.graph.edges():
+            edges.add(frozenset((n_slab + int(u), n_slab + int(v))))
 
-    missing: list = []
-    for ads_i, clq in enumerate(ms.atom_cliques):
+    for i, clq in enumerate(ms.atom_cliques):
         if clq is None:
             continue
-        ase_ads   = n_slab + ads_i
-        neighbours = {int(j) for j in nl.get_neighbors(ase_ads)[0]}
+        ads_idx = n_slab + i
         for surf_nid in clq:
             ase_surf = node_to_ase.get(int(surf_nid))
             if ase_surf is None:
                 continue
-            if ase_surf not in neighbours:
-                missing.append((ase_ads, ase_surf))
-    return (len(missing) == 0, missing)
+            edges.add(frozenset((ads_idx, ase_surf)))
+
+    return edges
+
+
+def _adsorbate_edges_from_graph(
+    G_relaxed: nx.Graph,
+    n_slab: int,
+) -> set[frozenset]:
+    """Edges of *G_relaxed* that touch at least one adsorbate atom.
+
+    Adsorbate atoms occupy ASE indices ``>= n_slab`` (the layout produced
+    by :func:`_build_pruning_atoms`); slab–slab edges are excluded because
+    small ML-driven relaxations of un-frozen metal atoms can flip pairs
+    across the natural-cutoff threshold without affecting the adsorbate.
+    """
+    edges: set[frozenset] = set()
+    for u, v in G_relaxed.edges():
+        if int(u) < n_slab and int(v) < n_slab:
+            continue
+        edges.add(frozenset((int(u), int(v))))
+    return edges
 
 
 def _remove_iso_class_nodes(G: nx.Graph, ms: AdsorbateSite) -> None:
@@ -976,23 +973,35 @@ def prune_unstable_adsorbate_sites(
 
     For each iso-class in *adsorbate_sites*:
 
-    1. Builds a bare slab + adsorbate :class:`~ase.Atoms` from the
-       representative positions (``ms.positions``).
-    2. Records the bond topology before relaxation.
-    3. Runs a full ML relaxation via
+    1. Build a bare slab + adsorbate :class:`~ase.Atoms` from the
+       representative positions (``ms.positions``) — see
+       :func:`_build_pruning_atoms`.  The adsorbate atoms are tagged
+       ``surface == 2`` so :func:`autokmc.graph.build_graph` can be called
+       on it directly.
+    2. Run a full ML relaxation via
        :func:`~autokmc.structure.optimise_structure`.
-    4. If the bond topology changed, or optimisation did not converge, the
-       iso-class is considered **unstable** and excluded from the returned list,
-       and any materialised G-nodes belonging to it are removed.
-    5. For **stable** iso-classes the adsorbate atom positions from the
-       ML-relaxed structure are extracted and written back to
-       ``ms.positions`` (step 5 of the pipeline), then
-       :func:`push_member_positions_to_graph` is called for the
-       representative (member 0) and Kabsch ego-alignment propagates the new
-       geometry to every other member (step 6).
+    3. Build the graph of the relaxed structure (same NL cutoff as the rest
+       of the package) and compare its **adsorbate-touching edge set** to
+       the *intended* edge set:
 
-    ``G.graph["adsorbate_sites"][reactant.smiles]`` is updated in place with
-    the surviving list.
+         * intramolecular bonds copied from ``reactant.graph``;
+         * one anchor bond per (reactant atom, surface clique member) for
+           every reactant atom that ``ms.atom_cliques`` says is bonded.
+
+       Any mismatch — missing intended edge OR unintended new edge touching
+       the adsorbate (dissociation, hop to a different clique, gained or
+       lost anchor bond, intramolecular bond broken) — prunes the iso-class.
+       Slab–slab edges are *ignored* because un-frozen metal atoms relax by
+       O(0.01–0.1 Å) under a real ML potential and can flip pairs across
+       the natural-cutoff threshold without affecting the adsorbate.
+    4. Convergence is also checked (max|F| ≤ *fmax* on the un-frozen atoms);
+       non-converged iso-classes are pruned.
+    5. For surviving iso-classes the relaxed adsorbate positions are
+       written back to ``ms.positions`` and Kabsch-propagated to every
+       member via :func:`push_member_positions_to_graph`.
+
+    ``G.graph["adsorbate_sites"][reactant.smiles]`` is updated in place
+    with the surviving list.
 
     Parameters
     ----------
@@ -1008,26 +1017,32 @@ def prune_unstable_adsorbate_sites(
         :func:`copy.deepcopy` is made for each iso-class so the caller's
         instance is never mutated.
     frozen_indices : list[int] | None
-        0-based indices into the **slab** portion (bulk + surface nodes sorted
-        by their original ASE atom ``index``) to freeze during relaxation.
-        Pass ``atoms.info["frozen_indices"]`` from the slab directly.
+        0-based indices into the **slab** portion (bulk + surface nodes
+        sorted by their original ASE atom ``index``) to freeze during
+        relaxation.  Pass ``atoms.info["frozen_indices"]`` from the slab
+        directly.
     fmax : float
-        Force convergence threshold (eV/Å).  Default :data:`~autokmc.constants.PRUNE_FMAX`.
+        Force convergence threshold (eV/Å).  Default
+        :data:`~autokmc.constants.PRUNE_FMAX`.
     max_steps : int
-        Maximum LBFGS steps.  Default :data:`~autokmc.constants.PRUNE_MAX_STEPS`.
+        Maximum LBFGS steps.  Default
+        :data:`~autokmc.constants.PRUNE_MAX_STEPS`.
     nl_mult : float
-        Neighbour-list cutoff multiplier for the connectivity comparison.
-        Default :data:`~autokmc.constants.NL_MULT_DEFAULT`.
+        Neighbour-list cutoff multiplier handed to
+        :func:`autokmc.graph.build_graph` for the connectivity comparison.
+        Default :data:`~autokmc.constants.NL_MULT_DEFAULT` — matches the
+        cutoff used everywhere else in the package.
     verbose : bool
         Print per-iso-class outcomes (stable ✓ / pruned ✗) to stdout.
 
     Returns
     -------
     list[AdsorbateSite]
-        Only the stable iso-classes, in their original order.  The iso_class
-        integer labels are **not** renumbered.
+        Only the stable iso-classes, in their original order.  The
+        ``iso_class`` integer labels are **not** renumbered.
     """
     from autokmc.structure import optimise_structure  # avoid circular at module level
+    from autokmc.graph import build_graph
 
     react_sym = list(reactant.atoms.get_chemical_symbols())
     stable: list[AdsorbateSite] = []
@@ -1039,19 +1054,10 @@ def prune_unstable_adsorbate_sites(
             f"fmax={fmax} eV/Å  max_steps={max_steps}"
         )
 
-    # Build slab-node → ASE-index mapping once (same for every iso-class).
-    _slab_nodes_sorted = sorted(
-        (n for n, d in G.nodes(data=True) if d.get("type") in ("bulk", "surface")),
-        key=lambda n: G.nodes[n].get("index", n),
-    )
-    _node_to_ase: dict[int, int] = {
-        int(nid): i for i, nid in enumerate(_slab_nodes_sorted)
-    }
-
     for ms in adsorbate_sites:
-        # ── Build initial Atoms ───────────────────────────────────────────
+        # ── Build initial Atoms (already tagged + node_to_ase in hand) ────
         try:
-            atoms_init, n_slab, n_ads = _build_pruning_atoms(
+            atoms_init, n_slab, n_ads, node_to_ase = _build_pruning_atoms(
                 G, ms, react_sym, frozen_indices=frozen_indices,
             )
         except Exception as exc:
@@ -1064,7 +1070,9 @@ def prune_unstable_adsorbate_sites(
             stable.append(ms)
             continue
 
-        bonds_before = _bond_set_pruning(atoms_init, nl_mult, n_slab)
+        intended_edges = _intended_adsorbate_edges(
+            ms, reactant, n_slab, node_to_ase
+        )
 
         # ── ML relaxation ─────────────────────────────────────────────────
         try:
@@ -1106,43 +1114,49 @@ def prune_unstable_adsorbate_sites(
             _remove_iso_class_nodes(G, ms)
             continue
 
-        # ── Connectivity check ────────────────────────────────────────────
-        # Compare only bonds touching the adsorbate (see _bond_set_pruning).
-        # Slab–slab bonds are excluded so that small ML-driven relaxations
-        # of un-frozen metal atoms do not spuriously flip pairs across the
-        # natural-cutoff threshold and trigger false pruning.
-        bonds_after = _bond_set_pruning(atoms_opt, nl_mult, n_slab)
-        if bonds_before != bonds_after:
-            added   = len(bonds_after - bonds_before)
-            removed = len(bonds_before - bonds_after)
+        # ── Connectivity check via canonical build_graph ──────────────────
+        # Carry the intended ``surface`` tags forward (build_graph requires
+        # them) and build the full atom-connectivity graph of the relaxed
+        # structure, then compare its adsorbate-touching edges against the
+        # intended edge set.  Any mismatch — missing intramolecular or
+        # anchor bond, OR a brand-new edge from any adsorbate atom to a
+        # surface atom outside its intended clique — prunes the iso-class.
+        atoms_for_graph = atoms_opt.copy()
+        atoms_for_graph.arrays["surface"] = atoms_init.arrays["surface"]
+        try:
+            G_relaxed = build_graph(atoms_for_graph, nl_mult=nl_mult)
+        except Exception as exc:
+            _log.warning(
+                "prune_unstable_adsorbate_sites: iso_class=%d build_graph "
+                "failed on relaxed atoms (%s) — pruned.",
+                ms.iso_class, exc,
+            )
             if verbose:
                 print(
-                    f"  ✗ iso={ms.iso_class}: bonds changed "
-                    f"(+{added}/-{removed}) — pruned"
+                    f"  ✗ iso={ms.iso_class}: build_graph(relaxed) failed "
+                    f"({exc}) — pruned"
                 )
             n_pruned += 1
             _remove_iso_class_nodes(G, ms)
             continue
 
-        # ── Intended-coordination check ───────────────────────────────────
-        # Verify every bonded adsorbate atom is actually bonded to the
-        # surface atoms in its intended clique in the ML-relaxed structure.
-        # This catches cases where the pre-relaxation geometry has the
-        # anchor atom too far from its clique so that bonds_before didn't
-        # contain the intended bond either (bonds_before==bonds_after passes
-        # trivially, but the coordination was already wrong).
-        ok_coord, missing_bonds = _check_intended_coordination(
-            atoms_opt, _node_to_ase, ms, n_slab, nl_mult
-        )
-        if not ok_coord:
+        relaxed_edges = _adsorbate_edges_from_graph(G_relaxed, n_slab)
+
+        if relaxed_edges != intended_edges:
+            missing = intended_edges - relaxed_edges
+            extra   = relaxed_edges - intended_edges
             if verbose:
-                pairs = ", ".join(
-                    f"(ads={a},surf={s})" for a, s in missing_bonds[:3]
-                )
+                def _fmt(e: frozenset) -> str:
+                    a, b = sorted(int(x) for x in e)
+                    return f"({a},{b})"
+                miss_s = ", ".join(_fmt(e) for e in list(missing)[:3])
+                extr_s = ", ".join(_fmt(e) for e in list(extra)[:3])
                 print(
-                    f"  ✗ iso={ms.iso_class}: adsorbate lost intended clique "
-                    f"bond(s) after relaxation ({pairs}"
-                    f"{'…' if len(missing_bonds) > 3 else ''}) — pruned"
+                    f"  ✗ iso={ms.iso_class}: adsorbate connectivity changed "
+                    f"(missing={len(missing)} [{miss_s}"
+                    f"{'…' if len(missing) > 3 else ''}], "
+                    f"extra={len(extra)} [{extr_s}"
+                    f"{'…' if len(extra) > 3 else ''}]) — pruned"
                 )
             n_pruned += 1
             _remove_iso_class_nodes(G, ms)

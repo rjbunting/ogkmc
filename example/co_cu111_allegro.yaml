@@ -36,13 +36,13 @@ calculator:
 adsorbate_sites:
   prune_stable_only: true
   fmax: 0.01
-  max_steps: 500
+  max_steps: 1000
 
 kmc:
   temperature_k: 500.0
-  n_steps: 50
+  n_steps: 10000
   transmission_coefficient: 1.0
   fmax: 0.01
-  max_steps: 10000
+  max_steps: 1000
   log_every: 1
   random_seed: 69

@@ -3,7 +3,7 @@
 schema_version: "1"
 
 output:
-  dir: ./runs/co_cu111_nequip
+  dir: ./runs/o_cu111_nequip
   trajectory_dump_every: 10
   log_level: INFO
 
@@ -40,7 +40,7 @@ adsorbate_sites:
 
 kmc:
   temperature_k: 500.0
-  n_steps: 50
+  n_steps: 10000
   transmission_coefficient: 1.0
   fmax: 0.01
   max_steps: 10000
