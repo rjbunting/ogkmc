@@ -876,6 +876,48 @@ def _bond_set_pruning(atoms, nl_mult: float) -> set:
     return bonds
 
 
+def _check_intended_coordination(
+    atoms,
+    node_to_ase: dict,
+    ms: "AdsorbateSite",
+    n_slab: int,
+    nl_mult: float,
+) -> tuple:
+    """Verify each bonded adsorbate atom is still bonded to its intended clique.
+
+    In the *atoms* object, adsorbate atom at reactant index *i* sits at ASE
+    index ``n_slab + i`` (the ordering produced by :func:`_build_pruning_atoms`).
+    *node_to_ase* maps surface G-node ids to ASE slab indices (0 … n_slab-1).
+
+    Returns
+    -------
+    ok : bool
+        ``True`` if every intended adsorbate–surface bond is present.
+    missing : list[tuple[int, int]]
+        ``(ase_ads_idx, ase_surf_idx)`` pairs for absent intended bonds.
+        Empty when *ok* is ``True``.
+    """
+    from ase.neighborlist import NeighborList, natural_cutoffs
+
+    cutoffs = natural_cutoffs(atoms, mult=nl_mult)
+    nl      = NeighborList(cutoffs, self_interaction=False, bothways=True)
+    nl.update(atoms)
+
+    missing: list = []
+    for ads_i, clq in enumerate(ms.atom_cliques):
+        if clq is None:
+            continue
+        ase_ads   = n_slab + ads_i
+        neighbours = {int(j) for j in nl.get_neighbors(ase_ads)[0]}
+        for surf_nid in clq:
+            ase_surf = node_to_ase.get(int(surf_nid))
+            if ase_surf is None:
+                continue
+            if ase_surf not in neighbours:
+                missing.append((ase_ads, ase_surf))
+    return (len(missing) == 0, missing)
+
+
 def _remove_iso_class_nodes(G: nx.Graph, ms: AdsorbateSite) -> None:
     """Remove all materialised G-nodes for *ms* (no-op if absent)."""
     to_remove = [
@@ -971,6 +1013,15 @@ def prune_unstable_adsorbate_sites(
             f"fmax={fmax} eV/Å  max_steps={max_steps}"
         )
 
+    # Build slab-node → ASE-index mapping once (same for every iso-class).
+    _slab_nodes_sorted = sorted(
+        (n for n, d in G.nodes(data=True) if d.get("type") in ("bulk", "surface")),
+        key=lambda n: G.nodes[n].get("index", n),
+    )
+    _node_to_ase: dict[int, int] = {
+        int(nid): i for i, nid in enumerate(_slab_nodes_sorted)
+    }
+
     for ms in adsorbate_sites:
         # ── Build initial Atoms ───────────────────────────────────────────
         try:
@@ -1038,6 +1089,30 @@ def prune_unstable_adsorbate_sites(
                 print(
                     f"  ✗ iso={ms.iso_class}: bonds changed "
                     f"(+{added}/-{removed}) — pruned"
+                )
+            n_pruned += 1
+            _remove_iso_class_nodes(G, ms)
+            continue
+
+        # ── Intended-coordination check ───────────────────────────────────
+        # Verify every bonded adsorbate atom is actually bonded to the
+        # surface atoms in its intended clique in the ML-relaxed structure.
+        # This catches cases where the pre-relaxation geometry has the
+        # anchor atom too far from its clique so that bonds_before didn't
+        # contain the intended bond either (bonds_before==bonds_after passes
+        # trivially, but the coordination was already wrong).
+        ok_coord, missing_bonds = _check_intended_coordination(
+            atoms_opt, _node_to_ase, ms, n_slab, nl_mult
+        )
+        if not ok_coord:
+            if verbose:
+                pairs = ", ".join(
+                    f"(ads={a},surf={s})" for a, s in missing_bonds[:3]
+                )
+                print(
+                    f"  ✗ iso={ms.iso_class}: adsorbate lost intended clique "
+                    f"bond(s) after relaxation ({pairs}"
+                    f"{'…' if len(missing_bonds) > 3 else ''}) — pruned"
                 )
             n_pruned += 1
             _remove_iso_class_nodes(G, ms)
@@ -1806,8 +1881,17 @@ def optimise_adsorbate_site_positions(
                            if int(s) in surf_id_to_row]
                 r_s_avg = float(np.mean(surf_r[rows])) if rows else 0.0
                 standoff = standoff_factor * (ads_rcov[i] + r_s_avg)
-                n_hat    = _outward_normal_at(G, base, pbc)
-                targets.append(base + standoff * n_hat)
+                # The standoff must be measured from the *surface* clique
+                # centroid, NOT from `base` (which is the anchor-node
+                # position already lifted ~OPT_FACTOR*(r_a+r_s) above the
+                # surface).  Using `base` here double-counts the height,
+                # producing targets ~2× too far from the surface.
+                if rows:
+                    clique_centroid = surf_pos[rows].mean(axis=0)
+                else:
+                    clique_centroid = base
+                n_hat = _outward_normal_at(G, clique_centroid, pbc)
+                targets.append(clique_centroid + standoff * n_hat)
             else:
                 targets.append(base)
             exclude_surf.update(int(s) for s in clique)
