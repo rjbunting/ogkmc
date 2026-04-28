@@ -57,6 +57,7 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
         build_graph,
         build_reactant,
         find_adsorbate_sites,
+        find_diffusion_sites,
         run_kmc_steps,
     )
 
@@ -152,6 +153,36 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
     )
     summary_collector = ReactionSummary()
 
+    # 6b. Diffusion (NEB) sites — flat list across all SMILES
+    diffusion_sites_flat: list = []
+    diffusion_kwargs: dict | None = None
+    d = cfg.diffusion
+    if d.enabled:
+        diff_by_smiles = find_diffusion_sites(
+            G, all_sites,
+            max_hops      = d.max_hops,
+            n_shells_pair = d.n_shells_pair,
+            verbose       = log_level <= logging.INFO,
+        )
+        for smiles, ds_list in diff_by_smiles.items():
+            diffusion_sites_flat.extend(ds_list)
+        diffusion_kwargs = dict(
+            fmax             = d.fmax,
+            max_steps        = d.max_steps,
+            n_images         = d.n_images,
+            climb            = d.climb,
+            spring_k         = d.spring_k,
+            interpolation    = d.interpolation,
+            persist_neb_path = d.persist_neb_path,
+        )
+        if log_level <= logging.INFO:
+            print(
+                f"[autokmc] Diffusion enabled: "
+                f"{sum(len(v) for v in diff_by_smiles.values())} "
+                f"DiffusionSite iso-class(es) across "
+                f"{len(diff_by_smiles)} SMILES."
+            )
+
     # 7. KMC
     k = cfg.kmc
     summary = run_kmc_steps(
@@ -166,6 +197,8 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
         rng                      = k.random_seed,
         log_every                = k.log_every,
         verbose                  = log_level <= logging.INFO,
+        diffusion_sites          = diffusion_sites_flat,
+        diffusion_kwargs         = diffusion_kwargs,
         reaction_writer          = reaction_writer,
         trajectory_writer        = trajectory_writer,
         summary_collector        = summary_collector,

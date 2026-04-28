@@ -13,10 +13,10 @@ structure:
   crystal_structure: fcc
   miller_index: [1, 1, 1]
   lattice_constant: 3.615
-  min_slab_size: 12.0
-  min_vacuum_size: 12.0
-  goal_x: 20.0
-  goal_y: 20.0
+  min_slab_size: 8.0
+  min_vacuum_size: 15.0
+  goal_x: 12.0
+  goal_y: 12.0
   n_freeze_layers: 2
 
 reactants:
@@ -46,3 +46,27 @@ kmc:
   max_steps: 1000
   log_every: 1
   random_seed: 69
+
+# Diffusion (NEB) channel.  Enabled by default; set `enabled: false` to
+# run adsorption / desorption only.  Each new (iso, lateral) pair triggers
+# one CI-NEB calculation; the raw transition-state energy is saved in
+# reactions/diffusion/diff_iso{X}_lat{Y}/reaction.json and the KMC barrier
+# is floored at EA_MIN (0.1 eV).
+diffusion:
+  enabled: true
+  max_hops: 1            # 1 = "share a surface atom OR are first surface neighbours"
+  n_shells_pair: 1
+  fmax: 0.05
+  max_steps: 1000
+  n_images: 10
+  climb: true
+  spring_k: 0.1
+  interpolation: idpp
+  # When true, every NEB image (including intermediates) is stored on the
+  # lateral class as `atoms_neb_path` and written to disk as a multi-frame
+  # neb_path.extxyz inside the diffusion reaction folder, useful for
+  # visualising the full minimum-energy path.  When false (default) only
+  # the two relaxed endpoints (state_a.extxyz, state_b.extxyz) and the
+  # single transition-state image (ts.extxyz) are persisted.
+  persist_neb_path: true
+

@@ -44,7 +44,7 @@ def test_reaction_writer_creates_per_lateral_class_folder(
         gas_energies={"[C-]#[O+]": -14.0},
     )
 
-    folder = tmp_path / "reactions" / "iso0_lat0"
+    folder = tmp_path / "reactions" / "adsorption" / "iso0_lat0"
     assert folder.is_dir()
     assert (folder / "occupied.extxyz").is_file()
     assert (folder / "unoccupied.extxyz").is_file()
@@ -55,7 +55,7 @@ def test_reaction_writer_creates_per_lateral_class_folder(
     payload = json.loads(jsonl[0])
     assert payload["schema_version"] == PERSISTENCE_SCHEMA_VERSION
     assert payload["kind"] == "adsorption"
-    assert payload["reaction_dir"] == "reactions/iso0_lat0"
+    assert payload["reaction_dir"] == "reactions/adsorption/iso0_lat0"
     assert "ΔE" in payload["description"]
 
     rxn_meta = json.loads((folder / "reaction.json").read_text())
@@ -90,7 +90,7 @@ def test_reaction_writer_reuses_folder_across_events(
     assert w.n_unique_reactions == 1
     assert w.n_written == 2
 
-    folder = tmp_path / "reactions" / "iso0_lat0"
+    folder = tmp_path / "reactions" / "adsorption" / "iso0_lat0"
     rxn_meta = json.loads((folder / "reaction.json").read_text())
     assert rxn_meta["stats"]["count"] == 2
     assert rxn_meta["stats"]["first_step"] == 1
@@ -107,7 +107,7 @@ def test_reaction_writer_warns_when_no_atoms(tmp_path, stub_reaction):
     w.record(step=1, time_s=1e-6, tau_s=1e-6, reaction=stub_reaction)
     w.close()
 
-    folder = tmp_path / "reactions" / "iso0_lat0"
+    folder = tmp_path / "reactions" / "adsorption" / "iso0_lat0"
     assert (folder / "reaction.json").is_file()
     assert not (folder / "occupied.extxyz").exists()
     assert not (folder / "unoccupied.extxyz").exists()

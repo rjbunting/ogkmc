@@ -58,8 +58,9 @@ from autokmc.check_adsorbate_sites import (
     AdsorbateDissociationError,
     OptimisationFailedError,
 )
-from autokmc.kmc_reactions import (
-    Reaction,
+from autokmc.kmc_adsorption import (
+    AdsorptionReaction,
+    Reaction,                       # alias of AdsorptionReaction (back-compat)
     KB_EV,
     H_EV_S,
     EA_MIN,
@@ -69,6 +70,26 @@ from autokmc.kmc_reactions import (
     compute_all_reactions,
     gather_all_applicable_reactions,
     fast_reaction_for_member,
+)
+from autokmc.find_diffusion_sites import (
+    DiffusionSite,
+    DiffusionLateral,
+    find_diffusion_sites,
+)
+from autokmc.check_diffusion_sites import (
+    check_diffusion_site_lateral,
+    check_diffusion_stability,
+    DiffusionStabilityError,
+    EndpointStabilityError,
+    NEBNotConvergedError,
+    TransitionStateInvalidError,
+)
+from autokmc.kmc_diffusion import (
+    DiffusionReaction,
+    is_diffusion_applicable,
+    get_applicable_diffusions,
+    compute_all_diffusions,
+    fast_diffusion_for_member,
 )
 from autokmc.kmc_simulation import (
     total_rate,
@@ -93,6 +114,7 @@ from autokmc.config import (
     CalculatorCfg,
     AdsorbateSitesCfg,
     KMCCfg,
+    DiffusionCfg,
     ConfigError,
     load_config,
     build_calculator,
@@ -122,11 +144,20 @@ __all__ = [
     "check_adsorbate_site_lateral", "check_site_stability",
     "SiteStabilityError", "SurfaceConnectivityError",
     "AdsorbateDissociationError", "OptimisationFailedError",
-    # KMC reactions
-    "Reaction", "KB_EV", "H_EV_S", "EA_MIN", "DEFAULT_TRANSMISSION_COEFFICIENT",
+    # KMC reactions (adsorption / desorption)
+    "AdsorptionReaction", "Reaction",
+    "KB_EV", "H_EV_S", "EA_MIN", "DEFAULT_TRANSMISSION_COEFFICIENT",
     "is_clique_blocked", "get_applicable_reactions",
     "compute_all_reactions", "gather_all_applicable_reactions",
     "fast_reaction_for_member",
+    # Diffusion (NEB)
+    "DiffusionSite", "DiffusionLateral", "find_diffusion_sites",
+    "check_diffusion_site_lateral", "check_diffusion_stability",
+    "DiffusionStabilityError", "EndpointStabilityError",
+    "NEBNotConvergedError", "TransitionStateInvalidError",
+    "DiffusionReaction", "is_diffusion_applicable",
+    "get_applicable_diffusions", "compute_all_diffusions",
+    "fast_diffusion_for_member",
     # KMC simulation
     "total_rate", "sample_tau", "choose_reaction",
     "execute_reaction", "run_kmc_steps",
@@ -135,7 +166,8 @@ __all__ = [
     "ReactionSummary", "atoms_from_graph", "make_run_meta",
     # config / CLI
     "RunConfig", "OutputCfg", "StructureCfg", "ReactantCfg",
-    "CalculatorCfg", "AdsorbateSitesCfg", "KMCCfg", "ConfigError",
+    "CalculatorCfg", "AdsorbateSitesCfg", "KMCCfg", "DiffusionCfg",
+    "ConfigError",
     "load_config", "build_calculator", "calculator_meta",
     "run_from_config",
 ]

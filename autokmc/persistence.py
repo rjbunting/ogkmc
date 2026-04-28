@@ -13,13 +13,27 @@ Output layout (under ``output.dir``)
     ├── summary.json          # per-reaction-type aggregates + run metadata
     ├── kmc.extxyz            # extended-XYZ trajectory (initial + every Nth state)
     └── reactions/
-        ├── iso0_lat0/
-        │   ├── reaction.json     # description + energies + ΔE / barrier / rate
-        │   ├── occupied.extxyz   # relaxed atoms used to compute E_occ
-        │   └── unoccupied.extxyz # relaxed atoms used to compute E_unocc
-        ├── iso0_lat1/
+        ├── adsorption/
+        │   ├── iso0_lat0/
+        │   │   ├── reaction.json     # description + energies + ΔE / barrier / rate
+        │   │   ├── occupied.extxyz   # relaxed atoms used to compute E_occ
+        │   │   └── unoccupied.extxyz # relaxed atoms used to compute E_unocc
+        │   ├── iso0_lat1/
+        │   │   └── …
         │   └── …
-        └── …
+        └── diffusion/
+            ├── diff_iso0_lat0/
+            │   ├── reaction.json
+            │   ├── state_a.extxyz    # relaxed endpoint A
+            │   ├── state_b.extxyz    # relaxed endpoint B
+            │   └── ts.extxyz         # NEB transition-state image
+            └── …
+
+Reactions are split by **kind** into a sub-folder of ``reactions/`` so that
+adsorption / desorption events and diffusion (hop) events do not collide on
+the ``(iso, lateral)`` namespace.  ``adsorption/`` and ``desorption/`` share
+the same sub-folder (``adsorption/``) since they are forward / reverse
+directions of the same lateral class.
 
 Each unique reaction is identified by ``(iso_class, lateral_class)`` — it
 is the lateral interaction class that owns the actual relaxed structures
@@ -169,8 +183,35 @@ class ReactionRecord:
 # ReactionWriter
 # ---------------------------------------------------------------------------
 
+#: Map ``reaction.kind`` → sub-folder name under ``reactions/``.  Adsorption
+#: and desorption are forward / reverse of the same lateral class so they
+#: share a single ``adsorption/`` folder; diffusion gets its own.
+KIND_SUBDIR: dict[str, str] = {
+    "adsorption": "adsorption",
+    "desorption": "adsorption",
+    "diffusion":  "diffusion",
+}
+
+def _kind_subdir(kind: str) -> str:
+    return KIND_SUBDIR.get(str(kind), str(kind))
+
+
 def _reaction_folder_name(iso_class: int, lateral_class: int) -> str:
     return f"iso{int(iso_class)}_lat{int(lateral_class)}"
+
+
+def _diffusion_folder_name(iso_class: int, lateral_class: int) -> str:
+    return f"diff_iso{int(iso_class)}_lat{int(lateral_class)}"
+
+
+def _reaction_relative_dir(kind: str, iso: int, lat: int) -> str:
+    """Return ``"reactions/<sub>/<folder>"`` (POSIX-style, for JSON output)."""
+    sub = _kind_subdir(kind)
+    folder = (
+        _diffusion_folder_name(iso, lat) if sub == "diffusion"
+        else _reaction_folder_name(iso, lat)
+    )
+    return f"{REACTIONS_DIR}/{sub}/{folder}"
 
 
 def _json_safe(o):
@@ -220,8 +261,8 @@ class ReactionWriter:
         self._calc_meta: dict[str, Any] = dict(calculator_meta or {})
         self._n_written: int = 0
 
-        # Per (iso, lat) bookkeeping for the on-disk reaction.json files.
-        self._folder_meta: dict[tuple[int, int], dict[str, Any]] = {}
+        # Per (sub, iso, lat) bookkeeping for the on-disk reaction.json files.
+        self._folder_meta: dict[tuple[str, int, int], dict[str, Any]] = {}
 
     # ------------------------------------------------------------------
     @property
@@ -238,12 +279,23 @@ class ReactionWriter:
 
     # ------------------------------------------------------------------
     def _ensure_reaction_folder(self, reaction) -> Path:
-        """Create + populate the per-lateral-class folder if not yet done."""
+        """Create + populate the per-lateral-class folder if not yet done.
+
+        Folders are nested by ``KIND_SUBDIR[reaction.kind]`` so that
+        adsorption/desorption events live under
+        ``reactions/adsorption/iso{X}_lat{Y}/`` and diffusion events under
+        ``reactions/diffusion/diff_iso{X}_lat{Y}/``.
+        """
         iso = int(reaction.site.iso_class)
         lat = int(reaction.lateral_class.lateral_class)
-        key = (iso, lat)
+        sub = _kind_subdir(getattr(reaction, "kind", "adsorption"))
+        key = (sub, iso, lat)
 
-        folder = self.reactions_root / _reaction_folder_name(iso, lat)
+        sub_root = self.reactions_root / sub
+        if sub == "diffusion":
+            folder = sub_root / _diffusion_folder_name(iso, lat)
+        else:
+            folder = sub_root / _reaction_folder_name(iso, lat)
 
         if key in self._folder_meta:
             return folder
@@ -251,25 +303,64 @@ class ReactionWriter:
         folder.mkdir(parents=True, exist_ok=True)
 
         lc = reaction.lateral_class
-        # Stamped onto the lateral class by check_site_stability().
-        atoms_occ   = getattr(lc, "atoms_occupied",   None)
-        atoms_unocc = getattr(lc, "atoms_unoccupied", None)
-        if atoms_occ is not None:
-            ase_write(folder / "occupied.extxyz",   _safe_atoms_copy(atoms_occ),   format="extxyz")
+        if sub == "diffusion":
+            atoms_a  = getattr(lc, "atoms_a",  None)
+            atoms_b  = getattr(lc, "atoms_b",  None)
+            atoms_ts = getattr(lc, "atoms_ts", None)
+            if atoms_a is not None:
+                ase_write(folder / "state_a.extxyz", _safe_atoms_copy(atoms_a), format="extxyz")
+            else:
+                _log.warning(
+                    "ReactionWriter: diffusion lateral_class iso=%d lat=%d "
+                    "has no atoms_a — state_a.extxyz will not be written.",
+                    iso, lat,
+                )
+            if atoms_b is not None:
+                ase_write(folder / "state_b.extxyz", _safe_atoms_copy(atoms_b), format="extxyz")
+            else:
+                _log.warning(
+                    "ReactionWriter: diffusion lateral_class iso=%d lat=%d "
+                    "has no atoms_b — state_b.extxyz will not be written.",
+                    iso, lat,
+                )
+            if atoms_ts is not None:
+                ase_write(folder / "ts.extxyz", _safe_atoms_copy(atoms_ts), format="extxyz")
+            else:
+                _log.warning(
+                    "ReactionWriter: diffusion lateral_class iso=%d lat=%d "
+                    "has no atoms_ts — ts.extxyz will not be written.",
+                    iso, lat,
+                )
+            # Optional full NEB band (one frame per image: A, n_images
+            # intermediates, then B).  Stamped on by check_diffusion_stability
+            # only when persist_neb_path=True.
+            atoms_neb_path = getattr(lc, "atoms_neb_path", None)
+            if atoms_neb_path:
+                ase_write(
+                    folder / "neb_path.extxyz",
+                    [_safe_atoms_copy(im) for im in atoms_neb_path],
+                    format="extxyz",
+                )
         else:
-            _log.warning(
-                "ReactionWriter: lateral_class iso=%d lat=%d has no "
-                "atoms_occupied — occupied.extxyz will not be written.",
-                iso, lat,
-            )
-        if atoms_unocc is not None:
-            ase_write(folder / "unoccupied.extxyz", _safe_atoms_copy(atoms_unocc), format="extxyz")
-        else:
-            _log.warning(
-                "ReactionWriter: lateral_class iso=%d lat=%d has no "
-                "atoms_unoccupied — unoccupied.extxyz will not be written.",
-                iso, lat,
-            )
+            # Stamped onto the lateral class by check_site_stability().
+            atoms_occ   = getattr(lc, "atoms_occupied",   None)
+            atoms_unocc = getattr(lc, "atoms_unoccupied", None)
+            if atoms_occ is not None:
+                ase_write(folder / "occupied.extxyz",   _safe_atoms_copy(atoms_occ),   format="extxyz")
+            else:
+                _log.warning(
+                    "ReactionWriter: lateral_class iso=%d lat=%d has no "
+                    "atoms_occupied — occupied.extxyz will not be written.",
+                    iso, lat,
+                )
+            if atoms_unocc is not None:
+                ase_write(folder / "unoccupied.extxyz", _safe_atoms_copy(atoms_unocc), format="extxyz")
+            else:
+                _log.warning(
+                    "ReactionWriter: lateral_class iso=%d lat=%d has no "
+                    "atoms_unoccupied — unoccupied.extxyz will not be written.",
+                    iso, lat,
+                )
 
         self._folder_meta[key] = {
             "count":      0,
@@ -290,7 +381,8 @@ class ReactionWriter:
     ) -> None:
         iso = int(reaction.site.iso_class)
         lat = int(reaction.lateral_class.lateral_class)
-        meta = self._folder_meta[(iso, lat)]
+        sub = _kind_subdir(getattr(reaction, "kind", "adsorption"))
+        meta = self._folder_meta[(sub, iso, lat)]
         if fired:
             meta["count"] += 1
             if meta["first_step"] is None:
@@ -298,52 +390,131 @@ class ReactionWriter:
             meta["last_step"] = int(step)
 
         smiles = getattr(reaction.site, "reactant", "")
-        e_gas  = float((gas_energies or {}).get(smiles, float("nan")))
-        e_occ   = getattr(reaction.lateral_class, "energy_occupied",   None)
-        e_unocc = getattr(reaction.lateral_class, "energy_unoccupied", None)
+        lc = reaction.lateral_class
 
-        payload = {
-            "schema_version":   PERSISTENCE_SCHEMA_VERSION,
-            "iso_class":        iso,
-            "lateral_class":    lat,
-            "reactant_smiles":  smiles,
-            "kind_directions":  ["adsorption", "desorption"],
-            "description":      REACTION_DESCRIPTION_FMT.format(
-                kind     = reaction.kind,
-                smiles   = smiles,
-                iso      = iso,
-                member   = reaction.member_index,
-                lateral  = lat,
-                delta_e  = float(reaction.delta_e),
-                barrier  = float(reaction.barrier),
-                rate     = float(reaction.rate),
-            ),
-            "energies_ev": {
-                "occupied":   None if e_occ   is None else float(e_occ),
-                "unoccupied": None if e_unocc is None else float(e_unocc),
-                "gas_phase":  e_gas,
-            },
-            "last_event": (
-                {
-                    "kind":       str(reaction.kind),
-                    "delta_e_ev": float(reaction.delta_e),
-                    "barrier_ev": float(reaction.barrier),
-                    "rate_hz":    float(reaction.rate),
-                    "step":       int(step),
-                }
-                if fired else None
-            ),
-            "stats": {
-                "count":      int(meta["count"]),
-                "first_step": meta["first_step"],
-                "last_step":  meta["last_step"],
-            },
-            "atoms": {
-                "occupied":   "occupied.extxyz",
-                "unoccupied": "unoccupied.extxyz",
-            },
-            "calculator": dict(self._calc_meta),
-        }
+        if sub == "diffusion":
+            # Per-direction barriers from the *raw* NEB TS energy.  The
+            # KMC-side barrier is floored at EA_MIN (see kmc_adsorption.EA_MIN
+            # docstring) but the *raw* values are persisted unchanged so the
+            # floor is auditable from disk.
+            from autokmc.kmc_adsorption import EA_MIN as _EA_MIN
+            e_a  = getattr(lc, "energy_a",  None)
+            e_b  = getattr(lc, "energy_b",  None)
+            e_ts = getattr(lc, "energy_ts", None)
+            if e_a is not None and e_ts is not None:
+                ea_fwd_raw = float(e_ts) - float(e_a)
+                ea_fwd_kmc = max(_EA_MIN, ea_fwd_raw)
+            else:
+                ea_fwd_raw = ea_fwd_kmc = None
+            if e_b is not None and e_ts is not None:
+                ea_rev_raw = float(e_ts) - float(e_b)
+                ea_rev_kmc = max(_EA_MIN, ea_rev_raw)
+            else:
+                ea_rev_raw = ea_rev_kmc = None
+
+            payload = {
+                "schema_version":   PERSISTENCE_SCHEMA_VERSION,
+                "kind":             "diffusion",
+                "iso_class":        iso,
+                "lateral_class":    lat,
+                "reactant_smiles":  smiles,
+                "kind_directions":  ["a_to_b", "b_to_a"],
+                "description":      REACTION_DESCRIPTION_FMT.format(
+                    kind     = reaction.kind,
+                    smiles   = smiles,
+                    iso      = iso,
+                    member   = reaction.member_index,
+                    lateral  = lat,
+                    delta_e  = float(reaction.delta_e),
+                    barrier  = float(reaction.barrier),
+                    rate     = float(reaction.rate),
+                ),
+                "energies_ev": {
+                    "state_a":      None if e_a  is None else float(e_a),
+                    "state_b":      None if e_b  is None else float(e_b),
+                    "transition":   None if e_ts is None else float(e_ts),
+                },
+                "barriers_ev": {
+                    "forward_raw": ea_fwd_raw,
+                    "forward_kmc": ea_fwd_kmc,
+                    "reverse_raw": ea_rev_raw,
+                    "reverse_kmc": ea_rev_kmc,
+                    "ea_min_floor": _EA_MIN,
+                },
+                "last_event": (
+                    {
+                        "kind":       str(reaction.kind),
+                        "direction":  getattr(reaction, "direction", None),
+                        "delta_e_ev": float(reaction.delta_e),
+                        "barrier_ev": float(reaction.barrier),
+                        "rate_hz":    float(reaction.rate),
+                        "step":       int(step),
+                    }
+                    if fired else None
+                ),
+                "stats": {
+                    "count":      int(meta["count"]),
+                    "first_step": meta["first_step"],
+                    "last_step":  meta["last_step"],
+                },
+                "atoms": {
+                    "state_a":    "state_a.extxyz",
+                    "state_b":    "state_b.extxyz",
+                    "transition": "ts.extxyz",
+                    "neb_path":   ("neb_path.extxyz"
+                                   if getattr(lc, "atoms_neb_path", None)
+                                   else None),
+                },
+                "calculator": dict(self._calc_meta),
+            }
+        else:
+            e_gas  = float((gas_energies or {}).get(smiles, float("nan")))
+            e_occ   = getattr(lc, "energy_occupied",   None)
+            e_unocc = getattr(lc, "energy_unoccupied", None)
+
+            payload = {
+                "schema_version":   PERSISTENCE_SCHEMA_VERSION,
+                "kind":             "adsorption",
+                "iso_class":        iso,
+                "lateral_class":    lat,
+                "reactant_smiles":  smiles,
+                "kind_directions":  ["adsorption", "desorption"],
+                "description":      REACTION_DESCRIPTION_FMT.format(
+                    kind     = reaction.kind,
+                    smiles   = smiles,
+                    iso      = iso,
+                    member   = reaction.member_index,
+                    lateral  = lat,
+                    delta_e  = float(reaction.delta_e),
+                    barrier  = float(reaction.barrier),
+                    rate     = float(reaction.rate),
+                ),
+                "energies_ev": {
+                    "occupied":   None if e_occ   is None else float(e_occ),
+                    "unoccupied": None if e_unocc is None else float(e_unocc),
+                    "gas_phase":  e_gas,
+                },
+                "last_event": (
+                    {
+                        "kind":       str(reaction.kind),
+                        "delta_e_ev": float(reaction.delta_e),
+                        "barrier_ev": float(reaction.barrier),
+                        "rate_hz":    float(reaction.rate),
+                        "step":       int(step),
+                    }
+                    if fired else None
+                ),
+                "stats": {
+                    "count":      int(meta["count"]),
+                    "first_step": meta["first_step"],
+                    "last_step":  meta["last_step"],
+                },
+                "atoms": {
+                    "occupied":   "occupied.extxyz",
+                    "unoccupied": "unoccupied.extxyz",
+                },
+                "calculator": dict(self._calc_meta),
+            }
         with (folder / "reaction.json").open("w", encoding="utf-8") as fp:
             json.dump(_json_safe(payload), fp, indent=2)
 
@@ -368,8 +539,12 @@ class ReactionWriter:
         """
         iso = int(reaction.site.iso_class)
         lat = int(reaction.lateral_class.lateral_class)
-        if (iso, lat) in self._folder_meta:
-            return self.reactions_root / _reaction_folder_name(iso, lat)
+        sub = _kind_subdir(getattr(reaction, "kind", "adsorption"))
+        if (sub, iso, lat) in self._folder_meta:
+            sub_root = self.reactions_root / sub
+            if sub == "diffusion":
+                return sub_root / _diffusion_folder_name(iso, lat)
+            return sub_root / _reaction_folder_name(iso, lat)
         folder = self._ensure_reaction_folder(reaction)
         self._write_reaction_json(folder, reaction, step, gas_energies, fired=False)
         return folder
@@ -568,7 +743,7 @@ class ReactionSummary:
                 "reactant_smiles":  smiles,
                 "iso_class":        iso,
                 "lateral_class":    lat,
-                "reaction_dir":     f"{REACTIONS_DIR}/{_reaction_folder_name(iso, lat)}",
+                "reaction_dir":     _reaction_relative_dir(kind, iso, lat),
                 "count":            len(b["rate"]),
                 "first_step":       self._first_step[key],
                 "last_step":        self._last_step[key],

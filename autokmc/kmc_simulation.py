@@ -4,7 +4,7 @@ autokmc.kmc_simulation
 Kinetic Monte Carlo (BKL / Gillespie) engine for autokmc.
 
 This module mirrors the role of :mod:`disreax_kmc.simulation` but operates on
-the on-the-fly :class:`~autokmc.kmc_reactions.Reaction` objects produced from
+the on-the-fly :class:`~autokmc.kmc_adsorption.AdsorptionReaction` objects produced from
 materialised :class:`~autokmc.find_adsorbate_sites.AdsorbateSite`'s.
 
 The standard KMC loop is::
@@ -35,9 +35,10 @@ import numpy as np
 import networkx as nx
 
 from autokmc.find_adsorbate_sites import AdsorbateSite
+from autokmc.find_diffusion_sites import DiffusionSite
 from autokmc.reactants import Reactant
-from autokmc.kmc_reactions import (
-    Reaction,
+from autokmc.kmc_adsorption import (
+    AdsorptionReaction as Reaction,  # alias keeps existing type hints valid
     KB_EV,
     H_EV_S,
     DEFAULT_TRANSMISSION_COEFFICIENT,
@@ -45,6 +46,11 @@ from autokmc.kmc_reactions import (
     compute_all_reactions,
     get_applicable_reactions,
     fast_reaction_for_member,
+)
+from autokmc.kmc_diffusion import (
+    DiffusionReaction,
+    compute_all_diffusions,
+    get_applicable_diffusions,
 )
 from autokmc.check_adsorbate_sites import _surface_bfs_shells
 from autokmc.logging_utils import get_logger
@@ -123,44 +129,55 @@ class _RateSegmentTree:
 class _ReactionIndex:
     """Flat (site, member) → leaf-id mapping plus the segment-tree of rates.
 
-    Each ``AdsorbateSite`` gets a contiguous block of leaves of length
-    ``len(site.member_node_ids)``.  ``self.reactions[leaf]`` holds the
-    currently-active :class:`Reaction` for that (site, member) pair, or
-    ``None`` when the member has no applicable reaction (clique-blocked,
-    unstable, …).  The companion segment-tree keeps the rate column in
-    sync so sampling and updates are both O(log R).
+    Each ``AdsorbateSite`` and each ``DiffusionSite`` gets a contiguous
+    block of leaves of length ``len(site.member_node_ids)``.
+    ``self.reactions[leaf]`` holds the currently-active reaction for that
+    (site, member) pair (an :class:`AdsorptionReaction` or a
+    :class:`DiffusionReaction`), or ``None`` when no reaction is currently
+    applicable (clique-blocked, unstable, …).  The companion segment-tree
+    keeps the rate column in sync so sampling and updates are both O(log R).
     """
-    __slots__ = ("base", "n_total", "tree", "reactions", "site_order")
+    __slots__ = ("base", "n_total", "tree", "reactions", "site_order",
+                 "diffusion_site_order")
 
-    def __init__(self, sites: list[AdsorbateSite]):
+    def __init__(
+        self,
+        sites: list[AdsorbateSite],
+        diffusion_sites: list[DiffusionSite] | None = None,
+    ):
         self.site_order: list[AdsorbateSite] = list(sites)
+        self.diffusion_site_order: list[DiffusionSite] = list(diffusion_sites or [])
         self.base: dict[int, int] = {}
         offset = 0
         for s in self.site_order:
             self.base[id(s)] = offset
             offset += len(s.member_node_ids)
+        for ds in self.diffusion_site_order:
+            self.base[id(ds)] = offset
+            offset += len(ds.member_node_ids)
         self.n_total = offset
         self.tree = _RateSegmentTree(self.n_total)
-        self.reactions: list[Reaction | None] = [None] * self.n_total
+        self.reactions: list[Reaction | DiffusionReaction | None] = (
+            [None] * self.n_total
+        )
 
-    def leaf_id(self, site: AdsorbateSite, m_idx: int) -> int:
+    def leaf_id(self, site, m_idx: int) -> int:
         return self.base[id(site)] + int(m_idx)
 
-    def install(self, rxn: Reaction | None,
-                site: AdsorbateSite, m_idx: int) -> None:
+    def install(self, rxn, site, m_idx: int) -> None:
         i = self.leaf_id(site, m_idx)
         self.reactions[i] = rxn
         self.tree.update(i, rxn.rate if (rxn is not None and rxn.rate > 0.0) else 0.0)
 
-    def install_site(self, site: AdsorbateSite,
-                     reactions: list[Reaction]) -> None:
-        """Refresh every leaf for *site* from a freshly-computed reaction list."""
-        # Clear all leaves of the site first.
+    def install_site(self, site, reactions: list) -> None:
+        """Refresh every leaf for *site* from a freshly-computed reaction list.
+
+        Works for both :class:`AdsorbateSite` and :class:`DiffusionSite`.
+        """
         b = self.base[id(site)]
         for k in range(len(site.member_node_ids)):
             self.reactions[b + k] = None
             self.tree.update(b + k, 0.0)
-        # Then install whatever new reactions exist.
         for r in reactions:
             self.install(r, r.site, r.member_index)
 
@@ -309,12 +326,39 @@ def _affected_surface_cliques(
     return out
 
 
-def execute_reaction(G: nx.Graph, reaction: Reaction) -> set:
-    """Apply *reaction* in place by toggling the member's occupancy on *G*.
+def execute_reaction(G: nx.Graph, reaction) -> set:
+    """Apply *reaction* in place by toggling member occupancies on *G*.
 
-    Returns the set of surface cliques touched by the executed member —
-    useful for the incremental rebuild in :func:`run_kmc_steps`.
+    Returns the set of surface cliques touched by the executed event —
+    used by the incremental rebuild in :func:`run_kmc_steps`.
+
+    Dispatch:
+
+    * :class:`AdsorptionReaction` (``kind ∈ {"adsorption","desorption"}``)
+      — toggles one member.
+    * :class:`DiffusionReaction`  (``kind == "diffusion"``)
+      — vacates the source endpoint and occupies the target endpoint
+      (per ``reaction.direction``); returns the union of both endpoints'
+      bonded cliques.
     """
+    if getattr(reaction, "kind", None) == "diffusion":
+        ds: DiffusionSite = reaction.site
+        site_a, m_a, site_b, m_b = ds.members[reaction.member_index]
+        if reaction.direction == "a_to_b":
+            src_site, src_m = site_a, m_a
+            tgt_site, tgt_m = site_b, m_b
+        else:
+            src_site, src_m = site_b, m_b
+            tgt_site, tgt_m = site_a, m_a
+        cliques: set = set()
+        cliques |= _affected_surface_cliques(G, src_site, src_m)
+        cliques |= _affected_surface_cliques(G, tgt_site, tgt_m)
+        # Vacate first, then occupy — this keeps occupied_by_clique
+        # consistent if the two endpoints happen to share a (sub-) clique.
+        _set_member_occupied(G, src_site, src_m, False)
+        _set_member_occupied(G, tgt_site, tgt_m, True)
+        return cliques
+
     new_state = (reaction.kind == "adsorption")
     cliques = _affected_surface_cliques(G, reaction.site, reaction.member_index)
     _set_member_occupied(G, reaction.site, reaction.member_index, new_state)
@@ -410,6 +454,41 @@ def _lateral_shell_members(
     return out
 
 
+def _diffusion_lateral_shell_members(
+    G: nx.Graph,
+    affected_cliques: set,
+    active_diffusion_ids: set[int] | None,
+    max_n_shells: int,
+) -> list[tuple[DiffusionSite, int]]:
+    """Diffusion analogue of :func:`_lateral_shell_members`.
+
+    Walks ``G.graph["diffusion_surface_node_to_members"]`` after a
+    surface-only BFS expansion of ``affected_cliques`` by ``max_n_shells``
+    hops.
+    """
+    surface_node_to_members: dict | None = G.graph.get(
+        "diffusion_surface_node_to_members"
+    )
+    if not surface_node_to_members or not affected_cliques:
+        return []
+
+    seed = frozenset(s for clq in affected_cliques for s in clq)
+    expanded: frozenset = _surface_bfs_shells(G, seed, max_n_shells)
+
+    seen: set[tuple[int, int]] = set()
+    out: list[tuple[DiffusionSite, int]] = []
+    for surf_id in expanded:
+        for ds, m_idx in surface_node_to_members.get(surf_id, ()):
+            if active_diffusion_ids is not None and id(ds) not in active_diffusion_ids:
+                continue
+            key = (id(ds), int(m_idx))
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append((ds, m_idx))
+    return out
+
+
 def _recompute_affected_sites(
     G: nx.Graph,
     adsorbate_sites: list[AdsorbateSite],
@@ -425,6 +504,8 @@ def _recompute_affected_sites(
     verbose: bool,
     max_n_shells: int = 1,
     rxn_index: _ReactionIndex | None = None,
+    diffusion_sites: list[DiffusionSite] | None = None,
+    diffusion_kwargs: dict | None = None,
 ) -> None:
     """Recompute lateral classes and rates for every member in the lateral
     shell of the just-toggled member.
@@ -501,6 +582,42 @@ def _recompute_affected_sites(
         if rxn_index is not None:
             rxn_index.install_site(site, rxns)
 
+    # ── Diffusion sites: same lateral-shell expansion, separate index ─────
+    if diffusion_sites:
+        active_ds_ids: set[int] | None = (
+            set(rxn_index.base.keys()) if rxn_index is not None else None
+        )
+        affected_ds = _diffusion_lateral_shell_members(
+            G, affected_cliques, active_ds_ids, max_n_shells,
+        )
+        ds_to_update: dict[int, DiffusionSite] = {}
+        for ds, _ in affected_ds:
+            ds_to_update[id(ds)] = ds
+
+        # Fallback when the reverse index isn't built — also recompute every
+        # diffusion site whose endpoints touch the affected cliques.
+        if not ds_to_update:
+            for ds in diffusion_sites:
+                for m_idx in range(len(ds.member_node_ids)):
+                    site_a, m_a, site_b, m_b = ds.members[m_idx]
+                    if (_affected_surface_cliques(G, site_a, m_a)
+                        | _affected_surface_cliques(G, site_b, m_b)) & affected_cliques:
+                        ds_to_update[id(ds)] = ds
+                        break
+
+        dkwargs = dict(diffusion_kwargs or {})
+        for ds in (ds_to_update.values() if ds_to_update else ()):
+            rxns = get_applicable_diffusions(
+                G, ds, calculator,
+                temperature              = temperature,
+                transmission_coefficient = transmission_coefficient,
+                frozen_indices           = frozen_indices,
+                verbose                  = verbose,
+                **dkwargs,
+            )
+            if rxn_index is not None:
+                rxn_index.install_site(ds, rxns)
+
 
 
 # ---------------------------------------------------------------------------
@@ -522,7 +639,10 @@ def run_kmc_steps(
     rng: random.Random | np.random.Generator | int | None = None,
     log_every: int = 1,
     verbose: bool = True,
-    # ── Optional persistence hooks (autokmc.persistence) ──────────────────
+    # ── Diffusion (NEB) channel ────────────────────────────────────────────
+    diffusion_sites: list[DiffusionSite] | None = None,
+    diffusion_kwargs: dict | None = None,
+    # ── Optional persistence hooks (autokmc.persistence) ─────────��────────
     reaction_writer=None,
     trajectory_writer=None,
     summary_collector=None,
@@ -559,6 +679,17 @@ def run_kmc_steps(
     log_every : int
         Print a log line every N steps.  Set to 0/None to silence per-step output.
     verbose : bool
+    diffusion_sites : list[DiffusionSite] | None
+        Diffusion (hop) iso-classes from
+        :func:`autokmc.find_diffusion_sites.find_diffusion_sites`.  When
+        non-empty the diffusion channel is enabled: every applicable
+        :class:`DiffusionReaction` is added to the segment-tree alongside
+        the adsorption / desorption reactions.
+    diffusion_kwargs : dict | None
+        Keyword arguments forwarded to
+        :func:`autokmc.kmc_diffusion.get_applicable_diffusions` (NEB knobs:
+        ``fmax``, ``max_steps``, ``n_images``, ``climb``, ``spring_k``,
+        ``interpolation``, ``persist_neb_path``).
     reaction_writer : autokmc.persistence.ReactionWriter | None
         Optional writer.  When supplied, every executed event is persisted
         as one JSON line + sidecar XYZ snapshots of the pre/post Atoms.
@@ -606,14 +737,36 @@ def run_kmc_steps(
         verbose                  = False,
     )
 
+    # ── Diffusion channel: initial NEB sweep ──────────────────────────────
+    diffusion_sites = list(diffusion_sites or [])
+    diffusion_kwargs = dict(diffusion_kwargs or {})
+    if diffusion_sites:
+        if verbose:
+            print(
+                f"[KMC] Initial diffusion sweep over "
+                f"{len(diffusion_sites)} DiffusionSite(s) "
+                f"(NEB lazily per new lateral class)…"
+            )
+        compute_all_diffusions(
+            G, diffusion_sites, calculator,
+            temperature              = temperature,
+            transmission_coefficient = transmission_coefficient,
+            frozen_indices           = frozen_indices,
+            verbose                  = False,
+            **diffusion_kwargs,
+        )
+
     # ── Build the segment-tree rate index (suggestion.MD #3) ─────────────
     # Each (site, member) pair gets a fixed leaf position so the per-step
     # cost of sampling a reaction and updating affected leaves is O(log R)
     # instead of the O(R) ``np.cumsum`` + ``np.searchsorted`` rebuild.
-    rxn_index = _ReactionIndex(adsorbate_sites)
+    rxn_index = _ReactionIndex(adsorbate_sites, diffusion_sites)
     for site in adsorbate_sites:
         rxns = getattr(site, "applicable_reactions", None) or []
         rxn_index.install_site(site, rxns)
+    for ds in diffusion_sites:
+        rxns = getattr(ds, "applicable_reactions", None) or []
+        rxn_index.install_site(ds, rxns)
 
     def _persist_all_known_reactions(step_for_discovery: int) -> None:
         """Materialise per-(iso, lat) folders for every currently-known
@@ -655,7 +808,9 @@ def run_kmc_steps(
     max_n_shells: int = LATERAL_SHELLS_DEFAULT
 
     history: list[tuple] = []
-    reaction_counts: dict[str, int] = {"adsorption": 0, "desorption": 0}
+    reaction_counts: dict[str, int] = {
+        "adsorption": 0, "desorption": 0, "diffusion": 0,
+    }
     current_time = 0.0
     steps_executed = 0
 
@@ -762,6 +917,8 @@ def run_kmc_steps(
             verbose                  = False,
             max_n_shells             = max_n_shells,
             rxn_index                = rxn_index,
+            diffusion_sites          = diffusion_sites,
+            diffusion_kwargs         = diffusion_kwargs,
         )
 
         # Persist every newly-discovered (iso, lat) reaction surfaced by the
