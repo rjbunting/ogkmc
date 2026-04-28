@@ -601,6 +601,66 @@ def _bond_set(
     return bonds
 
 
+def _check_intended_coordination_stable(
+    atoms_opt: Atoms,
+    G: nx.Graph,
+    self_node_ids,
+    n_slab: int,
+    n_lat: int,
+    nl_mult: float,
+) -> None:
+    """Raise :class:`AdsorbateDissociationError` if any self adsorbate atom lost
+    its intended surface-clique bond after ML relaxation.
+
+    The *atoms_opt* atom ordering is ``[slab | lat_neighbours | self]``.
+    Self atoms are at ASE indices ``n_slab+n_lat … n_slab+n_lat+len(self_nodes)-1``
+    in the same sorted-by-node-id order used by :func:`_build_stability_atoms`.
+
+    ``G.nodes[nid]["clique"]`` gives the frozenset of intended surface G-node ids
+    for each adsorbate node.  The slab atoms in *atoms_opt* are sorted by
+    ``G.nodes[n].get("index", n)`` so we can map G-node ids → ASE indices.
+    """
+    # Map slab G-node id → ASE index in atoms_opt.
+    slab_nodes_sorted = sorted(
+        (n for n, d in G.nodes(data=True) if d.get("type") in ("bulk", "surface")),
+        key=lambda n: G.nodes[n].get("index", n),
+    )
+    node_to_ase = {int(nid): i for i, nid in enumerate(slab_nodes_sorted)}
+
+    # Self nodes in the same order as _build_stability_atoms uses.
+    self_nid_list = sorted(nid for nid in self_node_ids if nid in G)
+
+    cutoffs = natural_cutoffs(atoms_opt, mult=nl_mult)
+    nl      = NeighborList(cutoffs, self_interaction=False, bothways=True)
+    nl.update(atoms_opt)
+
+    missing_info: list[str] = []
+    for j, nid in enumerate(self_nid_list):
+        clq = G.nodes[nid].get("clique")
+        if not clq:
+            continue
+        ase_self   = n_slab + n_lat + j
+        neighbours = {int(k) for k in nl.get_neighbors(ase_self)[0]}
+        for surf_nid in clq:
+            ase_surf = node_to_ase.get(int(surf_nid))
+            if ase_surf is None:
+                continue
+            if ase_surf not in neighbours:
+                missing_info.append(
+                    f"node {nid} → surf_node {surf_nid} "
+                    f"(ASE ads={ase_self}, surf={ase_surf})"
+                )
+
+    if missing_info:
+        detail = "  ".join(missing_info[:3]) + (
+            "…" if len(missing_info) > 3 else ""
+        )
+        raise AdsorbateDissociationError(
+            f"[occupied] Adsorbate lost intended surface bond after relaxation. "
+            + detail
+        )
+
+
 def _check_connectivity_stable(
     atoms_before: Atoms,
     atoms_after:  Atoms,
@@ -874,6 +934,20 @@ def check_site_stability(
             relevant_indices=ads_indices,
             n_lat=n_lat,
         )
+
+        # ── Intended-coordination check (occupied state only) ─────────────
+        # Verify each self-adsorbate atom is still bonded to its intended
+        # surface clique in the relaxed structure.  The bonds_before/after
+        # comparison above only catches changes relative to the *initial*
+        # placement; if the initial placement already lacks the intended bond
+        # (e.g. after Kabsch propagation moved the anchor too far), the
+        # bonds_before==bonds_after test passes trivially.  This check uses
+        # the clique stored on the graph node as the ground truth.
+        if include_self:
+            _check_intended_coordination_stable(
+                atoms_opt, G, self_node_ids,
+                n_slab, n_lat, nl_mult,
+            )
 
         energy = float(atoms_opt.get_potential_energy())
 
