@@ -1,0 +1,48 @@
+# autokmc — CO on Cu(111) with NequIP
+# Run with:    autokmc run example/co_cu111_allegro.yaml
+schema_version: "1"
+
+output:
+  dir: ./runs/co_cu111_nequip
+  trajectory_dump_every: 10
+  log_level: INFO
+
+structure:
+  kind: surface
+  composition: Cu
+  crystal_structure: fcc
+  miller_index: [1, 1, 1]
+  lattice_constant: 3.615
+  min_slab_size: 12.0
+  min_vacuum_size: 12.0
+  goal_x: 20.0
+  goal_y: 20.0
+  n_freeze_layers: 2
+
+reactants:
+  - smiles: "[C-]#[O+]"
+    add_hydrogens: false
+    relax_in_gas: true
+
+# NequIPCalculator must be created via its factory method, not direct
+# instantiation — use `factory` + `factory_kwargs` only.
+# Set `compile_path` to your compiled NequIP model (.pt2 for CUDA, .pth for CPU).
+calculator:
+  factory: nequip.ase.NequIPCalculator.from_compiled_model
+  factory_kwargs:
+    compile_path: ./autokmc/dev/cpuhcocuau.nequip.pth
+    device: cpu
+
+adsorbate_sites:
+  prune_stable_only: true
+  fmax: 0.01
+  max_steps: 1000
+
+kmc:
+  temperature_k: 500.0
+  n_steps: 10000
+  transmission_coefficient: 1.0
+  fmax: 0.01
+  max_steps: 1000
+  log_every: 1
+  random_seed: 69

@@ -8,7 +8,11 @@ Each node represents one atom and carries:
 * ``element``        – chemical symbol (str)
 * ``position``       – Cartesian coordinates (np.ndarray, shape (3,))
 * ``index``          – atom index in the original :class:`~ase.Atoms` object (int)
-* ``type``           – one of ``"bulk"``, ``"surface"``, or ``"adsorbate"`` (str)
+* ``type``           – one of ``"bulk"``, ``"surface"``, ``"adsorbate"``,
+  or ``"anchor"`` (str).  The first three are written here from
+  ``atoms.arrays["surface"]``; ``"anchor"`` nodes are added later by
+  :func:`autokmc.find_anchors.find_anchor_sites` (one node per
+  raw site clique).
 * ``covalent_radius``– covalent radius in Å from ASE data (float)
 
 Each edge carries:
@@ -34,10 +38,14 @@ Graph-level metadata (``G.graph[...]``):
   the neighbour-list — an axis is True iff at least one bond crosses
   the cell image along it (so a nanoparticle in a periodic cubic cell
   with sufficient vacuum reports ``pbc=array([False, False, False])``).
-* ``"autokmc"`` – the :class:`~autokmc.cache.SiteCache` for this graph.
+* ``"hull_equations"`` – ``(n_facets, 4)`` convex-hull equations array,
+  present only for nanoparticle structures.
 """
 
 from __future__ import annotations
+
+import logging
+import warnings
 
 import numpy as np
 import networkx as nx
@@ -47,10 +55,8 @@ from ase.data import covalent_radii as ASE_COVALENT_RADII
 from ase.neighborlist import NeighborList, natural_cutoffs
 
 from autokmc.constants import NL_MULT_DEFAULT
-from autokmc.cache import get_cache
-from autokmc.logging_utils import get_logger
 
-_log = get_logger(__name__)
+_log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -147,17 +153,35 @@ def build_graph(
 
     G.graph["pbc"] = pbc_effective
 
-    # Install (or refresh) the typed cache; aliases legacy G.graph["sites"]
-    # etc. to the typed dicts so existing code keeps working.
-    cache = get_cache(G)
+    # Warn if user-declared PBC disagrees with what the bonding-derived
+    # effective PBC says.  Common causes: a slab's vacuum gap is too small
+    # so atoms bond across z (False→True), or a nanoparticle is centred in
+    # a too-small periodic cell (False→True), or a nominally periodic axis
+    # has no inter-image bonds because the cell vector is huge (True→False
+    # — usually fine and intentional).  Only the first case is a real bug.
+    user_pbc = np.asarray(atoms.get_pbc(), dtype=bool)
+    if not np.array_equal(user_pbc, pbc_effective):
+        # We only warn for the dangerous direction (user said no-PBC but
+        # bonding says yes).  The other direction is the documented NP
+        # convention and is silent.
+        unexpected = (~user_pbc) & pbc_effective
+        if unexpected.any():
+            warnings.warn(
+                f"build_graph: cross-image bonds detected along axes "
+                f"{np.where(unexpected)[0].tolist()} where atoms.pbc was "
+                f"{user_pbc.tolist()}.  Effective pbc is "
+                f"{pbc_effective.tolist()}.  This is usually a vacuum-gap "
+                f"or cell-size bug; downstream code uses G.graph['pbc'].",
+                RuntimeWarning,
+                stacklevel=2,
+            )
 
     # Re-use any hull computed by find_surface_atoms (nanoparticle path) so
-    # downstream code (default_sites.find_sites_for_element) need not
-    # rebuild it.  Stored as the (n_facets, 4) equations array; that is
-    # all the spurious-clique filter actually needs.
+    # downstream code need not rebuild it.  Stored as the (n_facets, 4)
+    # equations array on the graph directly.
     hull_eq = atoms.info.get("_hull_equations")
     if hull_eq is not None:
-        cache.hull = np.asarray(hull_eq, dtype=float)
+        G.graph["hull_equations"] = np.asarray(hull_eq, dtype=float)
 
     _log.debug(
         "build_graph: %d nodes, %d edges, pbc=%s, nl_mult=%g",
