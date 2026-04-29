@@ -89,15 +89,68 @@ from autokmc.find_diffusion_sites import (
 )
 from autokmc.check_adsorbate_sites import (
     _surface_bfs_shells,
-    _lateral_node_match,
-    _lateral_fingerprint,
     _expand_to_full_placement,
     _check_connectivity_stable,
     _check_intended_coordination_stable,
+    _bond_set,
     SurfaceConnectivityError,
     AdsorbateDissociationError,
     OptimisationFailedError,
 )
+
+
+# ---------------------------------------------------------------------------
+# Diffusion-specific lateral predicates
+# ---------------------------------------------------------------------------
+#
+# The adsorption helpers ``_lateral_node_match`` / ``_lateral_fingerprint``
+# do not look at ``endpoint_role``.  For diffusion we *must* preserve the
+# distinction between an endpoint adsorbate (the migrating species at A or
+# B) and a third-party occupied adsorbate that happens to share the same
+# SMILES / iso_class — otherwise two physically different lateral
+# environments (endpoint at site P with neighbour at Q vs. endpoint at Q
+# with neighbour at P) collapse into the same lateral class and we cache
+# the wrong NEB barrier against them.
+#
+# The tag is ``"endpoint"`` for both A and B, so the iso match remains
+# symmetric under A↔B (a hop is intrinsically reversible).
+
+def _diffusion_lateral_node_match(d1: dict, d2: dict) -> bool:
+    """Lateral-iso predicate for the diffusion ego-graph.
+
+    Same as :func:`autokmc.check_adsorbate_sites._lateral_node_match` but
+    additionally requires ``endpoint_role`` to agree on adsorbate nodes so
+    endpoints never map onto third-party neighbours of the same SMILES.
+    """
+    if d1.get("type") != d2.get("type"):
+        return False
+    if d1.get("element") != d2.get("element"):
+        return False
+    if d1.get("type") == "adsorbate":
+        if d1.get("iso_class") != d2.get("iso_class"):
+            return False
+        if d1.get("reactant") != d2.get("reactant"):
+            return False
+        # Treat missing ``endpoint_role`` as None on both sides.
+        if d1.get("endpoint_role") != d2.get("endpoint_role"):
+            return False
+    return True
+
+
+def _diffusion_lateral_fingerprint(g: nx.Graph) -> tuple:
+    """Cheap pre-filter mirroring :func:`_diffusion_lateral_node_match`."""
+    node_sigs = tuple(sorted(
+        (
+            d.get("type",      "X"),
+            d.get("element",   "X"),
+            int(d.get("iso_class", -1)) if d.get("type") == "adsorbate" else -1,
+            str(d.get("reactant",  "")) if d.get("type") == "adsorbate" else "",
+            str(d.get("endpoint_role", "")) if d.get("type") == "adsorbate" else "",
+            g.degree(n),
+        )
+        for n, d in g.nodes(data=True)
+    ))
+    return (g.number_of_nodes(), g.number_of_edges(), node_sigs)
 from autokmc.constants import (
     LATERAL_SHELLS_DEFAULT,
     NL_MULT_DEFAULT,
@@ -316,20 +369,31 @@ def check_diffusion_site_lateral(
         endpoint_b_ids = endpoint_b_ids,
     )
 
-    fkey = _lateral_fingerprint(ego)
+    fkey = _diffusion_lateral_fingerprint(ego)
 
     fp_index: dict | None = getattr(diffusion_site, "_lateral_fp_index", None)
     if fp_index is None:
         fp_index = {}
         diffusion_site._lateral_fp_index = fp_index   # type: ignore[attr-defined]
 
+    # If this member was previously assigned to a different lateral class,
+    # remove it from that class's members list before re-assigning so
+    # ``lc.members`` always reflects the current classification.
+    def _drop_from_other_classes(new_lc=None) -> None:
+        for other in diffusion_site.lateral_classes:
+            if other is new_lc:
+                continue
+            if member_index in other.members:
+                other.members.remove(member_index)
+
     for lc in fp_index.get(fkey, ()):
         if lc.n_shells != depth or lc.ego_graph is None:
             continue
         gm = isomorphism.GraphMatcher(
-            ego, lc.ego_graph, node_match=_lateral_node_match,
+            ego, lc.ego_graph, node_match=_diffusion_lateral_node_match,
         )
         if gm.is_isomorphic():
+            _drop_from_other_classes(new_lc=lc)
             if member_index not in lc.members:
                 lc.members.append(member_index)
             _log.debug(
@@ -339,6 +403,7 @@ def check_diffusion_site_lateral(
             )
             return lc
 
+    _drop_from_other_classes(new_lc=None)
     new_lc = DiffusionLateral(
         lateral_class = len(diffusion_site.lateral_classes),
         ego_graph     = ego,
@@ -383,7 +448,8 @@ def _build_diffusion_atoms(
     *,
     endpoint_position: str,
     frozen_indices: list[int] | None = None,
-) -> tuple[Atoms, int, int, list[int]]:
+    base_atoms: Atoms | None = None,
+) -> tuple[Atoms, int, int, list[int], list[int]]:
     """Build a single-endpoint Atoms object for a diffusion calculation.
 
     Atom layout::
@@ -411,6 +477,14 @@ def _build_diffusion_atoms(
     n_lat : int
     migrating_atom_indices : list[int]
         ASE indices of the migrating molecule (length = SMILES atom count).
+    migrating_node_ids : list[int]
+        Graph node ids backing the migrating-molecule block, in the same
+        order as ``migrating_atom_indices``.  These are A's nodes when
+        ``endpoint_position == "a"`` and B's nodes when ``endpoint_position
+        == "b"`` — i.e. the node ids whose ``G.nodes[nid]["clique"]``
+        entries describe the *intended* surface coordination at the
+        endpoint we just built (used by the post-relaxation
+        :func:`_check_intended_coordination_stable` check).
     """
     if endpoint_position not in ("a", "b"):
         raise ValueError(
@@ -452,11 +526,6 @@ def _build_diffusion_atoms(
 
     # ── Assemble ────────────────────────────────────────────────────────
     slab_lat_nodes = slab_nodes + lat_nodes
-    symbols   = [G.nodes[n]["element"] for n in slab_lat_nodes] + symbols_mig
-    positions = [
-        np.asarray(G.nodes[n]["position"], dtype=float) for n in slab_lat_nodes
-    ] + positions_mig
-
     n_slab = len(slab_nodes)
     n_lat  = len(lat_nodes)
     n_mig  = len(symbols_mig)
@@ -464,17 +533,46 @@ def _build_diffusion_atoms(
     cell = np.array(G.graph["cell"], dtype=float)
     pbc  = np.asarray(G.graph.get("pbc", [True, True, False]), dtype=bool)
 
-    atoms = Atoms(
-        symbols   = symbols,
-        positions = np.asarray(positions, dtype=float),
-        cell      = cell,
-        pbc       = pbc,
-    )
+    if base_atoms is not None:
+        # Reuse the relaxed slab+lat positions from a prior endpoint
+        # relaxation so the NEB endpoints share the same surface basin.
+        # Only the migrating-molecule block is overwritten with the
+        # endpoint-specific coordinates.
+        if len(base_atoms) != n_slab + n_lat + n_mig:
+            raise ValueError(
+                "base_atoms has wrong length for the slab+lat+mig layout: "
+                f"got {len(base_atoms)}, expected {n_slab + n_lat + n_mig}."
+            )
+        atoms = base_atoms.copy()
+        positions = atoms.get_positions()
+        positions[n_slab + n_lat : n_slab + n_lat + n_mig] = np.asarray(
+            positions_mig, dtype=float,
+        )
+        atoms.set_positions(positions)
+    else:
+        symbols   = [G.nodes[n]["element"] for n in slab_lat_nodes] + symbols_mig
+        positions = [
+            np.asarray(G.nodes[n]["position"], dtype=float) for n in slab_lat_nodes
+        ] + positions_mig
+        atoms = Atoms(
+            symbols   = symbols,
+            positions = np.asarray(positions, dtype=float),
+            cell      = cell,
+            pbc       = pbc,
+        )
+
     if frozen_indices:
         atoms.set_constraint(FixAtoms(indices=list(frozen_indices)))
 
     migrating_atom_indices = list(range(n_slab + n_lat, n_slab + n_lat + n_mig))
-    return atoms, n_slab, n_lat, migrating_atom_indices
+    # Return the node-id ordering that matches each migrating atom's actual
+    # identity at this endpoint: A's nodes when at A, B's nodes when at B.
+    # The element symbols are taken from A throughout (both endpoints share
+    # the SMILES) but the per-atom *clique* attribute comes from G under
+    # whichever node id physically describes the placement at the relevant
+    # endpoint.  ``_check_intended_coordination_stable`` looks up
+    # ``G.nodes[nid]["clique"]`` so it must receive the endpoint-correct nids.
+    return atoms, n_slab, n_lat, migrating_atom_indices, list(chosen_nodes)
 
 
 # ---------------------------------------------------------------------------
@@ -494,6 +592,7 @@ def _relax_endpoint(
     n_mig: int,
     G: nx.Graph,
     self_node_ids: frozenset,
+    self_node_order: list[int] | None,
     state_label: str,
     verbose: bool,
 ) -> tuple[Atoms, float]:
@@ -540,6 +639,7 @@ def _relax_endpoint(
         _check_intended_coordination_stable(
             atoms_opt, G, self_node_ids,
             n_slab, n_lat, nl_mult,
+            self_node_order=self_node_order,
         )
 
         energy = float(atoms_opt.get_potential_energy())
@@ -608,9 +708,13 @@ def _make_neb_band(
     if interpolation == "idpp" and _idpp_interpolate is not None:
         try:
             _idpp_interpolate(neb, mic=True)
-        except Exception:
+        except Exception as exc:
             # IDPP can fail for very short bands or pathological geometries;
             # fall back gracefully so a single bad pair doesn't kill the run.
+            _log.warning(
+                "IDPP interpolation failed (%s: %s); falling back to linear.",
+                type(exc).__name__, exc,
+            )
             neb.interpolate("linear", mic=True)
     else:
         neb.interpolate("linear", mic=True)
@@ -619,10 +723,99 @@ def _make_neb_band(
 
 
 def _check_ts_validity(
-    *args, **kwargs,
+    atoms_ts: Atoms,
+    atoms_a: Atoms,
+    atoms_b: Atoms,
+    *,
+    n_slab: int,
+    n_lat: int,
+    n_mig: int,
+    nl_mult: float,
+    e_a: float,
+    e_b: float,
+    e_ts: float,
+    ts_index: int,
+    n_interior: int,
+    energy_tol: float = 1e-3,
 ) -> None:
-    """Placeholder — TS validity checks removed pending future implementation."""
-    pass
+    """Validate that the highest-energy NEB image is a real saddle.
+
+    Detects three failure modes that otherwise propagate silently into the
+    KMC rate:
+
+    1. **Energy ordering** — ``E_ts < max(E_a, E_b) − energy_tol`` (eV) means
+       the band is monotonic / reversed and there is no saddle.
+    2. **Endpoint collapse** — the saddle is one of the boundary interior
+       images (1 or n_interior) *and* its energy is within ``energy_tol``
+       of the adjacent endpoint, i.e. the band trivially recovers an
+       endpoint energy with no genuine barrier.
+    3. **Migrating-molecule fragmentation** — the bond topology *within*
+       the migrating block changed at the TS relative to **both** endpoints.
+       (We tolerate matching the topology of either A or B — at the saddle
+       the molecule may have already passed through bond rearrangement on
+       one side.)
+
+    Raises
+    ------
+    TransitionStateInvalidError
+        If any of the above checks fires.
+    """
+    # 1. Energy ordering.
+    if not (np.isfinite(e_ts) and np.isfinite(e_a) and np.isfinite(e_b)):
+        raise TransitionStateInvalidError(
+            f"TS / endpoint energies are not finite "
+            f"(E_a={e_a}, E_b={e_b}, E_ts={e_ts})."
+        )
+    e_max_endpoint = max(float(e_a), float(e_b))
+    if float(e_ts) < e_max_endpoint - float(energy_tol):
+        raise TransitionStateInvalidError(
+            f"NEB has no genuine saddle: E_ts={e_ts:.4f} eV is below "
+            f"max(E_a, E_b)={e_max_endpoint:.4f} eV (tol={energy_tol})."
+        )
+
+    # 2. Endpoint collapse — TS sits at the band edge and matches its
+    # adjacent endpoint within energy_tol.
+    if n_interior >= 1:
+        if ts_index == 1 and abs(float(e_ts) - float(e_a)) < float(energy_tol):
+            raise TransitionStateInvalidError(
+                f"TS image (k={ts_index}) collapsed onto endpoint A: "
+                f"E_ts={e_ts:.4f} eV ≈ E_a={e_a:.4f} eV "
+                f"(tol={energy_tol})."
+            )
+        if ts_index == n_interior and abs(float(e_ts) - float(e_b)) < float(energy_tol):
+            raise TransitionStateInvalidError(
+                f"TS image (k={ts_index}) collapsed onto endpoint B: "
+                f"E_ts={e_ts:.4f} eV ≈ E_b={e_b:.4f} eV "
+                f"(tol={energy_tol})."
+            )
+
+    # 3. Migrating-molecule connectivity.  Compute intra-mig bonds for
+    # A, B and TS using the relevant_indices filter so only bonds involving
+    # the migrating atoms are compared.  TS must match A *or* B.
+    if n_mig >= 2:
+        mig_indices = set(range(n_slab + n_lat, n_slab + n_lat + n_mig))
+        bonds_a  = _bond_set(atoms_a,  nl_mult=nl_mult, relevant_indices=mig_indices)
+        bonds_b  = _bond_set(atoms_b,  nl_mult=nl_mult, relevant_indices=mig_indices)
+        bonds_ts = _bond_set(atoms_ts, nl_mult=nl_mult, relevant_indices=mig_indices)
+        # Restrict the comparison to *intra*-migrating bonds (both ends in
+        # the mig block) so that surface↔mig bond rearrangement at the saddle
+        # is not flagged as fragmentation.
+        def _intra(bonds: set) -> set:
+            return {
+                b for b in bonds
+                if all(int(i) in mig_indices for i in b)
+            }
+        bonds_a_in  = _intra(bonds_a)
+        bonds_b_in  = _intra(bonds_b)
+        bonds_ts_in = _intra(bonds_ts)
+        if bonds_ts_in != bonds_a_in and bonds_ts_in != bonds_b_in:
+            raise TransitionStateInvalidError(
+                "Migrating molecule fragmented (or its intramolecular bond "
+                "topology changed at the TS): "
+                f"bonds_ts={sorted(map(tuple, bonds_ts_in))} differ from "
+                f"both bonds_A={sorted(map(tuple, bonds_a_in))} and "
+                f"bonds_B={sorted(map(tuple, bonds_b_in))}."
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -737,7 +930,7 @@ def check_diffusion_stability(
     self_b = frozenset(int(n) for n in b_node_ids if n in G)
 
     # ── 1. Endpoint A relaxation ────────────────────────────────────────
-    atoms_a_init, n_slab, n_lat, mig_idx_a = _build_diffusion_atoms(
+    atoms_a_init, n_slab, n_lat, mig_idx_a, mig_node_order_a = _build_diffusion_atoms(
         G, lateral_class, list(a_node_ids), list(b_node_ids),
         endpoint_position = "a",
         frozen_indices    = frozen_indices,
@@ -752,25 +945,34 @@ def check_diffusion_stability(
 
     atoms_a_opt, E_a = _relax_endpoint(
         atoms_a_init,
-        calculator     = calculator,
-        fmax           = fmax,
-        max_steps      = max_steps,
-        frozen_indices = frozen_indices,
-        nl_mult        = nl_mult,
-        n_slab         = n_slab,
-        n_lat          = n_lat,
-        n_mig          = n_mig,
-        G              = G,
-        self_node_ids  = self_a,
-        state_label    = "endpoint_a",
-        verbose        = verbose,
+        calculator      = calculator,
+        fmax            = fmax,
+        max_steps       = max_steps,
+        frozen_indices  = frozen_indices,
+        nl_mult         = nl_mult,
+        n_slab          = n_slab,
+        n_lat           = n_lat,
+        n_mig           = n_mig,
+        G               = G,
+        self_node_ids   = self_a,
+        self_node_order = mig_node_order_a,
+        state_label     = "endpoint_a",
+        verbose         = verbose,
     )
+    # Store A immediately so it survives any later exception.
+    lateral_class.energy_a = E_a
+    lateral_class.atoms_a  = atoms_a_opt
 
     # ── 2. Endpoint B relaxation ────────────────────────────────────────
-    atoms_b_init, _, _, mig_idx_b = _build_diffusion_atoms(
+    # Reuse A's relaxed slab + lateral-neighbour positions as B's starting
+    # geometry: only the migrating-molecule block is overwritten with B's
+    # coordinates.  Both endpoints then sit in the same surface basin, which
+    # makes the linear / IDPP NEB interpolation between them well-posed.
+    atoms_b_init, _, _, mig_idx_b, mig_node_order_b = _build_diffusion_atoms(
         G, lateral_class, list(a_node_ids), list(b_node_ids),
         endpoint_position = "b",
         frozen_indices    = frozen_indices,
+        base_atoms        = atoms_a_opt,
     )
 
     if verbose:
@@ -781,19 +983,23 @@ def check_diffusion_stability(
 
     atoms_b_opt, E_b = _relax_endpoint(
         atoms_b_init,
-        calculator     = calculator,
-        fmax           = fmax,
-        max_steps      = max_steps,
-        frozen_indices = frozen_indices,
-        nl_mult        = nl_mult,
-        n_slab         = n_slab,
-        n_lat          = n_lat,
-        n_mig          = n_mig,
-        G              = G,
-        self_node_ids  = self_b,
-        state_label    = "endpoint_b",
-        verbose        = verbose,
+        calculator      = calculator,
+        fmax            = fmax,
+        max_steps       = max_steps,
+        frozen_indices  = frozen_indices,
+        nl_mult         = nl_mult,
+        n_slab          = n_slab,
+        n_lat           = n_lat,
+        n_mig           = n_mig,
+        G               = G,
+        self_node_ids   = self_b,
+        self_node_order = mig_node_order_b,
+        state_label     = "endpoint_b",
+        verbose         = verbose,
     )
+    # Store B immediately so it survives any later exception.
+    lateral_class.energy_b = E_b
+    lateral_class.atoms_b  = atoms_b_opt
 
     # ── 3-4. NEB band ───────────────────────────────────────────────────
     neb, images = _make_neb_band(
@@ -828,34 +1034,31 @@ def check_diffusion_stability(
     E_ts = float(energies[k_ts])
     atoms_ts = images[k_ts].copy()
 
-    _check_ts_validity(
-        atoms_ts, atoms_a_opt,
-        n_slab    = n_slab,
-        n_lat     = n_lat,
-        n_mig     = n_mig,
-        nl_mult   = nl_mult,
-        clq_a     = frozenset(clq_a),
-        clq_b     = frozenset(clq_b),
-        G         = G,
-        migrating_atom_indices = mig_idx_a,
-        e_a       = E_a,
-        e_b       = E_b,
-        e_ts      = E_ts,
-    )
-
-    # ── 6. Store results ────────────────────────────────────────────────
-    lateral_class.energy_a   = E_a
-    lateral_class.energy_b   = E_b
-    lateral_class.energy_ts  = E_ts
-    lateral_class.atoms_a    = atoms_a_opt
-    lateral_class.atoms_b    = atoms_b_opt
-    lateral_class.atoms_ts   = atoms_ts
+    # Store TS and NEB path immediately — they will be available even if
+    # _check_ts_validity raises so callers can read partial results from
+    # lateral_class after catching the exception.
+    lateral_class.energy_ts = E_ts
+    lateral_class.atoms_ts  = atoms_ts
     if persist_neb_path:
-        # Capture energies while calculators are still attached, then copy.
         lateral_class.neb_path_energies = [
             float(im.get_potential_energy()) for im in images
         ]
         lateral_class.atoms_neb_path = [im.copy() for im in images]
+
+    _check_ts_validity(
+        atoms_ts, atoms_a_opt, atoms_b_opt,
+        n_slab     = n_slab,
+        n_lat      = n_lat,
+        n_mig      = n_mig,
+        nl_mult    = nl_mult,
+        e_a        = E_a,
+        e_b        = E_b,
+        e_ts       = E_ts,
+        ts_index   = k_ts,
+        n_interior = len(interior),
+    )
+
+    # ── 6. Mark stable ���─────────────────────────────────────────────────
     lateral_class.stable     = True
 
     _log.debug(

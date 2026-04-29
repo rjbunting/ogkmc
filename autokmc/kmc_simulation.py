@@ -137,8 +137,8 @@ class _ReactionIndex:
     applicable (clique-blocked, unstable, …).  The companion segment-tree
     keeps the rate column in sync so sampling and updates are both O(log R).
     """
-    __slots__ = ("base", "n_total", "tree", "reactions", "site_order",
-                 "diffusion_site_order")
+    __slots__ = ("base", "n_total", "tree", "reactions", "site_order",                 "diffusion_site_order",
+                 "_adsorbate_ids", "_diffusion_ids")
 
     def __init__(
         self,
@@ -148,12 +148,16 @@ class _ReactionIndex:
         self.site_order: list[AdsorbateSite] = list(sites)
         self.diffusion_site_order: list[DiffusionSite] = list(diffusion_sites or [])
         self.base: dict[int, int] = {}
+        self._adsorbate_ids: set[int] = set()
+        self._diffusion_ids: set[int] = set()
         offset = 0
         for s in self.site_order:
             self.base[id(s)] = offset
+            self._adsorbate_ids.add(id(s))
             offset += len(s.member_node_ids)
         for ds in self.diffusion_site_order:
             self.base[id(ds)] = offset
+            self._diffusion_ids.add(id(ds))
             offset += len(ds.member_node_ids)
         self.n_total = offset
         self.tree = _RateSegmentTree(self.n_total)
@@ -532,7 +536,7 @@ def _recompute_affected_sites(
         return
 
     active_site_ids: set[int] | None = (
-        set(rxn_index.base.keys()) if rxn_index is not None else None
+        set(rxn_index._adsorbate_ids) if rxn_index is not None else None
     )
 
     # Find all laterally-affected members via the n_shells surface expansion.
@@ -585,7 +589,7 @@ def _recompute_affected_sites(
     # ── Diffusion sites: same lateral-shell expansion, separate index ─────
     if diffusion_sites:
         active_ds_ids: set[int] | None = (
-            set(rxn_index.base.keys()) if rxn_index is not None else None
+            set(rxn_index._diffusion_ids) if rxn_index is not None else None
         )
         affected_ds = _diffusion_lateral_shell_members(
             G, affected_cliques, active_ds_ids, max_n_shells,
@@ -594,14 +598,23 @@ def _recompute_affected_sites(
         for ds, _ in affected_ds:
             ds_to_update[id(ds)] = ds
 
-        # Fallback when the reverse index isn't built — also recompute every
-        # diffusion site whose endpoints touch the affected cliques.
+        # Fallback when the reverse index isn't built — recompute every
+        # diffusion site whose endpoints fall within ``max_n_shells`` surface
+        # hops of the affected cliques.  This mirrors the lateral-shell
+        # expansion of the fast path so we don't miss neighbour members at
+        # shell ≥ 1.
         if not ds_to_update:
+            seed = frozenset(s for clq in affected_cliques for s in clq)
+            expanded: frozenset = _surface_bfs_shells(G, seed, max_n_shells)
             for ds in diffusion_sites:
                 for m_idx in range(len(ds.member_node_ids)):
                     site_a, m_a, site_b, m_b = ds.members[m_idx]
-                    if (_affected_surface_cliques(G, site_a, m_a)
-                        | _affected_surface_cliques(G, site_b, m_b)) & affected_cliques:
+                    cliques_pair = (
+                        _affected_surface_cliques(G, site_a, m_a)
+                        | _affected_surface_cliques(G, site_b, m_b)
+                    )
+                    pair_surface = {s for clq in cliques_pair for s in clq}
+                    if pair_surface & expanded:
                         ds_to_update[id(ds)] = ds
                         break
 

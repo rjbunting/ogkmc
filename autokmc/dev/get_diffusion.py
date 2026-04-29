@@ -47,6 +47,7 @@ from autokmc import (
 from autokmc.check_diffusion_sites import (
     check_diffusion_site_lateral,
     check_diffusion_stability,
+    DiffusionStabilityError,
 )
 
 # %% ── 1. Configuration ──────────────────────────────────────────────────────
@@ -94,14 +95,14 @@ print("Calculator ready.")
 # %% ── 3. Build Cu(111) slab ─────────────────────────────────────────────────
 _section("STAGE 1 — Build Cu(111) FCC slab")
 
-_goal = 12.0 if SMALL_SLAB else 20.0
+_goal = 15.0
 
 atoms = build_surface(
     composition       = "Cu",
     crystal_structure = "fcc",
     miller_index      = (1, 1, 1),
     lattice_constant  = 3.615,
-    min_slab_size     = 12.0,
+    min_slab_size     = 8.0,
     min_vacuum_size   = 12.0,
     goal_x            = _goal,
     goal_y            = _goal,
@@ -172,8 +173,12 @@ print(f"\nDiffusion iso-classes : {len(diff_sites_flat)}   "
       f"total hop-pair members : {total_diff_members}")
 for ds in diff_sites_flat:
     site_a0, m_a0, site_b0, m_b0 = ds.members[0]
+    _g = ds.ego_graph
+    _nn = _g.number_of_nodes() if _g is not None else -1
+    _ne = _g.number_of_edges() if _g is not None else -1
     print(f"  diff_iso {ds.iso_class:2d}  "
           f"members={len(ds.members):<4d}  "
+          f"ego(n={_nn}, e={_ne})  "
           f"representative: (ads_iso={site_a0.iso_class}, m={m_a0}) "
           f"↔ (ads_iso={site_b0.iso_class}, m={m_b0})")
 
@@ -181,6 +186,116 @@ if not diff_sites_flat:
     raise RuntimeError(
         "No diffusion iso-classes found — check max_hops / slab size."
     )
+
+# %% ── 7b. Plot the ego-graph of every unique DiffusionSite ────────────────
+_section("STAGE 5b — DiffusionSite ego-graph visualisation")
+
+from plotly.subplots import make_subplots
+
+_n = len(diff_sites_flat)
+_cols = min(3, _n)
+_rows = (_n + _cols - 1) // _cols
+
+fig_egos = make_subplots(
+    rows=_rows, cols=_cols,
+    subplot_titles=[
+        (f"diff_iso {ds.iso_class}  "
+         f"(ads {ds.members[0][0].iso_class}↔{ds.members[0][2].iso_class}, "
+         f"members={len(ds.members)})")
+        for ds in diff_sites_flat
+    ],
+    horizontal_spacing=0.04, vertical_spacing=0.08,
+)
+
+def _node_xy(g, nid):
+    p = g.nodes[nid].get("position")
+    if p is None:
+        return 0.0, 0.0
+    return float(p[0]), float(p[1])
+
+for _idx, ds in enumerate(diff_sites_flat):
+    g = ds.ego_graph
+    if g is None:
+        continue
+    r = _idx // _cols + 1
+    c = _idx %  _cols + 1
+
+    # Edges — split by kind so they can be styled.
+    edge_kinds = {
+        "surface":       dict(color="#888888", width=1.0, dash="solid"),
+        "anchor_bond":   dict(color="#1F77B4", width=2.0, dash="solid"),
+        "intra_adsorbate": dict(color="#2CA02C", width=2.0, dash="dot"),
+    }
+    seg_x = {k: [] for k in edge_kinds}
+    seg_y = {k: [] for k in edge_kinds}
+    for u, v, ed in g.edges(data=True):
+        if ed.get("anchor_bond"):
+            kind = "anchor_bond"
+        elif ed.get("intra_adsorbate"):
+            kind = "intra_adsorbate"
+        else:
+            kind = "surface"
+        x0, y0 = _node_xy(g, u)
+        x1, y1 = _node_xy(g, v)
+        # MIC-style guard: skip edges that wrap across the cell so the plot
+        # doesn't grow long stretched lines (purely cosmetic).
+        if abs(x1 - x0) > 8.0 or abs(y1 - y0) > 8.0:
+            continue
+        seg_x[kind] += [x0, x1, None]
+        seg_y[kind] += [y0, y1, None]
+
+    for kind, style in edge_kinds.items():
+        if not seg_x[kind]:
+            continue
+        fig_egos.add_trace(go.Scatter(
+            x=seg_x[kind], y=seg_y[kind], mode="lines",
+            line=style, hoverinfo="skip", showlegend=(_idx == 0), name=kind,
+        ), row=r, col=c)
+
+    # Nodes — colour / size by type+role.
+    surf_x, surf_y, surf_text = [], [], []
+    ep_x, ep_y, ep_text, ep_col = [], [], [], []
+    for n, d in g.nodes(data=True):
+        x, y = _node_xy(g, n)
+        if d.get("type") == "surface":
+            surf_x.append(x); surf_y.append(y)
+            surf_text.append(f"surf #{n} {d.get('element','?')}")
+        else:
+            ep_x.append(x); ep_y.append(y)
+            ep_text.append(
+                f"{d.get('element','?')} #{n} "
+                f"iso={d.get('iso_class','?')} "
+                f"role={d.get('endpoint_role','?')}"
+            )
+            ep_col.append("#E74C3C" if d.get("element") == "C" else "#F1C40F")
+
+    fig_egos.add_trace(go.Scatter(
+        x=surf_x, y=surf_y, mode="markers",
+        marker=dict(size=10, color="#BDC3C7", line=dict(width=0.5, color="#555")),
+        text=surf_text, hoverinfo="text",
+        showlegend=(_idx == 0), name="surface",
+    ), row=r, col=c)
+    fig_egos.add_trace(go.Scatter(
+        x=ep_x, y=ep_y, mode="markers",
+        marker=dict(size=14, color=ep_col, symbol="diamond",
+                    line=dict(width=1, color="black")),
+        text=ep_text, hoverinfo="text",
+        showlegend=(_idx == 0), name="endpoint",
+    ), row=r, col=c)
+
+    fig_egos.update_xaxes(scaleanchor=f"y{_idx + 1 if _idx else ''}",
+                          scaleratio=1.0, row=r, col=c, showgrid=False,
+                          zeroline=False, visible=False)
+    fig_egos.update_yaxes(showgrid=False, zeroline=False, visible=False,
+                          row=r, col=c)
+
+fig_egos.update_layout(
+    title=f"DiffusionSite ego-graphs — {_n} iso-class(es)",
+    height=320 * _rows, width=380 * _cols,
+    template="plotly_white",
+    margin=dict(l=20, r=20, t=70, b=20),
+)
+fig_egos.show()
 
 # %% ── 8. Lateral classification for diff_iso 0, member 0 ───────────────────
 _section("STAGE 6 — check_diffusion_site_lateral  (diff_iso=0, member=0)")
@@ -211,18 +326,28 @@ print(f"Running NEB: {NEB_N_IMAGES} intermediate images, "
       f"fmax={FMAX_NEB} eV/Å, climb={NEB_CLIMB}, interp={NEB_INTERP}")
 print("(This is often the slow step — watch for per-step output below)")
 
-E_a, E_b, E_ts = check_diffusion_stability(
-    G, TARGET_DS, TARGET_M, lc, calc,
-    frozen_indices   = frozen_indices,
-    fmax             = FMAX_NEB,
-    max_steps        = MAX_OPT_STEPS,
-    n_images         = NEB_N_IMAGES,
-    climb            = NEB_CLIMB,
-    spring_k         = NEB_SPRING_K,
-    interpolation    = NEB_INTERP,
-    persist_neb_path = True,   # keep all images for plotting below
-    verbose          = True,
-)
+try:
+    E_a, E_b, E_ts = check_diffusion_stability(
+        G, TARGET_DS, TARGET_M, lc, calc,
+        frozen_indices   = frozen_indices,
+        fmax             = FMAX_NEB,
+        max_steps        = MAX_OPT_STEPS,
+        n_images         = NEB_N_IMAGES,
+        climb            = NEB_CLIMB,
+        spring_k         = NEB_SPRING_K,
+        interpolation    = NEB_INTERP,
+        persist_neb_path = True,   # keep all images for plotting below
+        verbose          = True,
+    )
+except DiffusionStabilityError as _neb_err:
+    print(f"\n  ⚠  NEB failed: {type(_neb_err).__name__}: {_neb_err}")
+    # Use whatever partial values check_diffusion_stability managed to store
+    # in lc before raising (endpoints and/or TS may already be populated).
+    E_a   = lc.energy_a  if lc.energy_a  is not None else 0.0
+    E_b   = lc.energy_b  if lc.energy_b  is not None else 0.0
+    E_ts  = lc.energy_ts if lc.energy_ts is not None else (max(E_a, E_b) + 0.1)
+    print(f"     → using partial results from lc: "
+          f"E_a={E_a:+.4f}  E_b={E_b:+.4f}  E_ts={E_ts:+.4f} eV")
 
 Ea_fwd = E_ts - E_a
 Ea_rev = E_ts - E_b

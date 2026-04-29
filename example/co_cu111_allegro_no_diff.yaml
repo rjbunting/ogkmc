@@ -53,8 +53,8 @@ kmc:
 # reactions/diffusion/diff_iso{X}_lat{Y}/reaction.json and the KMC barrier
 # is floored at EA_MIN (0.1 eV).
 diffusion:
-  enabled: true
-  max_hops: 1            # 1 = "share a surface atom OR are first surface neighbours"
+  enabled: false
+  max_hops: 0            # 1 = "share a surface atom OR are first surface neighbours"
   n_shells_pair: 1
   fmax: 0.05
   max_steps: 100

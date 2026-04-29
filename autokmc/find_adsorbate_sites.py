@@ -419,17 +419,28 @@ def _get_surface_apsp(G: nx.Graph, *, cutoff: int = MAX_PAIR_SHELLS) -> dict:
 
     Cached in ``G.graph["surface_apsp"]`` as
     ``{"_cutoff": cutoff, "data": {u: {v: dist}}}``.
+
+    A cached table built with ``cached_cutoff >= cutoff`` is reused as-is
+    (extra entries beyond ``cutoff`` are ignored by callers, which always
+    threshold by ``cutoff`` themselves).  Only a strictly smaller cached
+    cutoff triggers a rebuild — and the rebuild grows to
+    ``max(cached_cutoff, cutoff)`` so subsequent callers with the smaller
+    cutoff also hit the cache.
     """
     cached = G.graph.get("surface_apsp")
-    if isinstance(cached, dict) and cached.get("_cutoff") == cutoff:
-        return cached["data"]
+    if isinstance(cached, dict):
+        cached_cutoff = cached.get("_cutoff")
+        if isinstance(cached_cutoff, int) and cached_cutoff >= int(cutoff):
+            return cached["data"]
+        if isinstance(cached_cutoff, int):
+            cutoff = max(int(cached_cutoff), int(cutoff))
     G_surf = _surface_subgraph(G)
     data: dict[int, dict[int, int]] = {}
     for u in G_surf.nodes:
         data[u] = dict(
             nx.single_source_shortest_path_length(G_surf, u, cutoff=cutoff)
         )
-    G.graph["surface_apsp"] = {"_cutoff": cutoff, "data": data}
+    G.graph["surface_apsp"] = {"_cutoff": int(cutoff), "data": data}
     return data
 
 

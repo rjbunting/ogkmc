@@ -608,17 +608,29 @@ def _check_intended_coordination_stable(
     n_slab: int,
     n_lat: int,
     nl_mult: float,
+    *,
+    self_node_order: list[int] | None = None,
 ) -> None:
     """Raise :class:`AdsorbateDissociationError` if any self adsorbate atom lost
     its intended surface-clique bond after ML relaxation.
 
     The *atoms_opt* atom ordering is ``[slab | lat_neighbours | self]``.
-    Self atoms are at ASE indices ``n_slab+n_lat … n_slab+n_lat+len(self_nodes)-1``
-    in the same sorted-by-node-id order used by :func:`_build_stability_atoms`.
+    Self atoms are at ASE indices ``n_slab+n_lat … n_slab+n_lat+len(self_nodes)-1``.
 
     ``G.nodes[nid]["clique"]`` gives the frozenset of intended surface G-node ids
     for each adsorbate node.  The slab atoms in *atoms_opt* are sorted by
     ``G.nodes[n].get("index", n)`` so we can map G-node ids → ASE indices.
+
+    Parameters
+    ----------
+    self_node_order : list[int] | None
+        Explicit ordering of the self-block node ids matching the ASE atom
+        order in *atoms_opt*.  Required when the self block was not built
+        in sorted-by-node-id order — e.g. the diffusion endpoint builder
+        orders the migrating molecule by SMILES ``reactant_index`` so that
+        atoms align across A and B for the NEB.  When ``None`` (default,
+        adsorption path) the function falls back to
+        ``sorted(self_node_ids)``, matching :func:`_build_stability_atoms`.
     """
     # Map slab G-node id → ASE index in atoms_opt.
     slab_nodes_sorted = sorted(
@@ -627,8 +639,12 @@ def _check_intended_coordination_stable(
     )
     node_to_ase = {int(nid): i for i, nid in enumerate(slab_nodes_sorted)}
 
-    # Self nodes in the same order as _build_stability_atoms uses.
-    self_nid_list = sorted(nid for nid in self_node_ids if nid in G)
+    # Self nodes in the same order as the caller laid them out in atoms_opt.
+    if self_node_order is not None:
+        self_nid_list = [int(nid) for nid in self_node_order if nid in G]
+    else:
+        # Default: matches _build_stability_atoms (sorted by node id).
+        self_nid_list = sorted(int(nid) for nid in self_node_ids if nid in G)
 
     cutoffs = natural_cutoffs(atoms_opt, mult=nl_mult)
     nl      = NeighborList(cutoffs, self_interaction=False, bothways=True)

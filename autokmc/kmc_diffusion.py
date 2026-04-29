@@ -284,6 +284,10 @@ def get_applicable_diffusions(
     for m_idx in range(len(ds.member_node_ids)):
         applicable, direction = is_diffusion_applicable(G, ds, m_idx)
         if not applicable or direction is None:
+            # Drop any stale lateral-class cache entry — applicability may
+            # change again later, at which point the lateral environment
+            # will be re-classified from scratch.
+            ds._member_lc.pop(m_idx, None)  # type: ignore[attr-defined]
             continue
 
         # 1. Lateral classification (cheap if seen before).
@@ -314,14 +318,26 @@ def get_applicable_diffusions(
                     verbose          = verbose,
                 )
             except DiffusionStabilityError as exc:
-                lc.stable = False
+                _log.warning(
+                    "diff_iso=%d m=%d lat=%d: %s — "
+                    "falling back to Ea=0.1 eV, ΔE=0",
+                    ds.iso_class, m_idx,
+                    lc.lateral_class, f"{type(exc).__name__}: {exc}",
+                )
                 if verbose:
                     print(
-                        f"  ✗  diff_iso={ds.iso_class} m={m_idx} "
+                        f"  ⚠  diff_iso={ds.iso_class} m={m_idx} "
                         f"lat={lc.lateral_class}: "
-                        f"{type(exc).__name__}: {exc}"
+                        f"{type(exc).__name__}: {exc}\n"
+                        f"     → falling back to Ea=0.1 eV, ΔE=0 eV"
                     )
-                continue
+                # Populate lc with degenerate energies so the event is still
+                # admitted with the KMC floor barrier (EA_MIN = 0.1 eV).
+                # E_ts = E_a + EA_MIN; E_b = E_a  →  ΔE=0, Ea_fwd=Ea_rev=0.1 eV.
+                lc.energy_a  = 0.0
+                lc.energy_b  = 0.0
+                lc.energy_ts = float(EA_MIN)
+                lc.stable    = True
 
         if not lc.stable:
             continue
@@ -398,7 +414,22 @@ def fast_diffusion_for_member(
     temperature: float,
     transmission_coefficient: float = DEFAULT_TRANSMISSION_COEFFICIENT,
 ) -> DiffusionReaction | None:
-    """Build the current DiffusionReaction for one member from cached state."""
+    """Build the current DiffusionReaction for one member from cached state.
+
+    .. warning::
+       This is a *cache-only* fast path: it consults
+       ``ds._member_lc[member_index]`` and assumes that cached
+       :class:`DiffusionLateral` is still the correct classification for
+       the current graph state.  If the member's lateral environment may
+       have changed since the cache was populated (e.g. a neighbouring
+       adsorbate was toggled), use :func:`get_applicable_diffusions`
+       instead so the lateral class is re-evaluated.
+
+       The KMC main loop always uses :func:`get_applicable_diffusions`
+       through :func:`autokmc.kmc_simulation._recompute_affected_sites`.
+       This helper is provided for callers that maintain their own
+       invalidation discipline.
+    """
     applicable, direction = is_diffusion_applicable(G, ds, member_index)
     if not applicable or direction is None:
         return None
