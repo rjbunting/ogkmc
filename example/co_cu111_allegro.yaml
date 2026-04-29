@@ -14,9 +14,9 @@ structure:
   miller_index: [1, 1, 1]
   lattice_constant: 3.615
   min_slab_size: 8.0
-  min_vacuum_size: 15.0
-  goal_x: 12.0
-  goal_y: 12.0
+  min_vacuum_size: 12.0
+  goal_x: 15.0
+  goal_y: 15.0
   n_freeze_layers: 2
 
 reactants:
@@ -35,17 +35,23 @@ calculator:
 
 adsorbate_sites:
   prune_stable_only: true
-  fmax: 0.01
-  max_steps: 1000
+  fmax: 0.05
+  max_steps: 500
 
 kmc:
   temperature_k: 500.0
-  n_steps: 10000
+  n_steps: 50
   transmission_coefficient: 1.0
-  fmax: 0.01
-  max_steps: 1000
+  fmax: 0.05
+  max_steps: 500
   log_every: 1
   random_seed: 69
+  # Set lateral_interactions: false to ignore neighbour occupancy when
+  # classifying lateral environments.  Every site member will always map to
+  # the single bare lat0, so only one ML relaxation per iso-class is needed.
+  # The lateral-shell incremental update is also skipped each KMC step,
+  # reducing overhead at high coverage.  Default: true.
+  lateral_interactions: true
 
 # Diffusion (NEB) channel.  Enabled by default; set `enabled: false` to
 # run adsorption / desorption only.  Each new (iso, lateral) pair triggers
@@ -54,19 +60,13 @@ kmc:
 # is floored at EA_MIN (0.1 eV).
 diffusion:
   enabled: true
-  max_hops: 1            # 1 = "share a surface atom OR are first surface neighbours"
+  max_hops: 0            # 0 = "share a surface atom"
   n_shells_pair: 1
   fmax: 0.05
-  max_steps: 100
+  max_steps: 500
   n_images: 5
   climb: true
   spring_k: 0.1
   interpolation: linear   # "linear" (default) or "idpp"
-  # When true, every NEB image (including intermediates) is stored on the
-  # lateral class as `atoms_neb_path` and written to disk as a multi-frame
-  # neb_path.extxyz inside the diffusion reaction folder, useful for
-  # visualising the full minimum-energy path.  When false (default) only
-  # the two relaxed endpoints (state_a.extxyz, state_b.extxyz) and the
-  # single transition-state image (ts.extxyz) are persisted.
-  persist_neb_path: true
+  persist_neb_path: false
 

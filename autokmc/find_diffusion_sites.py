@@ -17,7 +17,8 @@ that share
 Pairs are deduplicated into iso-classes by graph-isomorphism of the union
 ego-graph (the surface-only ``n_shells_pair``-shell BFS around the union of
 both endpoints' bonded cliques, with the two adsorbate placements stamped on
-as labelled leaves).
+as labelled occupied leaves — consistent with the adsorption lateral
+ego-graph convention).
 
 There is **no ML pruning** at this stage — the underlying
 :class:`AdsorbateSite`'s have already been pruned by
@@ -64,6 +65,7 @@ from autokmc.find_adsorbate_sites import (
     _get_surface_apsp,
     _shortest_path_between_cliques,
 )
+from autokmc.check_adsorbate_sites import _surface_bfs_shells
 from autokmc.constants import (
     DIFFUSION_MAX_HOPS,
     N_SHELLS_DEFAULT,
@@ -118,6 +120,10 @@ class DiffusionLateral:
         ``True`` when both endpoint relaxations and the NEB converged
         without changing surface / adsorbate connectivity; ``False`` on
         any stability failure; ``None`` until the check has run.
+    invalid_reason : str | None
+        Human-readable explanation of why this lateral class is invalid
+        (set when ``stable=False``).  ``None`` when ``stable`` is ``True``
+        or not yet evaluated.
     """
     lateral_class : int
     ego_graph     : Any              = None
@@ -132,6 +138,7 @@ class DiffusionLateral:
     atoms_neb_path: Any              = None
     neb_path_energies: list[float] | None = None
     stable        : bool | None      = None
+    invalid_reason: str | None       = None
 
 
 @dataclass
@@ -206,67 +213,76 @@ def _build_pair_ego_graph(
 ) -> nx.Graph:
     """Build the iso-class ego-graph for a diffusion pair.
 
-    Strategy: temporarily mark both endpoint placements as ``occupied=True``
-    in *G*, then run a BFS from each endpoint's bonded-clique seed that walks
-    through ``type=="surface"`` atoms **and** ``occupied`` adsorbate atoms
-    — but never through ``type=="bulk"`` atoms (sub-surface Cu leakage was
-    the source of spurious iso-class splits).  After BFS the live ``G`` nodes
-    are restored to their original occupancy.
+    Uses **surface-only BFS** — consistent with the adsorption lateral
+    ego-graph (:func:`autokmc.check_adsorbate_sites._build_lateral_ego_graph`).
+    Two cached surface-only BFS expansions are run (one per endpoint's
+    bonded-clique union, at that endpoint's own iso-class shell depth) and
+    their results are unioned.
 
-    BFS from each seed uses the *per-endpoint* shell depth taken from
-    ``AdsorbateSite.n_shells_settled`` so each endpoint's local environment
-    is represented at the depth that defined its adsorption iso-class.
+    After the BFS, any *other* occupied adsorbate nodes adjacent to the
+    surface set are collected as leaves (but not traversed further).
 
-    Both endpoint adsorbate nodes are stamped with ``endpoint_role="endpoint"``
-    in the returned copy so the iso-match treats A↔B symmetrically.
+    Both endpoint placements are then added as labelled occupied leaves with
+    ``endpoint_role="endpoint"`` so the iso-match treats A↔B symmetrically
+    and endpoints cannot be confused with third-party adsorbate neighbours.
+
+    G is **not mutated** — no temporary occupancy changes are made.
     """
-    # 1. Remember original occupied flags and force-occupy both placements.
-    all_endpoint_nids = [nid for nid in (*a_node_ids, *b_node_ids)
-                         if nid in G]
-    original_occupied: dict[int, bool] = {
-        nid: bool(G.nodes[nid].get("occupied", False))
-        for nid in all_endpoint_nids
-    }
+    all_endpoint_nids = [nid for nid in (*a_node_ids, *b_node_ids) if nid in G]
+    endpoint_ids: frozenset = frozenset(all_endpoint_nids)
+
+    # 1. Surface-only BFS (cached) from each endpoint's bonded-clique union.
+    visited_a = _surface_bfs_shells(G, a_clique_union, n_shells_a)
+    visited_b = _surface_bfs_shells(G, b_clique_union, n_shells_b)
+    visited: set = (set(visited_a) | set(visited_b)) - endpoint_ids
+
+    # 2. Collect *other* occupied adsorbate leaves adjacent to the BFS set;
+    #    endpoints are added explicitly afterwards with their role label.
+    ads_leaves: set = set()
+    for n in visited:
+        for nb in G.neighbors(n):
+            if nb in visited or nb in endpoint_ids:
+                continue
+            d = G.nodes[nb]
+            if d.get("type") != "adsorbate":
+                continue
+            if d.get("occupied", False):
+                ads_leaves.add(nb)
+
+    result = G.subgraph(visited | ads_leaves).copy()
+
+    # 3. Add endpoint nodes as labelled occupied leaves with endpoint_role.
     for nid in all_endpoint_nids:
-        G.nodes[nid]["occupied"] = True
+        if nid not in G:
+            continue
+        d = G.nodes[nid]
+        if nid not in result:
+            result.add_node(
+                nid,
+                element        = d.get("element"),
+                type           = d.get("type", "adsorbate"),
+                iso_class      = int(d.get("iso_class", -1)),
+                reactant       = str(d.get("reactant",  "")),
+                reactant_index = int(d.get("reactant_index", -1)),
+                occupied       = True,
+                endpoint_role  = "endpoint",
+            )
+        else:
+            result.nodes[nid]["occupied"]      = True
+            result.nodes[nid]["endpoint_role"] = "endpoint"
+        # Restore intramolecular edges.
+        for sib in d.get("siblings", ()):
+            sib = int(sib)
+            if sib in result and not result.has_edge(nid, sib):
+                result.add_edge(nid, sib, intra_adsorbate=True)
+        # Restore anchor bonds to bonded surface atoms.
+        clq = d.get("clique")
+        if clq is not None:
+            for surf_id in clq:
+                if surf_id in result and not result.has_edge(nid, surf_id):
+                    result.add_edge(nid, surf_id, anchor_bond=True)
 
-    try:
-        # 2. BFS from each endpoint's seed using the per-endpoint shell depth.
-        #    Walks all node types except ``anchor`` and unoccupied ``adsorbate``
-        #    (same rules as :func:`autokmc.find_anchors._build_ego_graph`).
-        def _bfs(seed: frozenset[int], n_shells: int) -> set[int]:
-            frontier: set[int] = set(seed)
-            visited:  set[int] = set(seed)
-            for _ in range(int(n_shells)):
-                nxt: set[int] = set()
-                for n in frontier:
-                    for nb in G.neighbors(n):
-                        d = G.nodes[nb]
-                        t = d.get("type")
-                        if t == "anchor":
-                            continue
-                        if t == "adsorbate" and not d.get("occupied", False):
-                            continue
-                        nxt.add(int(nb))
-                frontier = nxt - visited
-                visited |= frontier
-            return visited
-
-        visited = _bfs(a_clique_union, n_shells_a) | _bfs(b_clique_union, n_shells_b)
-        ego = G.subgraph(visited).copy()
-
-    finally:
-        # 3. Always restore original occupancy in G.
-        for nid, was_occupied in original_occupied.items():
-            if nid in G:
-                G.nodes[nid]["occupied"] = was_occupied
-
-    # 4. Stamp endpoint_role on the adsorbate nodes inside the *copy*.
-    for nid in all_endpoint_nids:
-        if nid in ego:
-            ego.nodes[nid]["endpoint_role"] = "endpoint"
-
-    return ego
+    return result
 
 
 def _pair_node_match(d1: dict, d2: dict) -> bool:
@@ -454,53 +470,24 @@ def find_diffusion_sites(
 
                 n_pairs_kept += 1
 
-        # ── Prune: one iso-class per unique (ads_iso_a, ads_iso_b) pair ──
-        # Multiple graph-non-isomorphic ego-graphs can arise for the same
-        # pair of adsorbate iso-classes (e.g. different relative orientations
-        # on the small periodic cell).  Physically there is only one distinct
-        # hop type per ordered adsorbate-iso-class pair, so we keep the
-        # DiffusionSite whose representative ego-graph has the fewest nodes
-        # (fewest edges as tiebreaker) and fold all members from discarded
-        # sites into it.
-        key_to_best: dict[tuple[int, int], DiffusionSite] = {}
-        for ds in diffusion_sites:
-            site_a0, _, site_b0, _ = ds.members[0]
-            pair_key = (
-                min(int(site_a0.iso_class), int(site_b0.iso_class)),
-                max(int(site_a0.iso_class), int(site_b0.iso_class)),
-            )
-            ego = ds.ego_graph
-            n_nodes = ego.number_of_nodes() if ego is not None else 10**9
-            n_edges = ego.number_of_edges() if ego is not None else 10**9
-            existing = key_to_best.get(pair_key)
-            if existing is None:
-                key_to_best[pair_key] = ds
-            else:
-                ex_ego = existing.ego_graph
-                ex_n = ex_ego.number_of_nodes() if ex_ego is not None else 10**9
-                ex_e = ex_ego.number_of_edges() if ex_ego is not None else 10**9
-                if (n_nodes, n_edges) < (ex_n, ex_e):
-                    # New ds is simpler — fold existing's members into ds,
-                    # make ds the survivor.
-                    ds.members.extend(existing.members)
-                    ds.member_node_ids.extend(existing.member_node_ids)
-                    key_to_best[pair_key] = ds
-                else:
-                    # Existing is simpler (or equal) — fold new ds into it.
-                    existing.members.extend(ds.members)
-                    existing.member_node_ids.extend(ds.member_node_ids)
-
-        # Rebuild diffusion_sites with only survivors, renumber iso_class.
-        diffusion_sites = list(key_to_best.values())
+        # ── Renumber iso_class sequentially ─────────────────────────────────
+        # NOTE: The earlier "one iso-class per (ads_iso_a, ads_iso_b) pair"
+        # pruning step has been removed.  That step assumed only one distinct
+        # hop type exists per ordered adsorbate-iso-class pair, but this is
+        # incorrect in general: hops in different crystallographic directions
+        # (or over different hop distances) between the same pair of adsorption
+        # site types can have genuinely different barriers.  Collapsing them
+        # into one DiffusionSite caused the lateral classifier to re-split them
+        # as spurious "lateral classes" with no second adsorbate present.
+        # The graph-isomorphism deduplication in the loop above already handles
+        # true equivalents, so no further collapse is needed.
         for new_idx, ds in enumerate(diffusion_sites):
             ds.iso_class = new_idx
 
         if verbose:
-            n_pruned = n_pairs_kept - len(diffusion_sites)
             print(
-                f"  pruned to 1 iso-class per (ads_iso_a, ads_iso_b) pair: "
-                f"{n_pruned} iso-class(es) merged away → "
-                f"{len(diffusion_sites)} remaining"
+                f"  {len(diffusion_sites)} diffusion iso-class(es) kept "
+                f"({n_pairs_kept} pairs considered)"
             )
 
         # ── Reverse indexes for the KMC incremental update path ──────────

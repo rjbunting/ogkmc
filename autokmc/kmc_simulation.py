@@ -510,6 +510,7 @@ def _recompute_affected_sites(
     rxn_index: _ReactionIndex | None = None,
     diffusion_sites: list[DiffusionSite] | None = None,
     diffusion_kwargs: dict | None = None,
+    lateral_interactions: bool = True,
 ) -> None:
     """Recompute lateral classes and rates for every member in the lateral
     shell of the just-toggled member.
@@ -560,6 +561,7 @@ def _recompute_affected_sites(
                         fmax                     = fmax,
                         max_steps                = max_steps,
                         verbose                  = verbose,
+                        lateral_interactions     = lateral_interactions,
                     )
                     if rxn_index is not None:
                         rxn_index.install_site(site, rxns)
@@ -582,6 +584,7 @@ def _recompute_affected_sites(
             fmax                     = fmax,
             max_steps                = max_steps,
             verbose                  = verbose,
+            lateral_interactions     = lateral_interactions,
         )
         if rxn_index is not None:
             rxn_index.install_site(site, rxns)
@@ -626,6 +629,7 @@ def _recompute_affected_sites(
                 transmission_coefficient = transmission_coefficient,
                 frozen_indices           = frozen_indices,
                 verbose                  = verbose,
+                lateral_interactions     = lateral_interactions,
                 **dkwargs,
             )
             if rxn_index is not None:
@@ -652,10 +656,11 @@ def run_kmc_steps(
     rng: random.Random | np.random.Generator | int | None = None,
     log_every: int = 1,
     verbose: bool = True,
+    lateral_interactions: bool = True,
     # ── Diffusion (NEB) channel ────────────────────────────────────────────
     diffusion_sites: list[DiffusionSite] | None = None,
     diffusion_kwargs: dict | None = None,
-    # ── Optional persistence hooks (autokmc.persistence) ─────────��────────
+    # ── Optional persistence hooks (autokmc.persistence) ──────────────────
     reaction_writer=None,
     trajectory_writer=None,
     summary_collector=None,
@@ -692,6 +697,13 @@ def run_kmc_steps(
     log_every : int
         Print a log line every N steps.  Set to 0/None to silence per-step output.
     verbose : bool
+    lateral_interactions : bool
+        When ``False``, neighbouring occupied adsorbate nodes are **excluded**
+        from the lateral ego-graph for both adsorption and diffusion reactions.
+        Every member therefore always maps to a single bare lat0, so only one
+        ML relaxation is performed per iso-class (no coverage-dependent
+        re-classification).  The lateral shell update is also skipped on every
+        step — only clique-touching members are recomputed.  Default ``True``.
     diffusion_sites : list[DiffusionSite] | None
         Diffusion (hop) iso-classes from
         :func:`autokmc.find_diffusion_sites.find_diffusion_sites`.  When
@@ -748,6 +760,7 @@ def run_kmc_steps(
         fmax                     = fmax,
         max_steps                = max_steps,
         verbose                  = False,
+        lateral_interactions     = lateral_interactions,
     )
 
     # ── Diffusion channel: initial NEB sweep ──────────────────────────────
@@ -766,6 +779,7 @@ def run_kmc_steps(
             transmission_coefficient = transmission_coefficient,
             frozen_indices           = frozen_indices,
             verbose                  = False,
+            lateral_interactions     = lateral_interactions,
             **diffusion_kwargs,
         )
 
@@ -797,7 +811,23 @@ def run_kmc_steps(
             except Exception as exc:  # pragma: no cover
                 _log.warning("reaction_writer.ensure_reaction failed: %s", exc)
 
+    def _persist_invalid_diffusions() -> None:
+        """Write on-disk records for every newly-discovered invalid diffusion
+        lateral class (stable=False).  Idempotent via the writer's key set."""
+        if reaction_writer is None:
+            return
+        for ds in diffusion_sites:
+            for lc in ds.lateral_classes:
+                if lc.stable is False:
+                    try:
+                        reaction_writer.write_invalid_diffusion(ds, lc)
+                    except Exception as exc:  # pragma: no cover
+                        _log.warning(
+                            "reaction_writer.write_invalid_diffusion failed: %s", exc
+                        )
+
     _persist_all_known_reactions(step_for_discovery=0)
+    _persist_invalid_diffusions()
 
     # Initialise the graph-level occupancy counter (suggestion.MD #9).
     if "n_occupied" not in G.graph:
@@ -818,7 +848,9 @@ def run_kmc_steps(
     # This must match the BFS depth used by check_adsorbate_site_lateral so that
     # the incremental trigger radius is consistent with the lateral environment
     # actually being evaluated.  Both are driven by LATERAL_SHELLS_DEFAULT.
-    max_n_shells: int = LATERAL_SHELLS_DEFAULT
+    # When lateral_interactions=False no lateral re-classification is needed —
+    # set max_n_shells=0 so only clique-touching members are recomputed.
+    max_n_shells: int = LATERAL_SHELLS_DEFAULT if lateral_interactions else 0
 
     history: list[tuple] = []
     reaction_counts: dict[str, int] = {
@@ -932,12 +964,14 @@ def run_kmc_steps(
             rxn_index                = rxn_index,
             diffusion_sites          = diffusion_sites,
             diffusion_kwargs         = diffusion_kwargs,
+            lateral_interactions     = lateral_interactions,
         )
 
         # Persist every newly-discovered (iso, lat) reaction surfaced by the
         # incremental rebuild.  ``ensure_reaction`` is a no-op once a folder
         # exists, so the cost after the first few steps is just dict lookups.
         _persist_all_known_reactions(step_for_discovery=step)
+        _persist_invalid_diffusions()
 
         # Periodic trajectory dump (cadence enforced inside the writer).
         # Writes one extended-XYZ frame to the trajectory_writer's output file.

@@ -197,6 +197,7 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
         rng                      = k.random_seed,
         log_every                = k.log_every,
         verbose                  = log_level <= logging.INFO,
+        lateral_interactions     = k.lateral_interactions,
         diffusion_sites          = diffusion_sites_flat,
         diffusion_kwargs         = diffusion_kwargs,
         reaction_writer          = reaction_writer,

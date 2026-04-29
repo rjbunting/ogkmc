@@ -121,6 +121,7 @@ class KMCCfg:
     max_steps: int = 200
     log_every: int = 1
     random_seed: int = RANDOM_SEED
+    lateral_interactions: bool = True
 
 
 @dataclass

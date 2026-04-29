@@ -393,23 +393,26 @@ class ReactionWriter:
         lc = reaction.lateral_class
 
         if sub == "diffusion":
-            # Per-direction barriers from the *raw* NEB TS energy.  The
-            # KMC-side barrier is floored at EA_MIN (see kmc_adsorption.EA_MIN
-            # docstring) but the *raw* values are persisted unchanged so the
-            # floor is auditable from disk.
+            # Barriers use the same effective TS as the KMC engine.
+            # e_ts_eff = max(e_ts, max(e_a, e_b) + EA_MIN) so that both
+            # forward and reverse barriers are derived from the same TS level,
+            # preserving detailed balance (Ea_fwd − Ea_rev = E_b − E_a).
+            # Raw NEB energies are also persisted for auditability.
             from autokmc.kmc_adsorption import EA_MIN as _EA_MIN
             e_a  = getattr(lc, "energy_a",  None)
             e_b  = getattr(lc, "energy_b",  None)
             e_ts = getattr(lc, "energy_ts", None)
-            if e_a is not None and e_ts is not None:
-                ea_fwd_raw = float(e_ts) - float(e_a)
-                ea_fwd_kmc = max(_EA_MIN, ea_fwd_raw)
+            if e_a is not None and e_b is not None and e_ts is not None:
+                _e_a  = float(e_a)
+                _e_b  = float(e_b)
+                _e_ts = float(e_ts)
+                e_ts_eff   = max(_e_ts, max(_e_a, _e_b) + _EA_MIN)
+                ea_fwd_raw = _e_ts    - _e_a
+                ea_rev_raw = _e_ts    - _e_b
+                ea_fwd_kmc = max(_EA_MIN, e_ts_eff - _e_a)
+                ea_rev_kmc = max(_EA_MIN, e_ts_eff - _e_b)
             else:
-                ea_fwd_raw = ea_fwd_kmc = None
-            if e_b is not None and e_ts is not None:
-                ea_rev_raw = float(e_ts) - float(e_b)
-                ea_rev_kmc = max(_EA_MIN, ea_rev_raw)
-            else:
+                e_ts_eff = ea_fwd_raw = ea_fwd_kmc = None
                 ea_rev_raw = ea_rev_kmc = None
 
             payload = {
@@ -430,9 +433,10 @@ class ReactionWriter:
                     rate     = float(reaction.rate),
                 ),
                 "energies_ev": {
-                    "state_a":      None if e_a  is None else float(e_a),
-                    "state_b":      None if e_b  is None else float(e_b),
-                    "transition":   None if e_ts is None else float(e_ts),
+                    "state_a":        None if e_a      is None else float(e_a),
+                    "state_b":        None if e_b      is None else float(e_b),
+                    "transition_raw": None if e_ts     is None else float(e_ts),
+                    "transition_eff": None if e_ts_eff is None else float(e_ts_eff),
                 },
                 "barriers_ev": {
                     "forward_raw": ea_fwd_raw,
@@ -547,6 +551,66 @@ class ReactionWriter:
             return sub_root / _reaction_folder_name(iso, lat)
         folder = self._ensure_reaction_folder(reaction)
         self._write_reaction_json(folder, reaction, step, gas_energies, fired=False)
+        return folder
+
+    # ------------------------------------------------------------------
+    def write_invalid_diffusion(self, ds, lc) -> Path:
+        """Write an on-disk record for a diffusion lateral class that failed NEB.
+
+        Creates ``reactions/diffusion/diff_iso{X}_lat{Y}/`` and writes a
+        ``reaction.json`` with ``"valid": false`` and the failure reason.
+        Any partial atoms already stored on *lc* (e.g. relaxed endpoint A
+        if the failure occurred during endpoint B relaxation) are written
+        as ``state_a.extxyz`` / ``state_b.extxyz`` so the partial geometry
+        is available for post-mortem inspection.
+
+        Idempotent — a second call for the same ``(iso, lat)`` is a no-op.
+        """
+        iso = int(ds.iso_class)
+        lat = int(lc.lateral_class)
+        key = ("diffusion_invalid", iso, lat)
+        sub_root = self.reactions_root / "diffusion"
+        folder   = sub_root / _diffusion_folder_name(iso, lat)
+
+        if key in self._folder_meta:
+            return folder
+
+        folder.mkdir(parents=True, exist_ok=True)
+
+        atoms_a  = getattr(lc, "atoms_a",  None)
+        atoms_b  = getattr(lc, "atoms_b",  None)
+        atoms_ts = getattr(lc, "atoms_ts", None)
+        if atoms_a is not None:
+            ase_write(folder / "state_a.extxyz", _safe_atoms_copy(atoms_a), format="extxyz")
+        if atoms_b is not None:
+            ase_write(folder / "state_b.extxyz", _safe_atoms_copy(atoms_b), format="extxyz")
+        if atoms_ts is not None:
+            ase_write(folder / "ts.extxyz", _safe_atoms_copy(atoms_ts), format="extxyz")
+
+        payload = {
+            "schema_version":  PERSISTENCE_SCHEMA_VERSION,
+            "kind":            "diffusion",
+            "iso_class":       iso,
+            "lateral_class":   lat,
+            "reactant_smiles": getattr(ds, "reactant", ""),
+            "valid":           False,
+            "invalid_reason":  getattr(lc, "invalid_reason", None),
+            "energies_ev": {
+                "state_a":   None if lc.energy_a  is None else float(lc.energy_a),
+                "state_b":   None if lc.energy_b  is None else float(lc.energy_b),
+                "transition": None if lc.energy_ts is None else float(lc.energy_ts),
+            },
+            "calculator": dict(self._calc_meta),
+        }
+        with (folder / "reaction.json").open("w", encoding="utf-8") as fp:
+            json.dump(_json_safe(payload), fp, indent=2)
+
+        self._folder_meta[key] = {"count": 0, "first_step": None, "last_step": None}
+        _log.info(
+            "ReactionWriter: wrote invalid diffusion folder "
+            "iso=%d lat=%d  reason=%s",
+            iso, lat, getattr(lc, "invalid_reason", None),
+        )
         return folder
 
     # ------------------------------------------------------------------

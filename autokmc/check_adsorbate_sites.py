@@ -175,6 +175,7 @@ def _build_lateral_ego_graph(
     n_shells: int,
     *,
     self_node_ids: frozenset | None = None,
+    ignore_occupied_neighbours: bool = False,
 ) -> nx.Graph:
     """Build an n-shell ego-subgraph for lateral-interaction matching.
 
@@ -202,6 +203,11 @@ def _build_lateral_ego_graph(
         Node ids of the adsorbate member being checked.  These are excluded
         from the returned graph so the site does not appear in its own
         environment.
+    ignore_occupied_neighbours : bool
+        When ``True``, neighbouring occupied adsorbate nodes are **not**
+        collected as leaves.  Only the site's own *self_node_ids* are added.
+        This collapses all members to a single "bare" lateral class (lat0),
+        effectively disabling lateral interactions.  Default ``False``.
 
     Returns
     -------
@@ -217,7 +223,8 @@ def _build_lateral_ego_graph(
 
     # ── Collect adsorbate leaves adjacent to the BFS surface set ────────────
     # Two categories are included:
-    #   1. Genuinely occupied adsorbate nodes (neighbours of the BFS surface).
+    #   1. Genuinely occupied adsorbate nodes (neighbours of the BFS surface)
+    #      — skipped when ``ignore_occupied_neighbours=True``.
     #   2. The site's own nodes (self_ids) — treated as occupied regardless of
     #      their current ``occupied`` flag on G, because we are evaluating the
     #      environment *as if* this site were occupied.
@@ -229,7 +236,9 @@ def _build_lateral_ego_graph(
             d = G.nodes[nb]
             if d.get("type") != "adsorbate":
                 continue
-            if nb in self_ids or d.get("occupied", False):
+            if nb in self_ids:
+                ads_leaves.add(nb)
+            elif not ignore_occupied_neighbours and d.get("occupied", False):
                 ads_leaves.add(nb)
 
     result = G.subgraph(visited | ads_leaves).copy()
@@ -304,6 +313,7 @@ def check_adsorbate_site_lateral(
     member_index: int,
     *,
     n_shells: int | None = None,
+    ignore_lateral: bool = False,
 ) -> AdsorbateSiteLateral:
     """Classify the lateral-interaction environment of one specific member.
 
@@ -335,6 +345,11 @@ def check_adsorbate_site_lateral(
         are counted as lateral neighbours (clique-sharing criterion).  Pass
         ``1`` to also include adsorbates on first-nearest-neighbour surface
         atoms, etc.
+    ignore_lateral : bool
+        When ``True``, neighbouring occupied adsorbate nodes are excluded from
+        the ego-graph so every member always maps to the single "bare" lat0.
+        Effectively disables lateral interactions for this site.  Default
+        ``False``.
 
     Returns
     -------
@@ -371,7 +386,7 @@ def check_adsorbate_site_lateral(
     # ── Determine BFS depth ───────────────────────────────────────────────
     depth: int = LATERAL_SHELLS_DEFAULT if n_shells is None else int(n_shells)
 
-    # ── Derive seed clique and self node ids ────────────────────────��─────
+    # ── Derive seed clique and self node ids ──────────────────────────────
     node_ids: list[int] = adsorbate_site.member_node_ids[member_index]
 
     seed_clique: frozenset = frozenset(
@@ -394,6 +409,7 @@ def check_adsorbate_site_lateral(
     # ── Build lateral ego-graph ───────────────────────────────────────────
     ego = _build_lateral_ego_graph(
         G, seed_clique, depth, self_node_ids=self_node_ids,
+        ignore_occupied_neighbours=ignore_lateral,
     )
 
     fkey = _lateral_fingerprint(ego)

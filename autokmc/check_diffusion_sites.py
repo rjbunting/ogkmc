@@ -228,6 +228,7 @@ def _build_diffusion_lateral_ego_graph(
     *,
     endpoint_a_ids: frozenset,
     endpoint_b_ids: frozenset,
+    ignore_occupied_neighbours: bool = False,
 ) -> nx.Graph:
     """Build the lateral ego-graph for a diffusion pair.
 
@@ -248,6 +249,12 @@ def _build_diffusion_lateral_ego_graph(
         surface BFS visited set and from the occupied-neighbour leaf
         collection, then re-added as labelled occupied leaves with
         intramolecular and anchor edges.
+    ignore_occupied_neighbours : bool
+        When ``True``, third-party occupied adsorbate neighbours are **not**
+        collected as leaves (endpoints are still added with their role tag).
+        This collapses all members to a single "bare" lateral class,
+        effectively disabling lateral interactions for diffusion.
+        Default ``False``.
     """
     endpoint_ids: frozenset = frozenset(endpoint_a_ids) | frozenset(endpoint_b_ids)
 
@@ -260,15 +267,16 @@ def _build_diffusion_lateral_ego_graph(
     # the symmetric endpoint_role label (preventing them from being
     # mistaken for third-party occupied adsorbates of the same SMILES).
     ads_leaves: set = set()
-    for n in visited:
-        for nb in G.neighbors(n):
-            if nb in visited or nb in endpoint_ids:
-                continue
-            d = G.nodes[nb]
-            if d.get("type") != "adsorbate":
-                continue
-            if d.get("occupied", False):
-                ads_leaves.add(nb)
+    if not ignore_occupied_neighbours:
+        for n in visited:
+            for nb in G.neighbors(n):
+                if nb in visited or nb in endpoint_ids:
+                    continue
+                d = G.nodes[nb]
+                if d.get("type") != "adsorbate":
+                    continue
+                if d.get("occupied", False):
+                    ads_leaves.add(nb)
 
     result = G.subgraph(visited | ads_leaves).copy()
 
@@ -313,6 +321,7 @@ def check_diffusion_site_lateral(
     member_index: int,
     *,
     n_shells: int | None = None,
+    ignore_lateral: bool = False,
 ) -> DiffusionLateral:
     """Classify the lateral-interaction environment of one hop-pair member.
 
@@ -329,6 +338,11 @@ def check_diffusion_site_lateral(
         Index into ``diffusion_site.member_node_ids``.
     n_shells : int | None
         BFS depth.  ``None`` (default) → :data:`LATERAL_SHELLS_DEFAULT`.
+    ignore_lateral : bool
+        When ``True``, third-party occupied adsorbate neighbours are excluded
+        from the ego-graph so every member always maps to the single bare
+        lat0.  Effectively disables lateral interactions for diffusion.
+        Default ``False``.
 
     Raises
     ------
@@ -365,8 +379,9 @@ def check_diffusion_site_lateral(
 
     ego = _build_diffusion_lateral_ego_graph(
         G, frozenset(seed), depth,
-        endpoint_a_ids = endpoint_a_ids,
-        endpoint_b_ids = endpoint_b_ids,
+        endpoint_a_ids              = endpoint_a_ids,
+        endpoint_b_ids              = endpoint_b_ids,
+        ignore_occupied_neighbours  = ignore_lateral,
     )
 
     fkey = _diffusion_lateral_fingerprint(ego)
@@ -768,9 +783,15 @@ def _check_ts_validity(
         )
     e_max_endpoint = max(float(e_a), float(e_b))
     if float(e_ts) < e_max_endpoint - float(energy_tol):
-        raise TransitionStateInvalidError(
-            f"NEB has no genuine saddle: E_ts={e_ts:.4f} eV is below "
-            f"max(E_a, E_b)={e_max_endpoint:.4f} eV (tol={energy_tol})."
+        # No genuine saddle — the path is monotonic or the TS image sits
+        # below both endpoints.  This is physically valid for a barrierless
+        # hop; the KMC will apply the EA_MIN (0.1 eV) floor automatically.
+        # Just warn and continue — do NOT raise.
+        _log.warning(
+            "NEB has no genuine saddle: E_ts=%.4f eV is below "
+            "max(E_a, E_b)=%.4f eV (tol=%.3f). "
+            "The KMC barrier will be floored at EA_MIN.",
+            e_ts, e_max_endpoint, energy_tol,
         )
 
     # 2. Endpoint collapse — TS sits at the band edge and matches its

@@ -317,8 +317,17 @@ def get_applicable_reactions(
     fmax: float = 0.05,
     max_steps: int = 200,
     verbose: bool = False,
+    lateral_interactions: bool = True,
 ) -> list[AdsorptionReaction]:
-    """Enumerate all applicable adsorption / desorption events for one site."""
+    """Enumerate all applicable adsorption / desorption events for one site.
+
+    Parameters
+    ----------
+    lateral_interactions : bool
+        When ``False``, neighbouring occupied adsorbate nodes are ignored
+        when building the lateral ego-graph, so every member is always
+        classified into the single bare lat0.  Default ``True``.
+    """
     if site.reactant not in gas_energies:
         raise KeyError(
             f"No gas-phase energy supplied for reactant SMILES "
@@ -338,7 +347,10 @@ def get_applicable_reactions(
             continue
 
         try:
-            lc = check_adsorbate_site_lateral(G, site, m_idx)
+            lc = check_adsorbate_site_lateral(
+                G, site, m_idx,
+                ignore_lateral=not lateral_interactions,
+            )
         except (ValueError, IndexError) as exc:
             if verbose:
                 print(
@@ -406,6 +418,7 @@ def compute_all_reactions(
     fmax: float = 0.05,
     max_steps: int = 200,
     verbose: bool = False,
+    lateral_interactions: bool = True,
 ) -> list[AdsorptionReaction]:
     """Compute applicable reactions for every site and return the flat list."""
     gas_energies = _build_gas_energy_lookup(reactants)
@@ -420,6 +433,7 @@ def compute_all_reactions(
             fmax                     = fmax,
             max_steps                = max_steps,
             verbose                  = verbose,
+            lateral_interactions     = lateral_interactions,
         )
         all_reactions.extend(rxns)
     return all_reactions

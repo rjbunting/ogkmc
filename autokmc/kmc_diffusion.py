@@ -207,9 +207,18 @@ def _diffusion_energetics_cached(
 ) -> tuple[float, float, float]:
     """Return ``(delta_e, barrier_kmc, rate)`` for one hop direction.
 
-    Both directions of every lateral class are pre-populated on the first
-    call so that the very next member toggle (which flips ``direction``)
-    hits the cache too.
+    The effective transition-state energy is raised so that it sits at least
+    ``EA_MIN`` above the *higher* of the two endpoints::
+
+        e_ts_eff = max(e_ts, max(e_a, e_b) + EA_MIN)
+
+    Both forward and reverse barriers are derived from the same ``e_ts_eff``,
+    which preserves detailed balance (``Ea_fwd − Ea_rev = E_b − E_a`` still
+    holds exactly).  ``EA_MIN`` is retained as a safety floor in case raw
+    arithmetic produces a negative value.
+
+    Both directions are pre-populated on the first call so that the very next
+    member toggle (which flips ``direction``) hits the cache too.
 
     Cache layout
     ------------
@@ -232,17 +241,21 @@ def _diffusion_energetics_cached(
     e_b  = float(lc.energy_b)   # type: ignore[arg-type]
     e_ts = float(lc.energy_ts)  # type: ignore[arg-type]
 
+    # Raise the effective TS so it is at least EA_MIN above the higher
+    # endpoint.  Deriving both barriers from the same e_ts_eff preserves
+    # energy consistency: Ea_fwd − Ea_rev = E_b − E_a.
+    e_ts_eff = max(e_ts, max(e_a, e_b) + EA_MIN)
+
     prefactor, kT = _eyring_prefactor(temperature, transmission_coefficient)
 
     def _make(direction_: str) -> tuple[float, float, float]:
         if direction_ == "a_to_b":
-            de       = e_b - e_a
-            ea_raw   = e_ts - e_a
+            de     = e_b - e_a
+            ea_kmc = max(EA_MIN, e_ts_eff - e_a)   # safety floor
         else:
-            de       = e_a - e_b
-            ea_raw   = e_ts - e_b
-        ea_kmc = max(EA_MIN, float(ea_raw))
-        rate   = float(prefactor * np.exp(-ea_kmc / kT))
+            de     = e_a - e_b
+            ea_kmc = max(EA_MIN, e_ts_eff - e_b)   # safety floor
+        rate = float(prefactor * np.exp(-ea_kmc / kT))
         return float(de), float(ea_kmc), rate
 
     out_fwd = _make("a_to_b")
@@ -274,8 +287,17 @@ def get_applicable_diffusions(
     nl_mult: float = NL_MULT_DEFAULT,
     persist_neb_path: bool = False,
     verbose: bool = False,
+    lateral_interactions: bool = True,
 ) -> list[DiffusionReaction]:
-    """Enumerate all currently-applicable hop events for one DiffusionSite."""
+    """Enumerate all currently-applicable hop events for one DiffusionSite.
+
+    Parameters
+    ----------
+    lateral_interactions : bool
+        When ``False``, third-party occupied adsorbate neighbours are excluded
+        from the lateral ego-graph so every member maps to the single bare
+        lat0.  Default ``True``.
+    """
     if not hasattr(ds, "_member_lc"):
         ds._member_lc = {}  # type: ignore[attr-defined]
 
@@ -292,7 +314,10 @@ def get_applicable_diffusions(
 
         # 1. Lateral classification (cheap if seen before).
         try:
-            lc = check_diffusion_site_lateral(G, ds, m_idx)
+            lc = check_diffusion_site_lateral(
+                G, ds, m_idx,
+                ignore_lateral=not lateral_interactions,
+            )
         except (ValueError, IndexError) as exc:
             if verbose:
                 print(
@@ -318,26 +343,20 @@ def get_applicable_diffusions(
                     verbose          = verbose,
                 )
             except DiffusionStabilityError as exc:
+                reason = f"{type(exc).__name__}: {exc}"
                 _log.warning(
                     "diff_iso=%d m=%d lat=%d: %s — "
-                    "falling back to Ea=0.1 eV, ΔE=0",
-                    ds.iso_class, m_idx,
-                    lc.lateral_class, f"{type(exc).__name__}: {exc}",
+                    "marking as invalid (excluded from KMC)",
+                    ds.iso_class, m_idx, lc.lateral_class, reason,
                 )
                 if verbose:
                     print(
                         f"  ⚠  diff_iso={ds.iso_class} m={m_idx} "
-                        f"lat={lc.lateral_class}: "
-                        f"{type(exc).__name__}: {exc}\n"
-                        f"     → falling back to Ea=0.1 eV, ΔE=0 eV"
+                        f"lat={lc.lateral_class}: {reason}\n"
+                        f"     → marked as invalid (will not be admitted to KMC)"
                     )
-                # Populate lc with degenerate energies so the event is still
-                # admitted with the KMC floor barrier (EA_MIN = 0.1 eV).
-                # E_ts = E_a + EA_MIN; E_b = E_a  →  ΔE=0, Ea_fwd=Ea_rev=0.1 eV.
-                lc.energy_a  = 0.0
-                lc.energy_b  = 0.0
-                lc.energy_ts = float(EA_MIN)
-                lc.stable    = True
+                lc.stable         = False
+                lc.invalid_reason = reason
 
         if not lc.stable:
             continue
@@ -383,6 +402,7 @@ def compute_all_diffusions(
     nl_mult: float = NL_MULT_DEFAULT,
     persist_neb_path: bool = False,
     verbose: bool = False,
+    lateral_interactions: bool = True,
 ) -> list[DiffusionReaction]:
     """Compute applicable hops for every DiffusionSite; return the flat list."""
     all_reactions: list[DiffusionReaction] = []
@@ -401,6 +421,7 @@ def compute_all_diffusions(
             nl_mult                  = nl_mult,
             persist_neb_path         = persist_neb_path,
             verbose                  = verbose,
+            lateral_interactions     = lateral_interactions,
         )
         all_reactions.extend(rxns)
     return all_reactions
