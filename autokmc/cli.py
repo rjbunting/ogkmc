@@ -160,9 +160,10 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
     if d.enabled:
         diff_by_smiles = find_diffusion_sites(
             G, all_sites,
-            max_hops      = d.max_hops,
-            n_shells_pair = d.n_shells_pair,
-            verbose       = log_level <= logging.INFO,
+            max_hops                 = d.max_hops,
+            n_shells_pair            = d.n_shells_pair,
+            prune_by_adsorption_pair = d.prune_by_adsorption_pair,
+            verbose                  = log_level <= logging.INFO,
         )
         for smiles, ds_list in diff_by_smiles.items():
             diffusion_sites_flat.extend(ds_list)

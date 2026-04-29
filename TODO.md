@@ -78,6 +78,14 @@ Need to do cases when adsorbate bonds will stretch on the surface (oxygen)
 check_diffusion_sites.py:
 Need to prune further... there has to be some way, but I'm just unsure!
 
+check_diffusion_sites.py (_check_ts_validity endpoint-collapse):
+The endpoint-collapse check only raises ``TransitionStateInvalidError`` for
+images 1 (adjacent to A) or n_interior (adjacent to B).  If image 2 is the
+highest-energy point and its energy is nearly identical to E_a, no exception
+is raised.  A more robust check would test ``abs(E_ts - E_a) < energy_tol``
+or ``abs(E_ts - E_b) < energy_tol`` regardless of index, or require that
+E_ts exceeds both endpoints by at least ``energy_tol``.
+
 free_energy.py:
 Need to add in entropy contributions. Can do this by calculating vibrational frequencies.
 

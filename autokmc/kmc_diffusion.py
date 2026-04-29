@@ -357,6 +357,26 @@ def get_applicable_diffusions(
                     )
                 lc.stable         = False
                 lc.invalid_reason = reason
+            except Exception as exc:
+                # Catch-all for unexpected errors (calculator failures, NumPy
+                # broadcast errors, etc.) that are not DiffusionStabilityError
+                # subtypes.  Without this, lc.stable stays None and the same
+                # expensive check is retried every KMC step.
+                reason = f"{type(exc).__name__}: {exc}"
+                _log.error(
+                    "diff_iso=%d m=%d lat=%d: unexpected error during "
+                    "check_diffusion_stability — marking as invalid: %s",
+                    ds.iso_class, m_idx, lc.lateral_class, reason,
+                    exc_info=True,
+                )
+                if verbose:
+                    print(
+                        f"  ✗  diff_iso={ds.iso_class} m={m_idx} "
+                        f"lat={lc.lateral_class}: unexpected error: {reason}\n"
+                        f"     → marked as invalid (will not be admitted to KMC)"
+                    )
+                lc.stable         = False
+                lc.invalid_reason = reason
 
         if not lc.stable:
             continue

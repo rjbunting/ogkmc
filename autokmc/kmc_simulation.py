@@ -619,6 +619,11 @@ def _recompute_affected_sites(
                     pair_surface = {s for clq in cliques_pair for s in clq}
                     if pair_surface & expanded:
                         ds_to_update[id(ds)] = ds
+                        # Break after finding the first qualifying member: we
+                        # only need to register `ds` once in `ds_to_update`.
+                        # `get_applicable_diffusions` / `install_site` will
+                        # then refresh ALL members of the site, so stopping
+                        # early here is correct, not incomplete.
                         break
 
         dkwargs = dict(diffusion_kwargs or {})

@@ -97,6 +97,22 @@ from autokmc.check_adsorbate_sites import (
     AdsorbateDissociationError,
     OptimisationFailedError,
 )
+from autokmc.constants import (
+    LATERAL_SHELLS_DEFAULT,
+    NL_MULT_DEFAULT,
+    NEB_N_IMAGES,
+    NEB_FMAX,
+    NEB_MAX_STEPS,
+    NEB_CLIMB,
+    NEB_SPRING_K,
+    NEB_INTERPOLATION,
+)
+from autokmc.logging_utils import get_logger
+
+if TYPE_CHECKING:
+    pass
+
+_log = get_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -119,8 +135,10 @@ def _diffusion_lateral_node_match(d1: dict, d2: dict) -> bool:
     """Lateral-iso predicate for the diffusion ego-graph.
 
     Same as :func:`autokmc.check_adsorbate_sites._lateral_node_match` but
-    additionally requires ``endpoint_role`` to agree on adsorbate nodes so
-    endpoints never map onto third-party neighbours of the same SMILES.
+    additionally requires ``endpoint_role`` and ``reactant_index`` to agree on
+    adsorbate nodes so endpoints never map onto third-party neighbours of the
+    same SMILES, and so symmetry-inequivalent atoms of the same element within a
+    multi-atom adsorbate are not interchanged.
     """
     if d1.get("type") != d2.get("type"):
         return False
@@ -130,6 +148,8 @@ def _diffusion_lateral_node_match(d1: dict, d2: dict) -> bool:
         if d1.get("iso_class") != d2.get("iso_class"):
             return False
         if d1.get("reactant") != d2.get("reactant"):
+            return False
+        if d1.get("reactant_index") != d2.get("reactant_index"):
             return False
         # Treat missing ``endpoint_role`` as None on both sides.
         if d1.get("endpoint_role") != d2.get("endpoint_role"):
@@ -143,30 +163,15 @@ def _diffusion_lateral_fingerprint(g: nx.Graph) -> tuple:
         (
             d.get("type",      "X"),
             d.get("element",   "X"),
-            int(d.get("iso_class", -1)) if d.get("type") == "adsorbate" else -1,
-            str(d.get("reactant",  "")) if d.get("type") == "adsorbate" else "",
-            str(d.get("endpoint_role", "")) if d.get("type") == "adsorbate" else "",
+            int(d.get("iso_class",      -1)) if d.get("type") == "adsorbate" else -1,
+            str(d.get("reactant",       "")) if d.get("type") == "adsorbate" else "",
+            int(d.get("reactant_index", -1)) if d.get("type") == "adsorbate" else -1,
+            str(d.get("endpoint_role",  "")) if d.get("type") == "adsorbate" else "",
             g.degree(n),
         )
         for n, d in g.nodes(data=True)
     ))
     return (g.number_of_nodes(), g.number_of_edges(), node_sigs)
-from autokmc.constants import (
-    LATERAL_SHELLS_DEFAULT,
-    NL_MULT_DEFAULT,
-    NEB_N_IMAGES,
-    NEB_FMAX,
-    NEB_MAX_STEPS,
-    NEB_CLIMB,
-    NEB_SPRING_K,
-    NEB_INTERPOLATION,
-)
-from autokmc.logging_utils import get_logger
-
-if TYPE_CHECKING:
-    pass
-
-_log = get_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -904,7 +909,7 @@ def check_diffusion_stability(
     spring_k : float
         NEB spring constant (eV/Å²).
     interpolation : str
-        ``"idpp"`` (default) or ``"linear"``.
+        ``"linear"`` (default) or ``"idpp"``.
     nl_mult : float
         Cutoff multiplier for the connectivity stability checks.
     persist_neb_path : bool

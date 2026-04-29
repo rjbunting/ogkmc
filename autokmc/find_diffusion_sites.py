@@ -12,7 +12,7 @@ that share
   hop distance through ``type == "surface"`` edges between any atom of A's
   bonded-clique union and any atom of B's bonded-clique union must be at
   most ``max_hops`` (default :data:`~autokmc.constants.DIFFUSION_MAX_HOPS`
-  = 1, i.e. "share a surface atom OR are first-neighbour surface atoms").
+  = 0, i.e. "share at least one surface atom").
 
 Pairs are deduplicated into iso-classes by graph-isomorphism of the union
 ego-graph (the surface-only ``n_shells_pair``-shell BFS around the union of
@@ -68,6 +68,7 @@ from autokmc.find_adsorbate_sites import (
 from autokmc.check_adsorbate_sites import _surface_bfs_shells
 from autokmc.constants import (
     DIFFUSION_MAX_HOPS,
+    DIFFUSION_PRUNE_BY_ADS_PAIR,
     N_SHELLS_DEFAULT,
     MAX_PAIR_SHELLS,
 )
@@ -290,8 +291,10 @@ def _pair_node_match(d1: dict, d2: dict) -> bool:
 
     * ``type == "surface"``   — must share ``element``.
     * ``type == "adsorbate"`` — must share ``element``, ``iso_class``,
-      ``reactant`` *and* ``endpoint_role`` (so an endpoint never maps onto
-      a third-party occupied adsorbate that happens to share the SMILES).
+      ``reactant``, ``reactant_index`` *and* ``endpoint_role`` (so an
+      endpoint never maps onto a third-party occupied adsorbate that happens
+      to share the SMILES, and symmetry-inequivalent atoms of the same element
+      within a multi-atom adsorbate are not interchanged).
     """
     if d1.get("type") != d2.get("type"):
         return False
@@ -301,6 +304,8 @@ def _pair_node_match(d1: dict, d2: dict) -> bool:
         if d1.get("iso_class") != d2.get("iso_class"):
             return False
         if d1.get("reactant") != d2.get("reactant"):
+            return False
+        if d1.get("reactant_index") != d2.get("reactant_index"):
             return False
         if d1.get("endpoint_role") != d2.get("endpoint_role"):
             return False
@@ -318,8 +323,9 @@ def _pair_fingerprint(g: nx.Graph) -> tuple:
         (
             d.get("type",    "X"),
             d.get("element", "X"),
-            int(d.get("iso_class", -1)) if d.get("type") == "adsorbate" else -1,
-            str(d.get("reactant",  "")) if d.get("type") == "adsorbate" else "",
+            int(d.get("iso_class",      -1)) if d.get("type") == "adsorbate" else -1,
+            str(d.get("reactant",       "")) if d.get("type") == "adsorbate" else "",
+            int(d.get("reactant_index", -1)) if d.get("type") == "adsorbate" else -1,
             (d.get("endpoint_role", "") or "") if d.get("type") == "adsorbate" else "",
             g.degree(n),
         )
@@ -327,6 +333,69 @@ def _pair_fingerprint(g: nx.Graph) -> tuple:
     ))
     return (g.number_of_nodes(), g.number_of_edges(), sigs)
 
+
+
+def _prune_one_per_adsorption_pair(
+    diffusion_sites: list[DiffusionSite],
+    *,
+    verbose: bool = False,
+    smiles: str = "",
+) -> list[DiffusionSite]:
+    """Keep the single smallest-ego :class:`DiffusionSite` per adsorption-pair.
+
+    For every unordered pair of adsorption iso-classes ``(ads_iso_a,
+    ads_iso_b)`` that appears in *diffusion_sites*, retains only the
+    :class:`DiffusionSite` whose ego-graph has the fewest nodes + edges
+    (i.e. the most direct / geometrically closest hop path between that pair
+    of site types).  All other iso-classes for the same adsorption pair are
+    discarded.
+
+    Parameters
+    ----------
+    diffusion_sites :
+        The full list produced by the graph-isomorphism deduplication loop.
+    verbose :
+        Print one line per pruned pair when ``True``.
+    smiles :
+        SMILES string for the verbose prefix.
+
+    Returns
+    -------
+    list[DiffusionSite]
+        Surviving sites in their original insertion order.
+    """
+    # Group by unordered adsorption-iso-class pair (representative = first member).
+    groups: dict[tuple[int, int], list[DiffusionSite]] = {}
+    for ds in diffusion_sites:
+        if not ds.members:
+            continue
+        site_a, _, site_b, _ = ds.members[0]
+        ic_a = int(site_a.iso_class)
+        ic_b = int(site_b.iso_class)
+        pair_key = (min(ic_a, ic_b), max(ic_a, ic_b))
+        groups.setdefault(pair_key, []).append(ds)
+
+    def _ego_size(ds: DiffusionSite) -> int:
+        g = ds.ego_graph
+        if g is None:
+            return 0
+        return g.number_of_nodes() + g.number_of_edges()
+
+    kept_ids: set[int] = set()
+    for pair_key, candidates in groups.items():
+        best = min(candidates, key=_ego_size)
+        kept_ids.add(id(best))
+        if verbose and len(candidates) > 1:
+            discarded = [c for c in candidates if c is not best]
+            print(
+                f"  prune_one_per_adsorption_pair[{smiles!r}]: "
+                f"pair {pair_key}: kept iso {best.iso_class} "
+                f"(ego size {_ego_size(best)}), "
+                f"discarded iso classes {[c.iso_class for c in discarded]}"
+            )
+
+    # Preserve original insertion order of surviving sites.
+    return [ds for ds in diffusion_sites if id(ds) in kept_ids]
 
 
 # ---------------------------------------------------------------------------
@@ -340,6 +409,7 @@ def find_diffusion_sites(
     max_hops: int = DIFFUSION_MAX_HOPS,
     n_shells_pair: int = N_SHELLS_DEFAULT,
     surface_apsp_cutoff: int = MAX_PAIR_SHELLS,
+    prune_by_adsorption_pair: bool = DIFFUSION_PRUNE_BY_ADS_PAIR,
     verbose: bool = False,
 ) -> dict[str, list[DiffusionSite]]:
     """Enumerate diffusion site-pairs for every SMILES present in *adsorbate_sites*.
@@ -363,6 +433,12 @@ def find_diffusion_sites(
     surface_apsp_cutoff : int
         Cutoff handed to :func:`autokmc.find_adsorbate_sites._get_surface_apsp`
         for the cached APSP table.  Must be ≥ ``max_hops``.
+    prune_by_adsorption_pair : bool
+        When ``True`` (default), for every unordered pair of adsorption
+        iso-classes keep only the single :class:`DiffusionSite` whose
+        ego-graph is smallest (fewest nodes + edges), i.e. the most direct
+        hop path.  Set to ``False`` to retain all crystallographically-
+        distinct hop directions between the same pair of site types.
     verbose : bool
 
     Returns
@@ -453,6 +529,11 @@ def find_diffusion_sites(
                     if gm.is_isomorphic():
                         ds.members.append((site_a, m_a, site_b, m_b))
                         ds.member_node_ids.append((a_nids, b_nids))
+                        # Keep the maximum settled shell depth so that lateral
+                        # classification always uses the deepest ego seen so far.
+                        ds.n_shells_pair_settled = max(
+                            ds.n_shells_pair_settled, max(ns_a, ns_b)
+                        )
                         merged = True
                         break
 
@@ -470,6 +551,12 @@ def find_diffusion_sites(
 
                 n_pairs_kept += 1
 
+        # ── Optional: keep one DiffusionSite per adsorption-pair ────────────
+        if prune_by_adsorption_pair:
+            diffusion_sites = _prune_one_per_adsorption_pair(
+                diffusion_sites, verbose=verbose, smiles=smiles,
+            )
+
         # ── Renumber iso_class sequentially ─────────────────────────────────
         # NOTE: The earlier "one iso-class per (ads_iso_a, ads_iso_b) pair"
         # pruning step has been removed.  That step assumed only one distinct
@@ -486,8 +573,8 @@ def find_diffusion_sites(
 
         if verbose:
             print(
-                f"  {len(diffusion_sites)} diffusion iso-class(es) kept "
-                f"({n_pairs_kept} pairs considered)"
+                f"  {len(diffusion_sites)} diffusion iso-class(es) found "
+                f"({n_pairs_kept} pair(s) kept from {n_pairs_considered} considered)"
             )
 
         # ── Reverse indexes for the KMC incremental update path ──────────

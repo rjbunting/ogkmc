@@ -33,6 +33,7 @@ from autokmc.constants import (
     PRUNE_MAX_STEPS,
     RANDOM_SEED,
     DIFFUSION_MAX_HOPS,
+    DIFFUSION_PRUNE_BY_ADS_PAIR,
     NEB_FMAX,
     NEB_MAX_STEPS,
     NEB_N_IMAGES,
@@ -134,9 +135,10 @@ class DiffusionCfg:
 
     All NEB defaults come from :mod:`autokmc.constants` (``NEB_*``).
     """
-    enabled:          bool   = True
-    max_hops:         int    = DIFFUSION_MAX_HOPS
-    n_shells_pair:    int    = N_SHELLS_DEFAULT
+    enabled:                   bool   = True
+    max_hops:                  int    = DIFFUSION_MAX_HOPS
+    n_shells_pair:             int    = N_SHELLS_DEFAULT
+    prune_by_adsorption_pair:  bool   = DIFFUSION_PRUNE_BY_ADS_PAIR
     fmax:             float  = NEB_FMAX
     max_steps:        int    = NEB_MAX_STEPS
     n_images:         int    = NEB_N_IMAGES

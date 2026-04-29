@@ -261,6 +261,13 @@ NEB_SPRING_K: float = 0.1
 #: potential, ASE default for chemistry) or ``"linear"``.
 NEB_INTERPOLATION: str = "linear"
 
+#: When ``True`` (default), :func:`autokmc.find_diffusion_sites.find_diffusion_sites`
+#: keeps only **one** :class:`~autokmc.find_diffusion_sites.DiffusionSite` per
+#: unordered pair of adsorption iso-classes — the one whose ego-graph has the
+#: fewest nodes + edges (i.e. the most direct / geometrically closest hop path).
+#: Set to ``False`` to retain all crystallographically-distinct hop directions.
+DIFFUSION_PRUNE_BY_ADS_PAIR: bool = True
+
 #: Folder-name format for diffusion reaction folders persisted by
 #: :class:`autokmc.persistence.ReactionWriter`.  See
 #: :func:`autokmc.persistence._diffusion_folder_name`.
