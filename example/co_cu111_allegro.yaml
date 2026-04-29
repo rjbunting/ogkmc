@@ -51,7 +51,7 @@ kmc:
   # the single bare lat0, so only one ML relaxation per iso-class is needed.
   # The lateral-shell incremental update is also skipped each KMC step,
   # reducing overhead at high coverage.  Default: true.
-  lateral_interactions: true
+  lateral_interactions: false
 
 # Diffusion (NEB) channel.  Enabled by default; set `enabled: false` to
 # run adsorption / desorption only.  Each new (iso, lateral) pair triggers
