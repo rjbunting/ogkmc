@@ -122,7 +122,7 @@ _section("STAGE 3 — Reactants  ([OH], [O], [H], OO)")
 # All four species we expect to see in the templates derived from [OH]:
 #   OH  →  O + H        (dissociation)
 #   OH + OH  →  HOOH    (coupling)
-SPECIES_SMILES = ["[OH]", "[O]", "[H]", "OO"]
+SPECIES_SMILES = ["[OH]", "[O]", "[H]", "O=O"]
 
 reactants = {}
 for smi in SPECIES_SMILES:

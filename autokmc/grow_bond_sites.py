@@ -213,11 +213,18 @@ def _ensure_species_known(
         return reg["species"][smi] is not None
 
     try:
+        # Newly-discovered species introduced during a KMC run should
+        # default to zero partial pressure (they are produced on-surface
+        # and are not assumed to be present in the gas phase unless the
+        # user explicitly adds them to the config).  Pass
+        # partial_pressure_bar=0.0 to enforce this behaviour for
+        # on-the-fly builds while leaving the global API default intact.
         r = build_reactant(
             smi,
-            calculator    = calculator,
-            add_hydrogens = add_hydrogens,
-            nl_mult       = nl_mult,
+            calculator            = calculator,
+            add_hydrogens         = add_hydrogens,
+            nl_mult               = nl_mult,
+            partial_pressure_bar = 0.0,
         )
     except Exception as exc:
         _log.warning(

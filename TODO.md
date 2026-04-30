@@ -106,3 +106,6 @@ that involve the transfer of atoms from one species to another.
 
 kmc_reactions.py (reaction enumeration):
 Need TS verification now with frequencies. Need a general plan for this.
+
+optimise_structure:
+If the structure doesn't optimise, it should be counted as unstable instead.

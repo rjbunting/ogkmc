@@ -91,7 +91,7 @@ diffusion:
 # and diffusion; CI-NEB barriers are computed lazily per (iso, lateral)
 # class and persisted under reactions/bond/.
 bond:
-  enabled: true
+  enabled: false
   bond_max_hops: 0                # 0 = "share a surface atom" between A and B / between A∪B and C
   bond_types: ["SINGLE", "DOUBLE", "TRIPLE"]   # cleavable / formed bond orders
   include_ring_bonds: false

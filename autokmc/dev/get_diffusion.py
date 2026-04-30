@@ -128,7 +128,7 @@ print(f"PBC: {G.graph['pbc']}")
 _section("STAGE 3 — CO reactant (gas-phase relaxation)")
 
 co = build_reactant(
-    "[C-]#[O+]",
+    "[C]=O",
     add_hydrogens = False,
     calculator    = calc,
 )
