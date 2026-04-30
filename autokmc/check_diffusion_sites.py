@@ -865,6 +865,9 @@ def check_diffusion_stability(
     nl_mult: float = NL_MULT_DEFAULT,
     persist_neb_path: bool = False,
     verbose: bool = False,
+    free_energy_options=None,
+    free_energy_temperature_k: float | None = None,
+    vib_cache_root: str | None = None,
 ) -> tuple[float, float, float]:
     """Relax both endpoints and the NEB band; store and return energies.
 
@@ -1086,6 +1089,83 @@ def check_diffusion_stability(
 
     # ── 6. Mark stable ���─────────────────────────────────────────────────
     lateral_class.stable     = True
+
+    # ── 7. Optional harmonic thermochemistry on A / B / TS ──────────────
+    # The migrating molecule occupies the tail of the per-image atom array
+    # (slab | lateral_neighbours | migrating_block).  Vibrate only those
+    # indices so frozen slab + lateral neighbours contribute zero.
+    if (free_energy_options is not None
+            and getattr(free_energy_options, "enabled", False)
+            and free_energy_temperature_k is not None):
+        from autokmc.free_energy import compute_harmonic_thermo
+        from pathlib import Path as _Path
+
+        vib_indices = list(range(n_slab + n_lat, n_slab + n_lat + n_mig))
+        cache_dir_root = (
+            _Path(vib_cache_root) if vib_cache_root is not None else None
+        )
+        per_lat_dir = (
+            cache_dir_root /
+            f"diff_iso{diffusion_site.iso_class}_lat{lateral_class.lateral_class}"
+            if cache_dir_root is not None else None
+        )
+
+        def _harm(atoms, label, energy_ev, drop_imag):
+            try:
+                return compute_harmonic_thermo(
+                    atoms, vib_indices,
+                    energy_ev      = float(energy_ev),
+                    temperature_k  = float(free_energy_temperature_k),
+                    calculator     = calculator,
+                    options        = free_energy_options,
+                    cache_dir      = (str(per_lat_dir) if per_lat_dir is not None else None),
+                    label          = label,
+                    drop_imaginary = drop_imag,
+                )
+            except Exception as exc:                          # pragma: no cover
+                _log.warning(
+                    "check_diffusion_stability: harmonic thermo for %s "
+                    "failed (diff_iso=%d, lat=%d): %s — leaving G=NaN.",
+                    label, diffusion_site.iso_class,
+                    lateral_class.lateral_class, exc,
+                )
+                return None
+
+        a_thermo  = _harm(atoms_a_opt, "state_a", E_a,  True)
+        b_thermo  = _harm(atoms_b_opt, "state_b", E_b,  True)
+        if getattr(free_energy_options, "include_ts_vibrations", True):
+            ts_thermo = _harm(atoms_ts, "ts", E_ts, True)
+        else:
+            ts_thermo = None
+
+        if a_thermo is not None:
+            lateral_class.g_correction_a   = a_thermo["g_corr_ev"]
+            lateral_class.g_a              = a_thermo["g_total_ev"]
+            lateral_class.zpe_a            = a_thermo["zpe_ev"]
+            lateral_class.entropy_a        = a_thermo["entropy_ev_per_k"]
+            lateral_class.frequencies_a_cm = a_thermo["frequencies_cm"]
+            lateral_class.imaginary_a_cm   = a_thermo["imaginary_cm"]
+        if b_thermo is not None:
+            lateral_class.g_correction_b   = b_thermo["g_corr_ev"]
+            lateral_class.g_b              = b_thermo["g_total_ev"]
+            lateral_class.zpe_b            = b_thermo["zpe_ev"]
+            lateral_class.entropy_b        = b_thermo["entropy_ev_per_k"]
+            lateral_class.frequencies_b_cm = b_thermo["frequencies_cm"]
+            lateral_class.imaginary_b_cm   = b_thermo["imaginary_cm"]
+        if ts_thermo is not None:
+            lateral_class.g_correction_ts   = ts_thermo["g_corr_ev"]
+            lateral_class.g_ts              = ts_thermo["g_total_ev"]
+            lateral_class.zpe_ts            = ts_thermo["zpe_ev"]
+            lateral_class.entropy_ts        = ts_thermo["entropy_ev_per_k"]
+            lateral_class.frequencies_ts_cm = ts_thermo["frequencies_cm"]
+            lateral_class.imaginary_ts_cm   = ts_thermo["imaginary_cm"]
+        elif a_thermo is not None and b_thermo is not None:
+            # Endpoint-ZPE-only fallback: use the average correction of A/B
+            # as the TS correction so detailed-balance ratios are preserved
+            # without paying the cost of a dedicated TS vib analysis.
+            avg_corr = 0.5 * (a_thermo["g_corr_ev"] + b_thermo["g_corr_ev"])
+            lateral_class.g_correction_ts = float(avg_corr)
+            lateral_class.g_ts            = float(E_ts) + float(avg_corr)
 
     _log.debug(
         "check_diffusion_stability: diff_iso=%d member=%d lat=%d  "

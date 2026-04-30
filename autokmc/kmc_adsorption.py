@@ -161,6 +161,45 @@ def _build_gas_energy_lookup(
     return out
 
 
+def _build_gas_g_lookup(
+    reactants: Reactant | Iterable[Reactant] | dict | None,
+) -> dict[str, float]:
+    """Return ``{smiles: gibbs_energy_eV}`` for every reactant with finite G.
+
+    Reactants whose ``gibbs_energy`` is NaN (free-energy mode disabled or
+    vibrations failed) are simply omitted; downstream callers fall back to
+    electronic ΔE for those species.
+    """
+    if reactants is None or isinstance(reactants, dict):
+        return {}
+    if isinstance(reactants, Reactant):
+        reactants = [reactants]
+    out: dict[str, float] = {}
+    for r in reactants:
+        if not isinstance(r, Reactant):
+            continue
+        g = getattr(r, "gibbs_energy", float("nan"))
+        if isinstance(g, float) and not np.isnan(g):
+            out[r.smiles] = float(g)
+    return out
+
+
+def _build_partial_pressure_lookup(
+    reactants: Reactant | Iterable[Reactant] | dict | None,
+) -> dict[str, float]:
+    """Return ``{smiles: partial_pressure_bar}`` (defaults 1.0 when unset)."""
+    if reactants is None or isinstance(reactants, dict):
+        return {}
+    if isinstance(reactants, Reactant):
+        reactants = [reactants]
+    out: dict[str, float] = {}
+    for r in reactants:
+        if not isinstance(r, Reactant):
+            continue
+        out[r.smiles] = float(getattr(r, "partial_pressure_bar", 1.0))
+    return out
+
+
 def _site_is_occupied(G: nx.Graph, site: AdsorbateSite, member_index: int) -> bool:
     return site._member_is_occupied(G, site.member_node_ids[member_index])
 
@@ -238,13 +277,30 @@ def _energetics_cached(
     *,
     temperature: float,
     transmission_coefficient: float = DEFAULT_TRANSMISSION_COEFFICIENT,
+    g_gas: float | None = None,
+    pressure_bar: float = 1.0,
 ) -> tuple[float, float, float]:
-    """Return ``(delta_e, barrier, rate)`` with caching of *both* directions."""
+    """Return ``(delta_e, barrier, rate)`` with caching of *both* directions.
+
+    When the lateral class has free-energy fields populated
+    (``g_occupied`` / ``g_unoccupied``) AND a *g_gas* is provided, the
+    rate is derived from ΔG instead of ΔE, with the adsorption (forward)
+    direction additionally multiplied by *pressure_bar* so that the
+    persisted ΔG / barriers stay at the 1 bar standard state.
+    """
+    use_g = (
+        g_gas is not None
+        and getattr(lc, "g_occupied",   None) is not None
+        and getattr(lc, "g_unoccupied", None) is not None
+    )
     key = (
         round(float(temperature),                9),
         round(float(transmission_coefficient),   9),
         round(float(e_gas),                      9),
+        round(float(g_gas) if use_g else 0.0,    9),
+        round(float(pressure_bar),               9),
         bool(occupied),
+        bool(use_g),
     )
     cache: dict | None = getattr(lc, "_rate_cache", None)
     if cache is None:
@@ -254,30 +310,42 @@ def _energetics_cached(
     if hit is not None:
         return hit
 
-    e_occ   = float(lc.energy_occupied)    # type: ignore[arg-type]
-    e_unocc = float(lc.energy_unoccupied)  # type: ignore[arg-type]
-
-    if occupied:
-        delta_e = e_unocc + float(e_gas) - e_occ
+    if use_g:
+        e_occ_used   = float(lc.g_occupied)    # type: ignore[arg-type]
+        e_unocc_used = float(lc.g_unoccupied)  # type: ignore[arg-type]
+        e_gas_used   = float(g_gas)            # type: ignore[arg-type]
     else:
-        delta_e = e_occ - (e_unocc + float(e_gas))
+        e_occ_used   = float(lc.energy_occupied)    # type: ignore[arg-type]
+        e_unocc_used = float(lc.energy_unoccupied)  # type: ignore[arg-type]
+        e_gas_used   = float(e_gas)
+
+    if occupied:                       # desorption
+        delta_e = e_unocc_used + e_gas_used - e_occ_used
+    else:                              # adsorption
+        delta_e = e_occ_used - (e_unocc_used + e_gas_used)
 
     barrier  = max(EA_MIN, delta_e + EA_MIN)
     prefactor, kT = _eyring_prefactor(temperature, transmission_coefficient)
     rate = float(prefactor * np.exp(-barrier / kT))
+    # Adsorption: multiply by reactant partial pressure (bar) so the
+    # persisted barrier remains at the 1 bar reference.
+    if not occupied:
+        rate *= max(0.0, float(pressure_bar))
 
     out = (float(delta_e), float(barrier), rate)
     cache[key] = out
 
-    other_key = key[:-1] + (not bool(occupied),)
+    other_key = key[:-2] + (not bool(occupied), bool(use_g))
     if other_key not in cache:
         other_occ = not bool(occupied)
         if other_occ:
-            other_de = e_unocc + float(e_gas) - e_occ
+            other_de = e_unocc_used + e_gas_used - e_occ_used
         else:
-            other_de = e_occ - (e_unocc + float(e_gas))
+            other_de = e_occ_used - (e_unocc_used + e_gas_used)
         other_barrier = max(EA_MIN, other_de + EA_MIN)
         other_rate    = float(prefactor * np.exp(-other_barrier / kT))
+        if not other_occ:
+            other_rate *= max(0.0, float(pressure_bar))
         cache[other_key] = (
             float(other_de), float(other_barrier), other_rate,
         )
@@ -292,12 +360,16 @@ def _energetics(
     *,
     temperature: float,
     transmission_coefficient: float = DEFAULT_TRANSMISSION_COEFFICIENT,
+    g_gas: float | None = None,
+    pressure_bar: float = 1.0,
 ) -> tuple[float, float, float]:
     """Backwards-compatible wrapper around :func:`_energetics_cached`."""
     return _energetics_cached(
         lc, e_gas, occupied,
         temperature              = temperature,
         transmission_coefficient = transmission_coefficient,
+        g_gas                    = g_gas,
+        pressure_bar             = pressure_bar,
     )
 
 
@@ -318,6 +390,10 @@ def get_applicable_reactions(
     max_steps: int = 200,
     verbose: bool = False,
     lateral_interactions: bool = True,
+    gas_g: dict[str, float] | None = None,
+    partial_pressures: dict[str, float] | None = None,
+    free_energy_options=None,
+    vib_cache_root: str | None = None,
 ) -> list[AdsorptionReaction]:
     """Enumerate all applicable adsorption / desorption events for one site.
 
@@ -327,6 +403,21 @@ def get_applicable_reactions(
         When ``False``, neighbouring occupied adsorbate nodes are ignored
         when building the lateral ego-graph, so every member is always
         classified into the single bare lat0.  Default ``True``.
+    gas_g : dict[str, float] | None
+        Optional ``{smiles: G_gas_eV}`` lookup used for ΔG-based rates
+        when free-energy mode is enabled.  When omitted, the rate falls
+        back to electronic ΔE.
+    partial_pressures : dict[str, float] | None
+        Optional ``{smiles: pressure_bar}`` lookup; the adsorption rate
+        for each species is multiplied by its partial pressure (default
+        1 bar when missing).
+    free_energy_options
+        Forwarded to :func:`autokmc.check_adsorbate_sites.check_site_stability`
+        so that harmonic vibrations are computed for every newly-stable
+        lateral class.
+    vib_cache_root : str | None
+        Forwarded to :func:`check_site_stability` for the ASE
+        ``Vibrations`` cache.
     """
     if site.reactant not in gas_energies:
         raise KeyError(
@@ -334,6 +425,14 @@ def get_applicable_reactions(
             f"{site.reactant!r}.  Pass it via the ``reactants`` argument."
         )
     e_gas = float(gas_energies[site.reactant])
+    g_gas = (
+        float(gas_g[site.reactant])
+        if gas_g is not None and site.reactant in gas_g
+        else None
+    )
+    pressure_bar = float(
+        (partial_pressures or {}).get(site.reactant, 1.0)
+    )
 
     if not hasattr(site, "_member_lc"):
         site._member_lc = {}  # type: ignore[attr-defined]
@@ -367,6 +466,9 @@ def get_applicable_reactions(
                     fmax           = fmax,
                     max_steps      = max_steps,
                     verbose        = verbose,
+                    free_energy_options       = free_energy_options,
+                    free_energy_temperature_k = float(temperature),
+                    vib_cache_root            = vib_cache_root,
                 )
             except SiteStabilityError as exc:
                 lc.stable = False
@@ -391,6 +493,8 @@ def get_applicable_reactions(
             lc, e_gas, occ,
             temperature              = temperature,
             transmission_coefficient = transmission_coefficient,
+            g_gas                    = g_gas,
+            pressure_bar             = pressure_bar,
         )
         reactions.append(AdsorptionReaction(
             kind          = kind,
@@ -419,6 +523,10 @@ def compute_all_reactions(
     max_steps: int = 200,
     verbose: bool = False,
     lateral_interactions: bool = True,
+    gas_g: dict[str, float] | None = None,
+    partial_pressures: dict[str, float] | None = None,
+    free_energy_options=None,
+    vib_cache_root: str | None = None,
 ) -> list[AdsorptionReaction]:
     """Compute applicable reactions for every site and return the flat list."""
     gas_energies = _build_gas_energy_lookup(reactants)
@@ -434,6 +542,10 @@ def compute_all_reactions(
             max_steps                = max_steps,
             verbose                  = verbose,
             lateral_interactions     = lateral_interactions,
+            gas_g                    = gas_g,
+            partial_pressures        = partial_pressures,
+            free_energy_options      = free_energy_options,
+            vib_cache_root           = vib_cache_root,
         )
         all_reactions.extend(rxns)
     return all_reactions

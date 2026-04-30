@@ -91,6 +91,44 @@ from autokmc.kmc_diffusion import (
     compute_all_diffusions,
     fast_diffusion_for_member,
 )
+from autokmc.molecular_bond_changing import (
+    FragmentPair,
+    CombinedSpecies,
+    get_all_fragments,
+    combine_fragments,
+    fragment_smiles_to_atoms,
+)
+from autokmc.find_bond_sites import (
+    BondReactionTemplate,
+    BondReactionLateral,
+    BondReactionSite,
+    derive_dissociation_templates,
+    derive_coupling_templates,
+    derive_bond_templates,
+    find_bond_sites,
+    prune_unstable_bond_sites,
+)
+from autokmc.grow_bond_sites import (
+    initialise_bond_registry,
+    bond_species_known,
+    expand_bond_sites_for_new_species,
+    expand_bond_sites_after_event,
+)
+from autokmc.check_bond_sites import (
+    BondStabilityError,
+    BondEndpointStabilityError,
+    BondNEBNotConvergedError,
+    BondTransitionStateInvalidError,
+    check_bond_site_lateral,
+    check_bond_site_stability,
+)
+from autokmc.kmc_bond import (
+    BondReaction,
+    is_bond_applicable,
+    get_applicable_bond_reactions,
+    compute_all_bond_reactions,
+    fast_bond_reaction_for_member,
+)
 from autokmc.kmc_simulation import (
     total_rate,
     sample_tau,
@@ -158,6 +196,21 @@ __all__ = [
     "DiffusionReaction", "is_diffusion_applicable",
     "get_applicable_diffusions", "compute_all_diffusions",
     "fast_diffusion_for_member",
+    # Molecular bond changing (SMILES → fragments / fragments → species)
+    "FragmentPair", "CombinedSpecies",
+    "get_all_fragments", "combine_fragments", "fragment_smiles_to_atoms",
+    # Bond reactions (A + B ⇌ C on the surface)
+    "BondReactionTemplate", "BondReactionLateral", "BondReactionSite",
+    "derive_dissociation_templates", "derive_coupling_templates",
+    "derive_bond_templates", "find_bond_sites", "prune_unstable_bond_sites",
+    "BondStabilityError", "BondEndpointStabilityError",
+    "BondNEBNotConvergedError", "BondTransitionStateInvalidError",
+    "check_bond_site_lateral", "check_bond_site_stability",
+    "BondReaction", "is_bond_applicable",
+    "get_applicable_bond_reactions", "compute_all_bond_reactions",
+    "fast_bond_reaction_for_member",
+    "initialise_bond_registry", "bond_species_known",
+    "expand_bond_sites_for_new_species", "expand_bond_sites_after_event",
     # KMC simulation
     "total_rate", "sample_tau", "choose_reaction",
     "execute_reaction", "run_kmc_steps",

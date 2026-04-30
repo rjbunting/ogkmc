@@ -36,6 +36,7 @@ import networkx as nx
 
 from autokmc.find_adsorbate_sites import AdsorbateSite
 from autokmc.find_diffusion_sites import DiffusionSite
+from autokmc.find_bond_sites import BondReactionSite
 from autokmc.reactants import Reactant
 from autokmc.kmc_adsorption import (
     AdsorptionReaction as Reaction,  # alias keeps existing type hints valid
@@ -43,6 +44,8 @@ from autokmc.kmc_adsorption import (
     H_EV_S,
     DEFAULT_TRANSMISSION_COEFFICIENT,
     _build_gas_energy_lookup,
+    _build_gas_g_lookup,
+    _build_partial_pressure_lookup,
     compute_all_reactions,
     get_applicable_reactions,
     fast_reaction_for_member,
@@ -52,6 +55,12 @@ from autokmc.kmc_diffusion import (
     compute_all_diffusions,
     get_applicable_diffusions,
 )
+from autokmc.kmc_bond import (
+    BondReaction,
+    compute_all_bond_reactions,
+    get_applicable_bond_reactions,
+)
+from autokmc.grow_bond_sites import expand_bond_sites_after_event
 from autokmc.check_adsorbate_sites import _surface_bfs_shells
 from autokmc.logging_utils import get_logger
 from autokmc.constants import LATERAL_SHELLS_DEFAULT
@@ -137,19 +146,22 @@ class _ReactionIndex:
     applicable (clique-blocked, unstable, …).  The companion segment-tree
     keeps the rate column in sync so sampling and updates are both O(log R).
     """
-    __slots__ = ("base", "n_total", "tree", "reactions", "site_order",                 "diffusion_site_order",
-                 "_adsorbate_ids", "_diffusion_ids")
+    __slots__ = ("base", "n_total", "tree", "reactions", "site_order",                 "diffusion_site_order", "bond_site_order",
+                 "_adsorbate_ids", "_diffusion_ids", "_bond_ids")
 
     def __init__(
         self,
         sites: list[AdsorbateSite],
         diffusion_sites: list[DiffusionSite] | None = None,
+        bond_sites: list[BondReactionSite] | None = None,
     ):
         self.site_order: list[AdsorbateSite] = list(sites)
         self.diffusion_site_order: list[DiffusionSite] = list(diffusion_sites or [])
+        self.bond_site_order: list[BondReactionSite] = list(bond_sites or [])
         self.base: dict[int, int] = {}
         self._adsorbate_ids: set[int] = set()
         self._diffusion_ids: set[int] = set()
+        self._bond_ids: set[int] = set()
         offset = 0
         for s in self.site_order:
             self.base[id(s)] = offset
@@ -159,9 +171,13 @@ class _ReactionIndex:
             self.base[id(ds)] = offset
             self._diffusion_ids.add(id(ds))
             offset += len(ds.member_node_ids)
+        for brs in self.bond_site_order:
+            self.base[id(brs)] = offset
+            self._bond_ids.add(id(brs))
+            offset += len(brs.member_node_ids)
         self.n_total = offset
         self.tree = _RateSegmentTree(self.n_total)
-        self.reactions: list[Reaction | DiffusionReaction | None] = (
+        self.reactions: list[Reaction | DiffusionReaction | BondReaction | None] = (
             [None] * self.n_total
         )
 
@@ -188,7 +204,7 @@ class _ReactionIndex:
     def total_rate(self) -> float:
         return self.tree.total
 
-    def sample(self, u: float) -> Reaction | None:
+    def sample(self, u: float) -> Reaction | DiffusionReaction | BondReaction | None:
         i = self.tree.sample(u)
         if i < 0:
             return None
@@ -363,6 +379,26 @@ def execute_reaction(G: nx.Graph, reaction) -> set:
         _set_member_occupied(G, tgt_site, tgt_m, True)
         return cliques
 
+    if getattr(reaction, "kind", None) == "bond":
+        brs: BondReactionSite = reaction.site
+        site_a, m_a, site_b, m_b, site_c, m_c = brs.members[reaction.member_index]
+        cliques = set()
+        cliques |= _affected_surface_cliques(G, site_a, m_a)
+        cliques |= _affected_surface_cliques(G, site_b, m_b)
+        cliques |= _affected_surface_cliques(G, site_c, m_c)
+        # Vacate then occupy so ``occupied_by_clique`` stays consistent
+        # when A/B and C share (sub-)cliques.
+        if reaction.direction == "couple":
+            # A + B → C
+            _set_member_occupied(G, site_a, m_a, False)
+            _set_member_occupied(G, site_b, m_b, False)
+            _set_member_occupied(G, site_c, m_c, True)
+        else:  # "dissoc": C → A + B
+            _set_member_occupied(G, site_c, m_c, False)
+            _set_member_occupied(G, site_a, m_a, True)
+            _set_member_occupied(G, site_b, m_b, True)
+        return cliques
+
     new_state = (reaction.kind == "adsorption")
     cliques = _affected_surface_cliques(G, reaction.site, reaction.member_index)
     _set_member_occupied(G, reaction.site, reaction.member_index, new_state)
@@ -493,6 +529,40 @@ def _diffusion_lateral_shell_members(
     return out
 
 
+def _bond_lateral_shell_members(
+    G: nx.Graph,
+    affected_cliques: set,
+    active_bond_ids: set[int] | None,
+    max_n_shells: int,
+) -> list[tuple[BondReactionSite, int]]:
+    """Bond-reaction analogue of :func:`_lateral_shell_members`.
+
+    Walks ``G.graph["bond_surface_node_to_members"]`` after a surface-only
+    BFS expansion of ``affected_cliques`` by ``max_n_shells`` hops.
+    """
+    surface_node_to_members: dict | None = G.graph.get(
+        "bond_surface_node_to_members"
+    )
+    if not surface_node_to_members or not affected_cliques:
+        return []
+
+    seed = frozenset(s for clq in affected_cliques for s in clq)
+    expanded: frozenset = _surface_bfs_shells(G, seed, max_n_shells)
+
+    seen: set[tuple[int, int]] = set()
+    out: list[tuple[BondReactionSite, int]] = []
+    for surf_id in expanded:
+        for brs, m_idx in surface_node_to_members.get(surf_id, ()):
+            if active_bond_ids is not None and id(brs) not in active_bond_ids:
+                continue
+            key = (id(brs), int(m_idx))
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append((brs, m_idx))
+    return out
+
+
 def _recompute_affected_sites(
     G: nx.Graph,
     adsorbate_sites: list[AdsorbateSite],
@@ -510,7 +580,13 @@ def _recompute_affected_sites(
     rxn_index: _ReactionIndex | None = None,
     diffusion_sites: list[DiffusionSite] | None = None,
     diffusion_kwargs: dict | None = None,
+    bond_sites: list[BondReactionSite] | None = None,
+    bond_kwargs: dict | None = None,
     lateral_interactions: bool = True,
+    gas_g: dict[str, float] | None = None,
+    partial_pressures: dict[str, float] | None = None,
+    free_energy_options=None,
+    vib_cache_root: str | None = None,
 ) -> None:
     """Recompute lateral classes and rates for every member in the lateral
     shell of the just-toggled member.
@@ -562,6 +638,10 @@ def _recompute_affected_sites(
                         max_steps                = max_steps,
                         verbose                  = verbose,
                         lateral_interactions     = lateral_interactions,
+                        gas_g                    = gas_g,
+                        partial_pressures        = partial_pressures,
+                        free_energy_options      = free_energy_options,
+                        vib_cache_root           = vib_cache_root,
                     )
                     if rxn_index is not None:
                         rxn_index.install_site(site, rxns)
@@ -585,6 +665,10 @@ def _recompute_affected_sites(
             max_steps                = max_steps,
             verbose                  = verbose,
             lateral_interactions     = lateral_interactions,
+            gas_g                    = gas_g,
+            partial_pressures        = partial_pressures,
+            free_energy_options      = free_energy_options,
+            vib_cache_root           = vib_cache_root,
         )
         if rxn_index is not None:
             rxn_index.install_site(site, rxns)
@@ -635,10 +719,59 @@ def _recompute_affected_sites(
                 frozen_indices           = frozen_indices,
                 verbose                  = verbose,
                 lateral_interactions     = lateral_interactions,
+                free_energy_options      = free_energy_options,
+                vib_cache_root           = vib_cache_root,
                 **dkwargs,
             )
             if rxn_index is not None:
                 rxn_index.install_site(ds, rxns)
+
+    # ── Bond reactions: same lateral-shell expansion, separate index ──────
+    if bond_sites:
+        active_brs_ids: set[int] | None = (
+            set(rxn_index._bond_ids) if rxn_index is not None else None
+        )
+        affected_brs = _bond_lateral_shell_members(
+            G, affected_cliques, active_brs_ids, max_n_shells,
+        )
+        brs_to_update: dict[int, BondReactionSite] = {}
+        for brs, _ in affected_brs:
+            brs_to_update[id(brs)] = brs
+
+        # Fallback when reverse index is empty: scan every bond site whose
+        # placements fall within ``max_n_shells`` surface hops of the
+        # affected cliques.
+        if not brs_to_update:
+            seed = frozenset(s for clq in affected_cliques for s in clq)
+            expanded: frozenset = _surface_bfs_shells(G, seed, max_n_shells)
+            for brs in bond_sites:
+                hit = False
+                for m_idx in range(len(brs.member_node_ids)):
+                    cliques_a, cliques_b, cliques_c = brs._member_cliques[m_idx]
+                    triple_surface = {
+                        s
+                        for clq in (*cliques_a, *cliques_b, *cliques_c)
+                        for s in clq
+                    }
+                    if triple_surface & expanded:
+                        hit = True
+                        break
+                if hit:
+                    brs_to_update[id(brs)] = brs
+
+        bkwargs = dict(bond_kwargs or {})
+        for brs in (brs_to_update.values() if brs_to_update else ()):
+            rxns = get_applicable_bond_reactions(
+                G, brs, calculator,
+                temperature              = temperature,
+                transmission_coefficient = transmission_coefficient,
+                frozen_indices           = frozen_indices,
+                lateral_interactions     = lateral_interactions,
+                verbose                  = verbose,
+                **bkwargs,
+            )
+            if rxn_index is not None:
+                rxn_index.install_site(brs, rxns)
 
 
 
@@ -665,6 +798,13 @@ def run_kmc_steps(
     # ── Diffusion (NEB) channel ────────────────────────────────────────────
     diffusion_sites: list[DiffusionSite] | None = None,
     diffusion_kwargs: dict | None = None,
+    # ── Bond-changing (A + B ⇌ C) channel ──────────────────────────────────
+    bond_sites: list[BondReactionSite] | None = None,
+    bond_kwargs: dict | None = None,
+    bond_growth_kwargs: dict | None = None,
+    # ── Free-energy / thermochemistry hooks ───────────────────────────────
+    free_energy_options=None,
+    vib_cache_root: str | None = None,
     # ── Optional persistence hooks (autokmc.persistence) ──────────────────
     reaction_writer=None,
     trajectory_writer=None,
@@ -720,6 +860,23 @@ def run_kmc_steps(
         :func:`autokmc.kmc_diffusion.get_applicable_diffusions` (NEB knobs:
         ``fmax``, ``max_steps``, ``n_images``, ``climb``, ``spring_k``,
         ``interpolation``, ``persist_neb_path``).
+    bond_sites : list[BondReactionSite] | None
+        Bond-changing iso-classes from
+        :func:`autokmc.find_bond_sites.find_bond_sites`.  When non-empty
+        the bond channel is enabled: every applicable
+        :class:`~autokmc.kmc_bond.BondReaction` (couple ``A+B→C`` and
+        dissoc ``C→A+B``) is added to the segment-tree alongside
+        adsorption / desorption / diffusion reactions.  CI-NEB barriers
+        are computed lazily per (iso, lateral) class.
+    bond_kwargs : dict | None
+        Keyword arguments forwarded to
+        :func:`autokmc.kmc_bond.get_applicable_bond_reactions` (NEB knobs,
+        same names as *diffusion_kwargs*).
+    bond_growth_kwargs : dict | None
+        Keyword arguments forwarded to
+        :func:`autokmc.grow_bond_sites.expand_bond_sites_after_event`,
+        called after every coupling event so newly-formed product
+        species extend the bond network on the fly.
     reaction_writer : autokmc.persistence.ReactionWriter | None
         Optional writer.  When supplied, every executed event is persisted
         as one JSON line + sidecar XYZ snapshots of the pre/post Atoms.
@@ -746,6 +903,8 @@ def run_kmc_steps(
         rng = np.random.default_rng(rng)
 
     gas_energies = _build_gas_energy_lookup(reactants)
+    gas_g_lookup = _build_gas_g_lookup(reactants)
+    pressures    = _build_partial_pressure_lookup(reactants)
 
     # ── Initial reaction list ─────────────────────────────────────────────
     if verbose:
@@ -766,6 +925,10 @@ def run_kmc_steps(
         max_steps                = max_steps,
         verbose                  = False,
         lateral_interactions     = lateral_interactions,
+        gas_g                    = gas_g_lookup,
+        partial_pressures        = pressures,
+        free_energy_options      = free_energy_options,
+        vib_cache_root           = vib_cache_root,
     )
 
     # ── Diffusion channel: initial NEB sweep ──────────────────────────────
@@ -785,20 +948,46 @@ def run_kmc_steps(
             frozen_indices           = frozen_indices,
             verbose                  = False,
             lateral_interactions     = lateral_interactions,
+            free_energy_options      = free_energy_options,
+            vib_cache_root           = vib_cache_root,
             **diffusion_kwargs,
+        )
+
+    # ── Bond channel: initial NEB sweep ───────────────────────────────────
+    bond_sites = list(bond_sites or [])
+    bond_kwargs = dict(bond_kwargs or {})
+    bond_growth_kwargs = dict(bond_growth_kwargs or {})
+    if bond_sites:
+        if verbose:
+            print(
+                f"[KMC] Initial bond-reaction sweep over "
+                f"{len(bond_sites)} BondReactionSite(s) "
+                f"(NEB lazily per new lateral class)…"
+            )
+        compute_all_bond_reactions(
+            G, bond_sites, calculator,
+            temperature              = temperature,
+            transmission_coefficient = transmission_coefficient,
+            frozen_indices           = frozen_indices,
+            verbose                  = False,
+            lateral_interactions     = lateral_interactions,
+            **bond_kwargs,
         )
 
     # ── Build the segment-tree rate index (suggestion.MD #3) ─────────────
     # Each (site, member) pair gets a fixed leaf position so the per-step
     # cost of sampling a reaction and updating affected leaves is O(log R)
     # instead of the O(R) ``np.cumsum`` + ``np.searchsorted`` rebuild.
-    rxn_index = _ReactionIndex(adsorbate_sites, diffusion_sites)
+    rxn_index = _ReactionIndex(adsorbate_sites, diffusion_sites, bond_sites)
     for site in adsorbate_sites:
         rxns = getattr(site, "applicable_reactions", None) or []
         rxn_index.install_site(site, rxns)
     for ds in diffusion_sites:
         rxns = getattr(ds, "applicable_reactions", None) or []
         rxn_index.install_site(ds, rxns)
+    for brs in bond_sites:
+        rxns = getattr(brs, "applicable_reactions", None) or []
+        rxn_index.install_site(brs, rxns)
 
     def _persist_all_known_reactions(step_for_discovery: int) -> None:
         """Materialise per-(iso, lat) folders for every currently-known
@@ -860,6 +1049,7 @@ def run_kmc_steps(
     history: list[tuple] = []
     reaction_counts: dict[str, int] = {
         "adsorption": 0, "desorption": 0, "diffusion": 0,
+        "bond": 0, "bond_couple": 0, "bond_dissoc": 0,
     }
     current_time = 0.0
     steps_executed = 0
@@ -904,6 +1094,9 @@ def run_kmc_steps(
         affected = execute_reaction(G, chosen)
         steps_executed += 1
         reaction_counts[chosen.kind] = reaction_counts.get(chosen.kind, 0) + 1
+        if chosen.kind == "bond":
+            sub = "bond_" + getattr(chosen, "direction", "couple")
+            reaction_counts[sub] = reaction_counts.get(sub, 0) + 1
 
         # Persist the event — the reaction writer materialises the per-
         # lateral-class folder lazily on first sighting and otherwise just
@@ -969,8 +1162,60 @@ def run_kmc_steps(
             rxn_index                = rxn_index,
             diffusion_sites          = diffusion_sites,
             diffusion_kwargs         = diffusion_kwargs,
+            bond_sites               = bond_sites,
+            bond_kwargs              = bond_kwargs,
             lateral_interactions     = lateral_interactions,
+            gas_g                    = gas_g_lookup,
+            partial_pressures        = pressures,
+            free_energy_options      = free_energy_options,
+            vib_cache_root           = vib_cache_root,
         )
+
+        # Bond-coupling events may introduce a new product species C that
+        # was not yet known to the registry — extend the bond network on
+        # the fly so subsequent steps can fire reactions involving C.
+        if chosen.kind == "bond" and getattr(chosen, "direction", None) == "couple":
+            try:
+                new_brs = expand_bond_sites_after_event(
+                    G, chosen,
+                    calculator=calculator,
+                    **bond_growth_kwargs,
+                )
+            except Exception as exc:  # pragma: no cover
+                _log.warning("expand_bond_sites_after_event failed: %s", exc)
+                new_brs = []
+            for brs in new_brs:
+                if id(brs) in rxn_index._bond_ids:
+                    continue
+                # Re-build the index with the appended site.  The leaves
+                # for the new site are appended to the segment tree by
+                # constructing a fresh _ReactionIndex from the updated
+                # site lists; existing per-leaf reactions are re-installed
+                # so no rate state is lost.
+                bond_sites.append(brs)
+            if new_brs:
+                # Snapshot every currently-live reaction before rebuilding.
+                live_rxns = [r for r in rxn_index.reactions if r is not None]
+                rxn_index = _ReactionIndex(
+                    adsorbate_sites, diffusion_sites, bond_sites,
+                )
+                for r in live_rxns:
+                    rxn_index.install(r, r.site, r.member_index)
+                # Sweep the freshly-added bond sites so their rates are
+                # populated before the next step is sampled.
+                compute_all_bond_reactions(
+                    G, new_brs, calculator,
+                    temperature              = temperature,
+                    transmission_coefficient = transmission_coefficient,
+                    frozen_indices           = frozen_indices,
+                    verbose                  = False,
+                    lateral_interactions     = lateral_interactions,
+                    **bond_kwargs,
+                )
+                for brs in new_brs:
+                    rxn_index.install_site(
+                        brs, getattr(brs, "applicable_reactions", []) or [],
+                    )
 
         # Persist every newly-discovered (iso, lat) reaction surfaced by the
         # incremental rebuild.  ``ensure_reaction`` is a no-op once a folder

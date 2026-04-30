@@ -812,6 +812,9 @@ def check_site_stability(
     max_steps: int = 200,
     nl_mult: float = NL_MULT_DEFAULT,
     verbose: bool = False,
+    free_energy_options=None,
+    free_energy_temperature_k: float | None = None,
+    vib_cache_root: str | None = None,
 ) -> tuple[float, float]:
     """Relax the occupied and unoccupied structures and check for stability.
 
@@ -1004,6 +1007,108 @@ def check_site_stability(
     lateral_class.atoms_occupied    = atoms_occ
     lateral_class.atoms_unoccupied  = atoms_unocc
     lateral_class.stable            = True
+
+    # ── Optional harmonic thermochemistry on the relaxed states ─────────
+    # Vibrate ONLY the reactive species (the site's own atoms).  Frozen
+    # slab atoms and frozen lateral-shell adsorbates contribute zero by
+    # construction.  The Atoms ordering is [slab | lat_neighbours | self]
+    # — the self-adsorbate atoms occupy the tail of the array.
+    if (free_energy_options is not None
+            and getattr(free_energy_options, "enabled", False)
+            and free_energy_temperature_k is not None):
+        from autokmc.free_energy import compute_harmonic_thermo
+
+        n_self = len(self_node_ids)
+        # atoms_occ ordering: slab (n_slab_occ) | lat | self.  We need to
+        # recover those counts; rebuild via the same _build_stability_atoms
+        # call so we know n_slab and n_ads exactly for both states.
+        atoms_occ_init,   n_slab_occ,   n_ads_occ   = _build_stability_atoms(
+            G, lateral_class, self_node_ids,
+            include_self=True,  frozen_indices=frozen_indices,
+        )
+        atoms_unocc_init, n_slab_unocc, n_ads_unocc = _build_stability_atoms(
+            G, lateral_class, self_node_ids,
+            include_self=False, frozen_indices=frozen_indices,
+        )
+        n_lat_occ   = n_ads_occ - n_self
+        n_lat_unocc = n_ads_unocc
+
+        vib_idx_occ = list(range(
+            n_slab_occ + n_lat_occ,
+            n_slab_occ + n_lat_occ + n_self,
+        ))
+        # Unoccupied state has no reactive species — nothing vibrates,
+        # so the harmonic correction is zero by construction.  We still
+        # call the helper to populate the bookkeeping fields with zeros
+        # so downstream code can rely on them.
+        vib_idx_unocc: list[int] = []
+
+        from pathlib import Path as _Path
+        cache_dir_root = (
+            _Path(vib_cache_root) if vib_cache_root is not None else None
+        )
+        per_lat_dir = (
+            cache_dir_root /
+            f"iso{adsorbate_site.iso_class}_lat{lateral_class.lateral_class}"
+            if cache_dir_root is not None else None
+        )
+
+        try:
+            occ_thermo = compute_harmonic_thermo(
+                atoms_occ, vib_idx_occ,
+                energy_ev     = float(E_occ),
+                temperature_k = float(free_energy_temperature_k),
+                calculator    = calculator,
+                options       = free_energy_options,
+                cache_dir     = (str(per_lat_dir) if per_lat_dir is not None else None),
+                label         = "occupied",
+                drop_imaginary= True,
+            )
+        except Exception as exc:                      # pragma: no cover
+            _log.warning(
+                "check_site_stability: harmonic thermo for OCCUPIED "
+                "state failed (iso=%d, lat=%d): %s — leaving G=NaN.",
+                adsorbate_site.iso_class,
+                lateral_class.lateral_class, exc,
+            )
+            occ_thermo = None
+
+        try:
+            unocc_thermo = compute_harmonic_thermo(
+                atoms_unocc, vib_idx_unocc,
+                energy_ev     = float(E_unocc),
+                temperature_k = float(free_energy_temperature_k),
+                calculator    = calculator,
+                options       = free_energy_options,
+                cache_dir     = (str(per_lat_dir) if per_lat_dir is not None else None),
+                label         = "unoccupied",
+                drop_imaginary= True,
+            )
+        except Exception as exc:                      # pragma: no cover
+            _log.warning(
+                "check_site_stability: harmonic thermo for UNOCCUPIED "
+                "state failed (iso=%d, lat=%d): %s — leaving G=NaN.",
+                adsorbate_site.iso_class,
+                lateral_class.lateral_class, exc,
+            )
+            unocc_thermo = None
+
+        if occ_thermo is not None:
+            lateral_class.g_correction_occupied   = occ_thermo["g_corr_ev"]
+            lateral_class.g_occupied              = occ_thermo["g_total_ev"]
+            lateral_class.zpe_occupied            = occ_thermo["zpe_ev"]
+            lateral_class.entropy_occupied        = occ_thermo["entropy_ev_per_k"]
+            lateral_class.frequencies_occupied_cm = occ_thermo["frequencies_cm"]
+            lateral_class.imaginary_occupied_cm   = occ_thermo["imaginary_cm"]
+            lateral_class.vib_indices_occupied    = occ_thermo["vib_indices"]
+        if unocc_thermo is not None:
+            lateral_class.g_correction_unoccupied   = unocc_thermo["g_corr_ev"]
+            lateral_class.g_unoccupied              = unocc_thermo["g_total_ev"]
+            lateral_class.zpe_unoccupied            = unocc_thermo["zpe_ev"]
+            lateral_class.entropy_unoccupied        = unocc_thermo["entropy_ev_per_k"]
+            lateral_class.frequencies_unoccupied_cm = unocc_thermo["frequencies_cm"]
+            lateral_class.imaginary_unoccupied_cm   = unocc_thermo["imaginary_cm"]
+            lateral_class.vib_indices_unoccupied    = unocc_thermo["vib_indices"]
 
     _log.debug(
         "check_site_stability: iso_class=%d member=%d lateral_class=%d "

@@ -58,6 +58,10 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
         build_reactant,
         find_adsorbate_sites,
         find_diffusion_sites,
+        derive_bond_templates,
+        find_bond_sites,
+        prune_unstable_bond_sites,
+        initialise_bond_registry,
         run_kmc_steps,
     )
 
@@ -113,13 +117,43 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
     find_surface_atoms(atoms, tag_atoms=True)
     G = build_graph(atoms)
 
+    # 3b. Free-energy options + persistent vibration cache root.
+    fe_cfg = cfg.free_energy
+    from autokmc.free_energy import FreeEnergyOptions
+    free_energy_options = FreeEnergyOptions(
+        enabled                 = fe_cfg.enabled,
+        pressure_bar            = fe_cfg.pressure_bar,
+        vibration_displacement  = fe_cfg.vibration_displacement,
+        vibration_nfree         = fe_cfg.vibration_nfree,
+        include_ts_vibrations   = fe_cfg.include_ts_vibrations,
+        min_frequency_cm        = fe_cfg.min_frequency_cm,
+        default_symmetry_number = fe_cfg.default_symmetry_number,
+        default_spin            = fe_cfg.default_spin,
+        default_geometry        = fe_cfg.default_geometry,
+        cache_dir               = fe_cfg.cache_dir,
+    )
+    vib_cache_root: str | None = (
+        fe_cfg.cache_dir if fe_cfg.cache_dir
+        else str(out_dir / "vib_cache")
+    )
+
     # 4. Reactants
     reactants_built = []
     for r in cfg.reactants:
         rx = build_reactant(
             r.smiles,
-            add_hydrogens = r.add_hydrogens,
-            calculator    = calc if r.relax_in_gas else None,
+            add_hydrogens             = r.add_hydrogens,
+            calculator                = calc if r.relax_in_gas else None,
+            free_energy_options       = free_energy_options if fe_cfg.enabled else None,
+            free_energy_temperature_k = cfg.kmc.temperature_k,
+            partial_pressure_bar      = (
+                r.partial_pressure_bar if r.partial_pressure_bar is not None
+                else fe_cfg.pressure_bar
+            ),
+            symmetry_number           = r.symmetry_number,
+            spin                      = r.spin,
+            geometry                  = r.geometry,
+            vib_cache_root            = vib_cache_root,
         )
         reactants_built.append(rx)
 
@@ -184,6 +218,182 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
                 f"{len(diff_by_smiles)} SMILES."
             )
 
+    # 6c. Bond-changing reactions (A + B ⇌ C).  When enabled, derive
+    # templates from the user-supplied reactant SMILES, build sites for
+    # any "leaf" species the templates reference, enumerate the bond
+    # iso-classes on the live graph, and bootstrap the on-the-fly growth
+    # registry so future coupling events can introduce new species.
+    b = cfg.bond
+    if b.enabled:
+        from autokmc.find_bond_sites import _canon_smiles  # type: ignore[attr-defined]
+
+        reactant_smiles = [rx.smiles for rx in reactants_built]
+        templates = derive_bond_templates(
+            reactant_smiles,
+            include_dissociation  = b.include_dissociation,
+            include_coupling      = b.include_coupling,
+            bond_types            = tuple(b.bond_types),
+            include_ring_bonds    = b.include_ring_bonds,
+            include_homo_coupling = b.include_homo_coupling,
+        )
+        if log_level <= logging.INFO:
+            print(
+                f"[autokmc] Bond reactions enabled: derived "
+                f"{len(templates)} template(s) from "
+                f"{len(reactant_smiles)} reactant SMILES."
+            )
+
+        # Map species → Reactant and species → list[AdsorbateSite] for the
+        # registry bootstrap.  Use canonical SMILES as the key so it lines
+        # up with what the templates / registry use internally.
+        reactant_by_smi: dict[str, object] = {
+            _canon_smiles(rx.smiles): rx for rx in reactants_built
+        }
+        sites_by_smi: dict[str, list] = {}
+        for s in all_sites:
+            sites_by_smi.setdefault(_canon_smiles(s.reactant), []).append(s)
+
+        # Build any leaf species (fragments / coupling products) that the
+        # templates reference but the user did not list under `reactants`.
+        if templates:
+            leaves: list[str] = []
+            for t in templates:
+                for smi in (t.smiles_a, t.smiles_b, t.smiles_c):
+                    cs = _canon_smiles(smi)
+                    if cs and cs not in reactant_by_smi and cs not in leaves:
+                        leaves.append(cs)
+            if leaves and not b.auto_build_leaf_species:
+                missing = sorted(leaves)
+                raise ValueError(
+                    f"bond.auto_build_leaf_species is False but the derived "
+                    f"templates reference {len(missing)} species not in "
+                    f"`reactants`: {missing}.  Add them to `reactants` or "
+                    f"set `bond.auto_build_leaf_species: true`."
+                )
+            for cs in leaves:
+                if log_level <= logging.INFO:
+                    print(f"[autokmc]   leaf species: {cs!r} — building Reactant + adsorbate sites…")
+                rx_leaf = build_reactant(
+                    cs,
+                    add_hydrogens             = False,
+                    calculator                = calc,
+                    free_energy_options       = free_energy_options if fe_cfg.enabled else None,
+                    free_energy_temperature_k = cfg.kmc.temperature_k,
+                    partial_pressure_bar      = fe_cfg.pressure_bar,
+                    vib_cache_root            = vib_cache_root,
+                )
+                reactants_built.append(rx_leaf)
+                reactant_by_smi[cs] = rx_leaf
+                leaf_sites = find_adsorbate_sites(
+                    G, rx_leaf,
+                    prune_stable_only = asc.prune_stable_only,
+                    calculator        = calc,
+                    frozen_indices    = frozen_indices,
+                    prune_fmax        = asc.fmax,
+                    prune_max_steps   = asc.max_steps,
+                    verbose           = log_level <= logging.INFO,
+                )
+                all_sites.extend(leaf_sites)
+                sites_by_smi.setdefault(cs, []).extend(leaf_sites)
+
+        # Enumerate bond iso-classes on the live graph.  Empty templates
+        # short-circuit to an empty list — find_bond_sites would still
+        # raise on an empty adsorbate_sites list, but `all_sites` is
+        # guaranteed non-empty here (asserted above when reactants exist).
+        bond_sites: list = []
+        if templates:
+            bond_sites = find_bond_sites(
+                G, all_sites, templates,
+                max_hops            = b.bond_max_hops,
+                surface_apsp_cutoff = b.surface_apsp_cutoff,
+                deduplicate_iso     = b.deduplicate_iso,
+                n_shells_pair       = b.pair_n_shells,
+                prune_by_triple     = b.prune_by_triple,
+                verbose             = log_level <= logging.INFO,
+            )
+
+            # Stage 1 — calculator-based A+B endpoint stability prune.
+            # Stage-2 (iso-class triple ego-size prune) already ran inside
+            # ``find_bond_sites``; we now drop any non-viable BRSs whose
+            # A+B endpoint changes bonding under a calculator relax, then
+            # re-run Stage 2 so the iso-class survivor set is consistent.
+            if b.prune_with_calculator and calc is not None and bond_sites:
+                from autokmc.find_bond_sites import (
+                    _prune_one_per_adsorption_triple,
+                )
+                species_by_smi: dict = {
+                    _canon_smiles(rx.smiles): rx for rx in reactants_built
+                }
+                bond_sites = prune_unstable_bond_sites(
+                    G, bond_sites, species_by_smi, calc,
+                    frozen_indices = frozen_indices,
+                    fmax           = b.prune_fmax,
+                    max_steps      = b.prune_max_steps,
+                    verbose        = log_level <= logging.INFO,
+                )
+                if b.prune_by_triple and bond_sites:
+                    bond_sites = _prune_one_per_adsorption_triple(
+                        bond_sites,
+                        verbose=log_level <= logging.INFO,
+                        prefix=" (post-stability)",
+                    )
+                    # Renumber after second pass.
+                    G.graph["bond_clique_to_members"] = {}
+                    G.graph["bond_surface_node_to_members"] = {}
+                    rebuilt_idx = G.graph["bond_clique_to_members"]
+                    rebuilt_surf = G.graph["bond_surface_node_to_members"]
+                    for new_idx, brs in enumerate(bond_sites):
+                        brs.iso_class = new_idx
+                        for m_idx, (cliques_a, cliques_b, cliques_c) in enumerate(
+                            brs._member_cliques
+                        ):
+                            for clq in (*cliques_a, *cliques_b, *cliques_c):
+                                rebuilt_idx.setdefault(clq, []).append(
+                                    (brs, m_idx)
+                                )
+                                for surf_id in clq:
+                                    rebuilt_surf.setdefault(
+                                        int(surf_id), [],
+                                    ).append((brs, m_idx))
+                    G.graph["bond_reaction_sites"] = bond_sites
+
+        # Bootstrap the on-the-fly registry so coupling events that
+        # introduce a new species can extend the network mid-run via
+        # ``expand_bond_sites_after_event``.
+        initialise_bond_registry(
+            G,
+            reactants       = list(reactant_by_smi.values()),
+            adsorbate_sites = sites_by_smi,
+            templates       = templates,
+            bond_sites      = bond_sites,
+        )
+
+        if log_level <= logging.INFO:
+            print(
+                f"[autokmc] Bond reactions: {len(bond_sites)} "
+                f"BondReactionSite iso-class(es) enumerated; "
+                f"registry seeded with {len(reactant_by_smi)} species."
+            )
+
+    # Build the kwargs forwarded to the bond channel inside the KMC loop.
+    bond_sites_for_kmc: list | None = None
+    bond_kwargs: dict | None = None
+    bond_growth_kwargs: dict | None = None
+    if b.enabled:
+        bond_sites_for_kmc = bond_sites
+        bond_kwargs = dict(
+            fmax             = b.neb_fmax,
+            max_steps        = b.neb_max_steps,
+            n_images         = b.neb_n_images,
+            climb            = b.neb_climb,
+            spring_k         = b.neb_spring_k,
+            interpolation    = b.neb_interpolation,
+            persist_neb_path = b.persist_neb_path,
+        )
+        bond_growth_kwargs = dict(
+            find_diffusion = d.enabled,
+        )
+
     # 7. KMC
     k = cfg.kmc
     summary = run_kmc_steps(
@@ -201,6 +411,11 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
         lateral_interactions     = k.lateral_interactions,
         diffusion_sites          = diffusion_sites_flat,
         diffusion_kwargs         = diffusion_kwargs,
+        bond_sites               = bond_sites_for_kmc,
+        bond_kwargs              = bond_kwargs,
+        bond_growth_kwargs       = bond_growth_kwargs,
+        free_energy_options      = free_energy_options if fe_cfg.enabled else None,
+        vib_cache_root           = vib_cache_root,
         reaction_writer          = reaction_writer,
         trajectory_writer        = trajectory_writer,
         summary_collector        = summary_collector,

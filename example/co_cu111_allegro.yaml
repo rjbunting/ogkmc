@@ -20,7 +20,7 @@ structure:
   n_freeze_layers: 2
 
 reactants:
-  - smiles: "[C-]#[O+]"
+  - smiles: "[C]=O"
     add_hydrogens: false
     relax_in_gas: true
 
@@ -51,7 +51,7 @@ kmc:
   # the single bare lat0, so only one ML relaxation per iso-class is needed.
   # The lateral-shell incremental update is also skipped each KMC step,
   # reducing overhead at high coverage.  Default: true.
-  lateral_interactions: false
+  lateral_interactions: true
 
 # Diffusion (NEB) channel.  Enabled by default; set `enabled: false` to
 # run adsorption / desorption only.  Each new (iso, lateral) pair triggers
@@ -68,5 +68,50 @@ diffusion:
   climb: true
   spring_k: 0.1
   interpolation: linear   # "linear" (default) or "idpp"
+  persist_neb_path: false
+
+# Bond-changing reactions (A + B ⇌ C on the surface).
+#
+# When `enabled: true` the CLI:
+#   1. Derives BondReactionTemplates from every reactant SMILES via
+#      `derive_bond_templates` (dissociation + coupling).
+#   2. Auto-builds Reactants + adsorbate sites for any "leaf" species
+#      (fragments / coupling products) the templates reference but the
+#      user did not list under `reactants`.  Set
+#      `auto_build_leaf_species: false` to instead raise.
+#   3. Calls `find_bond_sites` to enumerate the BondReactionSite
+#      iso-classes on the live graph (folder layout:
+#      reactions/bond/bond_iso{X}_lat{Y}/).
+#   4. Bootstraps `initialise_bond_registry` so future coupling events
+#      that introduce a new species extend the network mid-run via
+#      `expand_bond_sites_after_event`.
+#
+# Note: requires charge-free SMILES (e.g. "[C]=O", not "[C-]#[O+]").
+# The KMC inner loop fires bond events alongside adsorption / desorption
+# and diffusion; CI-NEB barriers are computed lazily per (iso, lateral)
+# class and persisted under reactions/bond/.
+bond:
+  enabled: true
+  bond_max_hops: 0                # 0 = "share a surface atom" between A and B / between A∪B and C
+  bond_types: ["SINGLE", "DOUBLE", "TRIPLE"]   # cleavable / formed bond orders
+  include_ring_bonds: false
+  include_dissociation: true
+  include_coupling: true
+  include_homo_coupling: true
+  deduplicate_iso: true
+  auto_build_leaf_species: true
+  # ── Pruning ──────────────────────────��──────────────────────────────
+  pair_n_shells: 1
+  prune_by_triple: true
+  prune_with_calculator: true
+  prune_fmax: 0.05
+  prune_max_steps: 200
+  # ── NEB knobs (used by check_bond_site_stability inside the KMC loop)
+  neb_fmax: 0.05
+  neb_max_steps: 500
+  neb_n_images: 5
+  neb_climb: true
+  neb_spring_k: 0.1
+  neb_interpolation: linear        # "linear" or "idpp"
   persist_neb_path: false
 

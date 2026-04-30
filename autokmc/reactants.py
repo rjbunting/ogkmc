@@ -111,6 +111,29 @@ class Reactant:
     unique_nodes : dict                        = field(default_factory=dict)
     anchor_atoms : list                        = field(default_factory=list)
     anchor_orbit : dict                        = field(default_factory=dict)
+    # ── Free-energy / vibrational fields (populated by autokmc.free_energy) ──
+    #: Gibbs free-energy correction relative to ``energy`` (eV) at the
+    #: simulation T / p.  ``nan`` when free-energy mode is disabled.
+    g_correction : float                       = field(default=float("nan"))
+    #: Absolute gas-phase Gibbs free energy (eV) — equal to ``energy +
+    #: g_correction``.  Cached so the rate code does not have to redo the
+    #: addition.
+    gibbs_energy : float                       = field(default=float("nan"))
+    #: Zero-point energy (eV).
+    zpe          : float                       = field(default=float("nan"))
+    #: Standard-state entropy (eV/K).
+    entropy      : float                       = field(default=float("nan"))
+    #: Real vibrational frequencies (cm⁻¹).
+    frequencies_cm : list                      = field(default_factory=list)
+    #: Imaginary / spurious low-mode frequencies (cm⁻¹) — kept for audit.
+    imaginary_cm   : list                      = field(default_factory=list)
+    #: Partial pressure (bar) of this reactant — multiplies the
+    #: adsorption rate in :func:`autokmc.kmc_adsorption._energetics_cached`
+    #: so the persisted ΔG / barrier remain at the 1-bar reference.
+    partial_pressure_bar : float               = 1.0
+    #: Free-floating dict for any extra thermo metadata
+    #: (geometry / symmetry_number / spin / temperature_k / pressure_bar).
+    thermo_meta  : dict                        = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -357,6 +380,13 @@ def build_reactant(
     steps: int = 500,
     nl_mult: float = NL_MULT_DEFAULT,
     hull_tol: float = 0.1,
+    free_energy_options=None,
+    free_energy_temperature_k: float | None = None,
+    partial_pressure_bar: float = 1.0,
+    symmetry_number: int | None = None,
+    spin: float | None = None,
+    geometry: str | None = None,
+    vib_cache_root: str | None = None,
 ) -> Reactant:
     """Build a :class:`Reactant` from a SMILES string.
 
@@ -443,6 +473,55 @@ def build_reactant(
                 orbit_id_of[atom] = next_id
             next_id += 1
     reactant.anchor_orbit = {a: orbit_id_of[a] for a in reactant.anchor_atoms}
+
+    # 7. Optional gas-phase thermochemistry — IdealGasThermo via ASE Vibrations.
+    reactant.partial_pressure_bar = float(partial_pressure_bar)
+    if (
+        free_energy_options is not None
+        and getattr(free_energy_options, "enabled", False)
+        and calculator is not None
+        and free_energy_temperature_k is not None
+        and not (isinstance(energy, float) and np.isnan(energy))
+    ):
+        try:
+            from autokmc.free_energy import compute_gas_thermo
+            from pathlib import Path as _Path
+
+            cache_dir = (
+                str(_Path(vib_cache_root) / f"gas_{smiles}")
+                if vib_cache_root is not None else None
+            )
+            thermo = compute_gas_thermo(
+                atoms,
+                energy_ev       = float(energy),
+                temperature_k   = float(free_energy_temperature_k),
+                pressure_bar    = float(partial_pressure_bar),
+                calculator      = calculator,
+                options         = free_energy_options,
+                symmetry_number = symmetry_number,
+                spin            = spin,
+                geometry        = geometry,
+                cache_dir       = cache_dir,
+            )
+            reactant.g_correction   = float(thermo["g_corr_ev"])
+            reactant.gibbs_energy   = float(thermo["g_total_ev"])
+            reactant.zpe            = float(thermo["zpe_ev"])
+            reactant.entropy        = float(thermo["entropy_ev_per_k"])
+            reactant.frequencies_cm = list(thermo["frequencies_cm"])
+            reactant.imaginary_cm   = list(thermo["imaginary_cm"])
+            reactant.thermo_meta = {
+                "geometry":        thermo.get("geometry"),
+                "symmetry_number": thermo.get("symmetry_number"),
+                "spin":            thermo.get("spin"),
+                "temperature_k":   thermo.get("temperature_k"),
+                "pressure_bar":    thermo.get("pressure_bar"),
+            }
+        except Exception as exc:                            # pragma: no cover
+            _log.warning(
+                "build_reactant(%r): gas-phase thermo failed (%s); "
+                "free-energy fields left as NaN.",
+                smiles, exc,
+            )
 
     return reactant
 

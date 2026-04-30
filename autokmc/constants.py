@@ -280,3 +280,45 @@ DIFFUSION_DESCRIPTION_FMT: str = (
     "k={rate:.3e} Hz)"
 )
 
+
+# ---------------------------------------------------------------------------
+# Bond reactions (A + B  ⇌  C  on the surface)
+# ---------------------------------------------------------------------------
+
+#: Maximum surface-graph hop distance allowed (a) between A's and B's bonded
+#: cliques and (b) between C's bonded clique and the union (A ∪ B).
+#: ``0`` (default) means "share at least one surface atom" — the strictest
+#: locality constraint.  Consumed by
+#: :func:`autokmc.find_bond_reactions.find_bond_reactions`.
+BOND_MAX_HOPS: int = 0
+
+#: When ``True`` (default), :func:`autokmc.find_bond_sites.find_bond_sites`
+#: keeps only **one** :class:`~autokmc.find_bond_sites.BondReactionSite` per
+#: unordered triple of adsorption iso-classes ``(frozenset({iso_a, iso_b}),
+#: iso_c)`` — the one whose triple ego-graph has the fewest nodes + edges
+#: (most direct / geometrically closest reaction).  Mirrors
+#: :data:`DIFFUSION_PRUNE_BY_ADS_PAIR`.
+BOND_PRUNE_BY_TRIPLE: bool = True
+
+#: When ``True`` (default), :func:`autokmc.find_bond_sites.prune_unstable_bond_sites`
+#: is invoked by the CLI to drop bond-reaction iso-classes whose ``A + B``
+#: endpoint state is not bond-connectivity-stable under a calculator
+#: relaxation — i.e. the reaction is not physically viable.
+BOND_PRUNE_WITH_CALCULATOR: bool = True
+
+#: BFS depth used to build the triple ego-graph in
+#: :func:`autokmc.find_bond_sites.find_bond_sites` for triple iso-class
+#: deduplication / pruning.
+BOND_PAIR_N_SHELLS: int = N_SHELLS_DEFAULT
+
+#: Folder-name format for bond reaction folders persisted by
+#: :class:`autokmc.persistence.ReactionWriter` (when enabled).
+BOND_FOLDER_FMT: str = "bond_iso{iso}_lat{lat}"
+
+#: Description template for a bond reaction event line.
+BOND_DESCRIPTION_FMT: str = (
+    "bond reaction {smiles_a}+{smiles_b}↔{smiles_c} at bond_iso={iso} "
+    "m={member} lat={lateral} dir={direction} "
+    "(ΔE={delta_e:+.4f} eV, Ea={barrier:.4f} eV, k={rate:.3e} Hz)"
+)
+

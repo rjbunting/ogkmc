@@ -140,6 +140,28 @@ class DiffusionLateral:
     neb_path_energies: list[float] | None = None
     stable        : bool | None      = None
     invalid_reason: str | None       = None
+    # ── Free-energy / vibrational fields (autokmc.free_energy) ────────────
+    g_correction_a   : float | None = None
+    g_correction_b   : float | None = None
+    g_correction_ts  : float | None = None
+    g_a              : float | None = None
+    g_b              : float | None = None
+    g_ts             : float | None = None
+    zpe_a            : float | None = None
+    zpe_b            : float | None = None
+    zpe_ts           : float | None = None
+    entropy_a        : float | None = None
+    entropy_b        : float | None = None
+    entropy_ts       : float | None = None
+    frequencies_a_cm : list = field(default_factory=list)
+    frequencies_b_cm : list = field(default_factory=list)
+    frequencies_ts_cm: list = field(default_factory=list)
+    imaginary_a_cm   : list = field(default_factory=list)
+    imaginary_b_cm   : list = field(default_factory=list)
+    imaginary_ts_cm  : list = field(default_factory=list)
+    vib_indices_a    : list = field(default_factory=list)
+    vib_indices_b    : list = field(default_factory=list)
+    vib_indices_ts   : list = field(default_factory=list)
 
 
 @dataclass

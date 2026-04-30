@@ -177,6 +177,28 @@ class AdsorbateSiteLateral:
     atoms_occupied    : Any          = None
     #: Relaxed ASE :class:`~ase.Atoms` snapshot of the **unoccupied** state.
     atoms_unoccupied  : Any          = None
+    # ── Free-energy / vibrational fields (autokmc.free_energy) ────────────
+    #: Gibbs/Helmholtz correction (eV) for the **occupied** state — added
+    #: to ``energy_occupied`` to obtain the surface free energy at *T*.
+    #: ``None`` when free-energy mode is disabled or vibrations failed.
+    g_correction_occupied   : float | None = None
+    g_correction_unoccupied : float | None = None
+    #: Absolute G (eV) cached for the rate code: ``energy_* + g_correction_*``.
+    g_occupied              : float | None = None
+    g_unoccupied            : float | None = None
+    #: ZPE / entropy (eV, eV/K).
+    zpe_occupied            : float | None = None
+    zpe_unoccupied          : float | None = None
+    entropy_occupied        : float | None = None
+    entropy_unoccupied      : float | None = None
+    #: Vibrational frequencies (cm⁻¹) — real + imaginary buckets.
+    frequencies_occupied_cm   : list = field(default_factory=list)
+    frequencies_unoccupied_cm : list = field(default_factory=list)
+    imaginary_occupied_cm     : list = field(default_factory=list)
+    imaginary_unoccupied_cm   : list = field(default_factory=list)
+    #: Atom indices in ``atoms_occupied`` that were displaced (for audit).
+    vib_indices_occupied      : list = field(default_factory=list)
+    vib_indices_unoccupied    : list = field(default_factory=list)
 
 
 @dataclass

@@ -41,6 +41,11 @@ from autokmc.constants import (
     NEB_SPRING_K,
     NEB_INTERPOLATION,
     N_SHELLS_DEFAULT,
+    BOND_MAX_HOPS,
+    BOND_PAIR_N_SHELLS,
+    BOND_PRUNE_BY_TRIPLE,
+    BOND_PRUNE_WITH_CALCULATOR,
+    MAX_PAIR_SHELLS,
 )
 from autokmc.kmc_adsorption import DEFAULT_TRANSMISSION_COEFFICIENT
 
@@ -82,6 +87,19 @@ class ReactantCfg:
     smiles: str
     add_hydrogens: bool = True
     relax_in_gas:  bool = True
+    # ── Thermochemistry (consumed when free_energy.enabled is true) ───────
+    #: Partial pressure of the gas-phase reactant in bar.  Multiplies the
+    #: adsorption rate so that ΔG / barriers stay at the 1-bar reference.
+    #: Default ``None`` → fall back to ``free_energy.pressure_bar``.
+    partial_pressure_bar: float | None = None
+    #: Symmetry number σ for IdealGasThermo (e.g. 2 for H₂, 12 for CH₄).
+    #: Default ``None`` → ``free_energy.default_symmetry_number`` (1).
+    symmetry_number: int | None        = None
+    #: Spin S (number of unpaired electrons / 2).  Default ``None`` →
+    #: ``free_energy.default_spin`` (0).
+    spin:            float | None      = None
+    #: ``"linear"`` / ``"nonlinear"`` / ``"monatomic"`` / ``None`` (auto).
+    geometry:        str | None        = None
 
 
 @dataclass
@@ -149,6 +167,109 @@ class DiffusionCfg:
 
 
 @dataclass
+class BondCfg:
+    """Bond-changing reaction (A + B ⇌ C) channel knobs.
+
+    When ``enabled=False`` (default) bond reactions are skipped entirely
+    — backwards-compatible with configs written before this channel was
+    wired up.
+
+    When enabled, the CLI:
+
+    1. Derives :class:`~autokmc.find_bond_sites.BondReactionTemplate`'s from
+       every reactant SMILES via
+       :func:`~autokmc.find_bond_sites.derive_bond_templates`.
+    2. Builds Reactant + adsorbate sites for any "leaf" species
+       (fragments / coupling products) referenced by the templates that
+       were not in ``reactants``.
+    3. Calls :func:`~autokmc.find_bond_sites.find_bond_sites` to enumerate
+       :class:`BondReactionSite` iso-classes on the live graph.
+    4. Bootstraps :func:`~autokmc.grow_bond_sites.initialise_bond_registry`
+       so the on-the-fly growth machinery is ready for new species
+       introduced by future bond-coupling events.
+
+    The static enumeration result is stored on
+    ``G.graph["bond_reaction_sites"]``.  The ``run_kmc_steps`` driver
+    does not yet consume bond reactions in the inner loop — they are
+    persisted as discoverable metadata only.  Bond-reaction folders go
+    under ``reactions/bond/bond_iso{X}_lat{Y}/``.
+    """
+    enabled:                bool = False
+    bond_max_hops:          int  = BOND_MAX_HOPS
+    surface_apsp_cutoff:    int  = MAX_PAIR_SHELLS
+    bond_types:             tuple = ("SINGLE", "DOUBLE", "TRIPLE")
+    include_ring_bonds:     bool = False
+    include_homo_coupling:  bool = True
+    include_dissociation:   bool = True
+    include_coupling:       bool = True
+    deduplicate_iso:        bool = True
+    # When True, every leaf species (fragment / coupling product) implied
+    # by the templates that is *not* already in ``reactants`` is built and
+    # has its adsorbate sites enumerated automatically.  When False, the
+    # CLI raises if any template references a species without sites.
+    auto_build_leaf_species: bool = True
+    # ── Pruning ────────────────────────────────────────────────────────────
+    #: BFS depth for the triple ego-graph used by Stage-2 iso-class pruning.
+    pair_n_shells:           int  = BOND_PAIR_N_SHELLS
+    #: Stage 2 — keep only the smallest-ego BondReactionSite per
+    #: (frozenset({iso_a, iso_b}), iso_c) adsorption triple.  Mirrors
+    #: ``diffusion.prune_by_adsorption_pair``.
+    prune_by_triple:         bool = BOND_PRUNE_BY_TRIPLE
+    #: Stage 1 — drop iso-classes whose A+B endpoint is bond-changing-
+    #: unstable under a calculator relaxation (i.e. the reaction is not
+    #: physically viable).  Disabled automatically when no calculator is
+    #: configured.
+    prune_with_calculator:   bool = BOND_PRUNE_WITH_CALCULATOR
+    #: Force convergence threshold for the Stage-1 endpoint relaxation.
+    prune_fmax:              float = PRUNE_FMAX
+    #: Maximum LBFGS steps for the Stage-1 endpoint relaxation.
+    prune_max_steps:         int  = PRUNE_MAX_STEPS
+    # ── NEB knobs (consumed by ``check_bond_site_stability`` via the KMC loop)
+    neb_fmax:                float = NEB_FMAX
+    neb_max_steps:           int   = NEB_MAX_STEPS
+    neb_n_images:            int   = NEB_N_IMAGES
+    neb_climb:               bool  = NEB_CLIMB
+    neb_spring_k:            float = NEB_SPRING_K
+    neb_interpolation:       str   = NEB_INTERPOLATION
+    persist_neb_path:        bool  = False
+
+
+@dataclass
+class FreeEnergyCfg:
+    """Free-energy / vibrational analysis knobs.
+
+    When ``enabled=True`` (default) the CLI runs ASE
+    :class:`~ase.vibrations.Vibrations` for every gas-phase reactant
+    (→ :class:`~ase.thermochemistry.IdealGasThermo` at the simulation
+    *T* and :attr:`pressure_bar`) and for every successful adsorbate
+    relaxation in :func:`autokmc.check_adsorbate_sites.check_site_stability`
+    (→ :class:`~ase.thermochemistry.HarmonicThermo`, vibrating only the
+    reactive species — frozen slab atoms and frozen lateral-shell
+    adsorbates contribute nothing).
+
+    Adsorption rates are then multiplied by the reactant's partial
+    pressure (in bar) so the persisted ΔG / barriers stay at the 1-bar
+    reference.
+
+    When ``enabled=False`` the entire pipeline runs on electronic energy
+    only — strict superset of the pre-free-energy schema.
+    """
+    enabled                 : bool  = True
+    pressure_bar            : float = 1.0
+    vibration_displacement  : float = 0.01
+    vibration_nfree         : int   = 2
+    include_ts_vibrations   : bool  = True
+    min_frequency_cm        : float = 12.0
+    default_symmetry_number : int   = 1
+    default_spin            : float = 0.0
+    default_geometry        : str   = "auto"
+    #: Optional persistent cache directory for ASE ``Vibrations`` JSON
+    #: pickle files.  ``None`` (default) → an ephemeral per-call dir
+    #: under the OS temp area is used and removed after analysis.
+    cache_dir               : str | None = None
+
+
+@dataclass
 class RunConfig:
     schema_version: str = CONFIG_SCHEMA_VERSION
     output:           OutputCfg          = field(default_factory=OutputCfg)
@@ -158,6 +279,8 @@ class RunConfig:
     adsorbate_sites:  AdsorbateSitesCfg  = field(default_factory=AdsorbateSitesCfg)
     kmc:              KMCCfg             = field(default_factory=KMCCfg)
     diffusion:        DiffusionCfg       = field(default_factory=DiffusionCfg)
+    bond:             BondCfg            = field(default_factory=BondCfg)
+    free_energy:      FreeEnergyCfg      = field(default_factory=FreeEnergyCfg)
 
 
 # ---------------------------------------------------------------------------
@@ -190,6 +313,8 @@ def _coerce(cls, value: Any, *, path: str = ""):
             "adsorbate_sites": AdsorbateSitesCfg,
             "kmc":             KMCCfg,
             "diffusion":       DiffusionCfg,
+            "bond":            BondCfg,
+            "free_energy":     FreeEnergyCfg,
         },
     }
     nested_for_cls = nested_map.get(cls.__name__, {})
@@ -220,6 +345,8 @@ def _coerce(cls, value: Any, *, path: str = ""):
                               for i, item in enumerate(v)]
         elif f.name == "miller_index":
             kwargs[f.name] = tuple(int(x) for x in v)
+        elif f.name == "bond_types":
+            kwargs[f.name] = tuple(str(x) for x in v)
         else:
             kwargs[f.name] = v
     return cls(**kwargs)

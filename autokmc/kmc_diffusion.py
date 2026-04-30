@@ -207,27 +207,21 @@ def _diffusion_energetics_cached(
 ) -> tuple[float, float, float]:
     """Return ``(delta_e, barrier_kmc, rate)`` for one hop direction.
 
-    The effective transition-state energy is raised so that it sits at least
-    ``EA_MIN`` above the *higher* of the two endpoints::
-
-        e_ts_eff = max(e_ts, max(e_a, e_b) + EA_MIN)
-
-    Both forward and reverse barriers are derived from the same ``e_ts_eff``,
-    which preserves detailed balance (``Ea_fwd − Ea_rev = E_b − E_a`` still
-    holds exactly).  ``EA_MIN`` is retained as a safety floor in case raw
-    arithmetic produces a negative value.
-
-    Both directions are pre-populated on the first call so that the very next
-    member toggle (which flips ``direction``) hits the cache too.
-
-    Cache layout
-    ------------
-    ``lc._rate_cache`` : ``dict[(round(T,9), round(κ,9), direction), tuple]``
+    When the lateral class has free-energy fields populated
+    (``g_a`` / ``g_b`` / ``g_ts``) those are used in place of the electronic
+    energies so the rate is derived from ΔG.  Pressure does not enter the
+    intramolecular hop rate (no gas-phase species changes between A and B).
     """
+    use_g = (
+        getattr(lc, "g_a",  None) is not None
+        and getattr(lc, "g_b",  None) is not None
+        and getattr(lc, "g_ts", None) is not None
+    )
     key = (
         round(float(temperature),              9),
         round(float(transmission_coefficient), 9),
         str(direction),
+        bool(use_g),
     )
     cache: dict | None = getattr(lc, "_rate_cache", None)
     if cache is None:
@@ -237,9 +231,14 @@ def _diffusion_energetics_cached(
     if hit is not None:
         return hit
 
-    e_a  = float(lc.energy_a)   # type: ignore[arg-type]
-    e_b  = float(lc.energy_b)   # type: ignore[arg-type]
-    e_ts = float(lc.energy_ts)  # type: ignore[arg-type]
+    if use_g:
+        e_a  = float(lc.g_a)    # type: ignore[arg-type]
+        e_b  = float(lc.g_b)    # type: ignore[arg-type]
+        e_ts = float(lc.g_ts)   # type: ignore[arg-type]
+    else:
+        e_a  = float(lc.energy_a)   # type: ignore[arg-type]
+        e_b  = float(lc.energy_b)   # type: ignore[arg-type]
+        e_ts = float(lc.energy_ts)  # type: ignore[arg-type]
 
     # Raise the effective TS so it is at least EA_MIN above the higher
     # endpoint.  Deriving both barriers from the same e_ts_eff preserves
@@ -260,8 +259,8 @@ def _diffusion_energetics_cached(
 
     out_fwd = _make("a_to_b")
     out_rev = _make("b_to_a")
-    cache[key[:-1] + ("a_to_b",)] = out_fwd
-    cache[key[:-1] + ("b_to_a",)] = out_rev
+    cache[key[:2] + ("a_to_b", bool(use_g))] = out_fwd
+    cache[key[:2] + ("b_to_a", bool(use_g))] = out_rev
 
     return out_fwd if direction == "a_to_b" else out_rev
 
@@ -288,6 +287,8 @@ def get_applicable_diffusions(
     persist_neb_path: bool = False,
     verbose: bool = False,
     lateral_interactions: bool = True,
+    free_energy_options=None,
+    vib_cache_root: str | None = None,
 ) -> list[DiffusionReaction]:
     """Enumerate all currently-applicable hop events for one DiffusionSite.
 
@@ -341,6 +342,9 @@ def get_applicable_diffusions(
                     nl_mult          = nl_mult,
                     persist_neb_path = persist_neb_path,
                     verbose          = verbose,
+                    free_energy_options       = free_energy_options,
+                    free_energy_temperature_k = float(temperature),
+                    vib_cache_root            = vib_cache_root,
                 )
             except DiffusionStabilityError as exc:
                 reason = f"{type(exc).__name__}: {exc}"
@@ -423,6 +427,8 @@ def compute_all_diffusions(
     persist_neb_path: bool = False,
     verbose: bool = False,
     lateral_interactions: bool = True,
+    free_energy_options=None,
+    vib_cache_root: str | None = None,
 ) -> list[DiffusionReaction]:
     """Compute applicable hops for every DiffusionSite; return the flat list."""
     all_reactions: list[DiffusionReaction] = []
@@ -442,6 +448,8 @@ def compute_all_diffusions(
             persist_neb_path         = persist_neb_path,
             verbose                  = verbose,
             lateral_interactions     = lateral_interactions,
+            free_energy_options      = free_energy_options,
+            vib_cache_root           = vib_cache_root,
         )
         all_reactions.extend(rxns)
     return all_reactions
