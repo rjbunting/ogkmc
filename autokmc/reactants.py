@@ -184,6 +184,21 @@ def _smiles_to_atoms(smiles: str, *, add_hydrogens: bool = True) -> Atoms:
                       if a.GetNumImplicitHs() > 0 or a.GetNumExplicitHs() > 0]
         if only_atoms:
             mol = Chem.AddHs(mol, onlyOnAtoms=only_atoms)
+    else:
+        # Even when add_hydrogens=False, always materialise H atoms that
+        # are **explicitly** specified in the bracket SMILES notation
+        # (GetNumExplicitHs() > 0).  These are genuinely part of the
+        # molecular formula — for example, the product of coupling [O]+[H]
+        # is written by RDKit as "[OH]" where the H is an explicit H count
+        # on O, not an implicit valence-fill H.  Skipping AddHs for these
+        # atoms would give a 1-atom (bare O) Reactant for a 2-atom (O-H)
+        # molecule, causing |A|+|B| ≠ |C| mismatches in bond NEB checks.
+        # Atoms with only implicit H (e.g. unreacted [O] radical) have
+        # GetNumExplicitHs()==0 and are left untouched.
+        only_explicit = [a.GetIdx() for a in mol.GetAtoms()
+                         if a.GetNumExplicitHs() > 0]
+        if only_explicit:
+            mol = Chem.AddHs(mol, onlyOnAtoms=only_explicit)
 
     params = AllChem.ETKDGv3()
     params.randomSeed = RANDOM_SEED
