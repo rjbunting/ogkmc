@@ -175,6 +175,15 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
         )
         all_sites.extend(sites)
 
+    # Snapshot of user-reactant-only sites to pass to the KMC loop.
+    # Leaf species (coupling products, fragments) are added to all_sites below
+    # so that find_bond_sites can enumerate A+B⇌C iso-classes, but they must
+    # NOT enter the KMC segment tree from the start — their partial pressures
+    # are 0 (produced on-surface only) and they should only be activated when
+    # a bond reaction first produces them.  The on-the-fly expansion machinery
+    # in kmc_simulation adds them at that point.
+    kmc_initial_sites: list = list(all_sites)
+
     # 6. Persistence hooks
     reaction_writer = ReactionWriter(
         out_dir,
@@ -185,7 +194,9 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
         out_dir / cfg.output.trajectory_filename,
         dump_every = cfg.output.trajectory_dump_every,
     )
-    summary_collector = ReactionSummary()
+    summary_collector = ReactionSummary(
+        reactant_smiles={rx.smiles for rx in reactants_built},
+    )
 
     # 6b. Diffusion (NEB) sites — flat list across all SMILES
     diffusion_sites_flat: list = []
@@ -279,7 +290,11 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
                     calculator                = calc,
                     free_energy_options       = free_energy_options if fe_cfg.enabled else None,
                     free_energy_temperature_k = cfg.kmc.temperature_k,
-                    partial_pressure_bar      = fe_cfg.pressure_bar,
+                    # Leaf species are produced on-surface only — they are not
+                    # present in the gas phase, so their partial pressure is 0.
+                    # This ensures adsorption rate = 0 (they can only appear via
+                    # a bond reaction, never from the gas phase).
+                    partial_pressure_bar      = 0.0,
                     vib_cache_root            = vib_cache_root,
                 )
                 reactants_built.append(rx_leaf)
@@ -398,14 +413,30 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
             persist_neb_path = b.persist_neb_path,
         )
         bond_growth_kwargs = dict(
-            find_diffusion = d.enabled,
-            verbose        = log_level <= logging.INFO,
+            find_diffusion              = d.enabled,
+            # NOTE: verbose is passed explicitly by run_kmc_steps; do NOT
+            # include it here or Python will raise "multiple values for
+            # keyword argument 'verbose'" at every bond event.
+            frozen_indices              = frozen_indices,
+            bond_max_hops               = b.bond_max_hops,
+            surface_apsp_cutoff         = b.surface_apsp_cutoff,
+            bond_pair_n_shells          = b.pair_n_shells,
+            bond_prune_by_triple        = b.prune_by_triple,
+            bond_prune_with_calculator  = b.prune_with_calculator,
+            prune_fmax                  = b.prune_fmax,
+            prune_max_steps             = b.prune_max_steps,
+            bond_types                  = tuple(b.bond_types),
+            include_ring_bonds          = b.include_ring_bonds,
+            include_homo_coupling       = b.include_homo_coupling,
+            diffusion_max_hops          = d.max_hops,
+            diffusion_n_shells_pair     = d.n_shells_pair,
+            diffusion_prune_by_ads_pair = d.prune_by_adsorption_pair,
         )
 
     # 7. KMC
     k = cfg.kmc
     summary = run_kmc_steps(
-        G, all_sites, calc,
+        G, kmc_initial_sites, calc,
         reactants                = reactants_built,
         temperature              = k.temperature_k,
         n_steps                  = k.n_steps,

@@ -799,16 +799,21 @@ def _check_bond_ts_validity(
         )
 
     if n_interior >= 1:
-        if ts_index == 1 and abs(float(e_ts) - float(e_ab)) < float(energy_tol):
+        # Check energy proximity regardless of image index — a TS image at
+        # position k=2 can still collapse to an endpoint energy if the NEB
+        # is nearly flat near that end.  Restricting to ts_index == 1 or
+        # ts_index == n_interior misses these interior-image collapses.
+        # (Mirrors the BUG-9 fix applied to check_diffusion_sites._check_ts_validity.)
+        if abs(float(e_ts) - float(e_ab)) < float(energy_tol):
             raise BondTransitionStateInvalidError(
-                f"TS image (k={ts_index}) collapsed onto endpoint AB: "
-                f"E_ts={e_ts:.4f} eV ≈ E_ab={e_ab:.4f} eV "
+                f"TS image (k={ts_index}) has energy indistinguishable from "
+                f"endpoint AB: E_ts={e_ts:.4f} eV ≈ E_ab={e_ab:.4f} eV "
                 f"(tol={energy_tol})."
             )
-        if ts_index == n_interior and abs(float(e_ts) - float(e_c)) < float(energy_tol):
+        if abs(float(e_ts) - float(e_c)) < float(energy_tol):
             raise BondTransitionStateInvalidError(
-                f"TS image (k={ts_index}) collapsed onto endpoint C: "
-                f"E_ts={e_ts:.4f} eV ≈ E_c={e_c:.4f} eV "
+                f"TS image (k={ts_index}) has energy indistinguishable from "
+                f"endpoint C: E_ts={e_ts:.4f} eV ≈ E_c={e_c:.4f} eV "
                 f"(tol={energy_tol})."
             )
 
@@ -976,9 +981,15 @@ def check_bond_site_stability(
     # ── 2. C endpoint ───────────────────────────────────────────────────
     # Greedily pair C's atoms to the AB reacting block (element + nearest
     # position) so atom k aligns across endpoints for the NEB.
-    ab_symbols   = [G.nodes[n]["element"] for n in react_nodes_ab]
-    ab_positions = [
-        np.asarray(G.nodes[n]["position"], dtype=float) for n in react_nodes_ab
+    # BUG-B2 FIX: use the *relaxed* AB reacting-block positions from
+    # atoms_ab_opt rather than the unrelaxed graph positions stored on G.
+    # After AB relaxation A and B can move substantially from their initial
+    # placements; matching C against relaxed positions gives a physically
+    # meaningful atom correspondence and a smoother NEB initial path.
+    ab_symbols       = [G.nodes[n]["element"] for n in react_nodes_ab]
+    _relaxed_ab_pos  = atoms_ab_opt.get_positions()
+    ab_positions     = [
+        _relaxed_ab_pos[n_slab + n_lat + k] for k in range(n_react)
     ]
     c_present    = [int(n) for n in c_node_ids if n in G]
     c_node_order = _greedy_pair_c_to_ab(G, ab_symbols, ab_positions, c_present)

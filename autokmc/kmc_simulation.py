@@ -1287,13 +1287,44 @@ def run_kmc_steps(
             # detect what gets added to the registry / graph.
             _snap_ads_ids  = {id(s)  for s in adsorbate_sites}
             _snap_diff_ids = {id(ds) for ds in diffusion_sites}
+            # Also snapshot registry adsorbate site IDs so we can distinguish
+            # "pre-built leaf species now being activated for the first time"
+            # from "brand-new species discovered by this expansion run".
+            _reg_pre = G.graph.get("bond_registry", {})
+            _snap_reg_ids: set[int] = {
+                id(s)
+                for _sl in _reg_pre.get("adsorbate_sites", {}).values()
+                for s in _sl
+            }
+            # Species produced by this specific event — used to activate
+            # pre-built leaf sites only at the moment they are first produced.
+            _ftmpl = getattr(getattr(chosen, "site", None), "template", None)
+            _fdir  = getattr(chosen, "direction", None)
+            if _ftmpl is not None and _fdir == "couple":
+                _newly_produced: set[str] = {getattr(_ftmpl, "smiles_c", "")}
+            elif _ftmpl is not None and _fdir == "dissoc":
+                _newly_produced = {
+                    getattr(_ftmpl, "smiles_a", ""),
+                    getattr(_ftmpl, "smiles_b", ""),
+                }
+            else:
+                _newly_produced = set()
+            _newly_produced.discard("")
+
+            # Build the kwargs dict for the on-the-fly expander.  Merge
+            # bond_growth_kwargs first, then override with the params known
+            # only inside run_kmc_steps (frozen_indices, verbose) so that
+            # caller-supplied bond_growth_kwargs can never accidentally
+            # shadow them or produce duplicate-keyword TypeErrors.
+            _grow_kw = dict(bond_growth_kwargs or {})
+            _grow_kw["verbose"] = verbose
+            _grow_kw.setdefault("frozen_indices", frozen_indices)
 
             try:
                 new_brs = expand_bond_sites_after_event(
                     G, chosen,
                     calculator=calculator,
-                    verbose=verbose,
-                    **bond_growth_kwargs,
+                    **_grow_kw,
                 )
             except Exception as exc:  # pragma: no cover
                 _log.warning("expand_bond_sites_after_event failed: %s", exc)
@@ -1305,13 +1336,26 @@ def run_kmc_steps(
             # the lateral-shell expander will find them automatically.
             # We still need to add them to the segment-tree and to the
             # adsorbate_sites list so adsorption / desorption can be sampled.
+            #
+            # Activation rules (both conditions must hold: not yet active):
+            #   (a) Brand-new species built during this expansion — their sites
+            #       were not in the registry before → activate immediately.
+            #   (b) Pre-built leaf species (e.g. OH) that appear in the
+            #       registry since CLI setup but were NOT in kmc_initial_sites
+            #       → activate only when the event that PRODUCED them fires
+            #       (i.e. their SMILES matches _newly_produced).
             _reg = G.graph.get("bond_registry", {})
-            _new_ads: list[AdsorbateSite] = [
-                s
-                for _sl in _reg.get("adsorbate_sites", {}).values()
-                for s in _sl
-                if id(s) not in _snap_ads_ids
-            ]
+            _new_ads: list[AdsorbateSite] = []
+            for _smi, _sl in _reg.get("adsorbate_sites", {}).items():
+                for s in _sl:
+                    if id(s) in _snap_ads_ids:
+                        continue  # already active in the KMC segment tree
+                    if id(s) not in _snap_reg_ids:
+                        # Brand-new site, built by this expansion — activate.
+                        _new_ads.append(s)
+                    elif _smi in _newly_produced:
+                        # Pre-built leaf site, first produced right now.
+                        _new_ads.append(s)
             if _new_ads:
                 if verbose:
                     _new_smi_ads = sorted({s.reactant for s in _new_ads})

@@ -4,7 +4,7 @@ autokmc.persistence
 Persistence of KMC events, trajectories and run summaries.
 
 Output layout (under ``output.dir``)
-------------------------------------
+-------------------------------------
 
 ::
 
@@ -14,46 +14,48 @@ Output layout (under ``output.dir``)
     ├── kmc.extxyz            # extended-XYZ trajectory (initial + every Nth state)
     └── reactions/
         ├── adsorption/
-        │   ├── iso0_lat0/
-        │   │   ├── reaction.json     # description + energies + ΔE / barrier / rate
-        │   │   ├── occupied.extxyz   # relaxed atoms used to compute E_occ
-        │   │   └── unoccupied.extxyz # relaxed atoms used to compute E_unocc
-        │   ├── iso0_lat1/
-        │   │   └── …
-        │   └── …
-        └── diffusion/
-            ├── diff_iso0_lat0/
-            │   ├── reaction.json
-            │   ├── state_a.extxyz    # relaxed endpoint A
-            │   ├── state_b.extxyz    # relaxed endpoint B
-            │   └── ts.extxyz         # NEB transition-state image
-            └── …
+        │   ├── (O)/                      ← species dir (SMILES-derived)
+        │   │   ├── iso0_lat0/
+        │   │   │   ├── reaction.json
+        │   │   │   ├── occupied.extxyz
+        │   │   │   └── unoccupied.extxyz
+        │   │   └── iso0_lat1/
+        │   │       └── …
+        │   └── (H)/
+        │       └── …
+        ├── diffusion/
+        │   └── (O)/                      ← species dir
+        │       ├── diff_iso0_lat0/
+        │       │   ├── reaction.json
+        │       │   ├── state_a.extxyz
+        │       │   ├── state_b.extxyz
+        │       │   └── ts.extxyz
+        │       └── …
+        └── bond/
+            └── (O)+(H)~(OH)/             ← reaction-process dir (A+B↔C, sanitised)
+                ├── bond_iso0_lat0/
+                │   ├── reaction.json
+                │   ├── state_ab.extxyz
+                │   ├── state_c.extxyz
+                │   └── ts.extxyz
+                └── …
 
-Reactions are split by **kind** into a sub-folder of ``reactions/`` so that
-adsorption / desorption events and diffusion (hop) events do not collide on
-the ``(iso, lateral)`` namespace.  ``adsorption/`` and ``desorption/`` share
-the same sub-folder (``adsorption/``) since they are forward / reverse
-directions of the same lateral class.
+The species / reaction-process level prevents ``iso0_lat0`` collisions when
+two different adsorbates happen to share the same iso/lateral index counters.
+Adsorption and desorption are forward / reverse of the same lateral class so
+they share a single ``adsorption/<species>/`` folder.
 
-Each unique reaction is identified by ``(iso_class, lateral_class)`` — it
-is the lateral interaction class that owns the actual relaxed structures
-used in the energy calculation.  The atoms files are the **as-calculated**
-structures from
-:func:`autokmc.check_adsorbate_sites.check_site_stability`, not snapshots
-of the live KMC graph.  They are written exactly **once** per
-``(iso, lat)`` pair (the first time the KMC fires that reaction); every
-subsequent firing simply appends a thin row to ``events.jsonl`` referring
-to the existing folder.
-
-For an adsorption event the *initial* state is ``unoccupied.extxyz`` and
-the *final* state is ``occupied.extxyz``.  The reverse holds for
-desorption — both directions re-use the same per-lateral-class folder.
+Each unique reaction is identified by ``(kind, species, iso_class,
+lateral_class)``.  Structures are written exactly **once** per that key; every
+subsequent event just appends a row to ``events.jsonl`` and updates the
+``reaction.json`` counters.
 """
 
 from __future__ import annotations
 
 import json
 import math
+import re as _re
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -116,6 +118,27 @@ def _safe_atoms_copy(atoms: Atoms) -> Atoms:
     return snap
 
 
+def _smiles_to_dirname(label: str) -> str:
+    """Convert a SMILES string or reaction-process label to a filesystem-safe dir name.
+
+    Rules applied (in order):
+
+    * ``↔`` → ``~``  (cross-platform ASCII alternative for the coupling arrow)
+    * ``[``, ``]``   → ``(``, ``)``  (square brackets confuse shells)
+    * Characters illegal on Windows: ``\\ / : * ? " < > |`` → ``_``
+    * Leading / trailing spaces and dots stripped.
+    * Truncated to 64 characters to avoid ``PATH_MAX`` issues.
+
+    The result is guaranteed non-empty (falls back to ``"unknown"``).
+    """
+    s = str(label)
+    s = s.replace("↔", "~")
+    s = s.replace("[", "(").replace("]", ")")
+    s = _re.sub(r'[\\/:*?"<>|]', "_", s)
+    s = s.strip(". ")
+    return s[:64] or "unknown"
+
+
 # ---------------------------------------------------------------------------
 # Atoms <-> graph helper
 # ---------------------------------------------------------------------------
@@ -172,7 +195,7 @@ class ReactionRecord:
     delta_e_ev:      float
     barrier_ev:      float
     description:     str
-    reaction_dir:    str  # relative to output.dir, e.g. "reactions/iso0_lat3"
+    reaction_dir:    str  # relative to output.dir, e.g. "reactions/adsorption/(O)/iso0_lat3"
     delta_g_ev:      float | None = None
     barrier_g_ev:    float | None = None
 
@@ -240,10 +263,11 @@ def _reaction_smiles(reaction) -> str:
     return ""
 
 
-def _reaction_relative_dir(kind: str, iso: int, lat: int) -> str:
-    """Return ``"reactions/<sub>/<folder>"`` (POSIX-style, for JSON output)."""
-    sub = _kind_subdir(kind)
-    return f"{REACTIONS_DIR}/{sub}/{_kind_folder_name(sub, iso, lat)}"
+def _reaction_relative_dir(kind: str, iso: int, lat: int, smiles: str = "") -> str:
+    """Return ``"reactions/<sub>/<species>/<folder>"`` (POSIX-style, for JSON)."""
+    sub     = _kind_subdir(kind)
+    species = _smiles_to_dirname(smiles) if smiles else "unknown"
+    return f"{REACTIONS_DIR}/{sub}/{species}/{_kind_folder_name(sub, iso, lat)}"
 
 
 def _json_safe(o):
@@ -260,19 +284,21 @@ def _json_safe(o):
 class ReactionWriter:
     """Writes per-unique-reaction folders + an events JSONL.
 
-    Each unique ``(iso_class, lateral_class)`` pair gets a folder under
-    ``output_dir/reactions/`` containing:
+    Each unique ``(kind, species, iso_class, lateral_class)`` tuple gets a
+    folder under ``output_dir/reactions/<sub>/<species>/`` containing:
 
     * ``occupied.extxyz``   — relaxed atoms behind ``E_occupied``.
     * ``unoccupied.extxyz`` — relaxed atoms behind ``E_unoccupied``.
     * ``reaction.json``     — description + energies + ΔE / barrier / rate
       / fired-event count.
 
+    The species sub-level prevents ``iso0_lat0`` collisions when two
+    different adsorbates share the same iso/lateral index counters.
+
     The folder is materialised lazily — it is written the **first time**
-    a reaction with that ``(iso, lat)`` is fired, then re-used by every
-    subsequent firing of either direction.  ``reaction.json`` is updated
-    in place (counts, last_step) on every event, but the .extxyz files
-    are written exactly once.
+    a reaction with that key is fired, then re-used by every subsequent
+    firing of either direction.  ``reaction.json`` is updated in-place
+    (counts, last_step) on every event; the .extxyz files are written once.
     """
 
     def __init__(
@@ -293,8 +319,8 @@ class ReactionWriter:
         self._calc_meta: dict[str, Any] = dict(calculator_meta or {})
         self._n_written: int = 0
 
-        # Per (sub, iso, lat) bookkeeping for the on-disk reaction.json files.
-        self._folder_meta: dict[tuple[str, int, int], dict[str, Any]] = {}
+        # Per (sub, species, iso, lat) bookkeeping for reaction.json files.
+        self._folder_meta: dict[tuple[str, str, int, int], dict[str, Any]] = {}
 
     # ------------------------------------------------------------------
     @property
@@ -313,19 +339,24 @@ class ReactionWriter:
     def _ensure_reaction_folder(self, reaction) -> Path:
         """Create + populate the per-lateral-class folder if not yet done.
 
-        Folders are nested by ``KIND_SUBDIR[reaction.kind]`` so that
-        adsorption/desorption events live under
-        ``reactions/adsorption/iso{X}_lat{Y}/``, diffusion events under
-        ``reactions/diffusion/diff_iso{X}_lat{Y}/`` and bond-changing
-        events under ``reactions/bond/bond_iso{X}_lat{Y}/``.
+        Folders are nested as::
+
+            reactions/<sub>/<species>/<iso_lat_folder>/
+
+        where *species* is the SMILES (adsorption/diffusion) or the
+        reaction-process label ``A+B~C`` (bond), sanitised for filesystem
+        use by :func:`_smiles_to_dirname`.  This prevents ``iso0_lat0``
+        collisions when two different adsorbates share the same iso/lateral
+        index counters.
         """
-        iso = int(reaction.site.iso_class)
-        lat = int(reaction.lateral_class.lateral_class)
-        sub = _kind_subdir(getattr(reaction, "kind", "adsorption"))
-        key = (sub, iso, lat)
+        iso     = int(reaction.site.iso_class)
+        lat     = int(reaction.lateral_class.lateral_class)
+        sub     = _kind_subdir(getattr(reaction, "kind", "adsorption"))
+        species = _smiles_to_dirname(_reaction_smiles(reaction))
+        key     = (sub, species, iso, lat)
 
         sub_root = self.reactions_root / sub
-        folder   = sub_root / _kind_folder_name(sub, iso, lat)
+        folder   = sub_root / species / _kind_folder_name(sub, iso, lat)
 
         if key in self._folder_meta:
             return folder
@@ -444,10 +475,11 @@ class ReactionWriter:
         *,
         fired: bool,
     ) -> None:
-        iso = int(reaction.site.iso_class)
-        lat = int(reaction.lateral_class.lateral_class)
-        sub = _kind_subdir(getattr(reaction, "kind", "adsorption"))
-        meta = self._folder_meta[(sub, iso, lat)]
+        iso     = int(reaction.site.iso_class)
+        lat     = int(reaction.lateral_class.lateral_class)
+        sub     = _kind_subdir(getattr(reaction, "kind", "adsorption"))
+        species = _smiles_to_dirname(_reaction_smiles(reaction))
+        meta    = self._folder_meta[(sub, species, iso, lat)]
         if fired:
             meta["count"] += 1
             if meta["first_step"] is None:
@@ -733,17 +765,21 @@ class ReactionWriter:
         Idempotent: the first call materialises the folder, writes
         ``occupied.extxyz`` / ``unoccupied.extxyz`` and an initial
         ``reaction.json`` (with ``stats.count = 0``).  Subsequent calls
-        with the same ``(iso_class, lateral_class)`` key are no-ops.
+        with the same ``(kind, species, iso_class, lateral_class)`` key are
+        no-ops.
 
         Used by the KMC driver to persist **every** reaction in the
         current applicable list — not just the one chosen for execution —
         so the run directory mirrors the full discovered reaction network.
         """
-        iso = int(reaction.site.iso_class)
-        lat = int(reaction.lateral_class.lateral_class)
-        sub = _kind_subdir(getattr(reaction, "kind", "adsorption"))
-        if (sub, iso, lat) in self._folder_meta:
-            return self.reactions_root / sub / _kind_folder_name(sub, iso, lat)
+        iso     = int(reaction.site.iso_class)
+        lat     = int(reaction.lateral_class.lateral_class)
+        sub     = _kind_subdir(getattr(reaction, "kind", "adsorption"))
+        species = _smiles_to_dirname(_reaction_smiles(reaction))
+        key     = (sub, species, iso, lat)
+        if key in self._folder_meta:
+            return (self.reactions_root / sub / species
+                    / _kind_folder_name(sub, iso, lat))
         folder = self._ensure_reaction_folder(reaction)
         self._write_reaction_json(folder, reaction, step, gas_energies, fired=False)
         return folder
@@ -752,20 +788,21 @@ class ReactionWriter:
     def write_invalid_diffusion(self, ds, lc) -> Path:
         """Write an on-disk record for a diffusion lateral class that failed NEB.
 
-        Creates ``reactions/diffusion/diff_iso{X}_lat{Y}/`` and writes a
-        ``reaction.json`` with ``"valid": false`` and the failure reason.
-        Any partial atoms already stored on *lc* (e.g. relaxed endpoint A
-        if the failure occurred during endpoint B relaxation) are written
-        as ``state_a.extxyz`` / ``state_b.extxyz`` so the partial geometry
-        is available for post-mortem inspection.
+        Creates ``reactions/diffusion/<species>/diff_iso{X}_lat{Y}/`` and
+        writes a ``reaction.json`` with ``"valid": false`` and the failure
+        reason.  Any partial atoms already stored on *lc* are written as
+        ``state_a.extxyz`` / ``state_b.extxyz`` for post-mortem inspection.
 
-        Idempotent — a second call for the same ``(iso, lat)`` is a no-op.
+        Idempotent — a second call for the same ``(iso, lat, species)`` is
+        a no-op.
         """
-        iso = int(ds.iso_class)
-        lat = int(lc.lateral_class)
-        key = ("diffusion_invalid", iso, lat)
+        iso     = int(ds.iso_class)
+        lat     = int(lc.lateral_class)
+        smiles  = getattr(ds, "reactant", "")
+        species = _smiles_to_dirname(smiles) if smiles else "unknown"
+        key     = ("diffusion_invalid", species, iso, lat)
         sub_root = self.reactions_root / "diffusion"
-        folder   = sub_root / _diffusion_folder_name(iso, lat)
+        folder   = sub_root / species / _diffusion_folder_name(iso, lat)
 
         if key in self._folder_meta:
             return folder
@@ -787,7 +824,7 @@ class ReactionWriter:
             "kind":            "diffusion",
             "iso_class":       iso,
             "lateral_class":   lat,
-            "reactant_smiles": getattr(ds, "reactant", ""),
+            "reactant_smiles": smiles,
             "valid":           False,
             "invalid_reason":  getattr(lc, "invalid_reason", None),
             "energies_ev": {
@@ -803,8 +840,8 @@ class ReactionWriter:
         self._folder_meta[key] = {"count": 0, "first_step": None, "last_step": None}
         _log.info(
             "ReactionWriter: wrote invalid diffusion folder "
-            "iso=%d lat=%d  reason=%s",
-            iso, lat, getattr(lc, "invalid_reason", None),
+            "species=%s iso=%d lat=%d  reason=%s",
+            species, iso, lat, getattr(lc, "invalid_reason", None),
         )
         return folder
 
@@ -957,16 +994,32 @@ class ReactionSummary:
 
     Reactions are bucketed by ``(kind, reactant_smiles, iso_class,
     lateral_class)``.
+
+    Parameters
+    ----------
+    reactant_smiles : set[str] | None
+        The SMILES of user-supplied feed-gas reactants (those listed under
+        ``reactants:`` in the config).  Any species that desorbs whose SMILES
+        is **not** in this set is treated as a *product* of the simulation
+        (created on the surface by bond-coupling events) and is counted
+        separately in the ``production_summary`` section of the output JSON.
+        Pass ``None`` or an empty set to include *all* desorbing species in
+        ``production_summary`` (useful when no bond channel is active).
     """
 
-    __slots__ = ("_buckets", "_total_by_kind", "_n", "_first_step", "_last_step")
+    __slots__ = (
+        "_buckets", "_total_by_kind", "_n", "_first_step", "_last_step",
+        "_reactant_smiles",
+    )
 
-    def __init__(self):
+    def __init__(self, reactant_smiles: set[str] | None = None):
         self._buckets: dict[tuple, dict[str, list[float]]] = {}
         self._total_by_kind: dict[str, int] = {}
         self._n: int = 0
         self._first_step: dict[tuple, int] = {}
         self._last_step:  dict[tuple, int] = {}
+        # frozenset for O(1) membership test; empty means "show all desorbates"
+        self._reactant_smiles: frozenset[str] = frozenset(reactant_smiles or [])
 
     def add(self, reaction, *, step: int) -> None:
         smiles = _reaction_smiles(reaction)
@@ -988,6 +1041,101 @@ class ReactionSummary:
         self._first_step.setdefault(key, int(step))
         self._last_step[key] = int(step)
 
+    # ------------------------------------------------------------------
+    def _production_summary(
+        self,
+        run_meta: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Build the ``production_summary`` block for the output JSON.
+
+        A *product* species is any species that desorbs whose SMILES is
+        **not** in ``self._reactant_smiles``.  When ``_reactant_smiles`` is
+        empty every desorbing species is included (no feed-gas / product
+        distinction has been configured).
+
+        The production rate in Hz is computed as::
+
+            production_rate_hz[species] = desorption_count[species]
+                                          / total_kmc_time_s
+
+        where ``total_kmc_time_s`` comes from ``run_meta["total_time_s"]``
+        (the total *simulated* time accumulated by the BKL sampler, **not**
+        wall-clock time).  If the KMC time is unavailable or zero, the rate
+        fields are ``null`` and only raw counts are reported.
+        """
+        kmc_time: float | None = None
+        if run_meta:
+            t = run_meta.get("total_time_s")
+            if t is not None and float(t) > 0:
+                kmc_time = float(t)
+
+        steps_executed: int | None = None
+        if run_meta:
+            se = run_meta.get("steps_executed")
+            if se is not None:
+                steps_executed = int(se)
+
+        # ── Collect desorption events bucketed by product species ──────────
+        # key: smiles  →  list of per-(iso,lat) breakdown dicts
+        product_map: dict[str, list[dict[str, Any]]] = {}
+
+        for key, b in self._buckets.items():
+            kind, smiles, iso, lat = key
+            if kind != "desorption":
+                continue
+            # Skip user-supplied feed-gas reactants when the set is non-empty.
+            if self._reactant_smiles and smiles in self._reactant_smiles:
+                continue
+            product_map.setdefault(smiles, []).append({
+                "iso_class":     iso,
+                "lateral_class": lat,
+                "count":         len(b["rate"]),
+                "first_step":    self._first_step[key],
+                "last_step":     self._last_step[key],
+            })
+
+        # ── Build per-species entries ──────────────────────────────────────
+        by_species: dict[str, Any] = {}
+        total_count = 0
+        for smiles in sorted(product_map):
+            breakdowns = sorted(
+                product_map[smiles],
+                key=lambda d: (d["iso_class"], d["lateral_class"]),
+            )
+            count = sum(d["count"] for d in breakdowns)
+            total_count += count
+            by_species[smiles] = {
+                "desorption_count":   count,
+                "production_rate_hz": (
+                    count / kmc_time if kmc_time is not None else None
+                ),
+                "events_per_step": (
+                    count / steps_executed
+                    if steps_executed and steps_executed > 0 else None
+                ),
+                "iso_breakdown": breakdowns,
+            }
+
+        note = (
+            "Desorption events of species not in the user-supplied reactants list "
+            "(partial_pressure_bar=0 species created on-the-fly by bond coupling)."
+            if self._reactant_smiles
+            else "Desorption events of all species (no reactant set configured)."
+        )
+
+        return {
+            "note":                      note,
+            "kmc_time_s":                kmc_time,
+            "steps_executed":            steps_executed,
+            "reactant_smiles":           sorted(self._reactant_smiles),
+            "product_species":           sorted(by_species),
+            "by_species":                by_species,
+            "total_product_desorptions": total_count,
+            "total_production_rate_hz":  (
+                total_count / kmc_time if kmc_time is not None else None
+            ),
+        }
+
     def to_dict(
         self,
         *,
@@ -1002,7 +1150,7 @@ class ReactionSummary:
                 "reactant_smiles":  smiles,
                 "iso_class":        iso,
                 "lateral_class":    lat,
-                "reaction_dir":     _reaction_relative_dir(kind, iso, lat),
+                "reaction_dir":     _reaction_relative_dir(kind, iso, lat, smiles=smiles),
                 "count":            len(b["rate"]),
                 "first_step":       self._first_step[key],
                 "last_step":        self._last_step[key],
@@ -1021,9 +1169,10 @@ class ReactionSummary:
                 "by_kind":               dict(self._total_by_kind),
                 "unique_reaction_types": len(self._buckets),
             },
-            "by_reaction_type": by_type,
-            "final_occupancy":  {str(k): int(v)
-                                 for k, v in (final_occupancy or {}).items()},
+            "by_reaction_type":  by_type,
+            "production_summary": self._production_summary(run_meta),
+            "final_occupancy":   {str(k): int(v)
+                                   for k, v in (final_occupancy or {}).items()},
         }
 
     def write(

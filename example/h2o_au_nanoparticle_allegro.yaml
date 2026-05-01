@@ -1,0 +1,142 @@
+# autokmc — H2O on Au nanoparticle with NequIP (Allegro)
+# Run with:    autokmc run example/h2o_au_nanoparticle_allegro.yaml
+schema_version: "1"
+
+output:
+  dir: ./runs/h2o_au_np_nequip
+  trajectory_dump_every: 10
+  log_level: INFO
+
+structure:
+  kind: nanoparticle
+  composition: Au
+  crystal_structure: fcc
+  lattice_constant: 4.08
+  # Approximate number of atoms in the Wulff-construction nanoparticle.
+  n_atoms: 600
+  # surface_energies cannot be expressed as tuple-keyed YAML; leave null to
+  # use the built-in FCC defaults: {(1,1,1): 1.10, (1,0,0): 1.29, (1,1,0): 1.51} J/m².
+  # To use Au-specific values (e.g. from DFT), override in Python:
+  #   from autokmc.structure import build_nanoparticle
+  #   atoms = build_nanoparticle(..., surface_energies={(1,1,1): 0.69, (1,0,0): 0.83, (1,1,0): 0.97})
+  surface_energies: null
+
+reactants:
+  - smiles: "[O]"
+    add_hydrogens: false
+    relax_in_gas: true
+    partial_pressure_bar: 1.0
+
+  - smiles: "[H]"
+    add_hydrogens: false
+    relax_in_gas: true
+    partial_pressure_bar: 1.0
+
+# NequIPCalculator must be created via its factory method, not direct
+# instantiation — use `factory` + `factory_kwargs` only.
+# Set `compile_path` to your compiled NequIP model (.pt2 for CUDA, .pth for CPU).
+calculator:
+  factory: nequip.ase.NequIPCalculator.from_compiled_model
+  factory_kwargs:
+    compile_path: ./autokmc/dev/cpuhcocuau.nequip.pth
+    device: cpu
+
+adsorbate_sites:
+  prune_stable_only: true
+  fmax: 0.05
+  max_steps: 500
+
+# Free-energy / vibrational corrections.
+# Set enabled: true to use ASE IdealGasThermo + HarmonicThermo for ΔG rates;
+# requires a calculator that can compute Hessians.  Disabled here for speed
+# — the pipeline runs on raw DFT/ML electronic energies only.
+free_energy:
+  enabled: true
+  pressure_bar: 1.0
+
+kmc:
+  temperature_k: 500.0
+  n_steps: 1000000
+  transmission_coefficient: 1.0
+  fmax: 0.05
+  max_steps: 500
+  log_every: 1
+  random_seed: 69
+  # Set lateral_interactions: false to ignore neighbour occupancy when
+  # classifying lateral environments.  Every site member will always map to
+  # the single bare lat0, so only one ML relaxation per iso-class is needed.
+  # The lateral-shell incremental update is also skipped each KMC step,
+  # reducing overhead at high coverage.  Default: true.
+  lateral_interactions: true
+
+# Diffusion (NEB) channel.  Enabled by default; set `enabled: false` to
+# run adsorption / desorption only.  Each new (iso, lateral) pair triggers
+# one CI-NEB calculation; the raw transition-state energy is saved in
+# reactions/diffusion/diff_iso{X}_lat{Y}/reaction.json and the KMC barrier
+# is floored at EA_MIN (0.1 eV).
+diffusion:
+  enabled: true
+  max_hops: 0            # 0 = "share a surface atom"
+  n_shells_pair: 1
+  prune_by_adsorption_pair: true   # keep one DiffusionSite per (isoA, isoB) pair
+  fmax: 0.05
+  max_steps: 500
+  n_images: 8
+  climb: true
+  spring_k: 0.1
+  interpolation: linear   # "linear" (default) or "idpp"
+  persist_neb_path: false
+
+# Bond-changing reactions (A + B ⇌ C on the surface).
+#
+# When `enabled: true` the CLI:
+#   1. Derives BondReactionTemplates from every reactant SMILES via
+#      `derive_bond_templates` (dissociation + coupling).
+#   2. Auto-builds Reactants + adsorbate sites for any "leaf" species
+#      (fragments / coupling products) the templates reference but the
+#      user did not list under `reactants`.  Set
+#      `auto_build_leaf_species: false` to instead raise.
+#   3. Calls `find_bond_sites` to enumerate the BondReactionSite
+#      iso-classes on the live graph (folder layout:
+#      reactions/bond/bond_iso{X}_lat{Y}/).
+#   4. Bootstraps `initialise_bond_registry` with `expanded_smiles` set to
+#      the user-provided reactant SMILES so the on-the-fly registry knows
+#      which species are already fully expanded.
+#
+# During the KMC loop, every bond event (coupling A+B→C and dissociation
+# C→A+B) triggers `expand_bond_sites_after_event`:
+#   - Coupling: product C gets its own templates derived and new bond/
+#     diffusion/adsorption iso-classes added to the segment-tree live.
+#   - Dissociation: fragments A and B (pre-built as leaf species) are
+#     expanded for their own templates if not already done.
+# The idempotency guard on reg["expanded_species"] prevents redundant work.
+#
+# Note: requires charge-free SMILES (e.g. "[C]=O", not "[C-]#[O+]").
+# The KMC inner loop fires bond events alongside adsorption / desorption
+# and diffusion; CI-NEB barriers are computed lazily per (iso, lateral)
+# class and persisted under reactions/bond/.
+bond:
+  enabled: true
+  bond_max_hops: 0                # 0 = "share a surface atom" between A and B / between A∪B and C
+  bond_types: ["SINGLE", "DOUBLE", "TRIPLE"]   # cleavable / formed bond orders
+  include_ring_bonds: false
+  include_dissociation: true
+  include_coupling: true
+  include_homo_coupling: true
+  deduplicate_iso: true
+  auto_build_leaf_species: true
+  # ── Pruning ────────────────────────────────────────────────────────────────
+  pair_n_shells: 1
+  prune_by_triple: true
+  prune_with_calculator: true
+  prune_fmax: 0.05
+  prune_max_steps: 200
+  # ── NEB knobs (used by check_bond_site_stability inside the KMC loop) ──────
+  neb_fmax: 0.05
+  neb_max_steps: 500
+  neb_n_images: 8
+  neb_climb: true
+  neb_spring_k: 0.1
+  neb_interpolation: linear        # "linear" or "idpp"
+  persist_neb_path: false
+
