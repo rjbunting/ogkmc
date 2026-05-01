@@ -909,12 +909,29 @@ def run_kmc_steps(
     # ── Initial reaction list ─────────────────────────────────────────────
     if verbose:
         print(
-            f"[KMC] T = {temperature} K   "
-            f"κ = {transmission_coefficient}   "
-            f"ν_Eyring = {transmission_coefficient * KB_EV * temperature / H_EV_S:.3e} Hz   "
-            f"max steps = {n_steps}"
+            f"\n[KMC] ═══════════════════════════════════════════════════════"
         )
-        print("[KMC] Building initial reaction list…")
+        print(
+            f"[KMC]  KMC initialisation"
+        )
+        print(
+            f"[KMC]  T = {temperature} K   "
+            f"κ = {transmission_coefficient}   "
+            f"ν_Eyring = {transmission_coefficient * KB_EV * temperature / H_EV_S:.3e} Hz"
+        )
+        print(
+            f"[KMC]  max steps = {n_steps}   "
+            f"lateral interactions = {lateral_interactions}"
+        )
+        print(
+            f"[KMC] ─────────────────────────────────────────────────────────"
+        )
+        n_members_ads = sum(len(s.member_node_ids) for s in adsorbate_sites)
+        print(
+            f"[KMC]  Adsorption/desorption channel"
+            f"  │  {len(adsorbate_sites)} iso-class(es)"
+            f"  │  {n_members_ads} total member(s)"
+        )
 
     compute_all_reactions(
         G, adsorbate_sites, calculator, gas_energies,
@@ -931,16 +948,28 @@ def run_kmc_steps(
         vib_cache_root           = vib_cache_root,
     )
 
+    if verbose:
+        _n_ads_rxns = sum(
+            len(getattr(s, "applicable_reactions", None) or [])
+            for s in adsorbate_sites
+        )
+        print(f"[KMC]    → {_n_ads_rxns} applicable reaction(s) after initial sweep")
+
     # ── Diffusion channel: initial NEB sweep ──────────────────────────────
     diffusion_sites = list(diffusion_sites or [])
     diffusion_kwargs = dict(diffusion_kwargs or {})
-    if diffusion_sites:
-        if verbose:
+    if verbose:
+        if diffusion_sites:
+            n_diff_members = sum(len(ds.member_node_ids) for ds in diffusion_sites)
             print(
-                f"[KMC] Initial diffusion sweep over "
-                f"{len(diffusion_sites)} DiffusionSite(s) "
-                f"(NEB lazily per new lateral class)…"
+                f"[KMC]  Diffusion channel"
+                f"  │  {len(diffusion_sites)} iso-class(es)"
+                f"  │  {n_diff_members} total member(s)"
+                f"  │  NEB lazily per new lateral class"
             )
+        else:
+            print(f"[KMC]  Diffusion channel  │  disabled (no DiffusionSite(s) supplied)")
+    if diffusion_sites:
         compute_all_diffusions(
             G, diffusion_sites, calculator,
             temperature              = temperature,
@@ -952,18 +981,29 @@ def run_kmc_steps(
             vib_cache_root           = vib_cache_root,
             **diffusion_kwargs,
         )
+        if verbose:
+            _n_diff_rxns = sum(
+                len(getattr(ds, "applicable_reactions", None) or [])
+                for ds in diffusion_sites
+            )
+            print(f"[KMC]    → {_n_diff_rxns} applicable diffusion(s) after initial sweep")
 
     # ── Bond channel: initial NEB sweep ───────────────────────────────────
     bond_sites = list(bond_sites or [])
     bond_kwargs = dict(bond_kwargs or {})
     bond_growth_kwargs = dict(bond_growth_kwargs or {})
-    if bond_sites:
-        if verbose:
+    if verbose:
+        if bond_sites:
+            n_bond_members = sum(len(brs.member_node_ids) for brs in bond_sites)
             print(
-                f"[KMC] Initial bond-reaction sweep over "
-                f"{len(bond_sites)} BondReactionSite(s) "
-                f"(NEB lazily per new lateral class)…"
+                f"[KMC]  Bond-reaction channel"
+                f"  │  {len(bond_sites)} iso-class(es)"
+                f"  │  {n_bond_members} total member(s)"
+                f"  │  NEB lazily per new lateral class"
             )
+        else:
+            print(f"[KMC]  Bond-reaction channel  │  disabled (no BondReactionSite(s) supplied)")
+    if bond_sites:
         compute_all_bond_reactions(
             G, bond_sites, calculator,
             temperature              = temperature,
@@ -973,6 +1013,12 @@ def run_kmc_steps(
             lateral_interactions     = lateral_interactions,
             **bond_kwargs,
         )
+        if verbose:
+            _n_bond_rxns = sum(
+                len(getattr(brs, "applicable_reactions", None) or [])
+                for brs in bond_sites
+            )
+            print(f"[KMC]    → {_n_bond_rxns} applicable bond reaction(s) after initial sweep")
 
     # ── Build the segment-tree rate index (suggestion.MD #3) ─────────────
     # Each (site, member) pair gets a fixed leaf position so the per-step
@@ -988,6 +1034,16 @@ def run_kmc_steps(
     for brs in bond_sites:
         rxns = getattr(brs, "applicable_reactions", None) or []
         rxn_index.install_site(brs, rxns)
+
+    if verbose:
+        _n_active = sum(1 for r in rxn_index.reactions if r is not None)
+        print(
+            f"[KMC]  Segment-tree index built"
+            f"  │  {rxn_index.n_total} leaves"
+            f"  │  {_n_active} active reaction(s)"
+            f"  │  Q₀ = {rxn_index.total_rate():.3e} Hz"
+        )
+        print(f"[KMC] ═══════════════════════════════════════════════════════\n")
 
     def _persist_all_known_reactions(step_for_discovery: int) -> None:
         """Materialise per-(iso, lat) folders for every currently-known
@@ -1134,10 +1190,33 @@ def run_kmc_steps(
         if verbose and log_every and (step % log_every == 0):
             # suggestion.MD #9: O(1) read instead of O(total members) scan.
             n_occ = int(G.graph.get("n_occupied", 0))
+            # Build a concise reaction label that includes bond direction /
+            # SMILES when available.
+            _kind = chosen.kind
+            if _kind == "bond":
+                _dir  = getattr(chosen, "direction", "")
+                _tmpl = getattr(getattr(chosen, "site", None), "template", None)
+                if _tmpl is not None:
+                    if _dir == "couple":
+                        _rxn_label = (
+                            f"bond/couple  "
+                            f"{_tmpl.smiles_a}+{_tmpl.smiles_b}→{_tmpl.smiles_c}"
+                        )
+                    else:
+                        _rxn_label = (
+                            f"bond/dissoc  "
+                            f"{_tmpl.smiles_c}→{_tmpl.smiles_a}+{_tmpl.smiles_b}"
+                        )
+                else:
+                    _rxn_label = f"bond/{_dir}"
+            elif _kind == "diffusion":
+                _rxn_label = f"diffusion   "
+            else:
+                _rxn_label = f"{_kind:<11}"
             print(
                 f"[KMC] step {step:>5}  t = {current_time:.4e} s  "
                 f"τ = {tau:.3e} s  Q = {q_total:.3e} Hz  "
-                f"{chosen.kind:<11} iso={chosen.site.iso_class} "
+                f"{_rxn_label}  iso={chosen.site.iso_class} "
                 f"m={chosen.member_index} lat={chosen.lateral_class.lateral_class} "
                 f"ΔE={chosen.delta_e:+.3f} eV  Ea={chosen.barrier:.3f} eV  "
                 f"k={chosen.rate:.2e} Hz  occ={n_occ}"
@@ -1171,50 +1250,250 @@ def run_kmc_steps(
             vib_cache_root           = vib_cache_root,
         )
 
-        # Bond-coupling events may introduce a new product species C that
-        # was not yet known to the registry — extend the bond network on
-        # the fly so subsequent steps can fire reactions involving C.
-        if chosen.kind == "bond" and getattr(chosen, "direction", None) == "couple":
+        # Bond events (coupling A+B→C *or* dissociation C→A+B) may introduce
+        # a species whose bond, diffusion, and adsorption channels have not
+        # been enumerated yet.  Expand the network on the fly so subsequent
+        # KMC steps include all new reactions.
+        #
+        # * Coupling: product C may be genuinely new.
+        # * Dissociation: fragments A and B were pre-built as leaf nodes when
+        #   C entered the registry, but their own coupling/dissociation
+        #   templates were never derived.  expand_bond_sites_after_event now
+        #   handles both directions; the idempotency guard on
+        #   reg["expanded_species"] prevents redundant work.
+        if chosen.kind == "bond":
+            # Announce what just fired so the user can track the chemistry.
+            if verbose:
+                _tmpl = getattr(getattr(chosen, "site", None), "template", None)
+                _dir  = getattr(chosen, "direction", "")
+                if _tmpl is not None:
+                    if _dir == "couple":
+                        print(
+                            f"[KMC]  ⚡ Bond coupling fired: "
+                            f"{_tmpl.smiles_a} + {_tmpl.smiles_b} → {_tmpl.smiles_c}"
+                            f"  (iso={chosen.site.iso_class} m={chosen.member_index})"
+                        )
+                    else:
+                        print(
+                            f"[KMC]  ⚡ Bond dissociation fired: "
+                            f"{_tmpl.smiles_c} → {_tmpl.smiles_a} + {_tmpl.smiles_b}"
+                            f"  (iso={chosen.site.iso_class} m={chosen.member_index})"
+                        )
+
+            # Snapshot existing site identities before expansion so we can
+            # detect what gets added to the registry / graph.
+            _snap_ads_ids  = {id(s)  for s in adsorbate_sites}
+            _snap_diff_ids = {id(ds) for ds in diffusion_sites}
+
             try:
                 new_brs = expand_bond_sites_after_event(
                     G, chosen,
                     calculator=calculator,
+                    verbose=verbose,
                     **bond_growth_kwargs,
                 )
             except Exception as exc:  # pragma: no cover
                 _log.warning("expand_bond_sites_after_event failed: %s", exc)
                 new_brs = []
+
+            # ── New adsorbate iso-classes from the registry ───────────────
+            # find_adsorbate_sites (called inside _ensure_species_known)
+            # merges new sites into G's reverse indices via setdefault, so
+            # the lateral-shell expander will find them automatically.
+            # We still need to add them to the segment-tree and to the
+            # adsorbate_sites list so adsorption / desorption can be sampled.
+            _reg = G.graph.get("bond_registry", {})
+            _new_ads: list[AdsorbateSite] = [
+                s
+                for _sl in _reg.get("adsorbate_sites", {}).values()
+                for s in _sl
+                if id(s) not in _snap_ads_ids
+            ]
+            if _new_ads:
+                if verbose:
+                    _new_smi_ads = sorted({s.reactant for s in _new_ads})
+                    print(
+                        f"[KMC]  🆕 New adsorbate iso-class(es) discovered: "
+                        f"{len(_new_ads)} class(es) across "
+                        f"species {_new_smi_ads}"
+                    )
+                    for _nsmi in _new_smi_ads:
+                        _nc = sum(1 for s in _new_ads if s.reactant == _nsmi)
+                        _nm = sum(
+                            len(s.member_node_ids)
+                            for s in _new_ads if s.reactant == _nsmi
+                        )
+                        print(
+                            f"[KMC]    {_nsmi!r:>12}  "
+                            f"{_nc} iso-class(es)  │  {_nm} member(s)"
+                        )
+                # Extend gas-energy / pressure lookups so that
+                # get_applicable_reactions can compute rates for the new
+                # species.  Newly-formed species have partial_pressure=0
+                # (set in _ensure_species_known) so they contribute only
+                # desorption reactions (they are not supplied from the gas
+                # phase).
+                _reg_species = _reg.get("species", {})
+                for _s in _new_ads:
+                    _r = _reg_species.get(_s.reactant) if _s.reactant else None
+                    if _r is not None:
+                        _smi = getattr(_r, "smiles", _s.reactant)
+                        if _smi not in gas_energies:
+                            _e = getattr(_r, "energy", float("nan"))
+                            if not np.isnan(_e):
+                                gas_energies[_smi] = float(_e)
+                        if _smi not in pressures:
+                            pressures[_smi] = float(
+                                getattr(_r, "partial_pressure_bar", 0.0)
+                            )
+                        if _smi not in gas_g_lookup:
+                            _g = getattr(_r, "gibbs_energy", float("nan"))
+                            if not np.isnan(_g):
+                                gas_g_lookup[_smi] = float(_g)
+                # Initial reaction sweep for the new adsorbate iso-classes.
+                compute_all_reactions(
+                    G, _new_ads, calculator, gas_energies,
+                    temperature              = temperature,
+                    transmission_coefficient = transmission_coefficient,
+                    frozen_indices           = frozen_indices,
+                    fmax                     = fmax,
+                    max_steps                = max_steps,
+                    verbose                  = False,
+                    lateral_interactions     = lateral_interactions,
+                    gas_g                    = gas_g_lookup,
+                    partial_pressures        = pressures,
+                    free_energy_options      = free_energy_options,
+                    vib_cache_root           = vib_cache_root,
+                )
+                if verbose:
+                    _n_new_ads_rxns = sum(
+                        len(getattr(s, "applicable_reactions", None) or [])
+                        for s in _new_ads
+                    )
+                    print(
+                        f"[KMC]    → {_n_new_ads_rxns} applicable "
+                        f"adsorption/desorption reaction(s) for new species"
+                    )
+                adsorbate_sites.extend(_new_ads)
+
+            # ── New diffusion iso-classes from the graph ──────────────────
+            # expand_bond_sites_for_new_species stores newly-found
+            # DiffusionSites in G.graph["diffusion_sites"] (when
+            # find_diffusion=True is passed via bond_growth_kwargs).
+            _g_diff = G.graph.get("diffusion_sites", {})
+            _new_diff: list[DiffusionSite] = [
+                ds
+                for _dlist in (
+                    _g_diff.values() if isinstance(_g_diff, dict) else []
+                )
+                if isinstance(_dlist, list)
+                for ds in _dlist
+                if id(ds) not in _snap_diff_ids
+            ]
+            if _new_diff:
+                if verbose:
+                    print(
+                        f"[KMC]  🆕 New diffusion iso-class(es) discovered: "
+                        f"{len(_new_diff)} site-pair(s)"
+                    )
+                _dkwargs = dict(diffusion_kwargs or {})
+                try:
+                    compute_all_diffusions(
+                        G, _new_diff, calculator,
+                        temperature              = temperature,
+                        transmission_coefficient = transmission_coefficient,
+                        frozen_indices           = frozen_indices,
+                        verbose                  = False,
+                        lateral_interactions     = lateral_interactions,
+                        free_energy_options      = free_energy_options,
+                        vib_cache_root           = vib_cache_root,
+                        **_dkwargs,
+                    )
+                except Exception as exc:  # pragma: no cover
+                    _log.warning(
+                        "compute_all_diffusions for new species failed: %s", exc
+                    )
+                if verbose:
+                    _n_new_diff_rxns = sum(
+                        len(getattr(ds, "applicable_reactions", None) or [])
+                        for ds in _new_diff
+                    )
+                    print(
+                        f"[KMC]    → {_n_new_diff_rxns} applicable "
+                        f"diffusion reaction(s) for new species"
+                    )
+                diffusion_sites.extend(_new_diff)
+
+            # ── Append new bond-reaction iso-classes ──────────────────────
             for brs in new_brs:
                 if id(brs) in rxn_index._bond_ids:
                     continue
-                # Re-build the index with the appended site.  The leaves
-                # for the new site are appended to the segment tree by
-                # constructing a fresh _ReactionIndex from the updated
-                # site lists; existing per-leaf reactions are re-installed
-                # so no rate state is lost.
                 bond_sites.append(brs)
-            if new_brs:
-                # Snapshot every currently-live reaction before rebuilding.
+
+            if verbose and new_brs:
+                print(
+                    f"[KMC]  🆕 New bond-reaction iso-class(es) enumerated: "
+                    f"{len(new_brs)} iso-class(es)  "
+                    f"(total bond iso-classes now: {len(bond_sites)})"
+                )
+                for _brs in new_brs:
+                    _t = _brs.template
+                    print(
+                        f"[KMC]    bond_iso {_brs.iso_class:>3}  "
+                        f"{_t.smiles_a!r}+{_t.smiles_b!r}⇌{_t.smiles_c!r}"
+                        f"  source={_t.source}"
+                        f"  members={len(_brs.member_node_ids)}"
+                    )
+
+            # ── Rebuild the segment-tree if anything was added ────────────
+            if new_brs or _new_ads or _new_diff:
+                # Snapshot currently-live reactions before the index rebuild
+                # so no rate state is lost for existing sites.
                 live_rxns = [r for r in rxn_index.reactions if r is not None]
                 rxn_index = _ReactionIndex(
                     adsorbate_sites, diffusion_sites, bond_sites,
                 )
                 for r in live_rxns:
                     rxn_index.install(r, r.site, r.member_index)
-                # Sweep the freshly-added bond sites so their rates are
-                # populated before the next step is sampled.
-                compute_all_bond_reactions(
-                    G, new_brs, calculator,
-                    temperature              = temperature,
-                    transmission_coefficient = transmission_coefficient,
-                    frozen_indices           = frozen_indices,
-                    verbose                  = False,
-                    lateral_interactions     = lateral_interactions,
-                    **bond_kwargs,
-                )
-                for brs in new_brs:
+                # Install freshly-computed reactions for new sites.
+                for _s in _new_ads:
                     rxn_index.install_site(
-                        brs, getattr(brs, "applicable_reactions", []) or [],
+                        _s, getattr(_s, "applicable_reactions", []) or [],
+                    )
+                for _ds in _new_diff:
+                    rxn_index.install_site(
+                        _ds, getattr(_ds, "applicable_reactions", []) or [],
+                    )
+                # Sweep new bond sites for initial NEB / lateral rates.
+                if new_brs:
+                    compute_all_bond_reactions(
+                        G, new_brs, calculator,
+                        temperature              = temperature,
+                        transmission_coefficient = transmission_coefficient,
+                        frozen_indices           = frozen_indices,
+                        verbose                  = False,
+                        lateral_interactions     = lateral_interactions,
+                        **bond_kwargs,
+                    )
+                    for brs in new_brs:
+                        rxn_index.install_site(
+                            brs,
+                            getattr(brs, "applicable_reactions", []) or [],
+                        )
+
+                if verbose:
+                    _n_active_now = sum(
+                        1 for r in rxn_index.reactions if r is not None
+                    )
+                    print(
+                        f"[KMC]  Segment-tree rebuilt"
+                        f"  │  {rxn_index.n_total} leaves"
+                        f"  │  {_n_active_now} active reaction(s)"
+                        f"  │  Q = {rxn_index.total_rate():.3e} Hz"
+                        f"  │  channels: "
+                        f"ads={len(adsorbate_sites)}"
+                        f" diff={len(diffusion_sites)}"
+                        f" bond={len(bond_sites)}"
                     )
 
         # Persist every newly-discovered (iso, lat) reaction surfaced by the

@@ -98,11 +98,19 @@ def _registry(G: nx.Graph) -> dict:
     reg = G.graph.get("bond_registry")
     if reg is None:
         reg = {
-            "species":         {},     # smi (canon) → Reactant | None
-            "adsorbate_sites": {},     # smi (canon) → list[AdsorbateSite]
-            "templates":       set(),  # set[(smi_a, smi_b, smi_c)]
+            "species":          {},     # smi (canon) → Reactant | None
+            "adsorbate_sites":  {},     # smi (canon) → list[AdsorbateSite]
+            "templates":        set(),  # set[(smi_a, smi_b, smi_c)]
+            # Species for which bond templates have been fully derived and
+            # enumerated (not just pre-built as leaf / product nodes).
+            # Used by expand_bond_sites_for_new_species as the idempotency
+            # guard so that leaf species (pre-built but not template-derived)
+            # can still be expanded when they first appear on the surface.
+            "expanded_species": set(),  # set[canonical_smiles]
         }
         G.graph["bond_registry"] = reg
+    # Back-fill for registries created before this field was added.
+    reg.setdefault("expanded_species", set())
     return reg
 
 
@@ -113,6 +121,7 @@ def initialise_bond_registry(
     adsorbate_sites: Iterable[AdsorbateSite] | Mapping[str, Iterable[AdsorbateSite]] | None = None,
     templates: Iterable[BondReactionTemplate] | None = None,
     bond_sites: Iterable[BondReactionSite] | None = None,
+    expanded_smiles: Iterable[str] | None = None,
 ) -> dict:
     """Bootstrap the on-graph registry from the user's initial state.
 
@@ -137,6 +146,15 @@ def initialise_bond_registry(
         Initial list of :class:`BondReactionSite`'s.  When supplied, the
         graph attribute ``G.graph["bond_reaction_sites"]`` is set to this
         list so future expansion appends to it.
+    expanded_smiles : iterable[str] | None
+        SMILES of species whose bond templates have already been fully
+        derived and enumerated (i.e. they were the *subject* of
+        :func:`~autokmc.find_bond_sites.derive_bond_templates`, not merely
+        auto-built as leaf / product nodes).  These species are marked in
+        ``reg["expanded_species"]`` so that
+        :func:`expand_bond_sites_for_new_species` does not attempt to
+        re-derive their templates.  Typically the user-provided reactant
+        SMILES.
 
     Returns
     -------
@@ -171,6 +189,14 @@ def initialise_bond_registry(
     if templates is not None:
         for t in templates:
             reg["templates"].add((t.smiles_a, t.smiles_b, t.smiles_c))
+
+    # Mark explicitly-expanded species so the on-the-fly expander won't
+    # needlessly re-derive their templates during the KMC loop.
+    if expanded_smiles is not None:
+        for smi in expanded_smiles:
+            cs = _canon_smiles(smi)
+            if cs:
+                reg["expanded_species"].add(cs)
 
     # Bond sites — primary store stays on G.graph for compatibility
     if bond_sites is not None:
@@ -349,9 +375,9 @@ def expand_bond_sites_for_new_species(
     cs = _canon_smiles(new_smiles)
     if not cs:
         return []
-    if cs in reg["species"]:
+    if cs in reg["expanded_species"]:
         if verbose:
-            print(f"  ⏭  species {cs!r} already known — no expansion needed")
+            print(f"  ⏭  species {cs!r} already expanded — no expansion needed")
         return []
 
     # 1–2. Build Reactant + sites for the newly-introduced species.
@@ -366,6 +392,8 @@ def expand_bond_sites_for_new_species(
         verbose         = verbose,
     )
     if not built_ok:
+        # Still mark as expanded so we do not retry on every KMC step.
+        reg["expanded_species"].add(cs)
         return []
 
     # 3. Derive new templates centred on cs.
@@ -408,6 +436,8 @@ def expand_bond_sites_for_new_species(
             print(
                 f"  → species {cs!r}: no new templates generated"
             )
+        # Mark as expanded so we don't retry on future KMC steps.
+        reg["expanded_species"].add(cs)
         return []
 
     # 4. Ensure every species referenced by new_tpls is known.
@@ -557,6 +587,9 @@ def expand_bond_sites_for_new_species(
             f"(total: {len(combined)} iso-class(es))"
         )
 
+    # Mark this species as fully expanded so future calls are no-ops.
+    reg["expanded_species"].add(cs)
+
     return list(new_brs)
 
 
@@ -573,15 +606,23 @@ def expand_bond_sites_after_event(
 ) -> list[BondReactionSite]:
     """KMC-loop hook: expand the registry if *reaction* produced a new species.
 
-    Inspects *reaction* and, when it is a coupling-direction
-    :class:`~autokmc.kmc_bond.BondReaction` (``kind == "bond"`` and
-    ``direction == "couple"``), forwards the C-side SMILES
-    (``reaction.site.template.smiles_c``) to
-    :func:`expand_bond_sites_for_new_species`.
+    Inspects *reaction* and, when it is a
+    :class:`~autokmc.kmc_bond.BondReaction` (``kind == "bond"``), triggers
+    :func:`expand_bond_sites_for_new_species` for any species that has not
+    yet been fully expanded:
+
+    * **Coupling** ``A + B → C``: expands for ``smiles_c``.  This is the
+      primary path that introduces a genuinely new product species.
+    * **Dissociation** ``C → A + B``: expands for both ``smiles_a`` and
+      ``smiles_b``.  A and B may have been pre-built as leaf nodes (Reactant
+      and adsorbate sites already in the registry) but their *own* bond
+      templates (A + Z → W, etc.) were never derived.  Expansion here
+      derives those templates and enumerates the resulting bond iso-classes
+      so they are available for subsequent KMC steps.
 
     Returns the list of newly enumerated :class:`BondReactionSite`'s
-    (empty when the reaction is not of the right kind, or when the
-    species is already in the registry).
+    (empty when the reaction is not of the right kind, or when all
+    relevant species are already in ``reg["expanded_species"]``).
 
     Wire it into the KMC step like::
 
@@ -594,15 +635,32 @@ def expand_bond_sites_after_event(
     if getattr(reaction, "kind", None) != "bond":
         return []
     direction = getattr(reaction, "direction", None)
-    if direction != "couple":
-        # Dissociation events produce A and B which are already in the
-        # registry by construction (they were the source of the template).
-        return []
 
-    smi_c = reaction.site.template.smiles_c
-    return expand_bond_sites_for_new_species(
-        G, smi_c, calculator=calculator, **expand_kwargs,
-    )
+    if direction == "couple":
+        # A + B → C: the product C may be a completely new species.
+        smi_c = reaction.site.template.smiles_c
+        return expand_bond_sites_for_new_species(
+            G, smi_c, calculator=calculator, **expand_kwargs,
+        )
+
+    if direction == "dissoc":
+        # C → A + B: the fragments A and B were pre-built as leaf nodes when
+        # C's templates were derived, but their OWN bond templates (A + Z → W)
+        # may never have been enumerated.  Expand each one that hasn't been
+        # fully expanded yet; the idempotency guard on expanded_species makes
+        # double-calling safe (homo-dissociation where A == B is handled
+        # correctly: the second call returns [] immediately).
+        smi_a = reaction.site.template.smiles_a
+        smi_b = reaction.site.template.smiles_b
+        new_a = expand_bond_sites_for_new_species(
+            G, smi_a, calculator=calculator, **expand_kwargs,
+        )
+        new_b = expand_bond_sites_for_new_species(
+            G, smi_b, calculator=calculator, **expand_kwargs,
+        )
+        return new_a + new_b
+
+    return []
 
 
 __all__ = [

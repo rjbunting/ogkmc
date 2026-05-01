@@ -366,6 +366,13 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
             adsorbate_sites = sites_by_smi,
             templates       = templates,
             bond_sites      = bond_sites,
+            # Mark the user-provided reactants as fully expanded so the
+            # KMC loop does not attempt to re-derive their templates.
+            # Leaf/product species built via auto_build_leaf_species are
+            # intentionally NOT listed here — they will be expanded on the
+            # fly the first time they appear on the surface as a product or
+            # fragment.
+            expanded_smiles = reactant_smiles,
         )
 
         if log_level <= logging.INFO:
@@ -392,6 +399,7 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
         )
         bond_growth_kwargs = dict(
             find_diffusion = d.enabled,
+            verbose        = log_level <= logging.INFO,
         )
 
     # 7. KMC

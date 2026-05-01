@@ -596,7 +596,7 @@ def _bond_set(
         ``None`` falls back to the legacy full-graph behaviour.
     """
     cutoffs = natural_cutoffs(atoms, mult=nl_mult)
-    nl = NeighborList(cutoffs, self_interaction=False, bothways=False)
+    nl = NeighborList(cutoffs, self_interaction=False, bothways=True)
     nl.update(atoms)
     bonds: set[frozenset] = set()
     if relevant_indices is None:
@@ -604,10 +604,6 @@ def _bond_set(
             for j in nl.get_neighbors(i)[0]:
                 bonds.add(frozenset((int(i), int(j))))
     else:
-        # NeighborList with ``bothways=False`` only emits j > i for atom i;
-        # to capture every bond touching ``relevant_indices`` we must walk
-        # *all* atoms i and keep bonds where i OR j is relevant.  This is
-        # still cheaper than building bothways=True over the whole slab.
         for i in range(len(atoms)):
             i_relevant = i in relevant_indices
             for j in nl.get_neighbors(i)[0]:

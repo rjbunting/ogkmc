@@ -12,5 +12,4 @@ htmlcov/
 *.egg-info/
 build/
 dist/
-!/AGENTS.md
-!/runs/
+./runs/
