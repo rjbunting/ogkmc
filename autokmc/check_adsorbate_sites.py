@@ -524,9 +524,13 @@ def _build_stability_atoms(
     atoms : Atoms
     n_slab : int
         Number of slab atoms at the start of *atoms*.
-    n_ads : int
-        Number of adsorbate atoms after the slab (lateral neighbours + self if
-        ``include_self=True``).
+    n_lat : int
+        Number of lateral-neighbour adsorbate atoms (``len(lat_nodes)``),
+        occupying indices ``n_slab … n_slab+n_lat-1`` in *atoms*.
+    n_self : int
+        Number of site-own adsorbate atoms actually placed (``len(self_nodes)``
+        — nodes in *self_node_ids* that are present in *G* at call time),
+        occupying indices ``n_slab+n_lat … n_slab+n_lat+n_self-1`` in *atoms*.
     """
     # ── 1. Slab atoms ────────────────────────────────────────────────────
     slab_nodes = sorted(
@@ -551,7 +555,8 @@ def _build_stability_atoms(
 
     all_node_ids = slab_nodes + lat_nodes + self_nodes
     n_slab = len(slab_nodes)
-    n_ads  = len(lat_nodes) + len(self_nodes)
+    n_lat  = len(lat_nodes)
+    n_self = len(self_nodes)
 
     symbols   = [G.nodes[n]["element"]  for n in all_node_ids]
     positions = [G.nodes[n]["position"] for n in all_node_ids]
@@ -569,7 +574,7 @@ def _build_stability_atoms(
     if frozen_indices:
         atoms.set_constraint(FixAtoms(indices=list(frozen_indices)))
 
-    return atoms, n_slab, n_ads
+    return atoms, n_slab, n_lat, n_self
 
 
 def _bond_set(
@@ -892,19 +897,20 @@ def check_site_stability(
         if nid in G
     )
 
-    def _relax_and_check(include_self: bool) -> float:
+    def _relax_and_check(include_self: bool) -> tuple:
         state = "occupied" if include_self else "unoccupied"
 
-        atoms_init, n_slab, n_ads = _build_stability_atoms(
+        # _build_stability_atoms returns n_lat and n_self directly from the
+        # node-list lengths so we never have to re-derive them from
+        # len(self_node_ids), which can differ if any node id is absent from G
+        # at call time (e.g. after _materialise_adsorbate_nodes re-indexes).
+        atoms_init, n_slab, n_lat, n_self_actual = _build_stability_atoms(
             G, lateral_class, self_node_ids,
             include_self    = include_self,
             frozen_indices  = frozen_indices,
         )
 
-        # n_lat = number of lateral-neighbour adsorbate atoms.
-        # The Atoms ordering is: [slab | lat_neighbours | self].
-        # The site's own atoms are at the tail of the adsorbate block.
-        n_lat: int = n_ads - len(self_node_ids) if include_self else n_ads
+        n_ads = n_lat + n_self_actual
 
         # ads_indices covers BOTH the lateral-neighbour adsorbate atoms
         # (indices n_slab … n_slab+n_lat-1) AND the site's own atoms
@@ -991,10 +997,16 @@ def check_site_stability(
                 f"max|F|={max_force:.4f} eV/Å  ✓ stable"
             )
 
-        return energy, atoms_opt
+        # Return n_slab, n_lat and n_self alongside the energy and relaxed atoms
+        # so the free-energy section can compute vib_idx_occ from the SAME
+        # _build_stability_atoms invocation that produced atoms_opt.
+        # n_self is len(self_nodes) — the adsorbate atoms actually placed in
+        # atoms_opt, NOT len(self_node_ids) which can disagree if any node id
+        # was absent from G at call time.
+        return energy, atoms_opt, n_slab, n_lat, n_self_actual
 
-    E_occ,   atoms_occ   = _relax_and_check(include_self=True)
-    E_unocc, atoms_unocc = _relax_and_check(include_self=False)
+    E_occ,   atoms_occ,   _n_slab_occ,   _n_lat_occ,   _n_self_occ   = _relax_and_check(include_self=True)
+    E_unocc, atoms_unocc, _n_slab_unocc, _n_lat_unocc, _n_self_unocc = _relax_and_check(include_self=False)
 
     lateral_class.energy_occupied   = E_occ
     lateral_class.energy_unoccupied = E_unocc
@@ -1014,24 +1026,26 @@ def check_site_stability(
             and free_energy_temperature_k is not None):
         from autokmc.free_energy import compute_harmonic_thermo
 
-        n_self = len(self_node_ids)
-        # atoms_occ ordering: slab (n_slab_occ) | lat | self.  We need to
-        # recover those counts; rebuild via the same _build_stability_atoms
-        # call so we know n_slab and n_ads exactly for both states.
-        atoms_occ_init,   n_slab_occ,   n_ads_occ   = _build_stability_atoms(
-            G, lateral_class, self_node_ids,
-            include_self=True,  frozen_indices=frozen_indices,
-        )
-        atoms_unocc_init, n_slab_unocc, n_ads_unocc = _build_stability_atoms(
-            G, lateral_class, self_node_ids,
-            include_self=False, frozen_indices=frozen_indices,
-        )
-        n_lat_occ   = n_ads_occ - n_self
-        n_lat_unocc = n_ads_unocc
+        # Use the n_slab / n_lat / n_self values captured inside
+        # _relax_and_check from the SAME _build_stability_atoms call that
+        # produced atoms_occ / atoms_unocc.  n_self is the count of adsorbate
+        # atoms ACTUALLY placed in atoms_occ (len(self_nodes)), NOT
+        # len(self_node_ids), which can be larger if any node id was absent
+        # from G when _build_stability_atoms ran.  Using the actual placed
+        # count prevents vib_idx_occ from ever pointing past the end of
+        # atoms_occ.
+        n_slab_occ   = _n_slab_occ
+        n_lat_occ    = _n_lat_occ
+        n_self_occ   = _n_self_occ       # atoms actually in atoms_occ tail
+        n_slab_unocc = _n_slab_unocc
+        n_lat_unocc  = _n_lat_unocc
 
+        # Vibrate ONLY the adsorbate atoms (the tail of atoms_occ).
+        # The Atoms ordering is [slab | lat_neighbours | self]; self atoms
+        # occupy exactly the last n_self_occ indices.
         vib_idx_occ = list(range(
             n_slab_occ + n_lat_occ,
-            n_slab_occ + n_lat_occ + n_self,
+            n_slab_occ + n_lat_occ + n_self_occ,
         ))
         # Unoccupied state has no reactive species — nothing vibrates,
         # so the harmonic correction is zero by construction.  We still
@@ -1049,9 +1063,28 @@ def check_site_stability(
             if cache_dir_root is not None else None
         )
 
+        # Strip FixAtoms constraints from the vibration copies.  The
+        # constraints were applied inside _build_stability_atoms to freeze
+        # bottom-layer slab atoms during ML relaxation; they are NOT needed
+        # here because vib_idx_occ already limits displacements to the
+        # adsorbate atoms only.  Keeping them can cause ASE's internal
+        # constraint-adjustment code (adjust_forces / adjust_positions) to
+        # fail with an IndexError when the frozen-atoms index array is applied
+        # to force arrays whose leading dimension differs from what was set up
+        # during earlier relaxation calls (e.g. different n_ads between calls).
+        atoms_occ_vib = atoms_occ.copy()
+        atoms_occ_vib.set_constraint([])   # remove all constraints
+
+        _log.debug(
+            "check_site_stability: harmonic thermo for OCCUPIED "
+            "state (iso=%d, lat=%d) — n_atoms=%d  vib_idx=%s",
+            adsorbate_site.iso_class, lateral_class.lateral_class,
+            len(atoms_occ_vib), vib_idx_occ,
+        )
+
         try:
             occ_thermo = compute_harmonic_thermo(
-                atoms_occ, vib_idx_occ,
+                atoms_occ_vib, vib_idx_occ,
                 energy_ev     = float(E_occ),
                 temperature_k = float(free_energy_temperature_k),
                 calculator    = calculator,
@@ -1061,17 +1094,22 @@ def check_site_stability(
                 drop_imaginary= True,
             )
         except Exception as exc:                      # pragma: no cover
+            import traceback as _tb
             _log.warning(
                 "check_site_stability: harmonic thermo for OCCUPIED "
-                "state failed (iso=%d, lat=%d): %s — leaving G=NaN.",
+                "state failed (iso=%d, lat=%d): %s — leaving G=NaN.\n%s",
                 adsorbate_site.iso_class,
                 lateral_class.lateral_class, exc,
+                _tb.format_exc(),
             )
             occ_thermo = None
 
+        atoms_unocc_vib = atoms_unocc.copy()
+        atoms_unocc_vib.set_constraint([])  # remove all constraints
+
         try:
             unocc_thermo = compute_harmonic_thermo(
-                atoms_unocc, vib_idx_unocc,
+                atoms_unocc_vib, vib_idx_unocc,
                 energy_ev     = float(E_unocc),
                 temperature_k = float(free_energy_temperature_k),
                 calculator    = calculator,
@@ -1081,11 +1119,13 @@ def check_site_stability(
                 drop_imaginary= True,
             )
         except Exception as exc:                      # pragma: no cover
+            import traceback as _tb
             _log.warning(
                 "check_site_stability: harmonic thermo for UNOCCUPIED "
-                "state failed (iso=%d, lat=%d): %s — leaving G=NaN.",
+                "state failed (iso=%d, lat=%d): %s — leaving G=NaN.\n%s",
                 adsorbate_site.iso_class,
                 lateral_class.lateral_class, exc,
+                _tb.format_exc(),
             )
             unocc_thermo = None
 

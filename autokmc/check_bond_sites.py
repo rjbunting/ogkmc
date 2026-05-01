@@ -328,7 +328,14 @@ def check_bond_site_lateral(
     depth: int = LATERAL_SHELLS_DEFAULT if n_shells is None else int(n_shells)
 
     site_a, m_a, site_b, m_b, site_c, m_c = brs.members[member_index]
-    a_node_ids, b_node_ids, c_node_ids    = brs.member_node_ids[member_index]
+    # Read node IDs live from the AdsorbateSite objects rather than the cached
+    # copies in brs.member_node_ids.  _materialise_adsorbate_nodes rebuilds
+    # AdsorbateSite.member_node_ids in-place with fresh graph-node ids whenever
+    # it is called; the list(...) copies kept in brs.member_node_ids are never
+    # updated and become stale after any re-materialisation.
+    a_node_ids = list(site_a.member_node_ids[m_a])
+    b_node_ids = list(site_b.member_node_ids[m_b])
+    c_node_ids = list(site_c.member_node_ids[m_c])
 
     clq_a = _member_clique_union(site_a, m_a)
     clq_b = _member_clique_union(site_b, m_b)
@@ -900,7 +907,14 @@ def check_bond_site_stability(
         )
 
     site_a, m_a, site_b, m_b, site_c, m_c = brs.members[member_index]
-    a_node_ids, b_node_ids, c_node_ids    = brs.member_node_ids[member_index]
+    # Read node IDs live from the AdsorbateSite objects rather than the cached
+    # copies in brs.member_node_ids.  _materialise_adsorbate_nodes rebuilds
+    # AdsorbateSite.member_node_ids in-place with fresh graph-node ids whenever
+    # it is called; the list(...) copies kept in brs.member_node_ids are never
+    # updated and become stale after any re-materialisation.
+    a_node_ids = list(site_a.member_node_ids[m_a])
+    b_node_ids = list(site_b.member_node_ids[m_b])
+    c_node_ids = list(site_c.member_node_ids[m_c])
 
     clq_a = _member_clique_union(site_a, m_a)
     clq_b = _member_clique_union(site_b, m_b)

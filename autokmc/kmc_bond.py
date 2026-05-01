@@ -200,7 +200,14 @@ def is_bond_applicable(
     2. The cliques that the firing direction needs to occupy are not
        claimed by any *third-party* adsorbate.
     """
-    a_nids, b_nids, c_nids = brs.member_node_ids[member_index]
+    # Read node IDs live from the AdsorbateSite objects so that we always see
+    # the current graph-node ids, even after _materialise_adsorbate_nodes has
+    # re-run for a species and invalidated the cached copies in
+    # brs.member_node_ids.
+    site_a, m_a, site_b, m_b, site_c, m_c = brs.members[member_index]
+    a_nids = list(site_a.member_node_ids[m_a])
+    b_nids = list(site_b.member_node_ids[m_b])
+    c_nids = list(site_c.member_node_ids[m_c])
     a_occ = _placement_occupied(G, a_nids)
     b_occ = _placement_occupied(G, b_nids)
     c_occ = _placement_occupied(G, c_nids)

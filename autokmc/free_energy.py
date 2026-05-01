@@ -179,6 +179,14 @@ def _vibrate(
     cache_dir.mkdir(parents=True, exist_ok=True)
     name = str(cache_dir / f"vib_{label}")
 
+    # Strip any FixAtoms / FixCartesianMomentum constraints that were set
+    # for the ML relaxation step.  These are not needed for finite-difference
+    # vibrational analysis (we already restrict displaced atoms via `indices`)
+    # and can cause ASE's internal adjust_forces() to raise an IndexError if
+    # the constraint index array was sized for a different Atoms object.
+    if atoms.constraints:
+        atoms.set_constraint([])
+
     vib = Vibrations(
         atoms,
         indices      = list(indices) if indices is not None else None,
@@ -187,9 +195,11 @@ def _vibrate(
         nfree        = int(options.vibration_nfree),
     )
     # Always recompute — caches mix poorly when the underlying calculator
-    # state changes between runs.  The user can opt into persistent caches
-    # by setting ``cache_dir`` explicitly and not deleting it.
-    vib.clean(empty_files=True)
+    # state changes or the number of atoms differs between lateral classes.
+    # clean(empty_files=False) removes ALL cached displacement files, not
+    # just the empty ones, preventing stale force arrays from a previous
+    # lateral class (different n_atoms) from poisoning the Hessian assembly.
+    vib.clean(empty_files=False)
     vib.run()
     energies = list(vib.get_energies())
     real_cm, imag_cm = _split_real_imag(

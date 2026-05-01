@@ -109,3 +109,6 @@ Need TS verification now with frequencies. Need a general plan for this.
 
 optimise_structure:
 If the structure doesn't optimise, it should be counted as unstable instead.
+
+checkpoint.py:
+Add some checkpointing to continue etc.
