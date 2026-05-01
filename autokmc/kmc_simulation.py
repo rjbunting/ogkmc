@@ -263,7 +263,10 @@ def choose_reaction(
 
     cum    = np.cumsum(rates)
     target = u * total
-    idx    = int(np.searchsorted(cum, target))
+    # Use side='right' so that target=0.0 skips any leading zero-rate entries
+    # (searchsorted with side='left' would return index 0 even if rates[0]==0,
+    # causing a zero-rate phantom reaction to be executed).
+    idx    = int(np.searchsorted(cum, target, side='right'))
     if idx >= len(reactions):
         idx = len(reactions) - 1
     return reactions[idx], idx, total

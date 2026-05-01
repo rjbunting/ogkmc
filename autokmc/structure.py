@@ -669,10 +669,23 @@ def optimise_structure(
         if existing is not None:
             try:
                 result.calc = copy.deepcopy(existing)
-            except Exception:
-                # Fall back to a fresh instance if deepcopy is unsupported
-                # (e.g. calculators wrapping un-picklable C handles).
-                result.calc = existing.__class__()
+            except Exception as deepcopy_exc:
+                # deepcopy is unsupported for some calculators wrapping
+                # un-picklable C handles.  Try a shallow copy first; if
+                # that also fails, raise a clear error rather than
+                # blindly calling existing.__class__() which would crash
+                # for any ML calculator that requires constructor args
+                # (model path, device, etc.).
+                try:
+                    result.calc = copy.copy(existing)
+                except Exception:
+                    raise RuntimeError(
+                        f"optimise_structure: could not copy calculator "
+                        f"'{existing.__class__.__name__}'. "
+                        f"deepcopy error: {deepcopy_exc}. "
+                        "Pass the calculator explicitly via the "
+                        "'calculator' argument."
+                    ) from deepcopy_exc
         else:
             result.calc = EMT()
 
@@ -719,6 +732,12 @@ def _parse_composition(composition: Composition) -> Dict[str, float]:
     total = sum(comp.values())
     if total <= 0:
         raise ValueError(f"Composition values must be positive, got: {comp}")
+    for sym, val in comp.items():
+        if val < 0:
+            raise ValueError(
+                f"Composition fraction for '{sym}' is negative ({val}). "
+                "All fractions must be non-negative."
+            )
     # Normalise so fractions sum to exactly 1
     return {sym: val / total for sym, val in comp.items()}
 

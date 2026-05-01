@@ -749,17 +749,30 @@ def _check_connectivity_stable(
     removed = before - after
     changed = added | removed
 
-    if not changed:
-        return
-
     slab_set     = set(range(n_slab))
     ads_set      = set(range(n_slab, n_slab + n_ads))
     lat_set      = set(range(n_slab, n_slab + n_lat))        # lateral neighbours
     site_set     = set(range(n_slab + n_lat, n_slab + n_ads)) # site's own atoms
 
-    # Classify by which groups are involved in each changed bond.
-    surf_changes = [b for b in changed if b <= slab_set]   # both in slab
+    # Detect slab-internal bond changes with a dedicated slab-range bond set.
+    # When relevant_indices is restricted to adsorbate indices (the normal call
+    # path from check_site_stability), slab-only bonds are excluded from
+    # `before`/`after`, making `surf_changes` permanently empty if computed
+    # from `changed` alone.  The separate slab bond-set call fixes this.
+    # Note: we compute this unconditionally so we don't exit early below
+    # before slab changes can be detected.
+    before_slab  = _bond_set(atoms_before, nl_mult=nl_mult,
+                             relevant_indices=slab_set)
+    after_slab   = _bond_set(atoms_after,  nl_mult=nl_mult,
+                             relevant_indices=slab_set)
+    changed_slab = (before_slab - after_slab) | (after_slab - before_slab)
+    surf_changes = [b for b in changed_slab if b <= slab_set]
+
+    # Classify adsorbate-region bond changes from the adsorbate-focused set.
     ads_changes  = [b for b in changed if b & ads_set]     # any in adsorbate
+
+    if not surf_changes and not ads_changes:
+        return
 
     if surf_changes:
         pairs = ", ".join(f"{{{min(b)},{max(b)}}}" for b in surf_changes[:5])

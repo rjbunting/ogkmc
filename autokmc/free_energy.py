@@ -281,17 +281,17 @@ def compute_gas_thermo(
     )
 
     # IdealGasThermo wants vibrational energies in eV (real, positive).
-    # For monatomic / linear / nonlinear: ASE drops the right number of
-    # translational/rotational modes automatically based on `geometry`.
+    # Use `real_cm` which has already been filtered by `_split_real_imag`
+    # (min_frequency_cm threshold applied).  The raw `raw_energies` list
+    # contains spurious near-zero / imaginary modes that would inflate the
+    # vibrational partition function and make the computed entropy diverge.
+    # IdealGasThermo selects the appropriate number of modes (subtracting
+    # translations / rotations) based on `geometry`, so pass all real
+    # modes sorted descending.
     vib_energies_ev = np.asarray(
-        [abs(complex(e).real) for e in raw_energies if abs(complex(e).imag) <= abs(complex(e).real)],
+        [nu * units.invcm for nu in sorted(real_cm, reverse=True)],
         dtype=float,
     )
-    # Filter the small / spurious modes consistent with the cm⁻¹ split.
-    keep_mask = (vib_energies_ev * 1e7) >= 0  # placeholder — IdealGasThermo
-    # IdealGasThermo selects the appropriate number of modes itself, so
-    # pass the raw real energies sorted descending.
-    vib_energies_ev = np.sort(vib_energies_ev)[::-1]
 
     thermo = IdealGasThermo(
         vib_energies     = vib_energies_ev,

@@ -324,13 +324,18 @@ def find_surface_atoms_convexhull(
     K_NEAR         = min(5, len(normals) - 1)
     nn_dot         = normals @ normals.T                           # (F, F)
     np.fill_diagonal(nn_dot, -2.0)
-    knn_vals       = np.sort(nn_dot, axis=1)[:, -K_NEAR:]         # (F, K)
-    curvature_f    = (1.0 - knn_vals).mean(axis=1)                # (F,)
-    c_min, c_max   = curvature_f.min(), curvature_f.max()
-    curvature_norm = (
-        (curvature_f - c_min) / (c_max - c_min)
-        if c_max > c_min else np.zeros_like(curvature_f)
-    )
+    if K_NEAR < 1:
+        # Degenerate hull with only one facet — no neighbour normals to
+        # average; skip curvature adaptation and use a flat tolerance.
+        curvature_norm = np.zeros(len(normals))
+    else:
+        knn_vals       = np.sort(nn_dot, axis=1)[:, -K_NEAR:]     # (F, K)
+        curvature_f    = (1.0 - knn_vals).mean(axis=1)            # (F,)
+        c_min, c_max   = curvature_f.min(), curvature_f.max()
+        curvature_norm = (
+            (curvature_f - c_min) / (c_max - c_min)
+            if c_max > c_min else np.zeros_like(curvature_f)
+        )
     hull_tol_per_atom = hull_tol_base * (1.0 + curvature_norm[nearest_facet])
 
     dist_surface_mask = signed_dist > -hull_tol_per_atom           # (N,)

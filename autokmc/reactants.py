@@ -205,7 +205,12 @@ def _smiles_to_atoms(smiles: str, *, add_hydrogens: bool = True) -> Atoms:
     result = AllChem.EmbedMolecule(mol, params)
     if result == -1:
         # Fall back to random embedding
-        AllChem.EmbedMolecule(mol, AllChem.EmbedParameters())
+        if AllChem.EmbedMolecule(mol, AllChem.EmbedParameters()) == -1:
+            raise ValueError(
+                f"RDKit could not embed a 3D conformer for SMILES: {smiles!r}. "
+                "Both ETKDGv3 and the random fallback embedder failed. "
+                "Try a different SMILES representation or simplify the molecule."
+            )
 
     # Quick MMFF94 pre-relaxation in RDKit before handing to ASE
     AllChem.MMFFOptimizeMolecule(mol, maxIters=2000)
@@ -423,7 +428,7 @@ def build_reactant(
         Maximum ASE optimisation steps.  Default 500.
     nl_mult : float
         Neighbour-list multiplier passed to :func:`~autokmc.graph.build_graph`.
-        Default 1.1.
+        Default ``NL_MULT_DEFAULT`` (currently 0.90).
     hull_tol : float
         Tolerance passed to :func:`find_anchor_atoms`.  Default 0.1 Å.
 
