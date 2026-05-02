@@ -78,6 +78,7 @@ from dataclasses import dataclass, field
 from typing import Any, Iterable
 
 import networkx as nx
+from networkx.algorithms import isomorphism
 
 from .find_adsorbate_sites import (
     AdsorbateSite,
@@ -622,6 +623,58 @@ def _build_triple_ego_graph(
     return result
 
 
+def _triple_node_match(d1: dict, d2: dict) -> bool:
+    """Node-match predicate for triple iso-class deduplication.
+
+    * ``type == "surface"``   — must share ``element``.
+    * ``type == "adsorbate"`` — must share ``element``, ``iso_class``,
+      ``reactant``, ``reactant_index`` *and* ``endpoint_role`` so that the
+      A/B/C roles are preserved across the mapping, and symmetry-inequivalent
+      atoms of the same element within a multi-atom adsorbate are never
+      interchanged.
+    """
+    if d1.get("type") != d2.get("type"):
+        return False
+    if d1.get("element") != d2.get("element"):
+        return False
+    if d1.get("type") == "adsorbate":
+        if d1.get("iso_class") != d2.get("iso_class"):
+            return False
+        if d1.get("reactant") != d2.get("reactant"):
+            return False
+        if d1.get("reactant_index") != d2.get("reactant_index"):
+            return False
+        if (d1.get("endpoint_role") or "") != (d2.get("endpoint_role") or ""):
+            return False
+    return True
+
+
+def _triple_fingerprint(g: nx.Graph) -> tuple:
+    """Cheap fingerprint to bucket triple ego-graphs before the full GraphMatcher.
+
+    Mirrors :func:`_triple_node_match`: ``endpoint_role`` is only included
+    for adsorbate nodes.
+    """
+    sigs = tuple(sorted(
+        (
+            d.get("type",    "X"),
+            d.get("element", "X"),
+            int(d.get("iso_class",      -1)) if d.get("type") == "adsorbate" else -1,
+            str(d.get("reactant",       "")) if d.get("type") == "adsorbate" else "",
+            int(d.get("reactant_index", -1)) if d.get("type") == "adsorbate" else -1,
+            (d.get("endpoint_role") or "") if d.get("type") == "adsorbate" else "",
+            g.degree(n),
+        )
+        for n, d in g.nodes(data=True)
+    ))
+    return (
+        g.number_of_nodes(),
+        g.number_of_edges(),
+        tuple(sorted(g.degree(n) for n in g.nodes())),
+        sigs,
+    )
+
+
 def _prune_one_per_adsorption_triple(
     bond_sites: list[BondReactionSite],
     *,
@@ -794,8 +847,13 @@ def find_bond_sites(
         n_considered = 0
         n_kept       = 0
 
-        # Bucket by iso-class signature for deduplication.
-        groups: dict[tuple, BondReactionSite] = {}
+        # Fingerprint → list[BondReactionSite] index for isomorphism dedup.
+        # Using graph isomorphism instead of a simple iso_class-index tuple key
+        # because the latter incorrectly merges geometrically distinct triples
+        # that share the same individual iso-class numbers (e.g. hops in
+        # different crystallographic directions between the same site types).
+        # See the analogous fix note in find_diffusion_sites (~lines 583-591).
+        fp_index: dict[tuple, list[BondReactionSite]] = {}
 
         for sa, ma, clq_a in flat_a:
             ka = _placement_key(sa, ma)
@@ -826,60 +884,66 @@ def find_bond_sites(
 
                     n_kept += 1
 
-                    # ── Bucket into BondReactionSite ───────────────────────
-                    if deduplicate_iso:
-                        if tpl.is_symmetric:
-                            ab_key: Any = frozenset(
-                                {int(sa.iso_class), int(sb.iso_class)}
-                            )
-                        else:
-                            ab_key = (int(sa.iso_class), int(sb.iso_class))
-                        key = (ab_key, int(sc.iso_class))
-                    else:
-                        key = (n_kept,)  # unique → one triple per BRS
+                    a_nids = list(sa.member_node_ids[ma])
+                    b_nids = list(sb.member_node_ids[mb])
+                    c_nids = list(sc.member_node_ids[mc])
+                    ns_a = max(int(getattr(sa, "n_shells_settled", 0) or 0),
+                               int(n_shells_pair))
+                    ns_b = max(int(getattr(sb, "n_shells_settled", 0) or 0),
+                               int(n_shells_pair))
+                    ns_c = max(int(getattr(sc, "n_shells_settled", 0) or 0),
+                               int(n_shells_pair))
 
-                    brs = groups.get(key)
-                    if brs is None:
-                        # Build the triple ego-graph from this (representative)
-                        # member's three placements so the iso-class can later
-                        # be pruned by ego-size against rivals targeting the
-                        # same adsorption triple.
-                        a_nids = list(sa.member_node_ids[ma])
-                        b_nids = list(sb.member_node_ids[mb])
-                        c_nids = list(sc.member_node_ids[mc])
-                        ns_a = max(int(getattr(sa, "n_shells_settled", 0) or 0),
-                                   int(n_shells_pair))
-                        ns_b = max(int(getattr(sb, "n_shells_settled", 0) or 0),
-                                   int(n_shells_pair))
-                        ns_c = max(int(getattr(sc, "n_shells_settled", 0) or 0),
-                                   int(n_shells_pair))
-                        try:
-                            ego = _build_triple_ego_graph(
-                                G, a_nids, b_nids, c_nids,
-                                clq_a, clq_b, clq_c,
-                                ns_a, ns_b, ns_c,
-                                is_symmetric=tpl.is_symmetric,
+                    # ── Bucket into BondReactionSite via graph isomorphism ──
+                    try:
+                        ego = _build_triple_ego_graph(
+                            G, a_nids, b_nids, c_nids,
+                            clq_a, clq_b, clq_c,
+                            ns_a, ns_b, ns_c,
+                            is_symmetric=tpl.is_symmetric,
+                        )
+                    except Exception as exc:  # pragma: no cover
+                        _log.debug(
+                            "find_bond_sites: triple ego build failed: %s",
+                            exc,
+                        )
+                        ego = None
+
+                    merged = False
+                    if deduplicate_iso and ego is not None:
+                        fkey = _triple_fingerprint(ego)
+                        for brs in fp_index.get(fkey, ()):
+                            if brs.ego_graph is None:
+                                continue
+                            gm = isomorphism.GraphMatcher(
+                                ego, brs.ego_graph,
+                                node_match=_triple_node_match,
                             )
-                        except Exception as exc:  # pragma: no cover
-                            _log.debug(
-                                "find_bond_sites: triple ego build failed: %s",
-                                exc,
-                            )
-                            ego = None
+                            if gm.is_isomorphic():
+                                brs.n_shells_pair_settled = max(
+                                    brs.n_shells_pair_settled,
+                                    max(ns_a, ns_b, ns_c),
+                                )
+                                merged = True
+                                break
+
+                    if not merged:
                         brs = BondReactionSite(
                             template              = tpl,
                             iso_class             = -1,   # renumbered below
                             ego_graph             = ego,
                             n_shells_pair_settled = max(ns_a, ns_b, ns_c),
                         )
-                        groups[key] = brs
                         out.append(brs)
+                        if ego is not None:
+                            fkey = _triple_fingerprint(ego)
+                            fp_index.setdefault(fkey, []).append(brs)
 
                     brs.members.append((sa, ma, sb, mb, sc, mc))
                     brs.member_node_ids.append((
-                        list(sa.member_node_ids[ma]),
-                        list(sb.member_node_ids[mb]),
-                        list(sc.member_node_ids[mc]),
+                        list(a_nids),
+                        list(b_nids),
+                        list(c_nids),
                     ))
                     brs._member_cliques.append((
                         _placement_cliques(sa, ma),
@@ -888,7 +952,7 @@ def find_bond_sites(
                     ))
 
         if verbose:
-            n_iso = len(groups)
+            n_iso = sum(len(v) for v in fp_index.values()) if deduplicate_iso else n_kept
             print(
                 f"  ✓ template {tpl.smiles_a!r}+{tpl.smiles_b!r}"
                 f"⇌{tpl.smiles_c!r} ({tpl.source}): "

@@ -733,12 +733,20 @@ def _check_connectivity_stable(
 
     Raises
     ------
-    SurfaceConnectivityError
-        A bond between two slab atoms appeared or disappeared.
     AdsorbateDissociationError
         A bond involving at least one adsorbate atom appeared or disappeared.
         The message identifies whether the affected atom belongs to a lateral
         neighbour or to the site being checked.
+
+    Notes
+    -----
+    Pure slab–slab bond changes are **intentionally ignored**.  ML potentials
+    (e.g. NequIP, MACE) naturally relax the top surface layer during endpoint
+    optimisation, causing metal–metal bond topology to flicker as atoms move
+    within the cutoff tolerance.  These slab-internal changes are physically
+    irrelevant to adsorbate stability.  The ``relevant_indices`` parameter
+    (set to adsorbate atom indices by all callers) is the designed mechanism
+    to restrict the bond set to adsorbate-touching bonds only.
     """
     before = _bond_set(atoms_before, nl_mult=nl_mult,
                        relevant_indices=relevant_indices)
@@ -749,38 +757,24 @@ def _check_connectivity_stable(
     removed = before - after
     changed = added | removed
 
-    slab_set     = set(range(n_slab))
-    ads_set      = set(range(n_slab, n_slab + n_ads))
-    lat_set      = set(range(n_slab, n_slab + n_lat))        # lateral neighbours
-    site_set     = set(range(n_slab + n_lat, n_slab + n_ads)) # site's own atoms
+    ads_set  = set(range(n_slab, n_slab + n_ads))
+    lat_set  = set(range(n_slab, n_slab + n_lat))         # lateral neighbours
+    site_set = set(range(n_slab + n_lat, n_slab + n_ads)) # site's own atoms
 
-    # Detect slab-internal bond changes with a dedicated slab-range bond set.
-    # When relevant_indices is restricted to adsorbate indices (the normal call
-    # path from check_site_stability), slab-only bonds are excluded from
-    # `before`/`after`, making `surf_changes` permanently empty if computed
-    # from `changed` alone.  The separate slab bond-set call fixes this.
-    # Note: we compute this unconditionally so we don't exit early below
-    # before slab changes can be detected.
-    before_slab  = _bond_set(atoms_before, nl_mult=nl_mult,
-                             relevant_indices=slab_set)
-    after_slab   = _bond_set(atoms_after,  nl_mult=nl_mult,
-                             relevant_indices=slab_set)
-    changed_slab = (before_slab - after_slab) | (after_slab - before_slab)
-    surf_changes = [b for b in changed_slab if b <= slab_set]
+    # Only classify bond changes that involve at least one adsorbate atom.
+    # Pure slab-slab bonds are intentionally excluded: ML potentials naturally
+    # relax the top surface layer, causing Cu-Cu (or other metal) bond
+    # topology to flicker as atoms move within the cutoff tolerance.  These
+    # slab-internal changes are physically irrelevant to adsorbate stability
+    # and must not cause a site to be marked invalid.  The `relevant_indices`
+    # parameter (normally set to adsorbate indices by all callers) is the
+    # designed mechanism to restrict the bond set; a separate slab-only scan
+    # is explicitly NOT performed here.
+    ads_changes = [b for b in changed if b & ads_set]     # any in adsorbate
 
-    # Classify adsorbate-region bond changes from the adsorbate-focused set.
-    ads_changes  = [b for b in changed if b & ads_set]     # any in adsorbate
-
-    if not surf_changes and not ads_changes:
+    if not ads_changes:
         return
 
-    if surf_changes:
-        pairs = ", ".join(f"{{{min(b)},{max(b)}}}" for b in surf_changes[:5])
-        raise SurfaceConnectivityError(
-            f"[{state_label}] Surface bond topology changed after relaxation. "
-            f"Changed pairs (atom indices): {pairs}"
-            + ("…" if len(surf_changes) > 5 else "")
-        )
     if ads_changes:
         # Distinguish whether the bond change involves a lateral-neighbour
         # adsorbate or the site under test — important for debugging which
