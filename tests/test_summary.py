@@ -7,7 +7,7 @@ import math
 
 import numpy as np
 
-from autokmc.persistence import ReactionSummary, make_run_meta
+from autokmc2.io.summary import ReactionSummary, make_run_meta
 
 
 def test_summary_aggregates_per_type(make_reaction):
@@ -26,6 +26,7 @@ def test_summary_aggregates_per_type(make_reaction):
 
     ads = next(b for b in out["by_reaction_type"] if b["kind"] == "adsorption")
     assert ads["count"] == 2
+    assert ads["reaction_dir"] == "reactions/adsorption/(C-)#(O+)/iso0_lat0"
     assert ads["first_step"] == 1
     assert ads["last_step"]  == 2
     assert math.isclose(ads["delta_e_ev"]["mean"], -0.25, rel_tol=1e-9)
@@ -51,4 +52,3 @@ def test_summary_empty():
     out = s.to_dict()
     assert out["totals"]["reactions"] == 0
     assert out["by_reaction_type"] == []
-

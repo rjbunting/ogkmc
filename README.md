@@ -1,9 +1,9 @@
-# autokmc
+# autokmc2
 
 A Python library for setting up surface kinetic Monte Carlo (KMC) inputs
 from atomic structures.
 
-`autokmc` builds bulk metals, nanoparticles and orthogonalised surface
+`autokmc2` builds bulk metals, nanoparticles and orthogonalised surface
 slabs (FCC / BCC / HCP, pure or alloy), classifies surface atoms,
 constructs an atom-connectivity graph, parses SMILES into 3-D reactants,
 and enumerates the geometrically feasible adsorbate sites for one- and
@@ -11,8 +11,8 @@ multi-atom adsorbates.  All steps consume / produce ASE `Atoms` and
 `networkx.Graph` objects so the pipeline plugs into any ASE-compatible
 calculator (EMT, NequIP, MACE, …).
 
-There is no app or CLI: the package is consumed from notebooks / scripts
-in `autokmc/dev/`.
+The package is consumed through explicit domain imports and includes an
+`autokmc2` CLI entry point for config-driven runs.
 
 ## Install
 
@@ -28,20 +28,20 @@ pip install -e ".[dev]"
 
 ```python
 from ase.calculators.emt import EMT
-from autokmc import (
-    build_surface,
-    find_surface_atoms,
-    build_graph,
-    build_reactant,
-    find_anchor_sites,
-    find_adsorbate_sites,
-    optimise_adsorbate_site_positions,
+from autokmc2.structure import build_surface
+from autokmc2.structure import find_surface_atoms
+from autokmc2.core.graph import build_graph
+from autokmc2.species.reactant import build_reactant
+from autokmc2.sites.anchors import find_anchor_sites
+from autokmc2.sites.adsorbate import (
+  find_adsorbate_sites,
+  optimise_adsorbate_site_positions,
 )
 
 # 1. Geometry
 slab = build_surface(
-    composition="Cu", crystal_structure="fcc", miller_index=(1, 1, 1),
-    calculator=EMT(),
+  composition="Cu", crystal_structure="fcc", miller_index=(1, 1, 1),
+  calculator=EMT(),
 )
 
 # 2. Surface classification → atoms.arrays["surface"]
@@ -65,37 +65,33 @@ optimise_adsorbate_site_positions(G, co.smiles, co)
 ```
 
 The full pipeline, design rationale and load-bearing invariants are
-documented in **AGENTS.md** — read that for anything beyond the quick
-start, especially when contributing new pipeline stages.
+documented in `structure.MD` and inline module docstrings.
 
 ## Module layout
 
 | Module | Role |
 |--------|------|
-| `structure.py` | Bulk / nanoparticle / slab builders + relaxation. |
-| `surface.py` | Surface-atom classification (ray-casting / convex hull). |
-| `graph.py` | ASE `Atoms` → `networkx.Graph` connectivity graph. |
-| `reactants.py` | SMILES → 3-D `Reactant` with anchor-atom metadata. |
-| `find_anchors.py` | Per-element top / bridge / hollow / … site enumeration. |
-| `find_adsorbate_sites.py` | Multi-atom adsorbate placement and rigid-body refinement. |
-| `constants.py` | Single source of truth for every tunable default. |
-| `results.py` | Lightweight result dataclasses. |
-| `logging_utils.py` | Package-wide logger helper. |
+| `autokmc2.structure.*` | Structure builders, slab/nanoparticle construction, optimization, and surface classification. |
+| `autokmc2.core.*` | Atom graph construction, graph-state accessors, constants, and shared result models. |
+| `autokmc2.species.*` | SMILES/reactant handling and molecular bond-changing chemistry. |
+| `autokmc2.sites.*` | Anchor, adsorbate, diffusion, and bond-site enumeration plus stability checks. |
+| `autokmc2.reactions.*` | Adsorption, diffusion, and bond reaction models/rate construction. |
+| `autokmc2.kmc.*` | KMC engine and on-the-fly site expansion. |
+| `autokmc2.io.*` | Config loading, persistence, trajectories and summaries. |
+| `autokmc2.thermo.*` | Vibrational free-energy helpers. |
+| `autokmc2.cli.*` | CLI entry point and config-driven pipeline. |
 
 ## Documentation
 
-- **AGENTS.md** — pipeline ordering, conventions (MIC handling, invisible
-  graph nodes, cache invalidation), open issues.
-- **REVIEW.md** — most recent code review.
-- **autokmc/todo.MD** — open work items.
+- **structure.MD** — restructuring rationale, target boundaries, and migration notes.
+- **TODO.md** — open work items.
 
 ## Status
 
-Active research code.  No tests, no CI yet.  See `todo.MD` and `AGENTS.md`
-for known limitations (oxide adsorbates, weakly adsorbing molecules,
-rigid-molecule assumption).
+Active research code.  A lightweight pytest suite covers config, CLI parsing,
+persistence, summaries, and trajectories.  See `TODO.md` for known limitations
+(oxide adsorbates, weakly adsorbing molecules, rigid-molecule assumption).
 
 ## License
 
 MIT — see `pyproject.toml`.
-

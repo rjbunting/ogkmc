@@ -1,4 +1,4 @@
-"""Tests for autokmc.config — load + dynamic calculator instantiation."""
+"""Tests for autokmc2.io.config — load + dynamic calculator instantiation."""
 
 from __future__ import annotations
 
@@ -7,11 +7,13 @@ from pathlib import Path
 
 import pytest
 
-from autokmc.config import (
+from autokmc2.io.config import (
     RunConfig,
-    CalculatorCfg,
     ConfigError,
     load_config,
+)
+from autokmc2.io.calculators import (
+    CalculatorCfg,
     build_calculator,
     calculator_meta,
 )
@@ -53,6 +55,7 @@ def test_load_yaml_ok(tmp_path):
     assert cfg.reactants[0].smiles == "[C-]#[O+]"
     assert cfg.calculator.import_path == "ase.calculators.emt.EMT"
     assert cfg.kmc.n_steps == 10
+    assert cfg.diffusion.enabled is False
 
 
 def test_load_toml_ok(tmp_path):
@@ -126,4 +129,3 @@ def test_unknown_extension(tmp_path):
 def test_missing_file():
     with pytest.raises(FileNotFoundError):
         load_config("does/not/exist.yaml")
-

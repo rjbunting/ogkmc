@@ -1,9 +1,4 @@
-"""Smoke test for the autokmc CLI argument parser & validate-config path.
-
-A full pipeline `autokmc run …` is not exercised here because the slab
-build + ML stability checks are too heavy for a unit-test budget; the
-end-to-end run is covered by the dev scripts under ``autokmc/dev/``.
-"""
+"""Smoke tests for the autokmc2 CLI parser and config validation."""
 
 from __future__ import annotations
 
@@ -11,7 +6,7 @@ import textwrap
 
 import pytest
 
-from autokmc.cli import main as cli_main
+from autokmc2.cli.main import main as cli_main
 
 
 YAML_OK = """\
@@ -44,7 +39,20 @@ def test_validate_config_ok(tmp_path, capsys):
     assert "OK" in out
 
 
+def test_cli_version(capsys):
+    with pytest.raises(SystemExit) as exc:
+        cli_main(["--version"])
+    assert exc.value.code == 0
+    assert "autokmc2" in capsys.readouterr().out
+
+
+def test_cli_package_exports_public_entrypoints():
+    import autokmc2.cli as cli
+
+    assert cli.main is cli_main
+    assert callable(cli.run_from_config)
+
+
 def test_cli_no_args_errors():
     with pytest.raises(SystemExit):
         cli_main([])
-
