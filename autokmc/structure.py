@@ -154,6 +154,7 @@ def build_nanoparticle(
     composition_seed: int = RANDOM_SEED,
     calculator=None,
     fmax: float = 0.05,
+    max_steps: int = 1000,
     vacuum: float = 10.0,
     logfile: Optional[str] = None,
     verbose: bool = True,
@@ -321,6 +322,7 @@ def build_nanoparticle(
         atoms,
         calculator=calculator,
         fmax=fmax,
+        steps=max_steps,
         logfile=logfile,
         verbose=verbose,
     )
@@ -342,6 +344,7 @@ def build_surface(
     composition_seed: int = RANDOM_SEED,
     calculator=None,
     fmax: float = 0.05,
+    max_steps: int = 1000,
     logfile: Optional[str] = None,
     verbose: bool = True,
 ) -> Atoms:
@@ -396,6 +399,8 @@ def build_surface(
         Defaults to EMT.
     fmax : float
         Force convergence criterion in eV/Å.
+    max_steps : int
+        Maximum number of LBFGS steps for the slab optimisation.
     logfile : str, optional
         Path to the optimiser log file.
     verbose : bool
@@ -542,6 +547,7 @@ def build_surface(
         atoms,
         calculator=calculator,
         fmax=fmax,
+        steps=max_steps,
         logfile=logfile,
         verbose=verbose,
     )

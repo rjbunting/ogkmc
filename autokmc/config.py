@@ -76,6 +76,12 @@ class StructureCfg:
     goal_x: float = 12.0
     goal_y: float = 12.0
     n_freeze_layers: int = 2
+    #: Force convergence criterion (eV/Å) for the slab/nanoparticle
+    #: LBFGS optimisation.  Default 0.05 eV/Å.
+    fmax: float = 0.05
+    #: Maximum number of LBFGS steps for the slab/nanoparticle
+    #: optimisation.  Default 1000.
+    max_steps: int = 1000
     # Nanoparticle-only knobs (used when kind == "nanoparticle"):
     n_atoms: int | None = None
     surface_energies: dict | None = None

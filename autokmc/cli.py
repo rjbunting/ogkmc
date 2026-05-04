@@ -93,6 +93,8 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
             goal_x            = s.goal_x,
             goal_y            = s.goal_y,
             n_freeze_layers   = s.n_freeze_layers,
+            fmax              = s.fmax,
+            max_steps         = s.max_steps,
             calculator        = calc,
             verbose           = log_level <= logging.INFO,
             **(s.extra_kwargs or {}),
@@ -104,6 +106,8 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
             lattice_constant  = s.lattice_constant,
             target_atoms      = int(s.n_atoms) if s.n_atoms else 600,
             surface_energies  = s.surface_energies,
+            fmax              = s.fmax,
+            max_steps         = s.max_steps,
             calculator        = calc,
             verbose           = log_level <= logging.INFO,
             **(s.extra_kwargs or {}),
@@ -315,27 +319,33 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
         # short-circuit to an empty list — find_bond_sites would still
         # raise on an empty adsorbate_sites list, but `all_sites` is
         # guaranteed non-empty here (asserted above when reactants exist).
+        #
+        # IMPORTANT: always pass prune_by_triple=False here so that the
+        # ego-size "one per adsorption triple" pruning (Stage 2) never
+        # runs before the calculator stability check (Stage 1).  If Stage 2
+        # ran first it could discard a stable site in favour of a smaller-ego
+        # one that subsequently fails Stage 1, leaving a triple with no
+        # representative.  The correct order is:
+        #   Stage 1 — optimise / stability-check ALL enumerated sites
+        #   Stage 2 — keep the best-ego survivor per triple
         bond_sites: list = []
         if templates:
+            from autokmc.find_bond_sites import _prune_one_per_adsorption_triple
+
             bond_sites = find_bond_sites(
                 G, all_sites, templates,
                 max_hops            = b.bond_max_hops,
                 surface_apsp_cutoff = b.surface_apsp_cutoff,
                 deduplicate_iso     = b.deduplicate_iso,
                 n_shells_pair       = b.pair_n_shells,
-                prune_by_triple     = b.prune_by_triple,
+                prune_by_triple     = False,   # always defer to after Stage 1
                 verbose             = log_level <= logging.INFO,
             )
 
             # Stage 1 — calculator-based A+B endpoint stability prune.
-            # Stage-2 (iso-class triple ego-size prune) already ran inside
-            # ``find_bond_sites``; we now drop any non-viable BRSs whose
-            # A+B endpoint changes bonding under a calculator relax, then
-            # re-run Stage 2 so the iso-class survivor set is consistent.
+            # Runs on the full enumerated set so no viable site is discarded
+            # before its stability has been assessed.
             if b.prune_with_calculator and calc is not None and bond_sites:
-                from autokmc.find_bond_sites import (
-                    _prune_one_per_adsorption_triple,
-                )
                 species_by_smi: dict = {
                     _canon_smiles(rx.smiles): rx for rx in reactants_built
                 }
@@ -346,31 +356,36 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
                     max_steps      = b.prune_max_steps,
                     verbose        = log_level <= logging.INFO,
                 )
-                if b.prune_by_triple and bond_sites:
-                    bond_sites = _prune_one_per_adsorption_triple(
-                        bond_sites,
-                        verbose=log_level <= logging.INFO,
-                        prefix=" (post-stability)",
-                    )
-                    # Renumber after second pass.
-                    G.graph["bond_clique_to_members"] = {}
-                    G.graph["bond_surface_node_to_members"] = {}
-                    rebuilt_idx = G.graph["bond_clique_to_members"]
-                    rebuilt_surf = G.graph["bond_surface_node_to_members"]
-                    for new_idx, brs in enumerate(bond_sites):
-                        brs.iso_class = new_idx
-                        for m_idx, (cliques_a, cliques_b, cliques_c) in enumerate(
-                            brs._member_cliques
-                        ):
-                            for clq in (*cliques_a, *cliques_b, *cliques_c):
-                                rebuilt_idx.setdefault(clq, []).append(
-                                    (brs, m_idx)
-                                )
-                                for surf_id in clq:
-                                    rebuilt_surf.setdefault(
-                                        int(surf_id), [],
-                                    ).append((brs, m_idx))
-                    G.graph["bond_reaction_sites"] = bond_sites
+
+            # Stage 2 — keep the smallest-ego BondReactionSite per
+            # (frozenset({iso_a, iso_b}), iso_c) adsorption triple.
+            # Always runs after Stage 1 so only stable survivors compete.
+            if b.prune_by_triple and bond_sites:
+                bond_sites = _prune_one_per_adsorption_triple(
+                    bond_sites,
+                    verbose=log_level <= logging.INFO,
+                    prefix=" (post-stability)",
+                )
+                # Renumber iso_class and rebuild the clique reverse-index
+                # to match the surviving set.
+                G.graph["bond_clique_to_members"] = {}
+                G.graph["bond_surface_node_to_members"] = {}
+                rebuilt_idx = G.graph["bond_clique_to_members"]
+                rebuilt_surf: dict = G.graph["bond_surface_node_to_members"]
+                for new_idx, brs in enumerate(bond_sites):
+                    brs.iso_class = new_idx
+                    for m_idx, (cliques_a, cliques_b, cliques_c) in enumerate(
+                        brs._member_cliques
+                    ):
+                        for clq in (*cliques_a, *cliques_b, *cliques_c):
+                            rebuilt_idx.setdefault(clq, []).append(
+                                (brs, m_idx)
+                            )
+                            for surf_id in clq:
+                                rebuilt_surf.setdefault(
+                                    int(surf_id), [],
+                                ).append((brs, m_idx))
+                G.graph["bond_reaction_sites"] = bond_sites
 
         # Bootstrap the on-the-fly registry so coupling events that
         # introduce a new species can extend the network mid-run via

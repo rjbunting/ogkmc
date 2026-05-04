@@ -1,0 +1,85 @@
+\section{Problem statement}
+\subsection{Context}
+\noindent
+Catalysis contributes to \textbf{a third} of the global economy.
+It dictates our lives through driving energy and food security, pharmaceutical synthesis, and manufacturing.
+The theoretical exploration of new catalysts is required to further accelerate development in these key areas.
+Theoretical exploration expedites catalyst discovery due to removing the need to experimentally synthesize and test candidates.
+
+\subsection{Problem}
+\noindent
+
+
+\subsection{Significance}
+\noindent
+
+
+\subsection{Goals}
+\noindent
+This project will be deemed a success when:
+\begin{itemize}
+    \item The online KMC model reproduces results of other KMC models.
+    \item The product and dominant reaction pathway is found for a process, with only reactants and surface structure given as an input.
+    \item Kinetic modeling is performed for a system that is unfeasible with current methods.
+\end{itemize}
+
+\section{Theory}
+\subsection{What is a bond?}
+\noindent
+Bonding can be separated into two categories: ionic and covalent.
+Ionic bonding can be explained simply from an electron transfer from one species to another, forming charged atoms.
+These charged species are attracted to each other based on electrostatic attraction.
+For covalent bonding, there is a quantum mechanical electron exchange energy, which can be more simply explained that the sharing of electrons forms a bond.
+Deciding whether there is bonding between two atoms is difficult and depends on the definition of what is a bond.\cite{nbo,dori}
+For us, we intuitively say a bond has formed if the covalent radii of two atoms overlap.
+These covalent radii are dictated by the element of the atom.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=60ex]{figures/bond_formation.pdf}
+    \caption{Defining a bond between atomic carbon and atomic oxygen}
+    \label{fig:bond_definition}
+\end{figure}
+
+A simple example is given for carbon and oxygen (Fig.\ref{fig:bond_definition})
+The covalent radii are imported from ASE, which are taken from ref.\cite{covradii}.
+Regardless of whether the structure is stable, or if a quantum mechanical bond actually is formed, our strict definition is this.
+With this definition of a bond, we can represent how molecules are connected to each other.
+
+\subsection{Representing atoms as graphs}
+Perhaps, as an imprinting of chemistry education, the graphical representation of molecules makes sense to chemists;
+carbon can be bonded to 4 other atoms, whilst hydrogen can only be bonded to one.
+Nodes are atomic nuclei, while edges are bonds.
+Graphs only care about coordination however, and have no concern for position.
+An example of this is shown in Fig.\ref{fig:molecular_graph}.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=60ex]{figures/molecular_graph.pdf}
+    \caption{Example molecular structure and graph representation for benzene}
+    \label{fig:molecular_graph}
+\end{figure}
+
+There is an information loss cost involved with this graphical representation.
+Stereoisomerism and chirality are not considered (Fig.\ref{fig:stereoisomers}).
+However, what is lost is made up for by \textbf{rapid calculation}.
+Comparing the similarity of structures is difficult and slow.
+However, the comparison (or identification of a graph as an isomorph) can rapidly be deployed.
+This is important for us as it lets us \textbf{find if a surface has a certain graphical representation that can undergo a reaction}.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=60ex]{figures/stereoisomers.pdf}
+    \caption{Example of a failure of graph representation, where isomorphic graphs are produced for cis/trans 1,2 dichloroethene}
+    \label{fig:stereoisomers}
+\end{figure}
+
+\subsection{Graphical representation of surface chemistry}
+\noindent
+
+
+
+\section{Examples}
+
+\section{Plan}
+

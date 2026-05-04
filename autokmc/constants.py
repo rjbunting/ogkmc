@@ -36,7 +36,7 @@ RANDOM_SEED: int = 69
 #: and :func:`autokmc.reactants.build_reactant`.  A single value is used
 #: across the package so that "is this bond a cross-image bond?" gives the
 #: same answer everywhere.
-NL_MULT_DEFAULT: float = 0.90
+NL_MULT_DEFAULT: float = 1.00
 
 #: Co-bonding cutoff scale used by
 #: :func:`autokmc.find_anchors._build_co_bond_graph`: two surface atoms can

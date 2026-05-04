@@ -1025,14 +1025,17 @@ def combine_fragments(
             pairs_to_try = [(ia, ib) for ia in avail_a for ib in dummies_b]
     else:
         # Undirected mode: for each radical atom in fragment A, try every
-        # non-H atom in fragment B, and vice versa.  Using "at least one
+        # non-dummy atom in fragment B, and vice versa.  Using "at least one
         # radical" (rather than "both radicals") allows a radical atom to
         # attack a saturated site — the bond-order reduction in _join_mols
         # resolves any resulting over-valency.
+        # NOTE: filter is > 0 (exclude dummy * atoms only), NOT > 1 — using
+        # > 1 incorrectly excludes hydrogen (GetAtomicNum() == 1), which
+        # prevents homo-coupling of radical H atoms to form H₂ ([H][H]).
         avail_a = _available_valence_indices(mol_a)
         avail_b = _available_valence_indices(mol_b)
-        heavy_a = [a.GetIdx() for a in mol_a.GetAtoms() if a.GetAtomicNum() > 1]
-        heavy_b = [a.GetIdx() for a in mol_b.GetAtoms() if a.GetAtomicNum() > 1]
+        heavy_a = [a.GetIdx() for a in mol_a.GetAtoms() if a.GetAtomicNum() > 0]
+        heavy_b = [a.GetIdx() for a in mol_b.GetAtoms() if a.GetAtomicNum() > 0]
 
         seen_pairs: set[tuple[int, int]] = set()
         pairs_to_try = []

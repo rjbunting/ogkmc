@@ -231,11 +231,19 @@ def compute_gas_thermo(
     symmetry default to safe values (σ=1, S=0) but should be overridden
     via the per-reactant config for diatomics like H₂ (σ=2) or O₂ (S=1).
 
+    The Gibbs free energy is **always** evaluated at the standard-state
+    pressure of 1 bar, regardless of the *pressure_bar* argument.  This
+    prevents ``log(0)`` errors when a species has ``partial_pressure_bar=0``
+    (e.g. on-surface-only leaf species).  The partial-pressure effect on
+    the adsorption rate is applied as a multiplicative factor in the KMC
+    engine (see :func:`autokmc.kmc_adsorption._energetics_cached`), keeping
+    all persisted ΔG / barrier values canonical at the 1 bar standard state.
+
     Returns a dict with keys:
     ``g_corr_ev``, ``g_total_ev``, ``zpe_ev``, ``entropy_ev_per_k``,
     ``frequencies_cm``, ``imaginary_cm``, ``geometry``,
     ``symmetry_number``, ``spin``, ``temperature_k``, ``pressure_bar``,
-    ``pressure_pa``, ``partial_pressure_bar``.
+    ``pressure_pa``.
 
     When ``options.enabled`` is ``False`` (or the gas-phase atom count is
     zero), the function returns a no-op dict where all corrections are
@@ -255,8 +263,8 @@ def compute_gas_thermo(
             "symmetry_number":       None,
             "spin":                  None,
             "temperature_k":         float(temperature_k),
-            "pressure_bar":          float(pressure_bar),
-            "pressure_pa":           float(pressure_bar) * _BAR_PA,
+            "pressure_bar":          float(pressure_bar),   # caller's partial pressure (metadata)
+            "pressure_pa":           1.0 * _BAR_PA,         # standard-state reference
         }
 
     from ase.thermochemistry import IdealGasThermo
@@ -301,16 +309,21 @@ def compute_gas_thermo(
         spin             = spin_,
         potentialenergy  = float(energy_ev),
     )
-    pressure_pa = float(pressure_bar) * _BAR_PA
+    # Always evaluate at the standard-state reference pressure of 1 bar.
+    # The caller's partial pressure (which may be 0 for on-surface species)
+    # must NOT be passed here — log(0) would cause a divide-by-zero.
+    # The per-reactant partial pressure multiplies the KMC adsorption rate
+    # separately in kmc_adsorption._energetics_cached.
+    _standard_pa = 1.0 * _BAR_PA
     g_total = float(thermo.get_gibbs_energy(
         temperature=float(temperature_k),
-        pressure=pressure_pa,
+        pressure=_standard_pa,
         verbose=False,
     ))
     zpe = float(thermo.get_ZPE_correction())
     s   = float(thermo.get_entropy(
         temperature=float(temperature_k),
-        pressure=pressure_pa,
+        pressure=_standard_pa,
         verbose=False,
     ))
 
@@ -335,8 +348,8 @@ def compute_gas_thermo(
         "symmetry_number":       sym,
         "spin":                  spin_,
         "temperature_k":         float(temperature_k),
-        "pressure_bar":          float(pressure_bar),
-        "pressure_pa":           pressure_pa,
+        "pressure_bar":          float(pressure_bar),   # caller's partial pressure (metadata only)
+        "pressure_pa":           _standard_pa,          # standard-state pressure used in computation
     }
 
 
