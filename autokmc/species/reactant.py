@@ -426,7 +426,7 @@ def build_reactant(
     steps : int
         Maximum ASE optimisation steps.  Default 500.
     nl_mult : float
-        Neighbour-list multiplier passed to :func:`~autokmc2.core.graph.build_graph`.
+        Neighbour-list multiplier passed to :func:`~autokmc.core.graph.build_graph`.
         Default ``NL_MULT_DEFAULT`` (currently 0.90).
     hull_tol : float
         Tolerance passed to :func:`find_anchor_atoms`.  Default 0.1 Å.

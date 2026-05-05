@@ -15,7 +15,7 @@ def test_stability_neb_imports_real_module_exports():
     assert callable(_make_neb_band)
 
 
-def test_logger_uses_autokmc2_root():
+def test_logger_uses_autokmc_root():
     logger = get_logger("autokmc.io.persistence")
     assert logger.name == "autokmc.io.persistence"
 

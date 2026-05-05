@@ -1541,7 +1541,7 @@ def find_adsorbate_sites(
     G : nx.Graph
         Surface graph from :func:`autokmc.core.graph.build_graph`.  Anchor sites
         for every anchor element are lazily computed if not already on *G*.
-    reactant : :class:`autokmc2.species.reactant.Reactant`
+    reactant : :class:`autokmc.species.reactant.Reactant`
         Gas-phase molecule.  ``len(reactant.atoms) >= 2`` is required.
     bond_tolerance : float
         Allowed Å deviation between any surface anchor-pair distance and the
@@ -2062,7 +2062,7 @@ def optimise_adsorbate_site_positions(
     G : nx.Graph
     smiles : str
         Key into ``G.graph["adsorbate_sites"]``.
-    reactant : :class:`autokmc2.species.reactant.Reactant`
+    reactant : :class:`autokmc.species.reactant.Reactant`
     restraint_weight, repulsion_weight, contact_factor, standoff_factor :
         Objective-function weights / scales.
     repulsion_cutoff : float | None

@@ -544,7 +544,7 @@ def run_kmc_steps(
         :func:`autokmc.kmc.expansion.expand_bond_sites_after_event`,
         called after every coupling event so newly-formed product
         species extend the bond network on the fly.
-    reaction_writer : autokmc2.io.persistence.ReactionWriter | None
+    reaction_writer : autokmc.io.persistence.ReactionWriter | None
         Optional writer.  When supplied, every executed event is persisted
         as one JSON line + sidecar XYZ snapshots of the pre/post Atoms.
     trajectory_writer : autokmc.io.persistence.TrajectoryWriter | None

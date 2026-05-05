@@ -429,15 +429,15 @@ def get_all_fragments(
         Collapse symmetry-equivalent bonds that produce the same two fragment
         SMILES into a single entry.  Default ``True``.
     as_reactants : bool
-        If ``True``, build an :class:`autokmc2.species.reactant.Reactant` for each
+        If ``True``, build an :class:`autokmc.species.reactant.Reactant` for each
         fragment and store it in :attr:`FragmentPair.reactant_a` /
         :attr:`FragmentPair.reactant_b`.
     calculator
         ASE calculator forwarded to
-        :func:`autokmc2.species.reactant.build_reactant` when ``as_reactants=True``.
+        :func:`autokmc.species.reactant.build_reactant` when ``as_reactants=True``.
     nl_mult : float
         Neighbour-list multiplier forwarded to
-        :func:`autokmc2.species.reactant.build_reactant`.
+        :func:`autokmc.species.reactant.build_reactant`.
 
     Returns
     -------
@@ -933,21 +933,21 @@ def combine_fragments(
     ----------
     fragment_a, fragment_b : str, Reactant, or ase.Atoms
         The two fragments to join.  SMILES strings are parsed directly;
-        :class:`autokmc2.species.reactant.Reactant` objects and ASE
+        :class:`autokmc.species.reactant.Reactant` objects and ASE
         :class:`~ase.Atoms` objects are converted via
         :func:`_rdkit_mol_from_atoms`.
     deduplicate : bool
         Collapse entries that produce the same canonical SMILES into a single
         :class:`CombinedSpecies`.  Default ``True``.
     as_reactants : bool
-        If ``True``, build an :class:`autokmc2.species.reactant.Reactant` for each
+        If ``True``, build an :class:`autokmc.species.reactant.Reactant` for each
         combined species and store it in :attr:`CombinedSpecies.reactant`.
     calculator
-        ASE calculator forwarded to :func:`autokmc2.species.reactant.build_reactant`
+        ASE calculator forwarded to :func:`autokmc.species.reactant.build_reactant`
         when ``as_reactants=True``.
     nl_mult : float
         Neighbour-list multiplier forwarded to
-        :func:`autokmc2.species.reactant.build_reactant`.
+        :func:`autokmc.species.reactant.build_reactant`.
 
     Returns
     -------
