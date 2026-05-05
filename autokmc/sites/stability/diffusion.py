@@ -222,6 +222,10 @@ except ImportError:                                               # pragma: no c
         _idpp_interpolate = None
 
 
+def _neb_optimizer_logfile(verbose: bool) -> str:
+    return "-" if verbose else os.devnull
+
+
 # ---------------------------------------------------------------------------
 # Lateral ego-graph (diffusion variant)
 # ---------------------------------------------------------------------------
@@ -1036,6 +1040,12 @@ def check_diffusion_stability(
     lateral_class.atoms_b  = atoms_b_opt
 
     # ── 3-4. NEB band ───────────────────────────────────────────────────
+    if verbose:
+        print(
+            f"  [NEB] images={int(n_images)}  climb={bool(climb)}  "
+            f"fmax={float(fmax):.4f} eV/Å  max_steps={int(max_steps)}"
+        )
+
     neb, images = _make_neb_band(
         atoms_a_opt, atoms_b_opt,
         n_images       = int(n_images),
@@ -1046,8 +1056,7 @@ def check_diffusion_stability(
         frozen_indices = frozen_indices,
     )
 
-    log = None if verbose else os.devnull
-    opt = BFGS(neb, logfile=log)
+    opt = BFGS(neb, logfile=_neb_optimizer_logfile(verbose))
     opt.run(fmax=float(fmax), steps=int(max_steps))
 
     if not opt.converged():
@@ -1092,8 +1101,13 @@ def check_diffusion_stability(
         n_interior = len(interior),
     )
 
-    # ── 6. Mark stable ���─────────────────────────────────────────────────
+    # ── 6. Mark stable ────────────────────────────────────────────────────
     lateral_class.stable     = True
+    if verbose:
+        print(
+            f"  [NEB] converged=True steps={opt.nsteps}  "
+            f"E_ts={E_ts:.4f} eV  image={k_ts}/{len(interior)}  ✓ stable"
+        )
 
     # ── 7. Optional harmonic thermochemistry on A / B / TS ──────────────
     # The migrating molecule occupies the tail of the per-image atom array
@@ -1179,4 +1193,3 @@ def check_diffusion_stability(
         E_a, E_b, E_ts, E_ts - E_a, E_ts - E_b,
     )
     return E_a, E_b, E_ts
-

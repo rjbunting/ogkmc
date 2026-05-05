@@ -131,6 +131,10 @@ except ImportError:                                               # pragma: no c
         _idpp_interpolate = None
 
 
+def _neb_optimizer_logfile(verbose: bool) -> str:
+    return "-" if verbose else os.devnull
+
+
 # ---------------------------------------------------------------------------
 # Errors  (mirror autokmc.sites.stability.diffusion)
 # ---------------------------------------------------------------------------
@@ -1034,6 +1038,12 @@ def check_bond_site_stability(
     lc.atoms_c  = atoms_c_opt
 
     # ── 3-4. NEB band ───────────────────────────────────────────────────
+    if verbose:
+        print(
+            f"  [NEB] images={int(n_images)}  climb={bool(climb)}  "
+            f"fmax={float(fmax):.4f} eV/Å  max_steps={int(max_steps)}"
+        )
+
     neb, images = _make_neb_band(
         atoms_ab_opt, atoms_c_opt,
         n_images       = int(n_images),
@@ -1044,8 +1054,7 @@ def check_bond_site_stability(
         frozen_indices = frozen_indices,
     )
 
-    log = None if verbose else os.devnull
-    opt = BFGS(neb, logfile=log)
+    opt = BFGS(neb, logfile=_neb_optimizer_logfile(verbose))
     opt.run(fmax=float(fmax), steps=int(max_steps))
 
     if not opt.converged():
@@ -1088,6 +1097,11 @@ def check_bond_site_stability(
     )
 
     lc.stable = True
+    if verbose:
+        print(
+            f"  [NEB] converged=True steps={opt.nsteps}  "
+            f"E_ts={E_ts:.4f} eV  image={k_ts}/{len(interior)}  ✓ stable"
+        )
 
     _log.debug(
         "check_bond_site_stability: bond_iso=%d member=%d lat=%d  "
@@ -1110,4 +1124,3 @@ __all__ = [
     "check_bond_site_lateral",
     "check_bond_site_stability",
 ]
-
