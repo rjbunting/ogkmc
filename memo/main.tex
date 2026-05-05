@@ -1,0 +1,84 @@
+\documentclass[a4paper, amsfonts, amssymb, amsmath, reprint, showkeys, footinbib, twoside,superscriptaddress,floatfix,longbibliography]{revtex4-2}
+
+\usepackage{graphicx}
+\usepackage{dblfloatfix}
+\usepackage{dcolumn}
+\usepackage{bm}
+\usepackage{float}
+\usepackage{xcolor}
+\usepackage{mhchem}
+\usepackage{gensymb}
+\usepackage[permil]{overpic}
+
+\usepackage{newtxtext}
+\usepackage[slantedGreek]{newtxmath}
+
+\usepackage{comment}
+\usepackage[pdftex, bookmarks, pdffitwindow=false, pdfstartview=FitH, pdfdisplaydoctitle, colorlinks, plainpages=false, pdftitle={},pdfauthor={}, pdfpagelabels, hypertexnames, citecolor={blue!50!black},linkcolor={blue!50!black}, urlcolor={blue!50!black}, pdflang={en}, hyperfootnotes=false, breaklinks]{hyperref}
+%
+
+\usepackage{siunitx}
+
+\usepackage{xspace}
+\renewcommand{\AA}{\ensuremath{\mathring{\mbox{A}}}\xspace}
+\newcommand{\bc}[1]{{\color{blue} #1 }}
+\newcommand{\mb}[1]{{\color{green} #1 }}
+\newcommand{\sh}[1]{{\color{purple} #1 }}
+\newcommand{\task}[1]{{\color{red}{#1}}}
+
+\newcommand{\avg}[1]{\ensuremath{\left<#1\right>}}
+\newcommand{\abs}[1]{\ensuremath{\lvert {#1}\rvert}}
+\newcommand{\pd}[2]{\ensuremath{\dfrac{\partial {#1}}{\partial {#2}}}}
+\newcommand{\pds}[2]{\ensuremath{\dfrac{\partial^2 {#1}}{\partial {#2}}}}
+\newcommand{\bigo}[1]{\ensuremath{\mathcal{O}\left({#1}\right)}}
+\newcommand{\D}{\ensuremath{\mathrm{d}}}
+\DeclareMathOperator*{\argmin}{arg\,min}
+\newcommand{\cs}[1]{\texttt{\symbol{`\\}#1}}
+
+\newcommand{\tm}{\ensuremath{T_{\text{m}}}} %
+\newcommand{\kb}{k_{\rm B}} %
+\newcommand{\ficm}{\ensuremath{\Tilde{m}}} 
+\newcommand{\stiff}{\ensuremath{\widetilde{\gamma}}}
+\newenvironment{Table}
+   {\par\bigskip\noindent\minipage{\textwidth}\centering}
+   {\endminipage\par\bigskip}
+   
+\makeatletter
+\renewcommand{\@seccntformat}[1]{}
+\makeatother
+
+\makeatletter
+\def\@bibdataout@aps{
+ \immediate\write\@bibdataout{
+ @CONTROL{
+   apsrev41Control, author="48",editor="1",pages="0",title="0",year="1"
+ }}
+ \if@filesw
+  \immediate\write\@auxout{\string\citation{apsrev41Control}}
+ \fi
+}
+\makeatother
+
+\begin{document}
+
+\preprint{APS/123-QED}
+
+\title{Online Graph Kinetic Monte Carlo}
+\author{Rhys J. Bunting}% \quad $\vert$ \quad rhys.j.bunting@gmail.com}
+\email{bunting4@llnl.gov}
+%\author{Margaret L. Berrens}
+%\author{William Engler}
+%\author{Ruchika Mahajan}
+%\author{Tuan Anh Pham}% \quad $\vert$ \quad rhys.j.bunting@gmail.com}
+%\email{pham16@llnl.gov}
+%\author{Michail Stamatakis}
+%\author{Zachary W. Ulissi}
+%\author{Joel B. Varley}
+%\author{Kirsten T. Winther}
+%\author{Brandon C. Wood}
+
+\maketitle
+\input{content}
+
+\bibliography{refs}
+\end{document}

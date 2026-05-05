@@ -3,10 +3,10 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "autokmc"
+name = "autokmc2"
 version = "0.1.0"
 description = "Surface kinetic Monte Carlo input generation from atomic structures"
-readme = "AGENTS.md"
+readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "onlinekmc contributors" }]
@@ -29,16 +29,15 @@ cli = ["pyyaml>=6"]
 test = ["pytest>=7", "pyyaml>=6"]
 
 [project.scripts]
-autokmc = "autokmc.cli:main"
+autokmc2 = "autokmc2.cli.main:main"
 
 [tool.setuptools.packages.find]
-include = ["autokmc*"]
-exclude = ["autokmc.dev*", "autokmc.__pycache__*", "tests*"]
+include = ["autokmc2*"]
+exclude = ["tests*"]
 
 [tool.setuptools.package-data]
-autokmc = ["py.typed"]
+autokmc2 = ["py.typed"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
-

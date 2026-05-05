@@ -3,16 +3,16 @@
 schema_version: "1"
 
 output:
-  dir: ./runs/co_cu111_nequip
+  dir: ./runs/h2o_au111_nequip
   trajectory_dump_every: 10
   log_level: INFO
 
 structure:
   kind: surface
-  composition: Cu
+  composition: Au
   crystal_structure: fcc
   miller_index: [1, 1, 1]
-  lattice_constant: 3.615
+  lattice_constant: 4.08
   min_slab_size: 8.0
   min_vacuum_size: 12.0
   goal_x: 15.0
@@ -20,9 +20,15 @@ structure:
   n_freeze_layers: 2
 
 reactants:
-  - smiles: "[C]=O"
+  - smiles: "[O]"
     add_hydrogens: false
     relax_in_gas: true
+    partial_pressure_bar: 1.0
+
+  - smiles: "[H]"
+    add_hydrogens: false
+    relax_in_gas: true
+    partial_pressure_bar: 1.0   # O2 present as
 
 # NequIPCalculator must be created via its factory method, not direct
 # instantiation — use `factory` + `factory_kwargs` only.
@@ -43,12 +49,12 @@ adsorbate_sites:
 # requires a calculator that can compute Hessians.  Disabled here for speed
 # — the pipeline runs on raw DFT/ML electronic energies only.
 free_energy:
-  enabled: false
+  enabled: true
   pressure_bar: 1.0
 
 kmc:
   temperature_k: 500.0
-  n_steps: 50
+  n_steps: 1000000
   transmission_coefficient: 1.0
   fmax: 0.05
   max_steps: 500
@@ -130,5 +136,5 @@ bond:
   neb_climb: true
   neb_spring_k: 0.1
   neb_interpolation: linear        # "linear" or "idpp"
-  persist_neb_path: true
+  persist_neb_path: false
 

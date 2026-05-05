@@ -6,7 +6,9 @@ Sometimes large k values are found. Need to tinker with this. Options are: check
 Sometimes n_shell can be too big for the surface. Need to raise error when this happens
 
 find_adsorbate_sites.py:
-Set the tolerance to something reasonable. Can test this more later (probably too small) Solve beyond rigid molecule - can have variable orbits? maybe? IMPORTANT: Weakly adsorbing molecules (like CH4) will form no bonds to surface. Need way to still activate them or release into gas in 1 step
+Set the tolerance to something reasonable. Can test this more later (probably too small) Solve beyond rigid molecule - 
+can have variable orbits? maybe? IMPORTANT: Weakly adsorbing molecules (like CH4) will form no bonds to surface. 
+Need way to still activate them or release into gas in 1 step
 
 find_adsorbate_sites.py (chain-placement performance):
 Re-introduce the per-element ``_AnchorKDTree`` annulus-query prefilter
@@ -89,5 +91,24 @@ E_ts exceeds both endpoints by at least ``energy_tol``.
 free_energy.py:
 Need to add in entropy contributions. Can do this by calculating vibrational frequencies.
 
+find_bond_sites.py:
+Sometimes a gas phase molecule can activate but it is so weakly adsorbed that it doesn't form any bonds to the surface. 
+Need to be able to still activate these molecules or release them into the gas phase in one step. 
+This is especially important for methane activation, which is a key reaction in many catalytic processes. 
+Reverse way is important too.
+
 ###
 Also need to do complete code review, going through code base very carefully. It is a garbage dump at the moment
+
+find_transfer_sites.py:
+This is a new module that I haven't implemented yet, but it will be responsible for finding transfer sites for reactions 
+that involve the transfer of atoms from one species to another.
+
+kmc_reactions.py (reaction enumeration):
+Need TS verification now with frequencies. Need a general plan for this.
+
+optimise_structure:
+If the structure doesn't optimise, it should be counted as unstable instead.
+
+checkpoint.py:
+Add some checkpointing to continue etc.

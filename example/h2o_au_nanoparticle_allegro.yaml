@@ -1,28 +1,36 @@
-# autokmc — CO on Cu(111) with NequIP (Allegro)
-# Run with:    autokmc run example/co_cu111_allegro.yaml
+# autokmc — H2O on Au nanoparticle with NequIP (Allegro)
+# Run with:    autokmc run example/h2o_au_nanoparticle_allegro.yaml
 schema_version: "1"
 
 output:
-  dir: ./runs/co_cu111_nequip
+  dir: ./runs/h2o_au_np_nequip
   trajectory_dump_every: 10
   log_level: INFO
 
 structure:
-  kind: surface
-  composition: Cu
+  kind: nanoparticle
+  composition: Au
   crystal_structure: fcc
-  miller_index: [1, 1, 1]
-  lattice_constant: 3.615
-  min_slab_size: 8.0
-  min_vacuum_size: 12.0
-  goal_x: 15.0
-  goal_y: 15.0
-  n_freeze_layers: 2
+  lattice_constant: 4.08
+  # Approximate number of atoms in the Wulff-construction nanoparticle.
+  n_atoms: 600
+  # surface_energies cannot be expressed as tuple-keyed YAML; leave null to
+  # use the built-in FCC defaults: {(1,1,1): 1.10, (1,0,0): 1.29, (1,1,0): 1.51} J/m².
+  # To use Au-specific values (e.g. from DFT), override in Python:
+  #   from autokmc.structure import build_nanoparticle
+  #   atoms = build_nanoparticle(..., surface_energies={(1,1,1): 0.69, (1,0,0): 0.83, (1,1,0): 0.97})
+  surface_energies: null
 
 reactants:
-  - smiles: "[C]=O"
+  - smiles: "[O]"
     add_hydrogens: false
     relax_in_gas: true
+    partial_pressure_bar: 1.0
+
+  - smiles: "[H]"
+    add_hydrogens: false
+    relax_in_gas: true
+    partial_pressure_bar: 1.0
 
 # NequIPCalculator must be created via its factory method, not direct
 # instantiation — use `factory` + `factory_kwargs` only.
@@ -43,12 +51,12 @@ adsorbate_sites:
 # requires a calculator that can compute Hessians.  Disabled here for speed
 # — the pipeline runs on raw DFT/ML electronic energies only.
 free_energy:
-  enabled: false
+  enabled: true
   pressure_bar: 1.0
 
 kmc:
   temperature_k: 500.0
-  n_steps: 50
+  n_steps: 1000000
   transmission_coefficient: 1.0
   fmax: 0.05
   max_steps: 500
@@ -130,5 +138,5 @@ bond:
   neb_climb: true
   neb_spring_k: 0.1
   neb_interpolation: linear        # "linear" or "idpp"
-  persist_neb_path: true
+  persist_neb_path: false
 
