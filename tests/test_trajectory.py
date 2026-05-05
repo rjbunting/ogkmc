@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from ase.io import read as ase_read
 
-from autokmc2.io.trajectory import TrajectoryWriter
+from autokmc.io.trajectory import TrajectoryWriter
 
 
 def test_trajectory_writer_respects_dump_every(tmp_path, tiny_atoms):

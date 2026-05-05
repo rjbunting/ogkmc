@@ -1,4 +1,4 @@
-"""Tests for autokmc2.io.persistence — ReactionWriter + atoms_from_graph."""
+"""Tests for autokmc.io.persistence — ReactionWriter + atoms_from_graph."""
 
 from __future__ import annotations
 
@@ -7,11 +7,11 @@ from types import SimpleNamespace
 
 from ase.io import read as ase_read
 
-from autokmc2.io.persistence import (
+from autokmc.io.persistence import (
     ReactionWriter,
     PERSISTENCE_SCHEMA_VERSION,
 )
-from autokmc2.io.atoms import atoms_from_graph
+from autokmc.io.atoms import atoms_from_graph
 
 
 def test_atoms_from_graph_includes_only_occupied_adsorbates(synth_graph):

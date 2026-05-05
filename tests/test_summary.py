@@ -7,7 +7,7 @@ import math
 
 import numpy as np
 
-from autokmc2.io.summary import ReactionSummary, make_run_meta
+from autokmc.io.summary import ReactionSummary, make_run_meta
 
 
 def test_summary_aggregates_per_type(make_reaction):

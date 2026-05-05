@@ -1,4 +1,4 @@
-"""Tests for autokmc2.io.config — load + dynamic calculator instantiation."""
+"""Tests for autokmc.io.config — load + dynamic calculator instantiation."""
 
 from __future__ import annotations
 
@@ -7,12 +7,12 @@ from pathlib import Path
 
 import pytest
 
-from autokmc2.io.config import (
+from autokmc.io.config import (
     RunConfig,
     ConfigError,
     load_config,
 )
-from autokmc2.io.calculators import (
+from autokmc.io.calculators import (
     CalculatorCfg,
     build_calculator,
     calculator_meta,

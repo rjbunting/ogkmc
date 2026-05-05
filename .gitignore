@@ -12,4 +12,5 @@ htmlcov/
 *.egg-info/
 build/
 dist/
-./runs/
+/memo/output/
+/runs/

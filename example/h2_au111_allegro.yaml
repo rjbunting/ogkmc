@@ -33,7 +33,7 @@ reactants:
 calculator:
   factory: nequip.ase.NequIPCalculator.from_compiled_model
   factory_kwargs:
-    compile_path: ./autokmc/dev/cpuhcocuau.nequip.pth
+    compile_path: ./example/cpuhcocuau.nequip.pth
     device: cpu
 
 adsorbate_sites:
