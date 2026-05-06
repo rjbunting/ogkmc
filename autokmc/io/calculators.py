@@ -109,6 +109,58 @@ def _resolve(dotted: str):
 	)
 
 
+def _looks_like_factory_spec(value: Any) -> bool:
+	return isinstance(value, dict) and (
+		"factory" in value or "import_path" in value
+	)
+
+
+def _set_dotted(mapping: dict, dotted: str, value: Any) -> None:
+	parts = str(dotted).split(".")
+	target = mapping
+	for part in parts[:-1]:
+		child = target.get(part)
+		if child is None:
+			child = {}
+			target[part] = child
+		if not isinstance(child, dict):
+			raise CalculatorConfigError(
+				f"cannot set calculator argument {dotted!r}: "
+				f"{part!r} is not a mapping"
+			)
+		target = child
+	target[parts[-1]] = value
+
+
+def _build_factory_spec(spec: dict):
+	"""Instantiate a nested generic factory/import spec from config data."""
+	if spec.get("factory"):
+		callable_obj = _resolve(str(spec["factory"]))
+		raw_kwargs = dict(spec.get("factory_kwargs") or {})
+	elif spec.get("import_path"):
+		callable_obj = _resolve(str(spec["import_path"]))
+		raw_kwargs = dict(spec.get("kwargs") or {})
+	else:
+		raise CalculatorConfigError(
+			"nested calculator spec must include 'factory' or 'import_path'"
+		)
+	args = [_resolve_config_value(v) for v in spec.get("args", ())]
+	kwargs = {k: _resolve_config_value(v) for k, v in raw_kwargs.items()}
+	return callable_obj(*args, **kwargs)
+
+
+def _resolve_config_value(value: Any):
+	if _looks_like_factory_spec(value):
+		return _build_factory_spec(value)
+	if isinstance(value, dict):
+		return {k: _resolve_config_value(v) for k, v in value.items()}
+	if isinstance(value, list):
+		return [_resolve_config_value(v) for v in value]
+	if isinstance(value, tuple):
+		return tuple(_resolve_config_value(v) for v in value)
+	return value
+
+
 def build_calculator(cfg: CalculatorCfg):
 	"""Instantiate the ASE-compatible calculator described by *cfg*.
 
@@ -117,13 +169,17 @@ def build_calculator(cfg: CalculatorCfg):
 	def _build_one(extra_kwargs: dict | None = None):
 		if cfg.factory:
 			fn = _resolve(cfg.factory)
-			kwargs = dict(cfg.factory_kwargs or {})
-			kwargs.update(extra_kwargs or {})
+			kwargs = copy.deepcopy(cfg.factory_kwargs or {})
+			for key, value in (extra_kwargs or {}).items():
+				_set_dotted(kwargs, key, value)
+			kwargs = _resolve_config_value(kwargs)
 			return fn(**kwargs)
 		if cfg.import_path:
 			cls = _resolve(cfg.import_path)
-			kwargs = dict(cfg.kwargs or {})
-			kwargs.update(extra_kwargs or {})
+			kwargs = copy.deepcopy(cfg.kwargs or {})
+			for key, value in (extra_kwargs or {}).items():
+				_set_dotted(kwargs, key, value)
+			kwargs = _resolve_config_value(kwargs)
 			return cls(**kwargs)
 		return None
 

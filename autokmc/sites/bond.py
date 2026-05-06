@@ -1332,6 +1332,7 @@ def prune_unstable_bond_sites(
     max_steps: int = PRUNE_MAX_STEPS,
     nl_mult: float = NL_MULT_DEFAULT,
     verbose: bool = False,
+    debug_output_dir: str | None = None,
 ) -> list[BondReactionSite]:
     """Drop bond-reaction iso-classes whose A+B endpoint is bond-changing-unstable.
 
@@ -1365,6 +1366,11 @@ def prune_unstable_bond_sites(
         each relaxation so the caller's instance is never mutated.
     frozen_indices, fmax, max_steps, nl_mult, verbose
         See :func:`autokmc.sites.adsorbate.prune_unstable_adsorbate_sites`.
+    debug_output_dir
+        Optional directory for debugging endpoint pruning.  When supplied,
+        the unrelaxed and relaxed representative A+B endpoint structures are
+        written as ``extxyz`` files under one folder per pre-pruning
+        ``bond_iso``.
 
     Returns
     -------
@@ -1382,6 +1388,29 @@ def prune_unstable_bond_sites(
     from autokmc.structure import optimise_structure
     from autokmc.core.graph import build_graph
 
+    debug_dir = None
+    if debug_output_dir is not None:
+        from pathlib import Path
+
+        debug_dir = Path(debug_output_dir)
+        debug_dir.mkdir(parents=True, exist_ok=True)
+
+    def _write_debug_endpoint(bond_iso, filename: str, atoms) -> None:
+        if debug_dir is None:
+            return
+        try:
+            from ase.io import write as ase_write
+
+            out_dir = debug_dir / f"bond_iso_{int(bond_iso):03d}"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            ase_write(out_dir / filename, atoms, format="extxyz")
+        except Exception as exc:
+            _log.warning(
+                "prune_unstable_bond_sites: failed to write debug endpoint "
+                "%s for bond_iso=%s (%s)",
+                filename, bond_iso, exc,
+            )
+
     if verbose:
         print(
             f"\nprune_unstable_bond_sites: {len(bond_sites)} iso-class(es)  "
@@ -1395,7 +1424,7 @@ def prune_unstable_bond_sites(
     def _placement_id(s, m):
         return (id(s), int(m))
 
-    def _check_pair(sa, ma, sb, mb) -> bool:
+    def _check_pair(sa, ma, sb, mb, bond_iso) -> bool:
         key = frozenset({_placement_id(sa, ma), _placement_id(sb, mb)})
         if key in cache:
             return cache[key]
@@ -1428,6 +1457,8 @@ def prune_unstable_bond_sites(
             cache[key] = True
             return True
 
+        _write_debug_endpoint(bond_iso, "endpoint_ab_before_opt.extxyz", atoms_init)
+
         intended = _intended_ab_edges(
             sa, react_a, n_slab, node_to_ase,
             sb, react_b, n_slab + n_a, ma, mb,
@@ -1448,6 +1479,8 @@ def prune_unstable_bond_sites(
             )
             cache[key] = False
             return False
+
+        _write_debug_endpoint(bond_iso, "endpoint_ab_after_opt.extxyz", atoms_opt)
 
         forces = atoms_opt.get_forces()
         if frozen_indices:
@@ -1483,7 +1516,7 @@ def prune_unstable_bond_sites(
         if not brs.members:
             continue
         sa, ma, sb, mb, _sc, _mc = brs.members[0]
-        viable = _check_pair(sa, ma, sb, mb)
+        viable = _check_pair(sa, ma, sb, mb, brs.iso_class)
         if viable:
             survivors.append(brs)
             if verbose:
