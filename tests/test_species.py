@@ -122,6 +122,20 @@ def test_io_uses_shared_smiles_dirname_helper():
     assert summary._smiles_to_dirname(label) == smiles_to_dirname(label)
 
 
+def test_rdkit_isolated_h_warning_is_suppressed(capfd):
+    pytest.importorskip("rdkit")
+    from rdkit import Chem
+
+    from autokmc.utils.rdkit_logging import silence_rdkit_warnings
+
+    silence_rdkit_warnings()
+    for _ in range(3):
+        Chem.RemoveHs(Chem.MolFromSmiles("[H]"))
+
+    _out, err = capfd.readouterr()
+    assert "not removing hydrogen atom without neighbors" not in err
+
+
 def test_gas_cache_dir_uses_safe_smiles_label(monkeypatch, tmp_path):
     import autokmc.species.reactant as reactant_mod
 

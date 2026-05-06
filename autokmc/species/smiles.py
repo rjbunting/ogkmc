@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import re
 
+from autokmc.utils.rdkit_logging import silence_rdkit_warnings
+
 
 def canonical_smiles(smiles: str | None) -> str:
     """Return RDKit canonical SMILES when RDKit can parse the input."""
     if smiles is None:
         return ""
     try:
+        silence_rdkit_warnings()
         from rdkit import Chem
 
         return Chem.CanonSmiles(str(smiles))

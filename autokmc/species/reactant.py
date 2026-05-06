@@ -58,6 +58,7 @@ from autokmc.core.constants import NL_MULT_DEFAULT, RANDOM_SEED
 from autokmc.io.calculators import acquire_calculator
 from autokmc.species.smiles import smiles_to_dirname
 from autokmc.utils.logging import get_logger
+from autokmc.utils.rdkit_logging import silence_rdkit_warnings
 
 _log = get_logger(__name__)
 
@@ -162,6 +163,7 @@ def _smiles_to_atoms(smiles: str, *, add_hydrogens: bool = True) -> Atoms:
     Atoms
         Non-periodic structure with no calculator attached.
     """
+    silence_rdkit_warnings()
     try:
         from rdkit import Chem
         from rdkit.Chem import AllChem

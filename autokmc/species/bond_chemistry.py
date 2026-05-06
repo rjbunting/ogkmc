@@ -77,8 +77,10 @@ from dataclasses import dataclass, field
 
 from autokmc.core.constants import NL_MULT_DEFAULT, RANDOM_SEED
 from autokmc.utils.logging import get_logger
+from autokmc.utils.rdkit_logging import silence_rdkit_warnings
 
 _log = get_logger(__name__)
+silence_rdkit_warnings()
 
 
 # ---------------------------------------------------------------------------

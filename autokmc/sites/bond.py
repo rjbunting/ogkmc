@@ -101,6 +101,7 @@ from autokmc.core.constants import (
     PRUNE_MAX_STEPS,
 )
 from autokmc.utils.logging import get_logger
+from autokmc.utils.rdkit_logging import silence_rdkit_warnings
 
 _log = get_logger(__name__)
 
@@ -114,6 +115,7 @@ def _canon_smiles(smi: str) -> str:
     if smi is None:
         return ""
     try:
+        silence_rdkit_warnings()
         from rdkit import Chem
     except ImportError:
         return str(smi)
