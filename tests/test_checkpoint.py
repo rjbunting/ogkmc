@@ -14,6 +14,11 @@ from autokmc.io.checkpoint import (
 )
 
 
+class HashableDict(dict):
+    def __hash__(self):
+        return hash(tuple(sorted(self.items())))
+
+
 def test_checkpoint_roundtrip_strips_calculators(tmp_path):
     G = nx.Graph()
     atoms = Atoms("H", positions=[[0.0, 0.0, 0.0]])
@@ -40,3 +45,31 @@ def test_checkpoint_roundtrip_strips_calculators(tmp_path):
     assert loaded.time_s == 1.25
     assert loaded.frozen_indices == [0]
     assert loaded.graph.graph["atoms"].calc is None
+
+
+def test_checkpoint_preserves_hashable_keys_that_strip_to_dict(tmp_path):
+    G = nx.Graph()
+    key = HashableDict({"kind": "lat", "index": 0})
+    atoms = Atoms("H", positions=[[0.0, 0.0, 0.0]])
+    atoms.calc = EMT()
+    G.graph["cache"] = {key: atoms}
+
+    state = make_checkpoint_state(
+        step=4,
+        time_s=2.0,
+        graph=G,
+        adsorbate_sites=[],
+        diffusion_sites=[],
+        bond_sites=[],
+        reactants=[],
+        frozen_indices=[],
+        history=[],
+        reaction_counts={},
+    )
+    path = save_checkpoint(tmp_path / "checkpoint.pkl", state)
+    loaded = load_checkpoint(path)
+
+    [(loaded_key, loaded_atoms)] = loaded.graph.graph["cache"].items()
+    assert isinstance(loaded_key, HashableDict)
+    assert dict(loaded_key) == {"kind": "lat", "index": 0}
+    assert loaded_atoms.calc is None

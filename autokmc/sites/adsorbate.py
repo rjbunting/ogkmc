@@ -1182,6 +1182,66 @@ def _build_pruning_atoms(
     return atoms, len(slab_nodes), n_ads, node_to_ase
 
 
+def _relaxed_adsorbate_positions_in_graph_frame(
+    G: nx.Graph,
+    ms: AdsorbateSite,
+    atoms_opt,
+    n_slab: int,
+    n_ads: int,
+    node_to_ase: dict[int, int],
+    *,
+    frame_depth: int,
+) -> np.ndarray:
+    """Return relaxed adsorbate positions projected back onto G's slab frame.
+
+    The pruning relaxation may move unfrozen slab atoms.  The live graph keeps
+    the original slab positions, so raw ``atoms_opt`` adsorbate coordinates are
+    in the wrong frame for graph storage and member propagation.  Align the
+    relaxed local surface ego back onto the graph ego, then apply that transform
+    to the relaxed adsorbate atoms.
+    """
+    all_pos = np.asarray(atoms_opt.get_positions(), dtype=float)
+    ads_pos = np.asarray(all_pos[n_slab : n_slab + n_ads], dtype=float)
+
+    rep_seed: frozenset = frozenset(
+        int(n)
+        for c in ms.atom_cliques if c is not None
+        for n in c
+    )
+    if not rep_seed:
+        return ads_pos
+
+    ego = _build_ego_graph(G, rep_seed, max(0, int(frame_depth)))
+    frame_nodes = [
+        int(n)
+        for n, d in ego.nodes(data=True)
+        if d.get("type") in ("bulk", "surface") and int(n) in node_to_ase
+    ]
+    if not frame_nodes:
+        return ads_pos
+
+    graph_pos = np.asarray(
+        [G.nodes[n]["position"] for n in frame_nodes],
+        dtype=float,
+    )
+    relaxed_pos = np.asarray(
+        [all_pos[node_to_ase[n]] for n in frame_nodes],
+        dtype=float,
+    )
+
+    cell = np.array(G.graph.get("cell", np.eye(3)), dtype=float)
+    pbc = _effective_pbc(G, cell)
+    if pbc.any():
+        relaxed_pos = graph_pos + minimum_image_vectors(
+            relaxed_pos - graph_pos,
+            cell,
+            pbc,
+        )
+
+    R, t = _kabsch(relaxed_pos, graph_pos)
+    return ads_pos @ R.T + t
+
+
 def _intended_adsorbate_edges(
     ms: AdsorbateSite,
     reactant,
@@ -1505,12 +1565,20 @@ def prune_unstable_adsorbate_sites(
             continue
 
         # ── Update positions from ML-relaxed geometry ─���───────────────────
-        # Extract the adsorbate atoms (last n_ads rows of atoms_opt) and
-        # write them back as the new representative positions for this
+        # Extract the adsorbate atoms (last n_ads rows of atoms_opt), project
+        # them from the relaxed slab frame back onto the live graph's slab
+        # frame, then store them as the representative positions for this
         # iso-class.  The ordering produced by _build_pruning_atoms matches
-        # reactant atom-index order, so ms.positions can be replaced directly.
-        new_pos: np.ndarray = np.asarray(
-            atoms_opt.get_positions()[n_slab : n_slab + n_ads], dtype=float
+        # reactant atom-index order.
+        frame_depth = max(1, int(ms.n_shells_settled))
+        new_pos: np.ndarray = _relaxed_adsorbate_positions_in_graph_frame(
+            G,
+            ms,
+            atoms_opt,
+            n_slab,
+            n_ads,
+            node_to_ase,
+            frame_depth=frame_depth,
         )
         cell_store = np.array(G.graph.get("cell", np.eye(3)), dtype=float)
         pbc_store = _effective_pbc(G, cell_store)
@@ -1532,7 +1600,6 @@ def prune_unstable_adsorbate_sites(
             )
             if rep_seed and len(ms.members) > 1:
                 cell_arr, cell_inv_arr, pbc_arr, use_mic_arr = _get_cell(G)
-                depth = max(1, int(ms.n_shells_settled))
                 n_propagated = 0
                 for m_idx in range(1, len(ms.members)):
                     mem_seed: frozenset = frozenset(
@@ -1544,7 +1611,7 @@ def prune_unstable_adsorbate_sites(
                         continue
                     R, t = _kabsch_align_ego(
                         G,
-                        rep_seed, mem_seed, depth,
+                        rep_seed, mem_seed, frame_depth,
                         cell_arr, cell_inv_arr, pbc_arr, use_mic_arr,
                     )
                     if R is None or t is None:

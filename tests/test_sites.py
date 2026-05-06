@@ -629,6 +629,84 @@ def test_adsorbate_pruning_reads_energy_before_detaching_calculator(monkeypatch)
     assert stable == [site]
 
 
+def test_adsorbate_pruning_projects_relaxed_adsorbate_back_to_graph_frame(monkeypatch):
+    G = nx.Graph()
+    G.graph["cell"] = np.eye(3) * 20.0
+    G.graph["pbc"] = np.array([False, False, False])
+    for nid, x in ((0, 0.0), (1, 3.0)):
+        G.add_node(
+            nid,
+            type="surface",
+            element="Pt",
+            position=np.array([x, 0.0, 0.0]),
+            index=nid,
+        )
+    G.add_edge(0, 1)
+    for nid, x, surf in ((10, 0.0, 0), (20, 3.0, 1)):
+        G.add_node(
+            nid,
+            type="adsorbate",
+            element="O",
+            position=np.array([x, 0.0, 1.8]),
+            reactant="[O]",
+            reactant_index=0,
+            clique=frozenset({surf}),
+            is_bonded=True,
+            occupied=False,
+        )
+        G.add_edge(surf, nid, anchor_bond=True)
+
+    site = AdsorbateSite(
+        reactant="[O]",
+        n_atoms=1,
+        atom_cliques=[frozenset({0})],
+        positions=np.array([[0.0, 0.0, 1.8]]),
+        iso_class=0,
+        members=[[frozenset({0})], [frozenset({1})]],
+        member_node_ids=[[10], [20]],
+        n_shells_settled=1,
+    )
+    G.graph["adsorbate_sites"] = {"[O]": [site]}
+    rebuild_adsorbate_reverse_indexes(G)
+
+    reactant = SimpleNamespace(
+        smiles="[O]",
+        atoms=Atoms("O", positions=[[0.0, 0.0, 0.0]]),
+        graph=nx.Graph(),
+    )
+    reactant.graph.add_node(0, element="O")
+
+    def fake_optimise_structure(atoms, **_kwargs):
+        opt = atoms.copy()
+        pos = opt.get_positions()
+        pos[:, 2] -= 0.5
+        opt.set_positions(pos)
+        opt.calc = SinglePointCalculator(
+            opt,
+            energy=-1.0,
+            forces=np.zeros((len(opt), 3)),
+        )
+        return opt
+
+    monkeypatch.setattr(
+        "autokmc.structure.optimise_structure",
+        fake_optimise_structure,
+    )
+
+    stable = prune_unstable_adsorbate_sites(
+        G,
+        [site],
+        reactant,
+        calculator=object(),
+        fmax=0.05,
+        max_steps=1,
+    )
+
+    assert stable == [site]
+    assert G.nodes[10]["position"][2] == pytest.approx(1.8)
+    assert G.nodes[20]["position"][2] == pytest.approx(1.8)
+
+
 def test_slab_anchor_optimisation_keeps_top_site_above_surface(monkeypatch):
     G = nx.Graph()
     G.graph["cell"] = np.eye(3) * 20.0

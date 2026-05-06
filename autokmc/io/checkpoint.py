@@ -36,6 +36,24 @@ class CheckpointState:
 	metadata: dict[str, Any]
 
 
+def _is_hashable(value) -> bool:
+	try:
+		hash(value)
+	except TypeError:
+		return False
+	return True
+
+
+def _hashable_fallback(value):
+	try:
+		out = copy.deepcopy(value)
+	except Exception:
+		out = value
+	if _is_hashable(out):
+		return out
+	return value
+
+
 def _strip_calculators(obj, *, _memo: dict[int, Any] | None = None):
 	"""Return a deep-copied object with ASE calculator handles removed."""
 	if _memo is None:
@@ -51,10 +69,11 @@ def _strip_calculators(obj, *, _memo: dict[int, Any] | None = None):
 	if isinstance(obj, dict):
 		out = {}
 		_memo[oid] = out
-		out.update({
-			_strip_calculators(k, _memo=_memo): _strip_calculators(v, _memo=_memo)
-			for k, v in obj.items()
-		})
+		for k, v in obj.items():
+			key = _strip_calculators(k, _memo=_memo)
+			if not _is_hashable(key):
+				key = _hashable_fallback(k)
+			out[key] = _strip_calculators(v, _memo=_memo)
 		return out
 	if isinstance(obj, list):
 		out = []
@@ -66,8 +85,13 @@ def _strip_calculators(obj, *, _memo: dict[int, Any] | None = None):
 		_memo[oid] = out
 		return out
 	if isinstance(obj, set):
-		out = {_strip_calculators(v, _memo=_memo) for v in obj}
+		out = set()
 		_memo[oid] = out
+		for v in obj:
+			item = _strip_calculators(v, _memo=_memo)
+			if not _is_hashable(item):
+				item = _hashable_fallback(v)
+			out.add(item)
 		return out
 	try:
 		out = copy.deepcopy(obj)
