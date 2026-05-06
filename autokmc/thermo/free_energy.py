@@ -36,6 +36,7 @@ from typing import Any, Iterable, Sequence
 import numpy as np
 from ase import Atoms
 
+from autokmc.io.calculators import acquire_calculator
 from autokmc.utils.logging import get_logger
 
 _log = get_logger(__name__)
@@ -287,7 +288,8 @@ def compute_gas_thermo(
     from ase.thermochemistry import IdealGasThermo
 
     snap = atoms.copy()
-    _ensure_calc(snap, calculator)
+    if calculator is not None:
+        snap.calc = None
 
     sym  = int(symmetry_number if symmetry_number is not None
                else options.default_symmetry_number)
@@ -296,12 +298,14 @@ def compute_gas_thermo(
 
     label = f"gas_{snap.get_chemical_formula(empirical=False)}"
 
-    with _cache_context(options, cache_dir) as cache_root_raw:
-        cache_root = _cache_path(cache_root_raw)
-        real_ev, imag_ev, raw_energies = _vibrate(
-            snap, indices=None, options=options,
-            cache_dir=cache_root, label=label,
-        )
+    with acquire_calculator(calculator, purpose="gas-phase thermochemistry") as calc:
+        _ensure_calc(snap, calc)
+        with _cache_context(options, cache_dir) as cache_root_raw:
+            cache_root = _cache_path(cache_root_raw)
+            real_ev, imag_ev, raw_energies = _vibrate(
+                snap, indices=None, options=options,
+                cache_dir=cache_root, label=label,
+            )
 
     # IdealGasThermo wants vibrational energies in eV (real, positive).
     # Use `real_ev` which has already been filtered by `_split_real_imag_ev`.
@@ -426,58 +430,60 @@ def compute_harmonic_thermo(
     from ase.thermochemistry import HarmonicThermo
 
     snap = atoms.copy()
-    _ensure_calc(snap, calculator)
+    if calculator is not None:
+        snap.calc = None
+    with acquire_calculator(calculator, purpose="harmonic thermochemistry") as calc:
+        _ensure_calc(snap, calc)
+        with _cache_context(options, cache_dir) as cache_root_raw:
+            cache_root = _cache_path(cache_root_raw)
+            real_ev, imag_ev, raw_energies = _vibrate(
+                snap, indices=indices, options=options,
+                cache_dir=cache_root, label=label,
+            )
 
-    with _cache_context(options, cache_dir) as cache_root_raw:
-        cache_root = _cache_path(cache_root_raw)
-        real_ev, imag_ev, raw_energies = _vibrate(
-            snap, indices=indices, options=options,
-            cache_dir=cache_root, label=label,
-        )
-
-        # HarmonicThermo wants real, positive energies in eV.
-        vib_energies_ev: list[float] = []
-        for e in raw_energies:
-            ec = complex(e)
-            if abs(ec.imag) > abs(ec.real):
-                if drop_imaginary:
+            # HarmonicThermo wants real, positive energies in eV.
+            vib_energies_ev: list[float] = []
+            for e in raw_energies:
+                ec = complex(e)
+                if abs(ec.imag) > abs(ec.real):
+                    if drop_imaginary:
+                        continue
+                    vib_energies_ev.append(float(abs(ec.imag)))
                     continue
-                vib_energies_ev.append(float(abs(ec.imag)))
-                continue
-            e_real = float(ec.real)
-            if e_real <= 0.0 or abs(e_real) < options.min_frequency_ev:
-                if drop_imaginary:
-                    continue
-            vib_energies_ev.append(float(abs(e_real)))
+                e_real = float(ec.real)
+                if e_real <= 0.0 or abs(e_real) < options.min_frequency_ev:
+                    if drop_imaginary:
+                        continue
+                vib_energies_ev.append(float(abs(e_real)))
 
-        vib_arr = np.asarray(sorted(vib_energies_ev, reverse=True), dtype=float)
-        if vib_arr.size == 0:
-            # No modes survived — return a zero correction rather than letting
-            # HarmonicThermo blow up.
-            return {
-                "enabled":          True,
-                "g_corr_ev":        0.0,
-                "g_total_ev":       float(energy_ev),
-                "zpe_ev":           0.0,
-                "entropy_ev_per_k": 0.0,
-                "frequencies_ev":   list(real_ev),
-                "imaginary_ev":     list(imag_ev),
-                "vib_indices":      indices,
-                "temperature_k":    float(temperature_k),
-            }
+            vib_arr = np.asarray(sorted(vib_energies_ev, reverse=True), dtype=float)
+            if vib_arr.size == 0:
+                # No modes survived — return a zero correction rather than letting
+                # HarmonicThermo blow up.
+                return {
+                    "enabled":          True,
+                    "g_corr_ev":        0.0,
+                    "g_total_ev":       float(energy_ev),
+                    "zpe_ev":           0.0,
+                    "entropy_ev_per_k": 0.0,
+                    "frequencies_ev":   list(real_ev),
+                    "imaginary_ev":     list(imag_ev),
+                    "vib_indices":      indices,
+                    "temperature_k":    float(temperature_k),
+                }
 
-        thermo = HarmonicThermo(
-            vib_energies    = vib_arr,
-            potentialenergy = float(energy_ev),
-        )
-        g_total = float(thermo.get_helmholtz_energy(
-            temperature=float(temperature_k), verbose=False,
-        ))
-        zpe = float(thermo.get_ZPE_correction())
-        s   = float(thermo.get_entropy(
-            temperature=float(temperature_k), verbose=False,
-        ))
-        g_corr = g_total - float(energy_ev)
+            thermo = HarmonicThermo(
+                vib_energies    = vib_arr,
+                potentialenergy = float(energy_ev),
+            )
+            g_total = float(thermo.get_helmholtz_energy(
+                temperature=float(temperature_k), verbose=False,
+            ))
+            zpe = float(thermo.get_ZPE_correction())
+            s   = float(thermo.get_entropy(
+                temperature=float(temperature_k), verbose=False,
+            ))
+            g_corr = g_total - float(energy_ev)
 
     return {
         "enabled":          True,

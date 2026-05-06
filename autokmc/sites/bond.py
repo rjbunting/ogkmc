@@ -82,6 +82,7 @@ from typing import Any, Iterable
 import networkx as nx
 from networkx.algorithms import isomorphism
 
+from autokmc.io.calculators import CalculatorConfigError, acquire_calculator
 from autokmc.sites.adsorbate import (
     AdsorbateSite,
     _get_surface_apsp,
@@ -1362,8 +1363,9 @@ def prune_unstable_bond_sites(
         topology.  Pass ``G.graph["bond_registry"]["species"]`` after
         :func:`autokmc.kmc.expansion.initialise_bond_registry` has run.
     calculator
-        ASE-compatible calculator.  A :func:`copy.deepcopy` is made for
-        each relaxation so the caller's instance is never mutated.
+        ASE-compatible calculator or CalculatorPool.  A calculator is
+        acquired for each relaxation; calculator instances are never
+        deep-copied.
     frozen_indices, fmax, max_steps, nl_mult, verbose
         See :func:`autokmc.sites.adsorbate.prune_unstable_adsorbate_sites`.
     debug_output_dir
@@ -1379,7 +1381,6 @@ def prune_unstable_bond_sites(
         **renumbered** to be sequential.
         ``G.graph["bond_reaction_sites"]`` is updated in place.
     """
-    import copy
     import numpy as np
 
     if calculator is None or not bond_sites:
@@ -1465,15 +1466,27 @@ def prune_unstable_bond_sites(
         )
 
         try:
-            calc_copy = copy.deepcopy(calculator)
-            atoms_opt = optimise_structure(
-                atoms_init,
-                calculator = calc_copy,
-                fmax       = fmax,
-                steps      = max_steps,
-                verbose    = False,
-            )
+            with acquire_calculator(
+                calculator, purpose="bond-site pruning"
+            ) as calc:
+                atoms_opt = optimise_structure(
+                    atoms_init,
+                    calculator = calc,
+                    fmax       = fmax,
+                    steps      = max_steps,
+                    verbose    = False,
+                )
+                forces = atoms_opt.get_forces()
+                if frozen_indices:
+                    free_mask = np.ones(len(atoms_opt), dtype=bool)
+                    free_mask[list(frozen_indices)] = False
+                    max_force = float(np.linalg.norm(forces[free_mask], axis=1).max())
+                else:
+                    max_force = float(np.linalg.norm(forces, axis=1).max())
+                atoms_opt.calc = None
         except Exception as exc:
+            if isinstance(exc, CalculatorConfigError):
+                raise
             _log.debug(
                 "prune_unstable_bond_sites: relaxation raised %s", exc,
             )
@@ -1481,14 +1494,6 @@ def prune_unstable_bond_sites(
             return False
 
         _write_debug_endpoint(bond_iso, "endpoint_ab_after_opt.extxyz", atoms_opt)
-
-        forces = atoms_opt.get_forces()
-        if frozen_indices:
-            free_mask = np.ones(len(atoms_opt), dtype=bool)
-            free_mask[list(frozen_indices)] = False
-            max_force = float(np.linalg.norm(forces[free_mask], axis=1).max())
-        else:
-            max_force = float(np.linalg.norm(forces, axis=1).max())
 
         if max_force > fmax:
             cache[key] = False

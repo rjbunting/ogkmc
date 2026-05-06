@@ -25,6 +25,7 @@ from autokmc.structure.builders import (
     _print_header,
     _validate_crystal_structure,
 )
+from autokmc.io.calculators import acquire_calculator
 from autokmc.structure.types import LatticeParams
 
 
@@ -49,22 +50,25 @@ def optimise_bulk(
         lp_in = _normalise_lp(lattice_constant, crystal_structure)
 
     bulk_atoms = _build_primitive_cell(symbol, crystal_structure, lp_in)
-    bulk_atoms.calc = calculator
 
-    ecf = ExpCellFilter(bulk_atoms)
-    opt = LBFGS(ecf, logfile=os.devnull)  # type: ignore[arg-type]
-    opt.run(fmax=fmax)
+    with acquire_calculator(calculator, purpose="bulk lattice relaxation") as calc:
+        bulk_atoms.calc = calc
 
-    lp_out = _extract_lp(bulk_atoms, crystal_structure)
+        ecf = ExpCellFilter(bulk_atoms)
+        opt = LBFGS(ecf, logfile=os.devnull)  # type: ignore[arg-type]
+        opt.run(fmax=fmax)
 
-    if verbose:
-        e = bulk_atoms.get_potential_energy()
-        _print_header(f"Bulk {symbol} ({crystal_structure.upper()}) optimised")
-        print(f"  Converged : {opt.converged()}  |  steps : {opt.get_number_of_steps()}")
-        print(f"  E/atom    : {e / len(bulk_atoms):.5f} eV")
-        for k, v in lp_out.items():
-            print(f"  Opt {k}     : {v:.4f} Å")
-        _print_divider()
+        lp_out = _extract_lp(bulk_atoms, crystal_structure)
+
+        if verbose:
+            e = bulk_atoms.get_potential_energy()
+            _print_header(f"Bulk {symbol} ({crystal_structure.upper()}) optimised")
+            print(f"  Converged : {opt.converged()}  |  steps : {opt.get_number_of_steps()}")
+            print(f"  E/atom    : {e / len(bulk_atoms):.5f} eV")
+            for k, v in lp_out.items():
+                print(f"  Opt {k}     : {v:.4f} Å")
+            _print_divider()
+        bulk_atoms.calc = None
 
     return bulk_atoms, lp_out
 

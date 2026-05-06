@@ -71,7 +71,6 @@ Public API
 
 from __future__ import annotations
 
-import copy
 import warnings
 from dataclasses import dataclass, field
 from itertools import combinations, product
@@ -82,6 +81,7 @@ import networkx as nx
 from networkx.algorithms import isomorphism
 
 from autokmc.core.pbc import minimum_image_vectors, wrap_positions_into_cell
+from autokmc.io.calculators import CalculatorConfigError, acquire_calculator
 from autokmc.sites.anchors import (
     find_anchor_sites,
     _build_ego_graph,
@@ -1314,9 +1314,9 @@ def prune_unstable_adsorbate_sites(
     reactant : Reactant
         Gas-phase molecule that produced *adsorbate_sites*.
     calculator
-        Any ASE-compatible ML/empirical potential.  A
-        :func:`copy.deepcopy` is made for each iso-class so the caller's
-        instance is never mutated.
+        Any ASE-compatible ML/empirical potential or CalculatorPool.  A
+        calculator is acquired for each relaxation; calculator instances are
+        never deep-copied.
     frozen_indices : list[int] | None
         0-based indices into the **slab** portion (bulk + surface nodes
         sorted by their original ASE atom ``index``) to freeze during
@@ -1377,15 +1377,27 @@ def prune_unstable_adsorbate_sites(
 
         # ── ML relaxation ─────────────────────────────────────────────────
         try:
-            calc_copy  = copy.deepcopy(calculator)
-            atoms_opt  = optimise_structure(
-                atoms_init,
-                calculator = calc_copy,
-                fmax       = fmax,
-                steps      = max_steps,
-                verbose    = False,
-            )
+            with acquire_calculator(
+                calculator, purpose="adsorbate-site pruning"
+            ) as calc:
+                atoms_opt = optimise_structure(
+                    atoms_init,
+                    calculator = calc,
+                    fmax       = fmax,
+                    steps      = max_steps,
+                    verbose    = False,
+                )
+                forces = atoms_opt.get_forces()
+                if frozen_indices:
+                    free_mask = np.ones(len(atoms_opt), dtype=bool)
+                    free_mask[list(frozen_indices)] = False
+                    max_force = float(np.linalg.norm(forces[free_mask], axis=1).max())
+                else:
+                    max_force = float(np.linalg.norm(forces, axis=1).max())
+                atoms_opt.calc = None
         except Exception as exc:
+            if isinstance(exc, CalculatorConfigError):
+                raise
             _log.debug(
                 "prune_unstable_adsorbate_sites: iso_class=%d relaxation raised %s",
                 ms.iso_class, exc,
@@ -1397,14 +1409,6 @@ def prune_unstable_adsorbate_sites(
             continue
 
         # ── Convergence check ─────────────────────────────────────────────
-        forces = atoms_opt.get_forces()
-        if frozen_indices:
-            free_mask = np.ones(len(atoms_opt), dtype=bool)
-            free_mask[list(frozen_indices)] = False
-            max_force = float(np.linalg.norm(forces[free_mask], axis=1).max())
-        else:
-            max_force = float(np.linalg.norm(forces, axis=1).max())
-
         if max_force > fmax:
             if verbose:
                 print(
@@ -1702,10 +1706,9 @@ def find_adsorbate_sites(
         does not converge.  Requires *calculator* to be set; if *calculator*
         is ``None`` a :class:`RuntimeWarning` is issued and pruning is skipped.
     calculator
-        ASE-compatible ML or empirical potential used for stability pruning.
-        A :func:`copy.deepcopy` is made for each iso-class so the caller's
-        instance is never mutated.  ``None`` disables pruning even when
-        *prune_stable_only* is ``True``.
+        ASE-compatible ML/empirical potential or CalculatorPool used for
+        stability pruning.  Calculators are acquired rather than deep-copied.
+        ``None`` disables pruning even when *prune_stable_only* is ``True``.
     frozen_indices : list[int] | None
         Atom indices into the **slab** portion (0-based, sorted by original
         ASE atom ``index``) to freeze during the pruning relaxation.  Pass

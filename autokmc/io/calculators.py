@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import importlib
 import queue
+import threading
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
@@ -21,6 +22,10 @@ class CalculatorCfg:
 	  returns a calculator instance.
 
 	``factory`` takes precedence when both are supplied.
+
+	``copies`` controls how many independent calculator instances are built
+	up front.  The science code acquires these instances from a
+	CalculatorPool instead of deep-copying live calculator objects.
 	"""
 	import_path:     str | None = None
 	kwargs:          dict       = field(default_factory=dict)
@@ -45,6 +50,7 @@ class CalculatorPool:
 		self.calculators = list(calculators)
 		self.max_workers = int(max_workers or len(self.calculators))
 		self._queue: queue.Queue[Any] = queue.Queue()
+		self._batch_lock = threading.Lock()
 		for calc in self.calculators:
 			self._queue.put(calc)
 
@@ -62,6 +68,65 @@ class CalculatorPool:
 			yield calc
 		finally:
 			self._queue.put(calc)
+
+	@contextmanager
+	def acquire_many(self, count: int, *, purpose: str | None = None):
+		"""Reserve multiple independent calculators for one operation."""
+		n = int(count)
+		if n < 0:
+			raise CalculatorConfigError("cannot acquire a negative number of calculators")
+		if n == 0:
+			yield []
+			return
+		if n > len(self.calculators):
+			label = f" for {purpose}" if purpose else ""
+			raise CalculatorConfigError(
+				f"{n} independent calculator(s){label} requested, but "
+				f"the pool has only {len(self.calculators)}. Increase "
+				"`calculator.copies` or reduce the number of simultaneous "
+				"images/calculations."
+			)
+		acquired: list[Any] = []
+		try:
+			with self._batch_lock:
+				for _ in range(n):
+					acquired.append(self._queue.get())
+			yield acquired
+		finally:
+			for calc in acquired:
+				self._queue.put(calc)
+
+
+@contextmanager
+def acquire_calculator(calculator, *, purpose: str | None = None):
+	"""Yield one concrete calculator from either a pool or a legacy instance."""
+	if isinstance(calculator, CalculatorPool):
+		with calculator.acquire() as calc:
+			yield calc
+	else:
+		yield calculator
+
+
+@contextmanager
+def acquire_calculators(calculator, count: int, *, purpose: str | None = None):
+	"""Yield *count* independent calculators without relying on deepcopy."""
+	n = int(count)
+	if n <= 0:
+		yield []
+		return
+	if isinstance(calculator, CalculatorPool):
+		with calculator.acquire_many(n, purpose=purpose) as calcs:
+			yield calcs
+		return
+	if n == 1:
+		yield [calculator]
+		return
+	label = f" for {purpose}" if purpose else ""
+	raise CalculatorConfigError(
+		f"{n} independent calculator(s){label} requested, but a single "
+		"calculator instance was supplied. Pass a CalculatorPool or configure "
+		"`calculator.copies` with enough instances."
+	)
 
 
 def _resolve(dotted: str):
@@ -162,7 +227,7 @@ def _resolve_config_value(value: Any):
 
 
 def build_calculator(cfg: CalculatorCfg):
-	"""Instantiate the ASE-compatible calculator described by *cfg*.
+	"""Build a CalculatorPool for the calculator described by *cfg*.
 
 	Returns ``None`` when neither *import_path* nor *factory* is set.
 	"""
@@ -183,24 +248,15 @@ def build_calculator(cfg: CalculatorCfg):
 			return cls(**kwargs)
 		return None
 
+	calculators = []
 	devices = list(cfg.gpu_devices or [])
 	n_copies = max(int(cfg.copies or 1), len(devices) or 1)
-	if n_copies <= 1:
-		extra = (
-			{str(cfg.gpu_device_arg): devices[0]}
-			if devices else None
-		)
-		return _build_one(extra)
-	calculators = []
 	for idx in range(n_copies):
 		extra = (
 			{str(cfg.gpu_device_arg): devices[idx]}
 			if idx < len(devices) else None
 		)
-		if idx == 0 or devices:
-			calc = _build_one(extra)
-		else:
-			calc = copy.deepcopy(calculators[0])
+		calc = _build_one(extra)
 		if calc is not None:
 			calculators.append(calc)
 	if calculators:
@@ -234,6 +290,8 @@ __all__ = [
 	"CalculatorPool",
 	"CalculatorConfigError",
 	"_resolve",
+	"acquire_calculator",
+	"acquire_calculators",
 	"build_calculator",
 	"primary_calculator",
 	"calculator_meta",

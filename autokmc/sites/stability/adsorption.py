@@ -89,6 +89,7 @@ from ase import Atoms
 from ase.constraints import FixAtoms
 from ase.neighborlist import NeighborList, natural_cutoffs
 
+from autokmc.io.calculators import acquire_calculator
 from autokmc.sites.adsorbate import AdsorbateSite, AdsorbateSiteLateral
 from autokmc.core.constants import NL_MULT_DEFAULT, LATERAL_SHELLS_DEFAULT
 from autokmc.utils.logging import get_logger
@@ -840,11 +841,11 @@ def check_site_stability(
     * **occupied**   — full slab + lateral-neighbour adsorbates + this site.
     * **unoccupied** — same slab + lateral neighbours, site absent.
 
-    Each is relaxed with *calculator* via
-    :func:`~autokmc.structure.optimise_structure` (LBFGS, deep-copied
-    calculator per AGENTS.md convention).  Before and after each relaxation
-    the ASE :class:`~ase.neighborlist.NeighborList` bond topology is compared;
-    changes raise a :class:`SiteStabilityError` subclass.
+    Each is relaxed with a calculator acquired from *calculator* via
+    :func:`~autokmc.structure.optimise_structure` (LBFGS).  Before and after
+    each relaxation the ASE :class:`~ase.neighborlist.NeighborList` bond
+    topology is compared; changes raise a :class:`SiteStabilityError`
+    subclass.
 
     On success the potential energies are stored on *lateral_class* and
     returned as ``(E_occupied, E_unoccupied)``.
@@ -861,11 +862,9 @@ def check_site_stability(
         The lateral-interaction class returned by
         :func:`check_adsorbate_site_lateral` for this member.
     calculator
-        Any ASE-compatible ML or empirical potential (e.g.
-        ``NequIPCalculator``).  The calculator instance is **shared** across
-        every relaxation in this function (no deep-copy) — see
-        suggestion.MD #1.  Pass a stateless wrapper (NequIP / MACE) or a
-        cheap-to-construct calculator (EMT) so concurrent reuse is safe.
+        Any ASE-compatible ML/empirical potential or CalculatorPool.  One
+        concrete calculator is acquired for each relaxation; calculator
+        instances are never deep-copied.
     frozen_indices : list[int] | None
         Indices into the **slab** portion of the constructed Atoms (0-based,
         same ordering as bulk/surface nodes sorted by their original ASE atom
@@ -956,62 +955,66 @@ def check_site_stability(
                 f"bonds_before={len(bonds_before)}"
             )
 
-        # suggestion.MD #1: do NOT deep-copy *calculator* per call.
-        atoms_opt = optimise_structure(
-            atoms_init,
-            calculator = calculator,
-            fmax       = fmax,
-            steps      = max_steps,
-            verbose    = verbose,
-        )
-
-        # Convergence guard — optimise_structure issues a RuntimeWarning but
-        # we want to raise an actionable error for the stability workflow.
-        # Check forces directly on the returned structure.
-        forces = atoms_opt.get_forces()
-        if frozen_indices:
-            free_mask = np.ones(len(atoms_opt), dtype=bool)
-            free_mask[list(frozen_indices)] = False
-            max_force = float(np.linalg.norm(forces[free_mask], axis=1).max())
-        else:
-            max_force = float(np.linalg.norm(forces, axis=1).max())
-
-        if max_force > fmax:
-            raise OptimisationFailedError(
-                f"[{state}] LBFGS did not converge: max|F| = {max_force:.4f} eV/Å "
-                f"after {max_steps} steps (fmax={fmax} eV/Å)."
+        with acquire_calculator(
+            calculator, purpose=f"adsorption {state} relaxation"
+        ) as calc:
+            atoms_opt = optimise_structure(
+                atoms_init,
+                calculator = calc,
+                fmax       = fmax,
+                steps      = max_steps,
+                verbose    = verbose,
             )
 
-        _check_connectivity_stable(
-            atoms_init, atoms_opt, n_slab, n_ads, state, nl_mult,
-            relevant_indices=ads_indices,
-            n_lat=n_lat,
-        )
+            # Convergence guard — optimise_structure issues a RuntimeWarning but
+            # we want to raise an actionable error for the stability workflow.
+            # Check forces directly on the returned structure.
+            forces = atoms_opt.get_forces()
+            if frozen_indices:
+                free_mask = np.ones(len(atoms_opt), dtype=bool)
+                free_mask[list(frozen_indices)] = False
+                max_force = float(np.linalg.norm(forces[free_mask], axis=1).max())
+            else:
+                max_force = float(np.linalg.norm(forces, axis=1).max())
 
-        # ── Intended-coordination check (occupied state only) ─────────────
-        # Verify each self-adsorbate atom is still bonded to its intended
-        # surface clique in the relaxed structure.  The bonds_before/after
-        # comparison above only catches changes relative to the *initial*
-        # placement; if the initial placement already lacks the intended bond
-        # (e.g. after Kabsch propagation moved the anchor too far), the
-        # bonds_before==bonds_after test passes trivially.  This check uses
-        # the clique stored on the graph node as the ground truth.
-        if include_self:
-            _check_intended_coordination_stable(
-                atoms_opt, G, self_node_ids,
-                n_slab, n_lat, nl_mult,
+            if max_force > fmax:
+                raise OptimisationFailedError(
+                    f"[{state}] LBFGS did not converge: "
+                    f"max|F| = {max_force:.4f} eV/Å after {max_steps} "
+                    f"steps (fmax={fmax} eV/Å)."
+                )
+
+            _check_connectivity_stable(
+                atoms_init, atoms_opt, n_slab, n_ads, state, nl_mult,
+                relevant_indices=ads_indices,
+                n_lat=n_lat,
             )
 
-        energy = float(atoms_opt.get_potential_energy())
+            # ── Intended-coordination check (occupied state only) ─────────────
+            # Verify each self-adsorbate atom is still bonded to its intended
+            # surface clique in the relaxed structure.  The bonds_before/after
+            # comparison above only catches changes relative to the *initial*
+            # placement; if the initial placement already lacks the intended bond
+            # (e.g. after Kabsch propagation moved the anchor too far), the
+            # bonds_before==bonds_after test passes trivially.  This check uses
+            # the clique stored on the graph node as the ground truth.
+            if include_self:
+                _check_intended_coordination_stable(
+                    atoms_opt, G, self_node_ids,
+                    n_slab, n_lat, nl_mult,
+                )
 
-        if verbose:
-            bonds_after = _bond_set(atoms_opt, nl_mult=nl_mult,
-                                    relevant_indices=ads_indices)
-            print(
-                f"  [{state}]  E={energy:.4f} eV  "
-                f"bonds_after={len(bonds_after)}  "
-                f"max|F|={max_force:.4f} eV/Å  ✓ stable"
-            )
+            energy = float(atoms_opt.get_potential_energy())
+
+            if verbose:
+                bonds_after = _bond_set(atoms_opt, nl_mult=nl_mult,
+                                        relevant_indices=ads_indices)
+                print(
+                    f"  [{state}]  E={energy:.4f} eV  "
+                    f"bonds_after={len(bonds_after)}  "
+                    f"max|F|={max_force:.4f} eV/Å  ✓ stable"
+                )
+            atoms_opt.calc = None
 
         # Return n_slab, n_lat and n_self alongside the energy and relaxed atoms
         # so the free-energy section can compute vib_idx_occ from the SAME

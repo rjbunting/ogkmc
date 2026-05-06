@@ -74,7 +74,6 @@ Public API
 
 from __future__ import annotations
 
-import copy
 import os
 from typing import TYPE_CHECKING
 
@@ -86,6 +85,7 @@ from ase import Atoms
 from ase.constraints import FixAtoms
 from ase.optimize import BFGS
 
+from autokmc.io.calculators import acquire_calculator
 from autokmc.sites.stability.adsorption import (
     SurfaceConnectivityError,
     AdsorbateDissociationError,
@@ -741,50 +741,53 @@ def _relax_bond_endpoint(
     from autokmc.structure import optimise_structure
 
     try:
-        calc = copy.deepcopy(calculator)
-        atoms_opt = optimise_structure(
-            atoms_init,
-            calculator = calc,
-            fmax       = fmax,
-            steps      = max_steps,
-            verbose    = verbose,
-        )
-
-        forces = atoms_opt.get_forces()
-        if frozen_indices:
-            free_mask = np.ones(len(atoms_opt), dtype=bool)
-            free_mask[list(frozen_indices)] = False
-            max_force = float(np.linalg.norm(forces[free_mask], axis=1).max())
-        else:
-            max_force = float(np.linalg.norm(forces, axis=1).max())
-
-        if max_force > fmax:
-            raise OptimisationFailedError(
-                f"[{state_label}] LBFGS did not converge: "
-                f"max|F|={max_force:.4f} eV/Å after {max_steps} steps "
-                f"(fmax={fmax} eV/Å)."
+        with acquire_calculator(
+            calculator, purpose=f"bond {state_label} relaxation"
+        ) as calc:
+            atoms_opt = optimise_structure(
+                atoms_init,
+                calculator = calc,
+                fmax       = fmax,
+                steps      = max_steps,
+                verbose    = verbose,
             )
 
-        n_ads = n_lat + n_react
-        ads_indices = set(range(n_slab, n_slab + n_ads))
-        _check_connectivity_stable(
-            atoms_init, atoms_opt, n_slab, n_ads, state_label, nl_mult,
-            relevant_indices=ads_indices,
-            n_lat=n_lat,
-        )
-        for self_ids, self_order, lat_offset in self_groups:
-            _check_intended_coordination_stable(
-                atoms_opt, G, self_ids,
-                n_slab, lat_offset, nl_mult,
-                self_node_order=self_order,
-            )
+            forces = atoms_opt.get_forces()
+            if frozen_indices:
+                free_mask = np.ones(len(atoms_opt), dtype=bool)
+                free_mask[list(frozen_indices)] = False
+                max_force = float(np.linalg.norm(forces[free_mask], axis=1).max())
+            else:
+                max_force = float(np.linalg.norm(forces, axis=1).max())
 
-        energy = float(atoms_opt.get_potential_energy())
-        if verbose:
-            print(
-                f"  [{state_label}] E={energy:.4f} eV  "
-                f"max|F|={max_force:.4f} eV/Å  ✓ stable"
+            if max_force > fmax:
+                raise OptimisationFailedError(
+                    f"[{state_label}] LBFGS did not converge: "
+                    f"max|F|={max_force:.4f} eV/Å after {max_steps} steps "
+                    f"(fmax={fmax} eV/Å)."
+                )
+
+            n_ads = n_lat + n_react
+            ads_indices = set(range(n_slab, n_slab + n_ads))
+            _check_connectivity_stable(
+                atoms_init, atoms_opt, n_slab, n_ads, state_label, nl_mult,
+                relevant_indices=ads_indices,
+                n_lat=n_lat,
             )
+            for self_ids, self_order, lat_offset in self_groups:
+                _check_intended_coordination_stable(
+                    atoms_opt, G, self_ids,
+                    n_slab, lat_offset, nl_mult,
+                    self_node_order=self_order,
+                )
+
+            energy = float(atoms_opt.get_potential_energy())
+            if verbose:
+                print(
+                    f"  [{state_label}] E={energy:.4f} eV  "
+                    f"max|F|={max_force:.4f} eV/Å  ✓ stable"
+                )
+            atoms_opt.calc = None
         return atoms_opt, energy
 
     except (SurfaceConnectivityError, AdsorbateDissociationError,
@@ -811,8 +814,10 @@ def _make_neb_band(
 ) -> tuple["NEB", list[Atoms]]:
     """Build an ASE NEB band of ``n_images + 2`` images between A and B.
 
-    A fresh ``copy.deepcopy(calculator)`` is attached to every image (ASE
-    NEB forbids shared calculators between images).
+    The same calculator instance is attached to every image and ASE's
+    ``allow_shared_calculator`` path is enabled.  This is the current ASE
+    equivalent of deprecated ``SingleCalculatorNEB`` and avoids requiring
+    calculators to be deep-copyable.
     """
     images: list[Atoms] = [atoms_a.copy()]
     for _ in range(int(n_images)):
@@ -824,13 +829,14 @@ def _make_neb_band(
             im.set_constraint(FixAtoms(indices=list(frozen_indices)))
 
     for im in images:
-        im.calc = copy.deepcopy(calculator)
+        im.calc = calculator
 
     neb = NEB(
         images,
         k=float(spring_k),
         climb=bool(climb),
         method="improvedtangent",
+        allow_shared_calculator=True,
     )
 
     if interpolation == "idpp" and _idpp_interpolate is not None:
@@ -968,7 +974,8 @@ def check_bond_site_stability(
        coordination survives.
     3. Run a CI-NEB band of ``n_images`` interior images between the
        two relaxed endpoints with the requested *interpolation* and
-       *spring_k*.  Each image gets a fresh ``copy.deepcopy(calculator)``.
+       *spring_k*.  All images share one acquired calculator via ASE's
+       SingleCalculatorNEB-style path.
     4. Identify the TS as the highest-energy interior image; validate
        (no fragmentation into a third species, no collapse onto an
        endpoint); store all energies / atoms / (optional) full band on
@@ -1092,14 +1099,18 @@ def check_bond_site_stability(
             atoms_empty_init.set_constraint(
                 FixAtoms(indices=[i for i in frozen_indices if i < len(atoms_empty_init)])
             )
-        atoms_empty_opt = optimise_structure(
-            atoms_empty_init,
-            calculator=copy.deepcopy(calculator),
-            fmax=fmax,
-            steps=max_steps,
-            verbose=verbose,
-        )
-        E_empty = float(atoms_empty_opt.get_potential_energy())
+        with acquire_calculator(
+            calculator, purpose="bond gas-product empty-slab relaxation"
+        ) as calc:
+            atoms_empty_opt = optimise_structure(
+                atoms_empty_init,
+                calculator=calc,
+                fmax=fmax,
+                steps=max_steps,
+                verbose=verbose,
+            )
+            E_empty = float(atoms_empty_opt.get_potential_energy())
+            atoms_empty_opt.calc = None
         E_c = E_empty + float(gas_energy)
         atoms_c_opt = _gas_product_neb_endpoint(
             atoms_empty=atoms_empty_opt,
@@ -1180,44 +1191,53 @@ def check_bond_site_stability(
             f"fmax={float(fmax):.4f} eV/Å  max_steps={int(max_steps)}"
         )
 
-    neb, images = _make_neb_band(
-        atoms_ab_opt, atoms_c_opt,
-        n_images       = int(n_images),
-        interpolation  = str(interpolation),
-        spring_k       = float(spring_k),
-        climb          = bool(climb),
-        calculator     = calculator,
-        frozen_indices = frozen_indices,
-    )
-
-    opt = BFGS(neb, logfile=_neb_optimizer_logfile(verbose))
-    opt.run(fmax=float(fmax), steps=int(max_steps))
-
-    if not opt.converged():
-        raise BondNEBNotConvergedError(
-            f"CI-NEB did not converge: fmax={fmax} eV/Å not reached in "
-            f"{max_steps} steps."
+    with acquire_calculator(calculator, purpose="bond NEB") as neb_calc:
+        neb, images = _make_neb_band(
+            atoms_ab_opt, atoms_c_opt,
+            n_images       = int(n_images),
+            interpolation  = str(interpolation),
+            spring_k       = float(spring_k),
+            climb          = bool(climb),
+            calculator     = neb_calc,
+            frozen_indices = frozen_indices,
         )
+        try:
+            opt = BFGS(neb, logfile=_neb_optimizer_logfile(verbose))
+            opt.run(fmax=float(fmax), steps=int(max_steps))
 
-    # ── 5. Identify TS = highest-energy interior image; validate ────────
-    energies = np.array([float(im.get_potential_energy()) for im in images])
-    interior = energies[1:-1]
-    if len(interior) == 0:
-        raise BondNEBNotConvergedError(
-            "NEB band has no interior images (n_images=0); "
-            "cannot identify a TS."
-        )
-    k_ts = 1 + int(np.argmax(interior))
-    E_ts = float(energies[k_ts])
-    atoms_ts = images[k_ts].copy()
+            if not opt.converged():
+                raise BondNEBNotConvergedError(
+                    f"CI-NEB did not converge: fmax={fmax} eV/Å not reached in "
+                    f"{max_steps} steps."
+                )
 
-    lc.energy_ts = E_ts
-    lc.atoms_ts  = atoms_ts
-    if persist_neb_path:
-        lc.neb_path_energies = [
-            float(im.get_potential_energy()) for im in images
-        ]
-        lc.atoms_neb_path = [im.copy() for im in images]
+            # ── 5. Identify TS = highest-energy interior image; validate ────────
+            energies = np.array([float(im.get_potential_energy()) for im in images])
+            interior = energies[1:-1]
+            if len(interior) == 0:
+                raise BondNEBNotConvergedError(
+                    "NEB band has no interior images (n_images=0); "
+                    "cannot identify a TS."
+                )
+            k_ts = 1 + int(np.argmax(interior))
+            E_ts = float(energies[k_ts])
+            atoms_ts = images[k_ts].copy()
+            atoms_ts.calc = None
+
+            lc.energy_ts = E_ts
+            lc.atoms_ts  = atoms_ts
+            if persist_neb_path:
+                lc.neb_path_energies = [
+                    float(im.get_potential_energy()) for im in images
+                ]
+                lc.atoms_neb_path = []
+                for im in images:
+                    snap = im.copy()
+                    snap.calc = None
+                    lc.atoms_neb_path.append(snap)
+        finally:
+            for im in images:
+                im.calc = None
 
     _check_bond_ts_validity(
         atoms_ts, atoms_ab_opt, atoms_c_opt,

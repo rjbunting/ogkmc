@@ -509,21 +509,20 @@ def compute_all_reactions(
         and len(adsorbate_sites) > 1
     ):
         def _one(site: AdsorbateSite) -> list[AdsorptionReaction]:
-            with calculator.acquire() as calc:
-                return get_applicable_reactions(
-                    G, site, calc, gas_energies,
-                    temperature              = temperature,
-                    transmission_coefficient = transmission_coefficient,
-                    frozen_indices           = frozen_indices,
-                    fmax                     = fmax,
-                    max_steps                = max_steps,
-                    verbose                  = verbose,
-                    lateral_interactions     = lateral_interactions,
-                    gas_g                    = gas_g,
-                    partial_pressures        = partial_pressures,
-                    free_energy_options      = free_energy_options,
-                    vib_cache_root           = vib_cache_root,
-                )
+            return get_applicable_reactions(
+                G, site, calculator, gas_energies,
+                temperature              = temperature,
+                transmission_coefficient = transmission_coefficient,
+                frozen_indices           = frozen_indices,
+                fmax                     = fmax,
+                max_steps                = max_steps,
+                verbose                  = verbose,
+                lateral_interactions     = lateral_interactions,
+                gas_g                    = gas_g,
+                partial_pressures        = partial_pressures,
+                free_energy_options      = free_energy_options,
+                vib_cache_root           = vib_cache_root,
+            )
 
         with ThreadPoolExecutor(max_workers=calculator.max_workers) as ex:
             for rxns in ex.map(_one, adsorbate_sites):

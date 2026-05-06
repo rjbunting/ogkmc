@@ -46,10 +46,11 @@ interpolators.
 
 Calculator handling
 -------------------
-Per the AGENTS.md convention, the supplied *calculator* is **deep-copied**
-once per endpoint relaxation and once per NEB image, so the user-supplied
-instance is never mutated and concurrent re-use is safe.  All NEB-specific
-defaults live in :mod:`autokmc.core.constants` (``NEB_*``).
+The supplied *calculator* may be a concrete ASE calculator or a
+CalculatorPool.  Endpoint relaxations acquire one calculator at a time; NEB
+bands acquire one calculator and use ASE's shared-calculator NEB mode.
+Calculators are never deep-copied.  All NEB-specific defaults live in
+:mod:`autokmc.core.constants` (``NEB_*``).
 
 Public API
 ----------
@@ -70,7 +71,6 @@ Public API
 
 from __future__ import annotations
 
-import copy
 import os
 from typing import TYPE_CHECKING
 
@@ -82,6 +82,7 @@ from ase import Atoms
 from ase.constraints import FixAtoms
 from ase.optimize import BFGS
 
+from autokmc.io.calculators import acquire_calculator
 from autokmc.sites.diffusion import (
     DiffusionSite,
     DiffusionLateral,
@@ -628,50 +629,52 @@ def _relax_endpoint(
     from autokmc.structure import optimise_structure  # local: avoid cycle
 
     try:
-        # AGENTS.md: deep-copy per call so loaded ML weights are preserved.
-        calc = copy.deepcopy(calculator)
-        atoms_opt = optimise_structure(
-            atoms_init,
-            calculator = calc,
-            fmax       = fmax,
-            steps      = max_steps,
-            verbose    = verbose,
-        )
-
-        forces = atoms_opt.get_forces()
-        if frozen_indices:
-            free_mask = np.ones(len(atoms_opt), dtype=bool)
-            free_mask[list(frozen_indices)] = False
-            max_force = float(np.linalg.norm(forces[free_mask], axis=1).max())
-        else:
-            max_force = float(np.linalg.norm(forces, axis=1).max())
-
-        if max_force > fmax:
-            raise OptimisationFailedError(
-                f"[{state_label}] LBFGS did not converge: "
-                f"max|F|={max_force:.4f} eV/Å after {max_steps} steps "
-                f"(fmax={fmax} eV/Å)."
+        with acquire_calculator(
+            calculator, purpose=f"diffusion {state_label} relaxation"
+        ) as calc:
+            atoms_opt = optimise_structure(
+                atoms_init,
+                calculator = calc,
+                fmax       = fmax,
+                steps      = max_steps,
+                verbose    = verbose,
             )
 
-        n_ads = n_lat + n_mig
-        ads_indices = set(range(n_slab, n_slab + n_ads))
-        _check_connectivity_stable(
-            atoms_init, atoms_opt, n_slab, n_ads, state_label, nl_mult,
-            relevant_indices=ads_indices,
-            n_lat=n_lat,
-        )
-        _check_intended_coordination_stable(
-            atoms_opt, G, self_node_ids,
-            n_slab, n_lat, nl_mult,
-            self_node_order=self_node_order,
-        )
+            forces = atoms_opt.get_forces()
+            if frozen_indices:
+                free_mask = np.ones(len(atoms_opt), dtype=bool)
+                free_mask[list(frozen_indices)] = False
+                max_force = float(np.linalg.norm(forces[free_mask], axis=1).max())
+            else:
+                max_force = float(np.linalg.norm(forces, axis=1).max())
 
-        energy = float(atoms_opt.get_potential_energy())
-        if verbose:
-            print(
-                f"  [{state_label}] E={energy:.4f} eV  "
-                f"max|F|={max_force:.4f} eV/Å  ✓ stable"
+            if max_force > fmax:
+                raise OptimisationFailedError(
+                    f"[{state_label}] LBFGS did not converge: "
+                    f"max|F|={max_force:.4f} eV/Å after {max_steps} steps "
+                    f"(fmax={fmax} eV/Å)."
+                )
+
+            n_ads = n_lat + n_mig
+            ads_indices = set(range(n_slab, n_slab + n_ads))
+            _check_connectivity_stable(
+                atoms_init, atoms_opt, n_slab, n_ads, state_label, nl_mult,
+                relevant_indices=ads_indices,
+                n_lat=n_lat,
             )
+            _check_intended_coordination_stable(
+                atoms_opt, G, self_node_ids,
+                n_slab, n_lat, nl_mult,
+                self_node_order=self_node_order,
+            )
+
+            energy = float(atoms_opt.get_potential_energy())
+            if verbose:
+                print(
+                    f"  [{state_label}] E={energy:.4f} eV  "
+                    f"max|F|={max_force:.4f} eV/Å  ✓ stable"
+                )
+            atoms_opt.calc = None
         return atoms_opt, energy
 
     except (SurfaceConnectivityError, AdsorbateDissociationError,
@@ -698,14 +701,10 @@ def _make_neb_band(
 ) -> tuple["NEB", list[Atoms]]:
     """Build an ASE NEB band of ``n_images + 2`` images between A and B.
 
-    A fresh ``copy.deepcopy(calculator)`` is attached to **every** image.
-    ASE's NEB explicitly forbids two images from sharing a calculator
-    instance — :class:`ase.mep.NEB.get_forces` raises ``ValueError("One or
-    more NEB images share the same calculator …")`` because per-image
-    forces / energies cannot be cached safely on a single ``Atoms.calc``
-    that is being pulled out from under the parallel image loop.  ASE
-    suggests :class:`ase.mep.SingleCalculatorNEB` as an alternative but
-    explicitly recommends separate calculators, so we honour that.
+    The same calculator instance is attached to every image and ASE's
+    ``allow_shared_calculator`` path is enabled.  This is the current ASE
+    equivalent of deprecated ``SingleCalculatorNEB`` and avoids requiring
+    calculators to be deep-copyable.
 
     ``interpolation == "idpp"`` uses the IDPP interpolator (falling back
     to linear if the optional ASE module is unavailable); otherwise a
@@ -722,16 +721,15 @@ def _make_neb_band(
         for im in images:
             im.set_constraint(FixAtoms(indices=list(frozen_indices)))
 
-    # Per-image deep-copy of the calculator (required by ASE NEB).  The
-    # user-supplied calculator is never mutated.
     for im in images:
-        im.calc = copy.deepcopy(calculator)
+        im.calc = calculator
 
     neb = NEB(
         images,
         k=float(spring_k),
         climb=bool(climb),
         method="improvedtangent",
+        allow_shared_calculator=True,
     )
 
     if interpolation == "idpp" and _idpp_interpolate is not None:
@@ -890,7 +888,8 @@ def check_diffusion_stability(
        ordering identical to A).
     3. Build an ``n_images``-image CI-NEB band between the two relaxed
        endpoints (IDPP or linear interpolation, configurable spring
-       constant).  Each image gets a fresh deep-copy of *calculator*.
+       constant).  All images share one acquired calculator via ASE's
+       SingleCalculatorNEB-style path.
     4. Run :class:`~ase.optimize.BFGS` on the NEB to ``fmax``.
     5. Identify the TS as the highest-energy interior image; validate
        (no fragmentation, no collapse onto an endpoint); store all
@@ -908,7 +907,9 @@ def check_diffusion_stability(
         The lateral class returned by :func:`check_diffusion_site_lateral`
         for this member.
     calculator
-        ASE calculator (deep-copied per relaxation and per NEB image).
+        ASE calculator or CalculatorPool.  Endpoint relaxations and NEB
+        calculations acquire calculators from the pool instead of copying
+        them.
     frozen_indices : list[int] | None
         Slab indices to freeze with :class:`~ase.constraints.FixAtoms`.
         Same convention as :func:`autokmc.sites.stability.adsorption.check_site_stability`.
@@ -1046,47 +1047,56 @@ def check_diffusion_stability(
             f"fmax={float(fmax):.4f} eV/Å  max_steps={int(max_steps)}"
         )
 
-    neb, images = _make_neb_band(
-        atoms_a_opt, atoms_b_opt,
-        n_images       = int(n_images),
-        interpolation  = str(interpolation),
-        spring_k       = float(spring_k),
-        climb          = bool(climb),
-        calculator     = calculator,
-        frozen_indices = frozen_indices,
-    )
-
-    opt = BFGS(neb, logfile=_neb_optimizer_logfile(verbose))
-    opt.run(fmax=float(fmax), steps=int(max_steps))
-
-    if not opt.converged():
-        raise NEBNotConvergedError(
-            f"CI-NEB did not converge: fmax={fmax} eV/Å not reached in "
-            f"{max_steps} steps."
+    with acquire_calculator(calculator, purpose="diffusion NEB") as neb_calc:
+        neb, images = _make_neb_band(
+            atoms_a_opt, atoms_b_opt,
+            n_images       = int(n_images),
+            interpolation  = str(interpolation),
+            spring_k       = float(spring_k),
+            climb          = bool(climb),
+            calculator     = neb_calc,
+            frozen_indices = frozen_indices,
         )
+        try:
+            opt = BFGS(neb, logfile=_neb_optimizer_logfile(verbose))
+            opt.run(fmax=float(fmax), steps=int(max_steps))
 
-    # ── 5. Identify TS = highest-energy interior image; validate ────────
-    energies = np.array([float(im.get_potential_energy()) for im in images])
-    interior = energies[1:-1]
-    if len(interior) == 0:
-        raise NEBNotConvergedError(
-            "NEB band has no interior images (n_images=0); "
-            "cannot identify a TS."
-        )
-    k_ts = 1 + int(np.argmax(interior))
-    E_ts = float(energies[k_ts])
-    atoms_ts = images[k_ts].copy()
+            if not opt.converged():
+                raise NEBNotConvergedError(
+                    f"CI-NEB did not converge: fmax={fmax} eV/Å not reached in "
+                    f"{max_steps} steps."
+                )
 
-    # Store TS and NEB path immediately — they will be available even if
-    # _check_ts_validity raises so callers can read partial results from
-    # lateral_class after catching the exception.
-    lateral_class.energy_ts = E_ts
-    lateral_class.atoms_ts  = atoms_ts
-    if persist_neb_path:
-        lateral_class.neb_path_energies = [
-            float(im.get_potential_energy()) for im in images
-        ]
-        lateral_class.atoms_neb_path = [im.copy() for im in images]
+            # ── 5. Identify TS = highest-energy interior image; validate ────────
+            energies = np.array([float(im.get_potential_energy()) for im in images])
+            interior = energies[1:-1]
+            if len(interior) == 0:
+                raise NEBNotConvergedError(
+                    "NEB band has no interior images (n_images=0); "
+                    "cannot identify a TS."
+                )
+            k_ts = 1 + int(np.argmax(interior))
+            E_ts = float(energies[k_ts])
+            atoms_ts = images[k_ts].copy()
+            atoms_ts.calc = None
+
+            # Store TS and NEB path immediately — they will be available even if
+            # _check_ts_validity raises so callers can read partial results from
+            # lateral_class after catching the exception.
+            lateral_class.energy_ts = E_ts
+            lateral_class.atoms_ts  = atoms_ts
+            if persist_neb_path:
+                lateral_class.neb_path_energies = [
+                    float(im.get_potential_energy()) for im in images
+                ]
+                lateral_class.atoms_neb_path = []
+                for im in images:
+                    snap = im.copy()
+                    snap.calc = None
+                    lateral_class.atoms_neb_path.append(snap)
+        finally:
+            for im in images:
+                im.calc = None
 
     _check_ts_validity(
         atoms_ts, atoms_a_opt, atoms_b_opt,

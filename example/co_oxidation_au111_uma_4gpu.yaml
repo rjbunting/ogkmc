@@ -53,18 +53,18 @@ reactants:
 # FAIR-Chem UMA setup. FAIR-Chem uses task_name="oc20" for heterogeneous
 # catalysis. The first run needs fairchem-core installed and Hugging Face access
 # to facebook/UMA, either through huggingface-cli login or HF_TOKEN.
+#
+# This builds four independent FAIRChemCalculator instances for AutoKMC's
+# CalculatorPool. Keep device as "cuda" here: FairChem rejects "cuda:0" style
+# ordinal strings, so GPU visibility/placement should be handled by the job
+# launcher environment.
 calculator:
-  factory: fairchem.core.FAIRChemCalculator
+  factory: fairchem.core.FAIRChemCalculator.from_model_checkpoint
   factory_kwargs:
-    predictor:
-      factory: fairchem.core.pretrained_mlip.get_predict_unit
-      args: ["uma-s-1p2"]
-      factory_kwargs:
-        device: cuda
+    name_or_path: uma-s-1p2
     task_name: oc20
+    device: cuda
   copies: 4
-  gpu_devices: ["cuda:0", "cuda:1", "cuda:2", "cuda:3"]
-  gpu_device_arg: predictor.factory_kwargs.device
   max_workers: 4
 
 adsorbate_sites:

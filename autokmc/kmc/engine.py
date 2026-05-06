@@ -29,7 +29,6 @@ Public API
 from __future__ import annotations
 
 import random
-from contextlib import contextmanager
 from typing import Iterable
 
 import numpy as np
@@ -78,20 +77,11 @@ from autokmc.sites.stability.adsorption import (
 )
 from autokmc.sites.stability.diffusion import check_diffusion_site_lateral
 from autokmc.sites.stability.bond import check_bond_site_lateral
-from autokmc.io.calculators import CalculatorPool
+from autokmc.io.calculators import CalculatorConfigError
 from autokmc.utils.logging import get_logger
 from autokmc.core.constants import LATERAL_SHELLS_DEFAULT
 
 _log = get_logger(__name__)
-
-
-@contextmanager
-def _acquire_calculator(calculator):
-    if isinstance(calculator, CalculatorPool):
-        with calculator.acquire() as calc:
-            yield calc
-    else:
-        yield calculator
 
 
 # Sampling, indexing, state mutation, and event execution live in focused
@@ -277,21 +267,20 @@ def _recompute_affected_sites(
             for m_idx in range(len(site.member_node_ids)):
                 cliques_m = _affected_surface_cliques(G, site, m_idx)
                 if cliques_m & affected_cliques:
-                    with _acquire_calculator(calculator) as calc:
-                        rxns = get_applicable_reactions(
-                            G, site, calc, gas_energies,
-                            temperature              = temperature,
-                            transmission_coefficient = transmission_coefficient,
-                            frozen_indices           = frozen_indices,
-                            fmax                     = fmax,
-                            max_steps                = max_steps,
-                            verbose                  = verbose,
-                            lateral_interactions     = lateral_interactions,
-                            gas_g                    = gas_g,
-                            partial_pressures        = partial_pressures,
-                            free_energy_options      = free_energy_options,
-                            vib_cache_root           = vib_cache_root,
-                        )
+                    rxns = get_applicable_reactions(
+                        G, site, calculator, gas_energies,
+                        temperature              = temperature,
+                        transmission_coefficient = transmission_coefficient,
+                        frozen_indices           = frozen_indices,
+                        fmax                     = fmax,
+                        max_steps                = max_steps,
+                        verbose                  = verbose,
+                        lateral_interactions     = lateral_interactions,
+                        gas_g                    = gas_g,
+                        partial_pressures        = partial_pressures,
+                        free_energy_options      = free_energy_options,
+                        vib_cache_root           = vib_cache_root,
+                    )
                     updated_reactions.extend(rxns)
                     if rxn_index is not None:
                         rxn_index.install_site(site, rxns)
@@ -401,55 +390,52 @@ def _recompute_affected_sites(
 
     updated_reactions: list[Reaction | DiffusionReaction | BondReaction] = []
     for site in sites_to_update.values():
-        with _acquire_calculator(calculator) as calc:
-            rxns = get_applicable_reactions(
-                G, site, calc, gas_energies,
-                temperature              = temperature,
-                transmission_coefficient = transmission_coefficient,
-                frozen_indices           = frozen_indices,
-                fmax                     = fmax,
-                max_steps                = max_steps,
-                verbose                  = verbose,
-                lateral_interactions     = lateral_interactions,
-                gas_g                    = gas_g,
-                partial_pressures        = partial_pressures,
-                free_energy_options      = free_energy_options,
-                vib_cache_root           = vib_cache_root,
-            )
+        rxns = get_applicable_reactions(
+            G, site, calculator, gas_energies,
+            temperature              = temperature,
+            transmission_coefficient = transmission_coefficient,
+            frozen_indices           = frozen_indices,
+            fmax                     = fmax,
+            max_steps                = max_steps,
+            verbose                  = verbose,
+            lateral_interactions     = lateral_interactions,
+            gas_g                    = gas_g,
+            partial_pressures        = partial_pressures,
+            free_energy_options      = free_energy_options,
+            vib_cache_root           = vib_cache_root,
+        )
         updated_reactions.extend(rxns)
         if rxn_index is not None:
             rxn_index.install_site(site, rxns)
 
     dkwargs = dict(diffusion_kwargs or {})
     for ds in ds_to_update.values():
-        with _acquire_calculator(calculator) as calc:
-            rxns = get_applicable_diffusions(
-                G, ds, calc,
-                temperature              = temperature,
-                transmission_coefficient = transmission_coefficient,
-                frozen_indices           = frozen_indices,
-                verbose                  = verbose,
-                lateral_interactions     = lateral_interactions,
-                free_energy_options      = free_energy_options,
-                vib_cache_root           = vib_cache_root,
-                **dkwargs,
-            )
+        rxns = get_applicable_diffusions(
+            G, ds, calculator,
+            temperature              = temperature,
+            transmission_coefficient = transmission_coefficient,
+            frozen_indices           = frozen_indices,
+            verbose                  = verbose,
+            lateral_interactions     = lateral_interactions,
+            free_energy_options      = free_energy_options,
+            vib_cache_root           = vib_cache_root,
+            **dkwargs,
+        )
         updated_reactions.extend(rxns)
         if rxn_index is not None:
             rxn_index.install_site(ds, rxns)
 
     bkwargs = dict(bond_kwargs or {})
     for brs in brs_to_update.values():
-        with _acquire_calculator(calculator) as calc:
-            rxns = get_applicable_bond_reactions(
-                G, brs, calc,
-                temperature              = temperature,
-                transmission_coefficient = transmission_coefficient,
-                frozen_indices           = frozen_indices,
-                lateral_interactions     = lateral_interactions,
-                verbose                  = verbose,
-                **bkwargs,
-            )
+        rxns = get_applicable_bond_reactions(
+            G, brs, calculator,
+            temperature              = temperature,
+            transmission_coefficient = transmission_coefficient,
+            frozen_indices           = frozen_indices,
+            lateral_interactions     = lateral_interactions,
+            verbose                  = verbose,
+            **bkwargs,
+        )
         updated_reactions.extend(rxns)
         if rxn_index is not None:
             rxn_index.install_site(brs, rxns)
@@ -1020,12 +1006,13 @@ def run_kmc_steps(
             _grow_kw.setdefault("frozen_indices", frozen_indices)
 
             try:
-                with _acquire_calculator(calculator) as calc:
-                    new_brs = expand_bond_sites_after_event(
-                        G, chosen,
-                        calculator=calc,
-                        **_grow_kw,
-                    )
+                new_brs = expand_bond_sites_after_event(
+                    G, chosen,
+                    calculator=calculator,
+                    **_grow_kw,
+                )
+            except CalculatorConfigError:
+                raise
             except Exception as exc:  # pragma: no cover
                 _log.warning("expand_bond_sites_after_event failed: %s", exc)
                 new_brs = []

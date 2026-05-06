@@ -67,7 +67,7 @@ from typing import Iterable
 import numpy as np
 import networkx as nx
 
-from autokmc.io.calculators import CalculatorPool
+from autokmc.io.calculators import CalculatorConfigError, CalculatorPool
 from autokmc.sites.bond import BondReactionSite, BondReactionLateral
 from autokmc.reactions.rates import EA_MIN, DEFAULT_TRANSMISSION_COEFFICIENT, _eyring_prefactor
 from autokmc.sites.stability.bond import (
@@ -418,6 +418,8 @@ def get_applicable_bond_reactions(
                     )
                 lc.stable         = False
                 lc.invalid_reason = reason
+            except CalculatorConfigError:
+                raise
             except Exception as exc:
                 reason = f"{type(exc).__name__}: {exc}"
                 _log.error(
@@ -490,23 +492,22 @@ def compute_all_bond_reactions(
         and len(sites) > 1
     ):
         def _one(brs: BondReactionSite) -> list[BondReaction]:
-            with calculator.acquire() as calc:
-                return get_applicable_bond_reactions(
-                    G, brs, calc,
-                    temperature              = temperature,
-                    transmission_coefficient = transmission_coefficient,
-                    frozen_indices           = frozen_indices,
-                    fmax                     = fmax,
-                    max_steps                = max_steps,
-                    n_images                 = n_images,
-                    climb                    = climb,
-                    spring_k                 = spring_k,
-                    interpolation            = interpolation,
-                    nl_mult                  = nl_mult,
-                    persist_neb_path         = persist_neb_path,
-                    lateral_interactions     = lateral_interactions,
-                    verbose                  = verbose,
-                )
+            return get_applicable_bond_reactions(
+                G, brs, calculator,
+                temperature              = temperature,
+                transmission_coefficient = transmission_coefficient,
+                frozen_indices           = frozen_indices,
+                fmax                     = fmax,
+                max_steps                = max_steps,
+                n_images                 = n_images,
+                climb                    = climb,
+                spring_k                 = spring_k,
+                interpolation            = interpolation,
+                nl_mult                  = nl_mult,
+                persist_neb_path         = persist_neb_path,
+                lateral_interactions     = lateral_interactions,
+                verbose                  = verbose,
+            )
 
         with ThreadPoolExecutor(max_workers=calculator.max_workers) as ex:
             for rxns in ex.map(_one, sites):

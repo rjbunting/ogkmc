@@ -13,6 +13,7 @@ from ase.calculators.emt import EMT
 from ase.constraints import FixAtoms
 
 from autokmc.core.constants import RANDOM_SEED
+from autokmc.io.calculators import acquire_calculator
 from autokmc.structure.builders import (
     _apply_composition,
     _build_surface_parent_cell,
@@ -147,14 +148,17 @@ def build_surface(
         if verbose:
             print(f"  Fixing bottom {n_freeze_layers} layer(s): {len(fixed_indices)} atoms")
 
-    return optimise_structure(
-        atoms,
-        calculator=calculator,
-        fmax=fmax,
-        steps=max_steps,
-        logfile=logfile,
-        verbose=verbose,
-    )
+    with acquire_calculator(calculator, purpose="surface relaxation") as calc:
+        result = optimise_structure(
+            atoms,
+            calculator=calc,
+            fmax=fmax,
+            steps=max_steps,
+            logfile=logfile,
+            verbose=verbose,
+        )
+        result.calc = None
+        return result
 
 
 def _orthogonalise_slab(

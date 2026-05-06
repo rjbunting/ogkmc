@@ -55,6 +55,7 @@ from ase.optimize import LBFGS
 
 from autokmc.core.graph import build_graph
 from autokmc.core.constants import NL_MULT_DEFAULT, RANDOM_SEED
+from autokmc.io.calculators import acquire_calculator
 from autokmc.species.smiles import smiles_to_dirname
 from autokmc.utils.logging import get_logger
 
@@ -465,18 +466,20 @@ def build_reactant(
     # 2. Optional ASE relaxation + energy
     energy = float("nan")
     if calculator is not None:
-        _optimise(atoms, calculator, fmax=fmax, steps=steps)
-        try:
-            energy = float(atoms.get_potential_energy())
-        except Exception as exc:
-            # Don't silently swallow calculator failures — users see
-            # `nan` and assume "no calculator", but it might mean the
-            # calculator crashed.  Warn loudly via the package logger.
-            _log.warning(
-                "build_reactant(%r): calculator failed to evaluate energy "
-                "after relaxation (%s); Reactant.energy left as NaN.",
-                smiles, exc,
-            )
+        with acquire_calculator(calculator, purpose="gas-phase reactant relaxation") as calc:
+            _optimise(atoms, calc, fmax=fmax, steps=steps)
+            try:
+                energy = float(atoms.get_potential_energy())
+            except Exception as exc:
+                # Don't silently swallow calculator failures — users see
+                # `nan` and assume "no calculator", but it might mean the
+                # calculator crashed.  Warn loudly via the package logger.
+                _log.warning(
+                    "build_reactant(%r): calculator failed to evaluate energy "
+                    "after relaxation (%s); Reactant.energy left as NaN.",
+                    smiles, exc,
+                )
+        atoms.calc = None
 
     # 3. Tag every atom as adsorbate (molecules have no bulk interior and are
     #    not part of the surface — they will adsorb onto it).

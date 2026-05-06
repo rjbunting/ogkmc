@@ -14,6 +14,7 @@ from autokmc.io.config import (
 )
 from autokmc.io.calculators import (
     CalculatorCfg,
+    CalculatorPool,
     build_calculator,
     calculator_meta,
 )
@@ -103,9 +104,10 @@ def test_schema_version_mismatch(tmp_path):
 def test_build_calculator_emt():
     cfg = CalculatorCfg(import_path="ase.calculators.emt.EMT", kwargs={})
     calc = build_calculator(cfg)
-    assert calc is not None
-    # Must look like an ASE calculator.
-    assert hasattr(calc, "get_potential_energy")
+    assert isinstance(calc, CalculatorPool)
+    with calc.acquire() as concrete:
+        # Must look like an ASE calculator.
+        assert hasattr(concrete, "get_potential_energy")
 
 
 def test_build_calculator_none():

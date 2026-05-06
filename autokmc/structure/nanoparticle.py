@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import copy
 import os
 from typing import Dict, Iterable, Mapping, Optional, Tuple
 
@@ -13,6 +12,7 @@ from ase.calculators.emt import EMT
 from ase.optimize import LBFGS
 
 from autokmc.core.constants import RANDOM_SEED
+from autokmc.io.calculators import acquire_calculator
 from autokmc.structure.builders import (
     _apply_composition,
     _build_primitive_cell,
@@ -88,32 +88,34 @@ def calculate_surface_energies(
         fmax=fmax, verbose=verbose,
     )
     bulk_atoms = _build_primitive_cell(primary, crystal_structure, lp)
-    bulk_calc = copy.deepcopy(calculator)
-    bulk_relaxed = optimise_structure(
-        bulk_atoms,
-        calculator=bulk_calc,
-        fmax=fmax,
-        steps=max_steps,
-        logfile=os.devnull,
-        verbose=False,
-    )
-    e_bulk_per_atom = float(bulk_relaxed.get_potential_energy()) / len(bulk_relaxed)
+    with acquire_calculator(calculator, purpose="bulk surface-energy relaxation") as calc:
+        bulk_relaxed = optimise_structure(
+            bulk_atoms,
+            calculator=calc,
+            fmax=fmax,
+            steps=max_steps,
+            logfile=os.devnull,
+            verbose=False,
+        )
+        e_bulk_per_atom = float(bulk_relaxed.get_potential_energy()) / len(bulk_relaxed)
+        bulk_relaxed.calc = None
 
     out: dict[tuple[int, int, int], float] = {}
     for facet in facets:
         hkl = _normalise_miller_index(facet)
         slab = ase_surface(bulk_atoms, hkl, layers=int(layers), vacuum=float(vacuum))
         slab.pbc = (True, True, False)
-        slab_calc = copy.deepcopy(calculator)
-        slab_relaxed = optimise_structure(
-            slab,
-            calculator=slab_calc,
-            fmax=fmax,
-            steps=max_steps,
-            logfile=os.devnull,
-            verbose=False,
-        )
-        e_slab = float(slab_relaxed.get_potential_energy())
+        with acquire_calculator(calculator, purpose="slab surface-energy relaxation") as calc:
+            slab_relaxed = optimise_structure(
+                slab,
+                calculator=calc,
+                fmax=fmax,
+                steps=max_steps,
+                logfile=os.devnull,
+                verbose=False,
+            )
+            e_slab = float(slab_relaxed.get_potential_energy())
+            slab_relaxed.calc = None
         area = float(np.linalg.norm(np.cross(slab.cell[0], slab.cell[1])))
         if area <= 0.0:
             raise ValueError(f"facet {hkl} produced a zero-area slab cell")
@@ -232,14 +234,16 @@ def build_nanoparticle(
         print("  PBC            : True (effective periodicity inferred from bonding in build_graph)")
         _print_divider()
 
-    atoms = optimise_structure(
-        atoms,
-        calculator=calculator,
-        fmax=fmax,
-        steps=max_steps,
-        logfile=logfile,
-        verbose=verbose,
-    )
+    with acquire_calculator(calculator, purpose="nanoparticle relaxation") as calc:
+        atoms = optimise_structure(
+            atoms,
+            calculator=calc,
+            fmax=fmax,
+            steps=max_steps,
+            logfile=logfile,
+            verbose=verbose,
+        )
+        atoms.calc = None
     return atoms
 
 

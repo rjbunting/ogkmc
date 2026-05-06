@@ -15,6 +15,9 @@ Need to do cases when adsorbate bonds will stretch on the surface (oxygen)
 
 check_diffusion_sites.py:
 Need to prune further... there has to be some way, but I'm just unsure!
+Shared-calculator NEB is now used to support non-deepcopyable ML calculators.
+This may need to change for DFT calculators where passing wavefunctions
+between separate image calculators is important.
 
 check_diffusion_sites.py (_check_ts_validity endpoint-collapse):
 The endpoint-collapse check only raises ``TransitionStateInvalidError`` for

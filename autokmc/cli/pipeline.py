@@ -8,7 +8,13 @@ from pathlib import Path
 
 import numpy as np
 
-from autokmc.io.calculators import build_calculator, calculator_meta, primary_calculator
+from autokmc.io.calculators import (
+    CalculatorPool,
+    acquire_calculator,
+    build_calculator,
+    calculator_meta,
+    primary_calculator,
+)
 from autokmc.io.checkpoint import CheckpointWriter, load_checkpoint
 from autokmc.io.config import RunConfig
 from autokmc.io.persistence import ReactionWriter
@@ -88,51 +94,53 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
     if calc is None:
         _log.warning("No calculator configured — falling back to ASE EMT.")
         from ase.calculators.emt import EMT
-        calc = EMT()
-        calc_resource = calc
+        calc_resource = CalculatorPool([EMT()])
+        calc = primary_calculator(calc_resource)
     elif verbose_run:
         print(f"[autokmc]   calculator ready: {type(calc).__name__}")
 
     # 2. Structure
     s = cfg.structure
     _stage(f"Stage 2/7: building {s.kind} structure", verbose=verbose_run)
-    if s.kind == "surface":
-        atoms = build_surface(
-            composition       = s.composition,
-            crystal_structure = s.crystal_structure,
-            miller_index      = tuple(s.miller_index),
-            lattice_constant  = s.lattice_constant,
-            min_slab_size     = s.min_slab_size,
-            min_vacuum_size   = s.min_vacuum_size,
-            goal_x            = s.goal_x,
-            goal_y            = s.goal_y,
-            n_freeze_layers   = s.n_freeze_layers,
-            fmax              = s.fmax,
-            max_steps         = s.max_steps,
-            calculator        = calc,
-            verbose           = verbose_run,
-            **(s.extra_kwargs or {}),
-        )
-    elif s.kind == "nanoparticle":
-        atoms = build_nanoparticle(
-            composition       = s.composition,
-            crystal_structure = s.crystal_structure,
-            lattice_constant  = s.lattice_constant,
-            target_atoms      = int(s.n_atoms) if s.n_atoms else 600,
-            surface_energies  = s.surface_energies,
-            fmax              = s.fmax,
-            max_steps         = s.max_steps,
-            surface_energy_facets    = s.surface_energy_facets,
-            surface_energy_layers    = s.surface_energy_layers,
-            surface_energy_vacuum    = s.surface_energy_vacuum,
-            surface_energy_fmax      = s.surface_energy_fmax,
-            surface_energy_max_steps = s.surface_energy_max_steps,
-            calculator        = calc,
-            verbose           = verbose_run,
-            **(s.extra_kwargs or {}),
-        )
-    else:
-        raise ValueError(f"unknown structure.kind={s.kind!r} (expected surface|nanoparticle)")
+    with acquire_calculator(calc_resource, purpose="structure construction") as calc:
+        if s.kind == "surface":
+            atoms = build_surface(
+                composition       = s.composition,
+                crystal_structure = s.crystal_structure,
+                miller_index      = tuple(s.miller_index),
+                lattice_constant  = s.lattice_constant,
+                min_slab_size     = s.min_slab_size,
+                min_vacuum_size   = s.min_vacuum_size,
+                goal_x            = s.goal_x,
+                goal_y            = s.goal_y,
+                n_freeze_layers   = s.n_freeze_layers,
+                fmax              = s.fmax,
+                max_steps         = s.max_steps,
+                calculator        = calc,
+                verbose           = verbose_run,
+                **(s.extra_kwargs or {}),
+            )
+        elif s.kind == "nanoparticle":
+            atoms = build_nanoparticle(
+                composition       = s.composition,
+                crystal_structure = s.crystal_structure,
+                lattice_constant  = s.lattice_constant,
+                target_atoms      = int(s.n_atoms) if s.n_atoms else 600,
+                surface_energies  = s.surface_energies,
+                fmax              = s.fmax,
+                max_steps         = s.max_steps,
+                surface_energy_facets    = s.surface_energy_facets,
+                surface_energy_layers    = s.surface_energy_layers,
+                surface_energy_vacuum    = s.surface_energy_vacuum,
+                surface_energy_fmax      = s.surface_energy_fmax,
+                surface_energy_max_steps = s.surface_energy_max_steps,
+                calculator        = calc,
+                verbose           = verbose_run,
+                **(s.extra_kwargs or {}),
+            )
+        else:
+            raise ValueError(f"unknown structure.kind={s.kind!r} (expected surface|nanoparticle)")
+        atoms.calc = None
 
     frozen_indices = list(atoms.info.get("frozen_indices", []) or []) or None
     if verbose_run:
@@ -196,7 +204,7 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
         rx = build_reactant(
             r.smiles,
             add_hydrogens             = r.add_hydrogens,
-            calculator                = calc if r.relax_in_gas else None,
+            calculator                = calc_resource if r.relax_in_gas else None,
             free_energy_options       = free_energy_options if fe_cfg.enabled else None,
             free_energy_temperature_k = cfg.kmc.temperature_k,
             partial_pressure_bar      = (
@@ -225,7 +233,7 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
     all_sites: list = []
     for rx in reactants_built:
         if verbose_run:
-            if asc.prune_stable_only and calc is not None:
+            if asc.prune_stable_only and calc_resource is not None:
                 print(
                     f"[autokmc]   {rx.smiles!r}: searching placements; "
                     "candidate iso-classes will each receive one stability "
@@ -239,7 +247,7 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
         sites = find_adsorbate_sites(
             G, rx,
             prune_stable_only = asc.prune_stable_only,
-            calculator        = calc,
+            calculator        = calc_resource,
             frozen_indices    = frozen_indices,
             prune_fmax        = asc.fmax,
             prune_max_steps   = asc.max_steps,
@@ -375,7 +383,7 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
                 rx_leaf = build_reactant(
                     cs,
                     add_hydrogens             = False,
-                    calculator                = calc,
+                    calculator                = calc_resource,
                     free_energy_options       = free_energy_options if fe_cfg.enabled else None,
                     free_energy_temperature_k = cfg.kmc.temperature_k,
                     # Leaf species are produced on-surface only — they are not
@@ -390,7 +398,7 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
                 leaf_sites = find_adsorbate_sites(
                     G, rx_leaf,
                     prune_stable_only = asc.prune_stable_only,
-                    calculator        = calc,
+                    calculator        = calc_resource,
                     frozen_indices    = frozen_indices,
                     prune_fmax        = asc.fmax,
                     prune_max_steps   = asc.max_steps,
@@ -435,12 +443,12 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
             # Stage 1 — calculator-based A+B endpoint stability prune.
             # Runs on the full enumerated set so no viable site is discarded
             # before its stability has been assessed.
-            if b.prune_with_calculator and calc is not None and bond_sites:
+            if b.prune_with_calculator and calc_resource is not None and bond_sites:
                 species_by_smi: dict = {
                     canonical_smiles(rx.smiles): rx for rx in reactants_built
                 }
                 bond_sites = prune_unstable_bond_sites(
-                    G, bond_sites, species_by_smi, calc,
+                    G, bond_sites, species_by_smi, calc_resource,
                     frozen_indices = frozen_indices,
                     fmax           = b.prune_fmax,
                     max_steps      = b.prune_max_steps,
