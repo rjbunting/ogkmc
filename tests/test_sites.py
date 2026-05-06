@@ -8,6 +8,7 @@ import networkx as nx
 import numpy as np
 import pytest
 from ase import Atoms
+from ase.calculators.singlepoint import SinglePointCalculator
 
 from autokmc.sites.anchors import _optimise_position
 from autokmc.sites.adsorbate import (
@@ -15,6 +16,7 @@ from autokmc.sites.adsorbate import (
     find_adsorbate_sites,
     _geometry_connectivity_mismatch,
     optimise_adsorbate_site_positions,
+    prune_unstable_adsorbate_sites,
     rebuild_adsorbate_reverse_indexes,
     push_member_positions_to_graph,
 )
@@ -564,6 +566,60 @@ def test_geometry_refinement_repels_unbonded_atoms_from_bonded_surface(monkeypat
     )
 
     assert seen["energy"] > 1.0
+
+
+def test_adsorbate_pruning_reads_energy_before_detaching_calculator(monkeypatch):
+    G = nx.Graph()
+    G.graph["cell"] = np.eye(3) * 10.0
+    G.graph["pbc"] = np.array([True, True, True])
+    G.add_node(
+        0,
+        type="surface",
+        element="Pt",
+        position=np.array([0.0, 0.0, 0.0]),
+        index=0,
+    )
+
+    site = AdsorbateSite(
+        reactant="[O]",
+        n_atoms=1,
+        atom_cliques=[frozenset({0})],
+        positions=np.array([[0.0, 0.0, 1.8]]),
+        iso_class=0,
+        members=[[frozenset({0})]],
+        member_node_ids=[],
+    )
+    reactant = SimpleNamespace(
+        smiles="[O]",
+        atoms=Atoms("O", positions=[[0.0, 0.0, 0.0]]),
+        graph=nx.Graph(),
+    )
+    reactant.graph.add_node(0, element="O")
+
+    def fake_optimise_structure(atoms, **_kwargs):
+        opt = atoms.copy()
+        opt.calc = SinglePointCalculator(
+            opt,
+            energy=-12.3,
+            forces=np.zeros((len(opt), 3)),
+        )
+        return opt
+
+    monkeypatch.setattr(
+        "autokmc.structure.optimise_structure",
+        fake_optimise_structure,
+    )
+
+    stable = prune_unstable_adsorbate_sites(
+        G,
+        [site],
+        reactant,
+        calculator=object(),
+        fmax=0.05,
+        max_steps=1,
+    )
+
+    assert stable == [site]
 
 
 def test_slab_anchor_optimisation_keeps_top_site_above_surface(monkeypatch):

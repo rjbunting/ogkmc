@@ -1398,6 +1398,7 @@ def prune_unstable_adsorbate_sites(
                     max_force = float(np.linalg.norm(forces[free_mask], axis=1).max())
                 else:
                     max_force = float(np.linalg.norm(forces, axis=1).max())
+                E = float(atoms_opt.get_potential_energy())
                 atoms_opt.calc = None
         except Exception as exc:
             if isinstance(exc, CalculatorConfigError):
@@ -1470,8 +1471,6 @@ def prune_unstable_adsorbate_sites(
             n_pruned += 1
             _remove_iso_class_nodes(G, ms)
             continue
-
-        E = float(atoms_opt.get_potential_energy())
 
         # ── Update positions from ML-relaxed geometry ─���───────────────────
         # Extract the adsorbate atoms (last n_ads rows of atoms_opt) and
