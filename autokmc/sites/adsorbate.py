@@ -533,11 +533,9 @@ def _adsorbate_pose_is_outward(
     *,
     margin: float = 1e-8,
 ) -> bool:
-    """Return False when a non-periodic propagated pose points into the particle."""
-    if np.asarray(pbc, dtype=bool).any():
-        return True
-
+    """Return False when a propagated pose points into the surface."""
     pos_arr = np.asarray(positions, dtype=float)
+    is_slab = bool(np.asarray(pbc, dtype=bool).any())
     for atom_i, clq in enumerate(atom_cliques):
         if clq is None:
             continue
@@ -546,6 +544,11 @@ def _adsorbate_pose_is_outward(
             for s in clq if int(s) in G
         ]
         if not rows:
+            continue
+        if is_slab:
+            z_ref = max(float(p[2]) for p in rows)
+            if float(pos_arr[int(atom_i), 2] - z_ref) <= margin:
+                return False
             continue
         centroid = np.asarray(rows, dtype=float).mean(axis=0)
         n_hat = _outward_normal_at(G, centroid, pbc)

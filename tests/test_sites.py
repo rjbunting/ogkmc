@@ -17,6 +17,7 @@ from autokmc.sites.anchors import (
 )
 from autokmc.sites.adsorbate import (
     AdsorbateSite,
+    AdsorbateSiteLateral,
     _adsorbate_pose_is_outward,
     find_adsorbate_sites,
     _geometry_connectivity_mismatch,
@@ -34,6 +35,7 @@ from autokmc.sites.bond import (
 )
 from autokmc.sites.diffusion import rebuild_diffusion_reverse_indexes
 from autokmc.sites.stability.adsorption import check_adsorbate_site_lateral
+from autokmc.sites.stability.adsorption import check_site_stability
 
 
 def test_sites_package_exports_public_api():
@@ -744,6 +746,114 @@ def test_nanoparticle_propagation_rejects_inward_positions():
     assert not _adsorbate_pose_is_outward(
         G, [frozenset({1})], np.array([[1.5, 0.0, 0.0]]), pbc,
     )
+
+
+def test_slab_propagation_rejects_positions_below_surface():
+    G = nx.Graph()
+    G.graph["cell"] = np.eye(3) * 20.0
+    G.graph["pbc"] = np.array([True, True, True])
+    G.graph["connectivity_pbc"] = np.array([True, True, False])
+    G.add_node(
+        0,
+        type="surface",
+        element="Pt",
+        position=np.array([0.0, 0.0, 5.0]),
+        covalent_radius=1.36,
+    )
+    G.add_node(
+        1,
+        type="surface",
+        element="Pt",
+        position=np.array([2.0, 0.0, 5.0]),
+        covalent_radius=1.36,
+    )
+
+    cell, cell_inv, pbc, use_mic = _get_cell(G)
+
+    assert use_mic
+    assert _outward_height_for_clique(
+        G, frozenset({0, 1}), np.array([1.0, 0.0, 6.0]),
+        cell, cell_inv, pbc, use_mic,
+    ) > 0.0
+    assert _outward_height_for_clique(
+        G, frozenset({0, 1}), np.array([1.0, 0.0, 4.5]),
+        cell, cell_inv, pbc, use_mic,
+    ) < 0.0
+    assert _adsorbate_pose_is_outward(
+        G, [frozenset({0, 1})], np.array([[1.0, 0.0, 6.0]]), pbc,
+    )
+    assert not _adsorbate_pose_is_outward(
+        G, [frozenset({0, 1})], np.array([[1.0, 0.0, 4.5]]), pbc,
+    )
+
+
+def test_adsorption_lateral_structures_preserve_effective_slab_pbc(monkeypatch):
+    G = nx.Graph()
+    G.graph["cell"] = np.eye(3) * 20.0
+    G.graph["pbc"] = np.array([True, True, True])
+    G.graph["connectivity_pbc"] = np.array([True, True, False])
+    G.add_node(
+        0,
+        type="surface",
+        element="Pt",
+        position=np.array([0.0, 0.0, 5.0]),
+        index=0,
+        covalent_radius=1.36,
+    )
+    G.add_node(
+        10,
+        type="adsorbate",
+        element="O",
+        position=np.array([0.0, 0.0, 6.0]),
+        clique=frozenset({0}),
+        reactant="[O]",
+        reactant_index=0,
+        occupied=False,
+        siblings=(),
+    )
+    G.add_edge(0, 10, anchor_bond=True)
+
+    site = AdsorbateSite(
+        reactant="[O]",
+        n_atoms=1,
+        atom_cliques=[frozenset({0})],
+        positions=np.array([[0.0, 0.0, 6.0]]),
+        iso_class=0,
+        members=[[frozenset({0})]],
+        member_node_ids=[[10]],
+    )
+    lateral = AdsorbateSiteLateral(
+        lateral_class=0,
+        ego_graph=G.subgraph([0, 10]).copy(),
+    )
+
+    def fake_optimise_structure(atoms, **_kwargs):
+        opt = atoms.copy()
+        opt.set_pbc([True, True, True])
+        opt.calc = SinglePointCalculator(
+            opt,
+            energy=-1.0,
+            forces=np.zeros((len(opt), 3)),
+        )
+        return opt
+
+    monkeypatch.setattr(
+        "autokmc.structure.optimise_structure",
+        fake_optimise_structure,
+    )
+
+    check_site_stability(
+        G,
+        site,
+        0,
+        lateral,
+        calculator=object(),
+        fmax=0.05,
+        max_steps=1,
+    )
+
+    assert tuple(lateral.atoms_occupied.pbc) == (True, True, False)
+    assert tuple(lateral.atoms_unoccupied.pbc) == (True, True, False)
 
 
 def test_adsorption_lateral_reassignment_removes_old_membership():

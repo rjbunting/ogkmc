@@ -351,7 +351,11 @@ def _build_co_bond_graph(
     cbg = nx.Graph()
     cbg.add_nodes_from((n, dict(G.nodes[n])) for n in ids)
 
-    is_ortho = use_mic and np.allclose(cell - np.diag(np.diag(cell)), 0.0)
+    is_ortho = (
+        use_mic
+        and bool(np.asarray(pbc, dtype=bool).all())
+        and np.allclose(cell - np.diag(np.diag(cell)), 0.0)
+    )
 
     if is_ortho:
         boxsize = np.where(pbc, np.diag(cell), 0.0)
@@ -532,7 +536,10 @@ def _outward_height_for_clique(
     pbc: np.ndarray,
     use_mic: bool,
 ) -> float:
-    """Signed height of *position* above a non-periodic surface clique."""
+    """Signed outward height of *position* above a surface clique."""
+    if use_mic:
+        z_ref = max(float(G.nodes[int(n)]["position"][2]) for n in clique)
+        return float(np.asarray(position, dtype=float)[2] - z_ref)
     centroid = _clique_centroid(G, clique, cell, cell_inv, pbc, use_mic)
     normal = _outward_normal(G, centroid)
     return float(np.dot(np.asarray(position, dtype=float) - centroid, normal))
@@ -1026,18 +1033,15 @@ def find_anchor_sites(
                 k_m, idx_m = clique_to_loc[member]
                 if R is not None and t is not None:
                     p_member = p_rep @ R.T + t
-                    if (
-                        not use_mic
-                        and _outward_height_for_clique(
-                            G,
-                            member,
-                            p_member,
-                            cell,
-                            cell_inv,
-                            pbc,
-                            use_mic,
-                        ) <= 1e-8
-                    ):
+                    if _outward_height_for_clique(
+                        G,
+                        member,
+                        p_member,
+                        cell,
+                        cell_inv,
+                        pbc,
+                        use_mic,
+                    ) <= 1e-8:
                         p_member = None
                     else:
                         n_prop += 1

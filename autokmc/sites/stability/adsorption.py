@@ -89,8 +89,8 @@ from ase import Atoms
 from ase.constraints import FixAtoms
 from ase.neighborlist import NeighborList, natural_cutoffs
 
-from autokmc.core.pbc import full_pbc_for_cell
 from autokmc.io.calculators import acquire_calculator
+from autokmc.sites.anchors import _effective_pbc
 from autokmc.sites.adsorbate import AdsorbateSite, AdsorbateSiteLateral
 from autokmc.core.constants import NL_MULT_DEFAULT, LATERAL_SHELLS_DEFAULT
 from autokmc.utils.logging import get_logger
@@ -573,7 +573,7 @@ def _build_stability_atoms(
     positions = [G.nodes[n]["position"] for n in all_node_ids]
 
     cell = np.array(G.graph["cell"], dtype=float)
-    pbc  = full_pbc_for_cell(cell)
+    pbc  = _effective_pbc(G, cell)
 
     atoms = Atoms(
         symbols   = symbols,
@@ -985,6 +985,9 @@ def check_site_stability(
                     f"steps (fmax={fmax} eV/Å)."
                 )
 
+            energy = float(atoms_opt.get_potential_energy())
+            atoms_opt.set_pbc(atoms_init.get_pbc())
+
             _check_connectivity_stable(
                 atoms_init, atoms_opt, n_slab, n_ads, state, nl_mult,
                 relevant_indices=ads_indices,
@@ -1004,8 +1007,6 @@ def check_site_stability(
                     atoms_opt, G, self_node_ids,
                     n_slab, n_lat, nl_mult,
                 )
-
-            energy = float(atoms_opt.get_potential_energy())
 
             if verbose:
                 bonds_after = _bond_set(atoms_opt, nl_mult=nl_mult,

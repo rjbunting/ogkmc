@@ -82,8 +82,8 @@ from ase import Atoms
 from ase.constraints import FixAtoms
 from ase.optimize import BFGS
 
-from autokmc.core.pbc import full_pbc_for_cell, set_full_pbc_if_cell
 from autokmc.io.calculators import acquire_calculator
+from autokmc.sites.anchors import _effective_pbc
 from autokmc.sites.diffusion import (
     DiffusionSite,
     DiffusionLateral,
@@ -557,7 +557,7 @@ def _build_diffusion_atoms(
     n_mig  = len(symbols_mig)
 
     cell = np.array(G.graph["cell"], dtype=float)
-    pbc  = full_pbc_for_cell(cell)
+    pbc  = _effective_pbc(G, cell)
 
     if base_atoms is not None:
         # Reuse the relaxed slab+lat positions from a prior endpoint
@@ -575,7 +575,7 @@ def _build_diffusion_atoms(
             positions_mig, dtype=float,
         )
         atoms.set_positions(positions)
-        set_full_pbc_if_cell(atoms)
+        atoms.set_pbc(pbc)
     else:
         symbols   = [G.nodes[n]["element"] for n in slab_lat_nodes] + symbols_mig
         positions = [
@@ -657,6 +657,9 @@ def _relax_endpoint(
                     f"(fmax={fmax} eV/Å)."
                 )
 
+            energy = float(atoms_opt.get_potential_energy())
+            atoms_opt.set_pbc(atoms_init.get_pbc())
+
             n_ads = n_lat + n_mig
             ads_indices = set(range(n_slab, n_slab + n_ads))
             _check_connectivity_stable(
@@ -670,7 +673,6 @@ def _relax_endpoint(
                 self_node_order=self_node_order,
             )
 
-            energy = float(atoms_opt.get_potential_energy())
             if verbose:
                 print(
                     f"  [{state_label}] E={energy:.4f} eV  "
