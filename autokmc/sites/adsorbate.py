@@ -80,7 +80,11 @@ import numpy as np
 import networkx as nx
 from networkx.algorithms import isomorphism
 
-from autokmc.core.pbc import minimum_image_vectors, wrap_positions_into_cell
+from autokmc.core.pbc import (
+    full_pbc_for_cell,
+    minimum_image_vectors,
+    wrap_positions_into_cell,
+)
 from autokmc.io.calculators import CalculatorConfigError, acquire_calculator
 from autokmc.sites.anchors import (
     find_anchor_sites,
@@ -1003,8 +1007,8 @@ def _materialise_adsorbate_nodes(
     _remove_adsorbate_nodes(G, smiles)
 
     pos_index = _clique_position_index(G, react_sym)
-    pbc = np.asarray(G.graph.get("pbc", [True, True, False]), dtype=bool)
     cell = np.array(G.graph.get("cell", np.eye(3)), dtype=float)
+    pbc = np.asarray(G.graph.get("pbc", full_pbc_for_cell(cell)), dtype=bool)
 
     for ms in adsorbate_sites:
         ms.member_node_ids = []
@@ -1135,7 +1139,7 @@ def _build_pruning_atoms(
     surface_array = np.asarray(slab_tag + [2] * n_ads, dtype=np.int8)
 
     cell = np.array(G.graph["cell"], dtype=float)
-    pbc  = np.asarray(G.graph.get("pbc", [True, True, False]), dtype=bool)
+    pbc  = full_pbc_for_cell(cell)
 
     atoms = Atoms(symbols=symbols, positions=positions, cell=cell, pbc=pbc)
     atoms.arrays["surface"] = surface_array
@@ -1478,7 +1482,9 @@ def prune_unstable_adsorbate_sites(
             atoms_opt.get_positions()[n_slab : n_slab + n_ads], dtype=float
         )
         cell_store = np.array(G.graph.get("cell", np.eye(3)), dtype=float)
-        pbc_store = np.asarray(G.graph.get("pbc", [True, True, False]), dtype=bool)
+        pbc_store = np.asarray(
+            G.graph.get("pbc", full_pbc_for_cell(cell_store)), dtype=bool,
+        )
         new_pos = _wrap_adsorbate_positions_for_storage(
             new_pos, ms.atom_cliques, cell_store, pbc_store,
         )
@@ -1590,7 +1596,7 @@ def push_member_positions_to_graph(
             f"{member_index} has {len(node_ids)} nodes."
         )
     cell = np.array(G.graph.get("cell", np.eye(3)), dtype=float)
-    pbc = np.asarray(G.graph.get("pbc", [True, True, False]), dtype=bool)
+    pbc = np.asarray(G.graph.get("pbc", full_pbc_for_cell(cell)), dtype=bool)
     if pbc.any():
         pos_arr = wrap_positions_into_cell(
             pos_arr, cell, pbc, reference=pos_arr[0],

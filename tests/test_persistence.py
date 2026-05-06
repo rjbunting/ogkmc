@@ -19,7 +19,7 @@ def test_atoms_from_graph_includes_only_occupied_adsorbates(synth_graph):
     atoms = atoms_from_graph(synth_graph)
     syms = atoms.get_chemical_symbols()
     assert syms == ["Cu", "Cu", "C"]
-    assert tuple(atoms.pbc) == (True, True, False)
+    assert tuple(atoms.pbc) == (True, True, True)
     assert atoms.cell[0, 0] == 10.0
 
 

@@ -4,6 +4,7 @@ from ase.build import fcc111
 
 from autokmc.core.pbc import minimum_image_vectors
 from autokmc.core.graph import build_graph
+from autokmc.io.atoms import atoms_from_graph
 from autokmc.sites.adsorbate import _mic_distance
 from autokmc.sites.anchors import _build_co_bond_graph
 from autokmc.sites.adsorbate import find_adsorbate_sites
@@ -98,7 +99,20 @@ def test_materialised_site_positions_are_wrapped_for_skew_slab():
     assert np.all(periodic_frac < 1.0 + 1e-10)
 
 
-def test_raycasting_does_not_wrap_nonperiodic_tilted_z_axis():
+def test_structures_with_real_cells_are_full_pbc():
+    atoms = fcc111("Cu", size=(2, 2, 2), vacuum=8.0, orthogonal=True)
+    atoms.set_pbc([True, True, False])
+    find_surface_atoms(atoms, tag_atoms=True)
+    G = build_graph(atoms)
+    snapshot = atoms_from_graph(G)
+
+    assert tuple(atoms.pbc) == (True, True, True)
+    assert tuple(G.graph["pbc"]) == (True, True, True)
+    assert tuple(snapshot.pbc) == (True, True, True)
+    assert tuple(G.graph["connectivity_pbc"]) == (True, True, False)
+
+
+def test_raycasting_uses_connectivity_axes_for_tilted_z_axis():
     from ase import Atoms
 
     atoms = Atoms(
@@ -121,6 +135,7 @@ def test_raycasting_does_not_wrap_nonperiodic_tilted_z_axis():
         coverage_threshold=0.5,
     )
 
+    assert tuple(atoms.pbc) == (True, True, True)
     assert top_mask.tolist() == [False, True]
     assert top_indices.tolist() == [1]
     assert bottom_mask.tolist() == [True, False]

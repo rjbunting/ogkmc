@@ -79,6 +79,7 @@ from ase.data import (
 )
 
 from autokmc.core.pbc import (
+    full_pbc_for_cell,
     minimum_image_distances,
     minimum_image_vectors,
     wrap_positions_into_cell,
@@ -168,7 +169,7 @@ def _get_cell(G: nx.Graph) -> tuple[np.ndarray, np.ndarray | None,
                                     np.ndarray, bool]:
     """Return ``(cell, cell_inv_or_None, pbc, use_mic)`` from *G*."""
     cell = np.array(G.graph["cell"], dtype=float)
-    pbc  = np.asarray(G.graph.get("pbc", [True, True, False]), dtype=bool)
+    pbc  = np.asarray(G.graph.get("pbc", full_pbc_for_cell(cell)), dtype=bool)
     use_mic = bool(pbc.any())
     cell_inv: np.ndarray | None = None
     if use_mic:
@@ -649,7 +650,7 @@ def _add_anchor_node(
     """
     nid = _next_node_id(G)
     cell = np.asarray(G.graph.get("cell", np.eye(3)), dtype=float)
-    pbc = np.asarray(G.graph.get("pbc", [True, True, False]), dtype=bool)
+    pbc = np.asarray(G.graph.get("pbc", full_pbc_for_cell(cell)), dtype=bool)
     if pbc.any():
         position = wrap_positions_into_cell(position, cell, pbc)
     G.add_node(

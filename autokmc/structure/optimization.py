@@ -25,6 +25,7 @@ from autokmc.structure.builders import (
     _print_header,
     _validate_crystal_structure,
 )
+from autokmc.core.pbc import set_full_pbc_if_cell
 from autokmc.io.calculators import acquire_calculator
 from autokmc.structure.types import LatticeParams
 
@@ -50,6 +51,7 @@ def optimise_bulk(
         lp_in = _normalise_lp(lattice_constant, crystal_structure)
 
     bulk_atoms = _build_primitive_cell(symbol, crystal_structure, lp_in)
+    set_full_pbc_if_cell(bulk_atoms)
 
     with acquire_calculator(calculator, purpose="bulk lattice relaxation") as calc:
         bulk_atoms.calc = calc
@@ -83,6 +85,7 @@ def optimise_structure(
 ) -> Atoms:
     """Relax an ASE Atoms object with LBFGS and return an optimised copy."""
     result = atoms.copy()
+    set_full_pbc_if_cell(result)
 
     if calculator is not None:
         result.calc = calculator

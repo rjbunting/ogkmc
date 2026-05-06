@@ -83,6 +83,7 @@ import networkx as nx
 from networkx.algorithms import isomorphism
 
 from autokmc.io.calculators import CalculatorConfigError, acquire_calculator
+from autokmc.core.pbc import full_pbc_for_cell
 from autokmc.sites.adsorbate import (
     AdsorbateSite,
     _get_surface_apsp,
@@ -1247,7 +1248,7 @@ def _build_ab_pruning_atoms(
     )
 
     cell = np.array(G.graph["cell"], dtype=float)
-    pbc  = np.asarray(G.graph.get("pbc", [True, True, False]), dtype=bool)
+    pbc  = full_pbc_for_cell(cell)
 
     atoms = Atoms(symbols=symbols, positions=positions, cell=cell, pbc=pbc)
     atoms.arrays["surface"] = surface_array

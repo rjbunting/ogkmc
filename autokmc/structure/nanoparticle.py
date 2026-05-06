@@ -12,6 +12,7 @@ from ase.calculators.emt import EMT
 from ase.optimize import LBFGS
 
 from autokmc.core.constants import RANDOM_SEED
+from autokmc.core.pbc import set_full_pbc_if_cell
 from autokmc.io.calculators import acquire_calculator
 from autokmc.structure.builders import (
     _apply_composition,
@@ -104,7 +105,7 @@ def calculate_surface_energies(
     for facet in facets:
         hkl = _normalise_miller_index(facet)
         slab = ase_surface(bulk_atoms, hkl, layers=int(layers), vacuum=float(vacuum))
-        slab.pbc = (True, True, False)
+        set_full_pbc_if_cell(slab)
         with acquire_calculator(calculator, purpose="slab surface-energy relaxation") as calc:
             slab_relaxed = optimise_structure(
                 slab,
@@ -222,7 +223,7 @@ def build_nanoparticle(
     box = (pos.max(axis=0) - pos.min(axis=0)) + 2.0 * float(vacuum)
     new_cell = np.diag(box.astype(float))
     atoms.set_cell(new_cell)
-    atoms.set_pbc(True)
+    set_full_pbc_if_cell(atoms)
     com_shift = 0.5 * box - pos.mean(axis=0)
     atoms.set_positions(pos + com_shift)
 

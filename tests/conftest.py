@@ -27,7 +27,7 @@ def tiny_atoms() -> Atoms:
         symbols=["Cu", "Cu", "C", "O"],
         positions=[[0, 0, 0], [2.5, 0, 0], [1.25, 0, 2.0], [1.25, 0, 3.15]],
         cell=[10.0, 10.0, 20.0],
-        pbc=[True, True, False],
+        pbc=[True, True, True],
     )
 
 
@@ -111,7 +111,7 @@ def make_reaction(stub_site, stub_lateral):
 def synth_graph() -> nx.Graph:
     G = nx.Graph()
     G.graph["cell"] = np.eye(3) * 10.0
-    G.graph["pbc"]  = (True, True, False)
+    G.graph["pbc"]  = (True, True, True)
     # Two slab atoms (one bulk, one surface) and one occupied adsorbate.
     G.add_node(0, type="bulk",      element="Cu", index=0,
                position=np.array([0.0, 0.0, 0.0]))
@@ -121,4 +121,3 @@ def synth_graph() -> nx.Graph:
                position=np.array([1.25, 0.0, 2.0]),
                occupied=True)
     return G
-

@@ -9,6 +9,8 @@ import numpy as np
 from ase import Atoms
 from ase.build import bulk
 
+from autokmc.core.pbc import set_full_pbc_if_cell
+
 from autokmc.core.constants import RANDOM_SEED
 from autokmc.structure.types import Composition
 
@@ -112,8 +114,10 @@ def _build_primitive_cell(symbol: str, crystal_structure: str, lp: Dict[str, flo
     a = lp["a"]
     if crystal_structure == "hcp":
         c = lp.get("c", a * _HCP_IDEAL_CA)
-        return bulk(symbol, crystalstructure="hcp", a=a, c=c)
-    return bulk(symbol, crystalstructure=crystal_structure, a=a, cubic=True)
+        atoms = bulk(symbol, crystalstructure="hcp", a=a, c=c)
+    else:
+        atoms = bulk(symbol, crystalstructure=crystal_structure, a=a, cubic=True)
+    return set_full_pbc_if_cell(atoms)
 
 
 def _build_surface_parent_cell(symbol: str, crystal_structure: str, lp: Dict[str, float]) -> Atoms:
@@ -121,8 +125,10 @@ def _build_surface_parent_cell(symbol: str, crystal_structure: str, lp: Dict[str
     a = lp["a"]
     if crystal_structure == "hcp":
         c = lp.get("c", a * _HCP_IDEAL_CA)
-        return bulk(symbol, crystalstructure="hcp", a=a, c=c)
-    return bulk(symbol, crystalstructure=crystal_structure, a=a, cubic=True)
+        atoms = bulk(symbol, crystalstructure="hcp", a=a, c=c)
+    else:
+        atoms = bulk(symbol, crystalstructure=crystal_structure, a=a, cubic=True)
+    return set_full_pbc_if_cell(atoms)
 
 
 def _extract_lp(atoms: Atoms, crystal_structure: str) -> Dict[str, float]:

@@ -13,6 +13,7 @@ from ase.calculators.emt import EMT
 from ase.constraints import FixAtoms
 
 from autokmc.core.constants import RANDOM_SEED
+from autokmc.core.pbc import set_full_pbc_if_cell
 from autokmc.io.calculators import acquire_calculator
 from autokmc.structure.builders import (
     _apply_composition,
@@ -98,6 +99,7 @@ def build_surface(
 
     slab_ase = AseAtomsAdaptor.get_atoms(slabs[0])
     assert isinstance(slab_ase, Atoms)
+    set_full_pbc_if_cell(slab_ase)
 
     if orthogonalise:
         slab_ase, ortho_info = _orthogonalise_slab(slab_ase)
@@ -117,6 +119,7 @@ def build_surface(
         nx_rep = max(1, math.ceil(goal_x / np.linalg.norm(cell[0])))
         ny_rep = max(1, math.ceil(goal_y / np.linalg.norm(cell[1])))
     atoms = make_supercell(slab_ase, [[nx_rep, 0, 0], [0, ny_rep, 0], [0, 0, 1]])
+    set_full_pbc_if_cell(atoms)
 
     if verbose:
         print(f"  Tiling {nx_rep}×{ny_rep} → {len(atoms)} atoms")

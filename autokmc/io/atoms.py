@@ -6,6 +6,8 @@ import networkx as nx
 import numpy as np
 from ase import Atoms
 
+from autokmc.core.pbc import full_pbc_for_cell
+
 
 def atoms_from_graph(G: nx.Graph) -> Atoms:
 	"""Build an :class:`~ase.Atoms` snapshot from the live graph state.
@@ -28,7 +30,7 @@ def atoms_from_graph(G: nx.Graph) -> Atoms:
 	positions = [G.nodes[n]["position"] for n in all_ids]
 
 	cell = np.array(G.graph["cell"], dtype=float)
-	pbc = np.asarray(G.graph.get("pbc", [True, True, False]), dtype=bool)
+	pbc = full_pbc_for_cell(cell)
 
 	return Atoms(symbols=symbols, positions=positions, cell=cell, pbc=pbc)
 
