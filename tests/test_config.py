@@ -113,10 +113,51 @@ def test_build_calculator_none():
 
 
 def test_calculator_meta_roundtrip():
-    cfg = CalculatorCfg(import_path="pkg.Foo", kwargs={"a": 1})
+    cfg = CalculatorCfg(
+        import_path="pkg.Foo",
+        kwargs={"a": 1},
+        copies=2,
+        gpu_devices=["cuda:0", "cuda:1"],
+    )
     meta = calculator_meta(cfg)
     assert meta["import_path"] == "pkg.Foo"
     assert meta["kwargs"] == {"a": 1}
+    assert meta["copies"] == 2
+    assert meta["gpu_devices"] == ["cuda:0", "cuda:1"]
+
+
+def test_load_new_checkpoint_and_parallel_fields(tmp_path):
+    pytest.importorskip("yaml")
+    p = _write(tmp_path, """
+schema_version: "1"
+output:
+  dir: ./out
+reactants:
+  - smiles: "[C-]#[O+]"
+    add_hydrogens: false
+calculator:
+  import_path: ase.calculators.emt.EMT
+  copies: 2
+  gpu_devices: ["cuda:0", "cuda:1"]
+  gpu_device_arg: device
+  max_workers: 2
+checkpoint:
+  enabled: true
+  path: ./out/checkpoint.pkl
+  every_n_steps: 5
+structure:
+  kind: nanoparticle
+  composition: Cu
+  n_atoms: 55
+  surface_energy_facets: [[1, 1, 1], [1, 0, 0]]
+  surface_energy_layers: 4
+""")
+    cfg = load_config(p)
+    assert cfg.calculator.copies == 2
+    assert cfg.calculator.gpu_devices == ["cuda:0", "cuda:1"]
+    assert cfg.checkpoint.enabled is True
+    assert cfg.checkpoint.every_n_steps == 5
+    assert cfg.structure.surface_energy_facets == ((1, 1, 1), (1, 0, 0))
 
 
 def test_unknown_extension(tmp_path):

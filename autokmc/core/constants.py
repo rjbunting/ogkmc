@@ -59,13 +59,13 @@ OPT_FACTOR: float = 0.85
 
 #: Weight of the ``1/r²`` non-bonded soft repulsion term used by
 #: :func:`autokmc.sites.anchors._optimise_position`.
-REPULSION_WEIGHT: float = 0.1
+REPULSION_WEIGHT: float = 0.2
 
 #: Steric-contact scale used by
 #: :func:`autokmc.sites.adsorbate.optimise_adsorbate_site_positions` —
 #: ``R_min = CONTACT_FACTOR * (r_cov_a + r_cov_s)`` for every (adsorbate,
 #: surface) pair.  Matches the ``OPT_FACTOR`` semantics above.
-CONTACT_FACTOR: float = 0.9
+CONTACT_FACTOR: float = 1.05
 
 #: Standoff-bond scale used by
 #: :func:`autokmc.sites.adsorbate.optimise_adsorbate_site_positions`.
@@ -95,7 +95,7 @@ N_RESTARTS: int = N_ADSORBATE_RESTARTS
 #: within this distance of the clique centroid are considered, since the
 #: ``1/r²`` term dies off rapidly.  Set to ``None`` to disable spatial
 #: filtering and fall back to the slower all-atoms behaviour.
-SITE_REPULSION_CUTOFF: float = 6.0
+SITE_REPULSION_CUTOFF: float = 10.0
 
 #: Alias for :data:`SITE_REPULSION_CUTOFF` matching the per-module name.
 REPULSION_CUTOFF: float = SITE_REPULSION_CUTOFF

@@ -44,12 +44,14 @@ Public API
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Iterable
 
 import numpy as np
 import networkx as nx
 
+from autokmc.io.calculators import CalculatorPool
 from autokmc.sites.diffusion import DiffusionSite, DiffusionLateral
 from autokmc.sites.stability.diffusion import (
     check_diffusion_site_lateral,
@@ -460,6 +462,37 @@ def compute_all_diffusions(
 ) -> list[DiffusionReaction]:
     """Compute applicable hops for every DiffusionSite; return the flat list."""
     all_reactions: list[DiffusionReaction] = []
+    if (
+        isinstance(calculator, CalculatorPool)
+        and len(calculator) > 1
+        and len(diffusion_sites) > 1
+    ):
+        def _one(ds: DiffusionSite) -> list[DiffusionReaction]:
+            with calculator.acquire() as calc:
+                return get_applicable_diffusions(
+                    G, ds, calc,
+                    temperature              = temperature,
+                    transmission_coefficient = transmission_coefficient,
+                    frozen_indices           = frozen_indices,
+                    fmax                     = fmax,
+                    max_steps                = max_steps,
+                    n_images                 = n_images,
+                    climb                    = climb,
+                    spring_k                 = spring_k,
+                    interpolation            = interpolation,
+                    nl_mult                  = nl_mult,
+                    persist_neb_path         = persist_neb_path,
+                    verbose                  = verbose,
+                    lateral_interactions     = lateral_interactions,
+                    free_energy_options      = free_energy_options,
+                    vib_cache_root           = vib_cache_root,
+                )
+
+        with ThreadPoolExecutor(max_workers=calculator.max_workers) as ex:
+            for rxns in ex.map(_one, diffusion_sites):
+                all_reactions.extend(rxns)
+        return all_reactions
+
     for ds in diffusion_sites:
         rxns = get_applicable_diffusions(
             G, ds, calculator,

@@ -6,7 +6,7 @@ import logging
 from pathlib import Path
 
 import pytest
-from ase import Atoms, units
+from ase import Atoms
 
 import autokmc.thermo.free_energy as free_energy
 
@@ -20,19 +20,19 @@ def test_thermo_and_utils_package_exports():
     assert utils.get_logger("") is logging.getLogger("autokmc")
 
 
-def test_split_real_imag_treats_negative_real_modes_as_imaginary():
-    real_cm, imag_cm = free_energy._split_real_imag(
+def test_split_real_imag_ev_treats_negative_real_modes_as_imaginary():
+    real_ev, imag_ev = free_energy._split_real_imag_ev(
         [
-            150.0 * units.invcm,
-            -80.0 * units.invcm,
-            4.0 * units.invcm,
-            1j * 90.0 * units.invcm,
+            0.150,
+            -0.080,
+            0.0004,
+            1j * 0.090,
         ],
-        min_frequency_cm=12.0,
+        min_frequency_ev=0.001,
     )
 
-    assert real_cm == pytest.approx([150.0])
-    assert imag_cm == pytest.approx([80.0, 4.0, 90.0])
+    assert real_ev == pytest.approx([0.150])
+    assert imag_ev == pytest.approx([0.080, 0.0004, 0.090])
 
 
 def test_default_harmonic_cache_uses_temporary_directory(monkeypatch):

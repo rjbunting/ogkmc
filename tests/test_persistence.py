@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
+import pytest
 from ase.io import read as ase_read
 
 from autokmc.io.persistence import (
@@ -157,6 +158,45 @@ def test_reaction_writer_persists_gas_free_energy(tmp_path, stub_reaction):
     assert rxn_meta["free_energies_ev"]["g_gas"] == -13.5
 
 
+def test_reaction_writer_records_adsorption_free_energy_event_fields(
+    tmp_path, stub_reaction
+):
+    stub_reaction.lateral_class.g_occupied = -9.75
+    stub_reaction.lateral_class.g_unoccupied = -8.25
+    stub_reaction.lateral_class.frequencies_occupied_ev = [0.012398]
+    stub_reaction.lateral_class.imaginary_occupied_ev = [0.0030995]
+    stub_reaction.delta_e = -0.25
+    stub_reaction.barrier = 0.1
+
+    w = ReactionWriter(tmp_path)
+    w.record(
+        step=1,
+        time_s=1e-6,
+        tau_s=1e-6,
+        reaction=stub_reaction,
+        gas_energies={"[C-]#[O+]": -1.0},
+        gas_free_energies={"[C-]#[O+]": -1.25},
+    )
+    w.close()
+
+    payload = json.loads((tmp_path / "events.jsonl").read_text())
+    assert payload["delta_e_ev"] == -0.5
+    assert payload["barrier_ev"] == 0.1
+    assert payload["delta_g_ev"] == -0.25
+    assert payload["barrier_g_ev"] == 0.1
+    assert payload["rate_energy_basis"] == "free_energy"
+    assert payload["rate_delta_ev"] == -0.25
+    assert payload["rate_barrier_ev"] == 0.1
+    assert "ΔG" in payload["description"]
+
+    folder = tmp_path / "reactions" / "adsorption" / "(C-)#(O+)" / "iso0_lat0"
+    rxn_meta = json.loads((folder / "reaction.json").read_text())
+    vib = rxn_meta["vibrations"]["occupied"]
+    assert set(vib) == {"real_ev", "imag_ev", "zpe_ev", "entropy_ev_per_k"}
+    assert vib["real_ev"] == [0.012398]
+    assert vib["imag_ev"] == [0.0030995]
+
+
 def test_reaction_writer_records_diffusion_direction(tmp_path):
     site = SimpleNamespace(iso_class=3, reactant="[O]", member_node_ids=[[1], [2]])
     lateral = SimpleNamespace(
@@ -183,6 +223,13 @@ def test_reaction_writer_records_diffusion_direction(tmp_path):
     payload = json.loads((tmp_path / "events.jsonl").read_text())
     assert rec.direction == "b_to_a"
     assert payload["direction"] == "b_to_a"
+    assert payload["delta_e_ev"] == pytest.approx(-0.2)
+    assert payload["barrier_ev"] == pytest.approx(0.3)
+    assert payload["delta_g_ev"] is None
+    assert payload["barrier_g_ev"] is None
+    assert payload["rate_energy_basis"] == "electronic"
+    assert payload["rate_delta_ev"] == pytest.approx(-0.2)
+    assert payload["rate_barrier_ev"] == pytest.approx(0.3)
     assert "dir=b_to_a" in payload["description"]
 
     folder = tmp_path / "reactions" / "diffusion" / "(O)" / "diff_iso3_lat4"
@@ -223,6 +270,13 @@ def test_reaction_writer_records_bond_direction(tmp_path):
 
     payload = json.loads((tmp_path / "events.jsonl").read_text())
     assert payload["direction"] == "couple"
+    assert payload["delta_e_ev"] == -1.0
+    assert payload["barrier_ev"] == 0.5
+    assert payload["delta_g_ev"] is None
+    assert payload["barrier_g_ev"] is None
+    assert payload["rate_energy_basis"] == "electronic"
+    assert payload["rate_delta_ev"] == -1.0
+    assert payload["rate_barrier_ev"] == 0.5
     assert "dir=couple" in payload["description"]
 
 

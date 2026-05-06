@@ -49,12 +49,14 @@ Public API
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Iterable
 
 import numpy as np
 import networkx as nx
 
+from autokmc.io.calculators import CalculatorPool
 from autokmc.sites.adsorbate import AdsorbateSite, AdsorbateSiteLateral
 from autokmc.sites.stability.adsorption import (
     check_adsorbate_site_lateral,
@@ -501,6 +503,33 @@ def compute_all_reactions(
     gas_energies = _build_gas_energy_lookup(reactants)
 
     all_reactions: list[AdsorptionReaction] = []
+    if (
+        isinstance(calculator, CalculatorPool)
+        and len(calculator) > 1
+        and len(adsorbate_sites) > 1
+    ):
+        def _one(site: AdsorbateSite) -> list[AdsorptionReaction]:
+            with calculator.acquire() as calc:
+                return get_applicable_reactions(
+                    G, site, calc, gas_energies,
+                    temperature              = temperature,
+                    transmission_coefficient = transmission_coefficient,
+                    frozen_indices           = frozen_indices,
+                    fmax                     = fmax,
+                    max_steps                = max_steps,
+                    verbose                  = verbose,
+                    lateral_interactions     = lateral_interactions,
+                    gas_g                    = gas_g,
+                    partial_pressures        = partial_pressures,
+                    free_energy_options      = free_energy_options,
+                    vib_cache_root           = vib_cache_root,
+                )
+
+        with ThreadPoolExecutor(max_workers=calculator.max_workers) as ex:
+            for rxns in ex.map(_one, adsorbate_sites):
+                all_reactions.extend(rxns)
+        return all_reactions
+
     for site in adsorbate_sites:
         rxns = get_applicable_reactions(
             G, site, calculator, gas_energies,

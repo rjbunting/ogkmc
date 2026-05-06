@@ -8,7 +8,8 @@ from pathlib import Path
 
 import numpy as np
 
-from autokmc.io.calculators import build_calculator, calculator_meta
+from autokmc.io.calculators import build_calculator, calculator_meta, primary_calculator
+from autokmc.io.checkpoint import CheckpointWriter, load_checkpoint
 from autokmc.io.config import RunConfig
 from autokmc.io.persistence import ReactionWriter
 from autokmc.io.summary import ReactionSummary, make_run_meta
@@ -82,11 +83,13 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
 
     # 1. Calculator
     _stage("Stage 1/7: preparing calculator", verbose=verbose_run)
-    calc = build_calculator(cfg.calculator)
+    calc_resource = build_calculator(cfg.calculator)
+    calc = primary_calculator(calc_resource)
     if calc is None:
         _log.warning("No calculator configured — falling back to ASE EMT.")
         from ase.calculators.emt import EMT
         calc = EMT()
+        calc_resource = calc
     elif verbose_run:
         print(f"[autokmc]   calculator ready: {type(calc).__name__}")
 
@@ -119,6 +122,11 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
             surface_energies  = s.surface_energies,
             fmax              = s.fmax,
             max_steps         = s.max_steps,
+            surface_energy_facets    = s.surface_energy_facets,
+            surface_energy_layers    = s.surface_energy_layers,
+            surface_energy_vacuum    = s.surface_energy_vacuum,
+            surface_energy_fmax      = s.surface_energy_fmax,
+            surface_energy_max_steps = s.surface_energy_max_steps,
             calculator        = calc,
             verbose           = verbose_run,
             **(s.extra_kwargs or {}),
@@ -168,7 +176,7 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
         vibration_displacement  = fe_cfg.vibration_displacement,
         vibration_nfree         = fe_cfg.vibration_nfree,
         include_ts_vibrations   = fe_cfg.include_ts_vibrations,
-        min_frequency_cm        = fe_cfg.min_frequency_cm,
+        min_frequency_ev        = fe_cfg.min_frequency_ev,
         default_symmetry_number = fe_cfg.default_symmetry_number,
         default_spin            = fe_cfg.default_spin,
         default_geometry        = fe_cfg.default_geometry,
@@ -268,6 +276,14 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
     summary_collector = ReactionSummary(
         reactant_smiles={rx.smiles for rx in reactants_built},
     )
+    checkpoint_writer = None
+    if cfg.checkpoint.enabled:
+        checkpoint_path = cfg.checkpoint.path or str(out_dir / "checkpoint.pkl")
+        checkpoint_writer = CheckpointWriter(
+            checkpoint_path,
+            every_n_steps=cfg.checkpoint.every_n_steps,
+            metadata={"config_path": config_path},
+        )
 
     # 6b. Diffusion (NEB) sites — flat list across all SMILES
     diffusion_sites_flat: list = []
@@ -412,6 +428,7 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
                 deduplicate_iso     = b.deduplicate_iso,
                 n_shells_pair       = b.pair_n_shells,
                 prune_by_triple     = False,   # always defer to after Stage 1
+                gas_species         = reactant_by_smi,
                 verbose             = verbose_run,
             )
 
@@ -505,11 +522,40 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
             diffusion_prune_by_ads_pair = d.prune_by_adsorption_pair,
         )
 
+    initial_step = 0
+    initial_time_s = 0.0
+    if cfg.checkpoint.resume_from:
+        state = load_checkpoint(cfg.checkpoint.resume_from)
+        G = state.graph
+        reactants_built = list(state.reactants)
+        all_sites = list(state.adsorbate_sites)
+        kmc_initial_sites = list(state.adsorbate_sites)
+        diffusion_sites_flat = list(state.diffusion_sites)
+        bond_sites_for_kmc = list(state.bond_sites)
+        frozen_indices = state.frozen_indices
+        initial_step = int(state.step)
+        initial_time_s = float(state.time_s)
+        summary_collector = ReactionSummary(
+            reactant_smiles={rx.smiles for rx in reactants_built},
+        )
+        reaction_writer.close()
+        reaction_writer = ReactionWriter(
+            out_dir,
+            reactions_filename = cfg.output.reactions_filename,
+            calculator_meta    = calculator_meta(cfg.calculator),
+            append             = True,
+        )
+        if verbose_run:
+            print(
+                f"[autokmc] Resuming from checkpoint {cfg.checkpoint.resume_from}: "
+                f"step={initial_step}, t={initial_time_s:.4e} s"
+            )
+
     # 7. KMC
     _stage("Stage 7/7: starting KMC simulation", verbose=verbose_run)
     k = cfg.kmc
     summary = run_kmc_steps(
-        G, kmc_initial_sites, calc,
+        G, kmc_initial_sites, calc_resource,
         reactants                = reactants_built,
         temperature              = k.temperature_k,
         n_steps                  = k.n_steps,
@@ -531,6 +577,9 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
         reaction_writer          = reaction_writer,
         trajectory_writer        = trajectory_writer,
         summary_collector        = summary_collector,
+        checkpoint_writer        = checkpoint_writer,
+        initial_step             = initial_step,
+        initial_time_s           = initial_time_s,
     )
 
     finished_at = datetime.now(timezone.utc)
@@ -562,6 +611,10 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
         ),
         "reactions_dir": str(reaction_writer.reactions_root),
         "n_unique_reactions": reaction_writer.n_unique_reactions,
+        "checkpoint": (
+            str(checkpoint_writer.last_path or checkpoint_writer.path)
+            if checkpoint_writer is not None else None
+        ),
     }
     return summary
 

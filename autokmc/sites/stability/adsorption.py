@@ -1150,16 +1150,16 @@ def check_site_stability(
             lateral_class.g_occupied              = occ_thermo["g_total_ev"]
             lateral_class.zpe_occupied            = occ_thermo["zpe_ev"]
             lateral_class.entropy_occupied        = occ_thermo["entropy_ev_per_k"]
-            lateral_class.frequencies_occupied_cm = occ_thermo["frequencies_cm"]
-            lateral_class.imaginary_occupied_cm   = occ_thermo["imaginary_cm"]
+            lateral_class.frequencies_occupied_ev = occ_thermo["frequencies_ev"]
+            lateral_class.imaginary_occupied_ev   = occ_thermo["imaginary_ev"]
             lateral_class.vib_indices_occupied    = occ_thermo["vib_indices"]
         if unocc_thermo is not None:
             lateral_class.g_correction_unoccupied   = unocc_thermo["g_corr_ev"]
             lateral_class.g_unoccupied              = unocc_thermo["g_total_ev"]
             lateral_class.zpe_unoccupied            = unocc_thermo["zpe_ev"]
             lateral_class.entropy_unoccupied        = unocc_thermo["entropy_ev_per_k"]
-            lateral_class.frequencies_unoccupied_cm = unocc_thermo["frequencies_cm"]
-            lateral_class.imaginary_unoccupied_cm   = unocc_thermo["imaginary_cm"]
+            lateral_class.frequencies_unoccupied_ev = unocc_thermo["frequencies_ev"]
+            lateral_class.imaginary_unoccupied_ev   = unocc_thermo["imaginary_ev"]
             lateral_class.vib_indices_unoccupied    = unocc_thermo["vib_indices"]
 
     _log.debug(
@@ -1169,4 +1169,3 @@ def check_site_stability(
         lateral_class.lateral_class, E_occ, E_unocc,
     )
     return E_occ, E_unocc
-

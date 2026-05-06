@@ -31,7 +31,11 @@ from autokmc.structure.optimization import (
     optimise_bulk,
     optimise_structure,
 )
-from autokmc.structure.nanoparticle import build_nanoparticle
+from autokmc.structure.nanoparticle import (
+    build_nanoparticle,
+    calculate_surface_energies,
+    normalise_surface_energies,
+)
 from autokmc.structure.slab import (
     _get_bottom_layer_indices,
     _orthogonalise_slab,
@@ -49,6 +53,8 @@ __all__ = [
     "Composition",
     "LatticeParams",
     "build_nanoparticle",
+    "calculate_surface_energies",
+    "normalise_surface_energies",
     "build_surface",
     "optimise_bulk",
     "optimise_structure",

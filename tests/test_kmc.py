@@ -16,6 +16,8 @@ from autokmc.kmc.expansion import (
     initialise_bond_registry,
 )
 from autokmc.kmc.sampling import _RateSegmentTree
+from autokmc.reactions.bond import _bond_energetics_cached, is_bond_applicable
+from autokmc.sites.bond import BondReactionLateral
 
 
 def _site(smiles: str, iso: int, node_id: int, clique: frozenset[int]):
@@ -253,6 +255,101 @@ def test_execute_reaction_rejects_bond_dissociation_with_ab_clique_collision():
     assert G.nodes[20]["occupied"] is False
     assert G.nodes[30]["occupied"] is True
     assert G.graph["n_occupied"] == 1
+
+
+def test_gas_product_bond_coupling_releases_ab_to_gas():
+    clique_a = frozenset({1})
+    clique_b = frozenset({2})
+    site_a = _site("[C]", 0, 10, clique_a)
+    site_b = _site("[O]", 0, 20, clique_b)
+    G = _graph_with_adsorbates(
+        (10, clique_a, True),
+        (20, clique_b, True),
+    )
+    brs = SimpleNamespace(
+        gas_product=True,
+        members=[(site_a, 0, site_b, 0, None, -1)],
+        _member_cliques=[((clique_a,), (clique_b,), tuple())],
+    )
+    reaction = SimpleNamespace(
+        kind="bond",
+        direction="couple",
+        site=brs,
+        member_index=0,
+    )
+
+    touched = execute_reaction(G, reaction)
+
+    assert touched == {clique_a, clique_b}
+    assert G.nodes[10]["occupied"] is False
+    assert G.nodes[20]["occupied"] is False
+    assert G.graph["n_occupied"] == 0
+
+
+def test_gas_product_bond_reverse_consumes_gas_to_make_ab():
+    clique_a = frozenset({1})
+    clique_b = frozenset({2})
+    site_a = _site("[C]", 0, 10, clique_a)
+    site_b = _site("[O]", 0, 20, clique_b)
+    G = _graph_with_adsorbates(
+        (10, clique_a, False),
+        (20, clique_b, False),
+    )
+    brs = SimpleNamespace(
+        gas_product=True,
+        members=[(site_a, 0, site_b, 0, None, -1)],
+        _member_cliques=[((clique_a,), (clique_b,), tuple())],
+    )
+    reaction = SimpleNamespace(
+        kind="bond",
+        direction="dissoc",
+        site=brs,
+        member_index=0,
+    )
+
+    assert is_bond_applicable(G, brs, 0) == (True, "dissoc")
+    execute_reaction(G, reaction)
+
+    assert G.nodes[10]["occupied"] is True
+    assert G.nodes[20]["occupied"] is True
+    assert G.graph["n_occupied"] == 2
+
+
+def test_gas_product_reverse_bond_rate_scales_with_pressure():
+    lc_low = BondReactionLateral(
+        lateral_class=0,
+        energy_ab=0.0,
+        energy_c=0.2,
+        energy_ts=0.5,
+        gas_product=True,
+        gas_pressure_bar=1.0,
+    )
+    lc_high = BondReactionLateral(
+        lateral_class=0,
+        energy_ab=0.0,
+        energy_c=0.2,
+        energy_ts=0.5,
+        gas_product=True,
+        gas_pressure_bar=3.0,
+    )
+    lc_zero = BondReactionLateral(
+        lateral_class=0,
+        energy_ab=0.0,
+        energy_c=0.2,
+        energy_ts=0.5,
+        gas_product=True,
+        gas_pressure_bar=0.0,
+    )
+
+    couple_low = _bond_energetics_cached(lc_low, "couple", temperature=500.0)
+    couple_high = _bond_energetics_cached(lc_high, "couple", temperature=500.0)
+    reverse_low = _bond_energetics_cached(lc_low, "dissoc", temperature=500.0)
+    reverse_high = _bond_energetics_cached(lc_high, "dissoc", temperature=500.0)
+    reverse_zero = _bond_energetics_cached(lc_zero, "dissoc", temperature=500.0)
+
+    assert couple_high[2] == pytest.approx(couple_low[2])
+    assert reverse_high[2] == pytest.approx(3.0 * reverse_low[2])
+    assert reverse_zero[2] == 0.0
 
 
 def test_rate_segment_tree_clamps_boundary_samples_to_real_leaves():

@@ -29,6 +29,7 @@ Public API
 from __future__ import annotations
 
 import random
+from contextlib import contextmanager
 from typing import Iterable
 
 import numpy as np
@@ -77,10 +78,20 @@ from autokmc.sites.stability.adsorption import (
 )
 from autokmc.sites.stability.diffusion import check_diffusion_site_lateral
 from autokmc.sites.stability.bond import check_bond_site_lateral
+from autokmc.io.calculators import CalculatorPool
 from autokmc.utils.logging import get_logger
 from autokmc.core.constants import LATERAL_SHELLS_DEFAULT
 
 _log = get_logger(__name__)
+
+
+@contextmanager
+def _acquire_calculator(calculator):
+    if isinstance(calculator, CalculatorPool):
+        with calculator.acquire() as calc:
+            yield calc
+    else:
+        yield calculator
 
 
 # Sampling, indexing, state mutation, and event execution live in focused
@@ -266,20 +277,21 @@ def _recompute_affected_sites(
             for m_idx in range(len(site.member_node_ids)):
                 cliques_m = _affected_surface_cliques(G, site, m_idx)
                 if cliques_m & affected_cliques:
-                    rxns = get_applicable_reactions(
-                        G, site, calculator, gas_energies,
-                        temperature              = temperature,
-                        transmission_coefficient = transmission_coefficient,
-                        frozen_indices           = frozen_indices,
-                        fmax                     = fmax,
-                        max_steps                = max_steps,
-                        verbose                  = verbose,
-                        lateral_interactions     = lateral_interactions,
-                        gas_g                    = gas_g,
-                        partial_pressures        = partial_pressures,
-                        free_energy_options      = free_energy_options,
-                        vib_cache_root           = vib_cache_root,
-                    )
+                    with _acquire_calculator(calculator) as calc:
+                        rxns = get_applicable_reactions(
+                            G, site, calc, gas_energies,
+                            temperature              = temperature,
+                            transmission_coefficient = transmission_coefficient,
+                            frozen_indices           = frozen_indices,
+                            fmax                     = fmax,
+                            max_steps                = max_steps,
+                            verbose                  = verbose,
+                            lateral_interactions     = lateral_interactions,
+                            gas_g                    = gas_g,
+                            partial_pressures        = partial_pressures,
+                            free_energy_options      = free_energy_options,
+                            vib_cache_root           = vib_cache_root,
+                        )
                     updated_reactions.extend(rxns)
                     if rxn_index is not None:
                         rxn_index.install_site(site, rxns)
@@ -389,52 +401,55 @@ def _recompute_affected_sites(
 
     updated_reactions: list[Reaction | DiffusionReaction | BondReaction] = []
     for site in sites_to_update.values():
-        rxns = get_applicable_reactions(
-            G, site, calculator, gas_energies,
-            temperature              = temperature,
-            transmission_coefficient = transmission_coefficient,
-            frozen_indices           = frozen_indices,
-            fmax                     = fmax,
-            max_steps                = max_steps,
-            verbose                  = verbose,
-            lateral_interactions     = lateral_interactions,
-            gas_g                    = gas_g,
-            partial_pressures        = partial_pressures,
-            free_energy_options      = free_energy_options,
-            vib_cache_root           = vib_cache_root,
-        )
+        with _acquire_calculator(calculator) as calc:
+            rxns = get_applicable_reactions(
+                G, site, calc, gas_energies,
+                temperature              = temperature,
+                transmission_coefficient = transmission_coefficient,
+                frozen_indices           = frozen_indices,
+                fmax                     = fmax,
+                max_steps                = max_steps,
+                verbose                  = verbose,
+                lateral_interactions     = lateral_interactions,
+                gas_g                    = gas_g,
+                partial_pressures        = partial_pressures,
+                free_energy_options      = free_energy_options,
+                vib_cache_root           = vib_cache_root,
+            )
         updated_reactions.extend(rxns)
         if rxn_index is not None:
             rxn_index.install_site(site, rxns)
 
     dkwargs = dict(diffusion_kwargs or {})
     for ds in ds_to_update.values():
-        rxns = get_applicable_diffusions(
-            G, ds, calculator,
-            temperature              = temperature,
-            transmission_coefficient = transmission_coefficient,
-            frozen_indices           = frozen_indices,
-            verbose                  = verbose,
-            lateral_interactions     = lateral_interactions,
-            free_energy_options      = free_energy_options,
-            vib_cache_root           = vib_cache_root,
-            **dkwargs,
-        )
+        with _acquire_calculator(calculator) as calc:
+            rxns = get_applicable_diffusions(
+                G, ds, calc,
+                temperature              = temperature,
+                transmission_coefficient = transmission_coefficient,
+                frozen_indices           = frozen_indices,
+                verbose                  = verbose,
+                lateral_interactions     = lateral_interactions,
+                free_energy_options      = free_energy_options,
+                vib_cache_root           = vib_cache_root,
+                **dkwargs,
+            )
         updated_reactions.extend(rxns)
         if rxn_index is not None:
             rxn_index.install_site(ds, rxns)
 
     bkwargs = dict(bond_kwargs or {})
     for brs in brs_to_update.values():
-        rxns = get_applicable_bond_reactions(
-            G, brs, calculator,
-            temperature              = temperature,
-            transmission_coefficient = transmission_coefficient,
-            frozen_indices           = frozen_indices,
-            lateral_interactions     = lateral_interactions,
-            verbose                  = verbose,
-            **bkwargs,
-        )
+        with _acquire_calculator(calculator) as calc:
+            rxns = get_applicable_bond_reactions(
+                G, brs, calc,
+                temperature              = temperature,
+                transmission_coefficient = transmission_coefficient,
+                frozen_indices           = frozen_indices,
+                lateral_interactions     = lateral_interactions,
+                verbose                  = verbose,
+                **bkwargs,
+            )
         updated_reactions.extend(rxns)
         if rxn_index is not None:
             rxn_index.install_site(brs, rxns)
@@ -476,6 +491,9 @@ def run_kmc_steps(
     reaction_writer=None,
     trajectory_writer=None,
     summary_collector=None,
+    checkpoint_writer=None,
+    initial_step: int = 0,
+    initial_time_s: float = 0.0,
 ) -> dict:
     """Run a KMC simulation in place on *G* for up to ``n_steps`` events.
 
@@ -747,9 +765,10 @@ def run_kmc_steps(
                             "reaction_writer.write_invalid_diffusion failed: %s", exc
                         )
 
+    start_step = int(initial_step or 0)
     _persist_reactions(
         (rxn for rxn in rxn_index.reactions if rxn is not None),
-        step_for_discovery=0,
+        step_for_discovery=start_step,
     )
     _persist_invalid_diffusion_sites(diffusion_sites)
 
@@ -781,7 +800,7 @@ def run_kmc_steps(
         "adsorption": 0, "desorption": 0, "diffusion": 0,
         "bond": 0, "bond_couple": 0, "bond_dissoc": 0,
     }
-    current_time = 0.0
+    current_time = float(initial_time_s or 0.0)
     steps_executed = 0
 
     # Optional: trajectory writer (extxyz append) needs an atoms snapshot.
@@ -791,11 +810,11 @@ def run_kmc_steps(
     if trajectory_writer is not None:
         try:
             from autokmc.io.atoms import atoms_from_graph
-            trajectory_writer.maybe_write(atoms_from_graph(G), step=0)
+            trajectory_writer.maybe_write(atoms_from_graph(G), step=start_step)
         except Exception as exc:  # pragma: no cover
             _log.warning("trajectory_writer initial frame failed: %s", exc)
 
-    for step in range(1, int(n_steps) + 1):
+    for step in range(start_step + 1, start_step + int(n_steps) + 1):
         q_total = rxn_index.total_rate()
         if q_total <= 0.0:
             if verbose:
@@ -1001,11 +1020,12 @@ def run_kmc_steps(
             _grow_kw.setdefault("frozen_indices", frozen_indices)
 
             try:
-                new_brs = expand_bond_sites_after_event(
-                    G, chosen,
-                    calculator=calculator,
-                    **_grow_kw,
-                )
+                with _acquire_calculator(calculator) as calc:
+                    new_brs = expand_bond_sites_after_event(
+                        G, chosen,
+                        calculator=calc,
+                        **_grow_kw,
+                    )
             except Exception as exc:  # pragma: no cover
                 _log.warning("expand_bond_sites_after_event failed: %s", exc)
                 new_brs = []
@@ -1276,12 +1296,66 @@ def run_kmc_steps(
             except Exception as exc:  # pragma: no cover
                 _log.warning("trajectory_writer.maybe_write failed: %s", exc)
 
+        if checkpoint_writer is not None:
+            try:
+                checkpoint_writer.maybe_write(
+                    step=step,
+                    time_s=current_time,
+                    graph=G,
+                    adsorbate_sites=adsorbate_sites,
+                    diffusion_sites=diffusion_sites,
+                    bond_sites=bond_sites,
+                    reactants=(
+                        list(reactants.values())
+                        if isinstance(reactants, dict)
+                        else (
+                            list(reactants)
+                            if isinstance(reactants, Iterable)
+                            and not isinstance(reactants, Reactant)
+                            else [reactants]
+                        )
+                    ),
+                    frozen_indices=frozen_indices,
+                    history=history,
+                    reaction_counts=reaction_counts,
+                )
+            except Exception as exc:  # pragma: no cover
+                _log.warning("checkpoint_writer.maybe_write failed: %s", exc)
+
     # Close trajectory writer if we own a handle.
     if trajectory_writer is not None:
         try:
             trajectory_writer.close()
         except Exception:  # pragma: no cover
             pass
+
+    if checkpoint_writer is not None and steps_executed > 0:
+        final_step = start_step + steps_executed
+        try:
+            checkpoint_writer.maybe_write(
+                step=final_step,
+                force=True,
+                time_s=current_time,
+                graph=G,
+                adsorbate_sites=adsorbate_sites,
+                diffusion_sites=diffusion_sites,
+                bond_sites=bond_sites,
+                reactants=(
+                    list(reactants.values())
+                    if isinstance(reactants, dict)
+                    else (
+                        list(reactants)
+                        if isinstance(reactants, Iterable)
+                        and not isinstance(reactants, Reactant)
+                        else [reactants]
+                    )
+                ),
+                frozen_indices=frozen_indices,
+                history=history,
+                reaction_counts=reaction_counts,
+            )
+        except Exception as exc:  # pragma: no cover
+            _log.warning("final checkpoint write failed: %s", exc)
 
     final_occupancy = _final_occupancy_by_species(adsorbate_sites)
 

@@ -578,6 +578,7 @@ def expand_bond_sites_for_new_species(
         # before calculator stability pruning, or a stable representative can
         # be discarded in favour of an unstable smaller-ego one.
         prune_by_triple     = False,
+        gas_species         = reg["species"],
         verbose             = verbose,
     )
 

@@ -1162,22 +1162,22 @@ def check_diffusion_stability(
             lateral_class.g_a              = a_thermo["g_total_ev"]
             lateral_class.zpe_a            = a_thermo["zpe_ev"]
             lateral_class.entropy_a        = a_thermo["entropy_ev_per_k"]
-            lateral_class.frequencies_a_cm = a_thermo["frequencies_cm"]
-            lateral_class.imaginary_a_cm   = a_thermo["imaginary_cm"]
+            lateral_class.frequencies_a_ev = a_thermo["frequencies_ev"]
+            lateral_class.imaginary_a_ev   = a_thermo["imaginary_ev"]
         if b_thermo is not None:
             lateral_class.g_correction_b   = b_thermo["g_corr_ev"]
             lateral_class.g_b              = b_thermo["g_total_ev"]
             lateral_class.zpe_b            = b_thermo["zpe_ev"]
             lateral_class.entropy_b        = b_thermo["entropy_ev_per_k"]
-            lateral_class.frequencies_b_cm = b_thermo["frequencies_cm"]
-            lateral_class.imaginary_b_cm   = b_thermo["imaginary_cm"]
+            lateral_class.frequencies_b_ev = b_thermo["frequencies_ev"]
+            lateral_class.imaginary_b_ev   = b_thermo["imaginary_ev"]
         if ts_thermo is not None:
             lateral_class.g_correction_ts   = ts_thermo["g_corr_ev"]
             lateral_class.g_ts              = ts_thermo["g_total_ev"]
             lateral_class.zpe_ts            = ts_thermo["zpe_ev"]
             lateral_class.entropy_ts        = ts_thermo["entropy_ev_per_k"]
-            lateral_class.frequencies_ts_cm = ts_thermo["frequencies_cm"]
-            lateral_class.imaginary_ts_cm   = ts_thermo["imaginary_cm"]
+            lateral_class.frequencies_ts_ev = ts_thermo["frequencies_ev"]
+            lateral_class.imaginary_ts_ev   = ts_thermo["imaginary_ev"]
         elif a_thermo is not None and b_thermo is not None:
             # Endpoint-ZPE-only fallback: use the average correction of A/B
             # as the TS correction so detailed-balance ratios are preserved

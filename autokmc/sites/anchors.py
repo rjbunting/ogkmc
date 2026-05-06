@@ -584,11 +584,12 @@ def _optimise_position(
             mic_rel = b_pos - b_pos[0]
         lat_d = np.linalg.norm(mic_rel[:, :2] - mic_rel[:, :2].mean(0), axis=1)
         h     = np.sqrt(np.maximum(0.0, d_ideal ** 2 - lat_d ** 2))
-        z0    = float(b_pos[:, 2].max()) + float(h.mean())
+        z_min = float(b_pos[:, 2].max()) + max(float(h.mean()), 0.25)
+        z0    = z_min
         x0    = np.array([centroid[0], centroid[1], z0])
         res   = minimize(obj, x0, method="L-BFGS-B",
                          bounds=[(None, None), (None, None),
-                                 (float(b_pos[:, 2].max()), None)])
+                                 (z_min, None)])
     else:
         # Nanoparticle: constrained to the outward half-space.
         n_out  = _outward_normal(G, centroid)
