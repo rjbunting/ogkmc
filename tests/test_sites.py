@@ -655,6 +655,53 @@ def test_slab_anchor_optimisation_keeps_top_site_above_surface(monkeypatch):
     assert pos[2] == pytest.approx(captured["bounds"][2][0])
 
 
+def test_nanoparticle_anchor_optimisation_uses_connectivity_pbc(monkeypatch):
+    G = nx.Graph()
+    G.graph["cell"] = np.eye(3) * 20.0
+    G.graph["pbc"] = np.array([True, True, True])
+    G.graph["connectivity_pbc"] = np.array([False, False, False])
+    G.add_node(
+        0,
+        type="surface",
+        element="Pt",
+        position=np.array([0.0, 0.0, 0.0]),
+        index=0,
+        covalent_radius=1.36,
+    )
+    G.add_node(
+        1,
+        type="surface",
+        element="Pt",
+        position=np.array([2.0, 0.0, 0.0]),
+        index=1,
+        covalent_radius=1.36,
+    )
+
+    captured = {}
+
+    def fake_minimize(fn, x0, **kwargs):
+        captured["method"] = kwargs["method"]
+        captured["constraints"] = kwargs.get("constraints")
+        captured["bounds"] = kwargs.get("bounds")
+        captured["x0"] = np.asarray(x0, dtype=float)
+        return SimpleNamespace(x=np.asarray(x0, dtype=float), fun=float(fn(x0)))
+
+    monkeypatch.setattr("scipy.optimize.minimize", fake_minimize)
+
+    pos = _optimise_position(
+        G,
+        frozenset({1}),
+        r_cov_ads=0.76,
+        repulsion_weight=0.0,
+    )
+
+    assert captured["method"] == "SLSQP"
+    assert captured["constraints"]["type"] == "ineq"
+    assert captured["bounds"] is None
+    assert pos[0] > 2.0
+    assert pos[2] == pytest.approx(0.0)
+
+
 def test_adsorption_lateral_reassignment_removes_old_membership():
     G = nx.Graph()
     G.add_node(1, type="surface", element="Pt")

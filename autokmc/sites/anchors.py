@@ -169,7 +169,7 @@ def _get_cell(G: nx.Graph) -> tuple[np.ndarray, np.ndarray | None,
                                     np.ndarray, bool]:
     """Return ``(cell, cell_inv_or_None, pbc, use_mic)`` from *G*."""
     cell = np.array(G.graph["cell"], dtype=float)
-    pbc  = np.asarray(G.graph.get("pbc", full_pbc_for_cell(cell)), dtype=bool)
+    pbc  = _effective_pbc(G, cell)
     use_mic = bool(pbc.any())
     cell_inv: np.ndarray | None = None
     if use_mic:
@@ -178,6 +178,22 @@ def _get_cell(G: nx.Graph) -> tuple[np.ndarray, np.ndarray | None,
         except np.linalg.LinAlgError:
             use_mic = False
     return cell, cell_inv, pbc, use_mic
+
+
+def _effective_pbc(G: nx.Graph, cell: np.ndarray | None = None) -> np.ndarray:
+    """Return periodic axes that are real for surface connectivity geometry.
+
+    ``build_graph`` keeps ``G.graph["pbc"]`` fully periodic for any structure
+    with a real cell, which is useful for ASE snapshots. Isolated
+    nanoparticles also have a real cell, but their surface geometry should be
+    treated as non-periodic. ``connectivity_pbc`` is inferred from actual
+    cross-image bonds and is the right selector for calc-free site geometry.
+    """
+    if "connectivity_pbc" in G.graph:
+        return np.asarray(G.graph["connectivity_pbc"], dtype=bool)
+    if cell is None:
+        cell = np.array(G.graph["cell"], dtype=float)
+    return np.asarray(G.graph.get("pbc", full_pbc_for_cell(cell)), dtype=bool)
 
 
 def _circular_centroid(
@@ -650,7 +666,7 @@ def _add_anchor_node(
     """
     nid = _next_node_id(G)
     cell = np.asarray(G.graph.get("cell", np.eye(3)), dtype=float)
-    pbc = np.asarray(G.graph.get("pbc", full_pbc_for_cell(cell)), dtype=bool)
+    pbc = _effective_pbc(G, cell)
     if pbc.any():
         position = wrap_positions_into_cell(position, cell, pbc)
     G.add_node(
