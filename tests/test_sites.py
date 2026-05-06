@@ -10,9 +10,14 @@ import pytest
 from ase import Atoms
 from ase.calculators.singlepoint import SinglePointCalculator
 
-from autokmc.sites.anchors import _optimise_position
+from autokmc.sites.anchors import (
+    _get_cell,
+    _optimise_position,
+    _outward_height_for_clique,
+)
 from autokmc.sites.adsorbate import (
     AdsorbateSite,
+    _adsorbate_pose_is_outward,
     find_adsorbate_sites,
     _geometry_connectivity_mismatch,
     optimise_adsorbate_site_positions,
@@ -700,6 +705,45 @@ def test_nanoparticle_anchor_optimisation_uses_connectivity_pbc(monkeypatch):
     assert captured["bounds"] is None
     assert pos[0] > 2.0
     assert pos[2] == pytest.approx(0.0)
+
+
+def test_nanoparticle_propagation_rejects_inward_positions():
+    G = nx.Graph()
+    G.graph["cell"] = np.eye(3) * 20.0
+    G.graph["pbc"] = np.array([True, True, True])
+    G.graph["connectivity_pbc"] = np.array([False, False, False])
+    G.add_node(
+        0,
+        type="surface",
+        element="Pt",
+        position=np.array([0.0, 0.0, 0.0]),
+        covalent_radius=1.36,
+    )
+    G.add_node(
+        1,
+        type="surface",
+        element="Pt",
+        position=np.array([2.0, 0.0, 0.0]),
+        covalent_radius=1.36,
+    )
+
+    cell, cell_inv, pbc, use_mic = _get_cell(G)
+
+    assert not use_mic
+    assert _outward_height_for_clique(
+        G, frozenset({1}), np.array([3.0, 0.0, 0.0]),
+        cell, cell_inv, pbc, use_mic,
+    ) > 0.0
+    assert _outward_height_for_clique(
+        G, frozenset({1}), np.array([1.5, 0.0, 0.0]),
+        cell, cell_inv, pbc, use_mic,
+    ) < 0.0
+    assert _adsorbate_pose_is_outward(
+        G, [frozenset({1})], np.array([[3.0, 0.0, 0.0]]), pbc,
+    )
+    assert not _adsorbate_pose_is_outward(
+        G, [frozenset({1})], np.array([[1.5, 0.0, 0.0]]), pbc,
+    )
 
 
 def test_adsorption_lateral_reassignment_removes_old_membership():

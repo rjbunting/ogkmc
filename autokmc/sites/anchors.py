@@ -523,6 +523,21 @@ def _outward_normal(G: nx.Graph, centroid: np.ndarray) -> np.ndarray:
     return n / norm if norm > 1e-10 else np.array([0.0, 0.0, 1.0])
 
 
+def _outward_height_for_clique(
+    G: nx.Graph,
+    clique: frozenset,
+    position: np.ndarray,
+    cell: np.ndarray,
+    cell_inv: np.ndarray | None,
+    pbc: np.ndarray,
+    use_mic: bool,
+) -> float:
+    """Signed height of *position* above a non-periodic surface clique."""
+    centroid = _clique_centroid(G, clique, cell, cell_inv, pbc, use_mic)
+    normal = _outward_normal(G, centroid)
+    return float(np.dot(np.asarray(position, dtype=float) - centroid, normal))
+
+
 def _optimise_position(
     G: nx.Graph,
     clique: frozenset,
@@ -619,7 +634,14 @@ def _optimise_position(
                          "fun": lambda p: float(np.dot(p - _c, _n))},
             options={"ftol": 1e-9, "maxiter": 500},
         )
-    return np.asarray(res.x, dtype=float)
+    out = np.asarray(res.x, dtype=float)
+    if not use_mic:
+        height = _outward_height_for_clique(
+            G, clique, out, cell, cell_inv, pbc, use_mic,
+        )
+        if height <= 1e-8:
+            out = out + (1e-8 - height) * _outward_normal(G, centroid)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1004,9 +1026,28 @@ def find_anchor_sites(
                 k_m, idx_m = clique_to_loc[member]
                 if R is not None and t is not None:
                     p_member = p_rep @ R.T + t
-                    n_prop += 1
+                    if (
+                        not use_mic
+                        and _outward_height_for_clique(
+                            G,
+                            member,
+                            p_member,
+                            cell,
+                            cell_inv,
+                            pbc,
+                            use_mic,
+                        ) <= 1e-8
+                    ):
+                        p_member = None
+                    else:
+                        n_prop += 1
                 else:
-                    # Fallback: independently optimise this member.
+                    p_member = None
+                if p_member is None:
+                    # Fallback: independently optimise this member. This is
+                    # required for nanoparticles, where graph-isomorphic local
+                    # patches can admit a Kabsch transform that places the
+                    # propagated anchor inside the particle.
                     p_member = _optimise_position(
                         G, member, r_cov,
                         opt_factor=opt_factor,

@@ -525,6 +525,35 @@ def _full_adsorbate_positions(
     return rel + p_target
 
 
+def _adsorbate_pose_is_outward(
+    G: nx.Graph,
+    atom_cliques: list,
+    positions: np.ndarray,
+    pbc: np.ndarray,
+    *,
+    margin: float = 1e-8,
+) -> bool:
+    """Return False when a non-periodic propagated pose points into the particle."""
+    if np.asarray(pbc, dtype=bool).any():
+        return True
+
+    pos_arr = np.asarray(positions, dtype=float)
+    for atom_i, clq in enumerate(atom_cliques):
+        if clq is None:
+            continue
+        rows = [
+            np.asarray(G.nodes[int(s)]["position"], dtype=float)
+            for s in clq if int(s) in G
+        ]
+        if not rows:
+            continue
+        centroid = np.asarray(rows, dtype=float).mean(axis=0)
+        n_hat = _outward_normal_at(G, centroid, pbc)
+        if float(np.dot(pos_arr[int(atom_i)] - centroid, n_hat)) <= margin:
+            return False
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Reactant molecule helpers
 # ---------------------------------------------------------------------------
@@ -1517,8 +1546,13 @@ def prune_unstable_adsorbate_sites(
                     )
                     if R is None or t is None:
                         continue
+                    member_pos = new_pos @ R.T + t
+                    if not _adsorbate_pose_is_outward(
+                        G, ms.members[m_idx], member_pos, pbc_arr,
+                    ):
+                        continue
                     push_member_positions_to_graph(
-                        G, ms, m_idx, new_pos @ R.T + t
+                        G, ms, m_idx, member_pos
                     )
                     n_propagated += 1
                 if verbose:
@@ -2543,7 +2577,12 @@ def optimise_adsorbate_site_positions(
                     )
                     if R is None or t is None:
                         continue
-                    push_member_positions_to_graph(G, ms, m_idx, new_pos @ R.T + t)
+                    member_pos = new_pos @ R.T + t
+                    if not _adsorbate_pose_is_outward(
+                        G, ms.members[m_idx], member_pos, pbc_arr,
+                    ):
+                        continue
+                    push_member_positions_to_graph(G, ms, m_idx, member_pos)
                     n_propagated += 1
 
         if verbose:
