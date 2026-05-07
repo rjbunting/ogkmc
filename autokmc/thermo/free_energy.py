@@ -36,6 +36,7 @@ from typing import Any, Iterable, Sequence
 import numpy as np
 from ase import Atoms
 
+from autokmc.core.pbc import has_real_cell
 from autokmc.io.calculators import acquire_calculator
 from autokmc.utils.logging import get_logger
 
@@ -103,6 +104,13 @@ class FreeEnergyOptions:
 def _ensure_calc(atoms: Atoms, calculator) -> None:
     if atoms.calc is None and calculator is not None:
         atoms.calc = calculator
+
+
+def _normalise_harmonic_pbc(atoms: Atoms) -> None:
+    """Avoid mixed PBC when calculator-backed vibrations run on slab systems."""
+    pbc = np.asarray(atoms.get_pbc(), dtype=bool)
+    if pbc.any() and has_real_cell(atoms.get_cell()):
+        atoms.set_pbc(True)
 
 
 def _split_real_imag_ev(
@@ -288,6 +296,7 @@ def compute_gas_thermo(
     from ase.thermochemistry import IdealGasThermo
 
     snap = atoms.copy()
+    snap.set_pbc(False)
     if calculator is not None:
         snap.calc = None
 
@@ -430,6 +439,7 @@ def compute_harmonic_thermo(
     from ase.thermochemistry import HarmonicThermo
 
     snap = atoms.copy()
+    _normalise_harmonic_pbc(snap)
     if calculator is not None:
         snap.calc = None
     with acquire_calculator(calculator, purpose="harmonic thermochemistry") as calc:

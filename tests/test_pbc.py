@@ -112,6 +112,15 @@ def test_structures_with_real_cells_are_full_pbc():
     assert tuple(G.graph["connectivity_pbc"]) == (True, True, False)
 
 
+def test_adsorbate_only_reactants_stay_nonperiodic_with_vacuum_cell():
+    reactant = build_reactant("[O]", add_hydrogens=False)
+
+    assert np.linalg.matrix_rank(np.asarray(reactant.atoms.get_cell())) == 3
+    assert tuple(reactant.atoms.pbc) == (False, False, False)
+    assert tuple(reactant.graph.graph["pbc"]) == (False, False, False)
+    assert tuple(reactant.graph.graph["connectivity_pbc"]) == (False, False, False)
+
+
 def test_raycasting_uses_connectivity_axes_for_tilted_z_axis():
     from ase import Atoms
 

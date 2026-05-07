@@ -865,7 +865,7 @@ def test_slab_propagation_rejects_positions_below_surface():
     )
 
 
-def test_adsorption_lateral_structures_preserve_effective_slab_pbc(monkeypatch):
+def test_adsorption_lateral_structures_use_full_calculator_pbc(monkeypatch):
     G = nx.Graph()
     G.graph["cell"] = np.eye(3) * 20.0
     G.graph["pbc"] = np.array([True, True, True])
@@ -930,8 +930,8 @@ def test_adsorption_lateral_structures_preserve_effective_slab_pbc(monkeypatch):
         max_steps=1,
     )
 
-    assert tuple(lateral.atoms_occupied.pbc) == (True, True, False)
-    assert tuple(lateral.atoms_unoccupied.pbc) == (True, True, False)
+    assert tuple(lateral.atoms_occupied.pbc) == (True, True, True)
+    assert tuple(lateral.atoms_unoccupied.pbc) == (True, True, True)
 
 
 def test_adsorption_lateral_reassignment_removes_old_membership():

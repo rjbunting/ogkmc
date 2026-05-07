@@ -31,8 +31,9 @@ Edges connect atoms whose covalent-radius neighbour-lists overlap (ASE
 Graph-level metadata (``G.graph[...]``):
 
 * ``"cell"`` – :class:`numpy.ndarray`, shape ``(3, 3)`` (rows = lattice vectors).
-* ``"pbc"``  – :class:`numpy.ndarray` of three :class:`bool`.  Structures with
-  a real cell are stored as fully periodic (``[True, True, True]``).
+* ``"pbc"``  – :class:`numpy.ndarray` of three :class:`bool`.  Material
+  structures with a real cell are stored as fully periodic
+  (``[True, True, True]``); adsorbate-only gas reactants stay non-periodic.
 * ``"connectivity_pbc"`` – :class:`numpy.ndarray` of three :class:`bool`.
   Derived from the neighbour-list — an axis is True iff at least one bond
   crosses the cell image along it.
@@ -52,7 +53,7 @@ from ase.data import covalent_radii as ASE_COVALENT_RADII
 from ase.neighborlist import NeighborList, natural_cutoffs
 
 from autokmc.core.constants import NL_MULT_DEFAULT
-from autokmc.core.pbc import full_pbc_for_cell, set_full_pbc_if_cell
+from autokmc.core.pbc import graph_pbc_for_atoms
 from autokmc.utils.logging import get_logger
 
 _log = get_logger(__name__)
@@ -119,7 +120,8 @@ def build_graph(
         )
 
     declared_pbc = np.asarray(atoms.get_pbc(), dtype=bool)
-    set_full_pbc_if_cell(atoms)
+    graph_pbc = graph_pbc_for_atoms(atoms)
+    atoms.set_pbc(graph_pbc)
 
     cutoffs = natural_cutoffs(atoms, mult=nl_mult)
     nl = NeighborList(cutoffs, self_interaction=False, bothways=True)
@@ -129,7 +131,7 @@ def build_graph(
 
     cell_arr = np.array(atoms.get_cell(), dtype=float)
     G.graph["cell"] = cell_arr
-    G.graph["pbc"] = full_pbc_for_cell(cell_arr)
+    G.graph["pbc"] = graph_pbc.copy()
 
     positions      = atoms.get_positions()
     symbols        = atoms.get_chemical_symbols()
@@ -146,8 +148,8 @@ def build_graph(
         )
 
     # Track per-axis whether *any* bond crosses an image. This is diagnostic
-    # connectivity metadata; graph structures themselves keep full PBC when
-    # they have a real cell.
+    # connectivity metadata; material graph structures keep full PBC when
+    # they have a real cell, while adsorbate-only reactants stay non-periodic.
     pbc_effective = np.zeros(3, dtype=bool)
 
     # Walk the bothways=True neighbour list and add each bond once (i<j),
@@ -171,9 +173,9 @@ def build_graph(
     G.graph["connectivity_pbc"] = pbc_effective
 
     # Warn if the caller's original PBC declaration hid cross-image bonds.
-    # The stored structure PBC is full when a real cell exists, but this still
-    # catches too-small vacuum gaps or cells in inputs that arrived with a
-    # partially/non-periodic PBC setting.
+    # Material structures with a real cell are stored with full PBC, but this
+    # still catches too-small vacuum gaps or cells in inputs that arrived with
+    # a partially/non-periodic PBC setting.
     if not np.array_equal(declared_pbc, pbc_effective):
         unexpected = (~declared_pbc) & pbc_effective
         if unexpected.any():

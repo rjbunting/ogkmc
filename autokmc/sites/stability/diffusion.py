@@ -83,7 +83,7 @@ from ase.constraints import FixAtoms
 from ase.optimize import BFGS
 
 from autokmc.io.calculators import acquire_calculator
-from autokmc.sites.anchors import _effective_pbc
+from autokmc.core.pbc import full_pbc_for_cell
 from autokmc.sites.diffusion import (
     DiffusionSite,
     DiffusionLateral,
@@ -557,7 +557,7 @@ def _build_diffusion_atoms(
     n_mig  = len(symbols_mig)
 
     cell = np.array(G.graph["cell"], dtype=float)
-    pbc  = _effective_pbc(G, cell)
+    pbc  = full_pbc_for_cell(cell)
 
     if base_atoms is not None:
         # Reuse the relaxed slab+lat positions from a prior endpoint

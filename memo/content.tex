@@ -8,10 +8,19 @@ Theoretical exploration expedites catalyst discovery due to removing the need to
 
 \subsection{Problem}
 \noindent
+Current kinetic models require the user to decide the important adsorbates, surface sites, reactions, and barriers before the simulation begins.
+This is a severe limitation when the chemistry is not already known.
+Even for a small catalytic network, manually deciding which diffusion, adsorption, desorption, and bond-forming events must be included can take longer than the KMC simulation itself.
+The problem is therefore not only calculating a rate constant; it is deciding which rate constants should exist.
+The goal of online KMC is to make those decisions automatically from the surface graph and the molecular graph.
 
 
 \subsection{Significance}
 \noindent
+If the site and reaction network can be generated automatically, KMC can be used as a discovery tool instead of only a validation tool.
+The user supplies the surface, gas-phase reactants, and a calculator.
+The package then builds the adsorbate sites, finds local reaction motifs, and calculates barriers only when the simulation reaches the corresponding local environment.
+This avoids precomputing an exhaustive reaction network, and makes it possible to explore systems where the dominant pathway is not known in advance.
 
 
 \subsection{Goals}
@@ -77,9 +86,185 @@ This is important for us as it lets us \textbf{find if a surface has a certain g
 \subsection{Graphical representation of surface chemistry}
 \noindent
 
+Just like graphs can describe molecules, they can also describe surface adsorbates.
+However, surfaces are \textbf{much} bigger than molecules.
+That raises an important question: How can we describe adsorbates on these very big surfaces that have many atoms/nodes?
+We truncate the full graph into a subgraph with n shells.
 
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=60ex]{figures/adsorbate_shell_expansion}
+    \caption{Diagram of expanding to neighbours of neighbours of neighbours.
+    Note, subsurface atoms are not shown.
+    The package defaults to $n_{shells}=1$.
+    This allows capturing different hollow sites in fcc metals and lateral interactions.
+    }
+    \label{fig:nshell}
+\end{figure}
 
-\section{Examples}
+This allows us to describe transformations/chemical processes; a reaction happens and the graph representation changes.
+The reactions are:
+adsorption is an adsorption site becoming occupied;
+diffusion is an occupied adsorption site becoming unoccupied and a neighbouring adsorption site becoming occupied;
+bond formation is two occupied fragment adsorption sites becoming unoccupied and one product adsorption site becoming occupied.
+The reverse of bond formation is bond dissociation.
 
-\section{Plan}
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=60ex]{figures/diffusion_site_process}
+    \caption{Diagram showing the storage of diffusion reactions.
+    The diffusion site is saved as a subgraph containing both hollow sites and their local surface environments.
+    The example has $E_a=0.3$ eV and $\Delta E=0.1$ eV.}
+    \label{fig:diffusion}
+\end{figure}
 
+\subsection{Building a structure and classifying the surface sites}
+\noindent
+The reactive part of a catalyst is the surface.
+For this, adsorbates are restricted to only bonding to the surface.
+\textbf{Any} structure can be put in as an input, but the package has a basic input for slabs and nanoparticles.
+The package classifies which atoms are surface atoms.
+It does this with ray casting for periodic structures (slabs) and convex hull for 3D structures (nanoparticles).
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=60ex]{figures/surface_classification_methods.pdf}
+    \caption{Surface classification methods used before graph construction.
+    Periodic slabs use ray casting, whilst nanoparticles use a convex hull.}
+    \label{fig:surface_classification}
+\end{figure}
+
+The atoms are then converted into a graph.
+Each atom becomes a node with an element, position, covalent radius, and type (surface or bulk).
+Edges are added when covalent-radius neighbour-list cutoffs overlap.
+The graph also stores the cell and periodic boundary information for loading structures in ASE for optimisation.
+
+\subsection{Per element possible sites}
+\noindent
+For each element, a co-bonding graph is built on the surface atoms.
+Two surface atoms are connected in this graph when an adsorbate atom of that element can geometrically bond to both of them.
+Then, graph cliques can be made to give each distinct site on the graph, each with their own unique coordination.
+Bigger elements will have bigger possible cliques.
+This removes the need for having set positions for surface sites, as it is purely graph based.
+These graphically unique sites on the surface are called \textbf{anchors}.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=60ex]{figures/anchor_site_selection.pdf}
+    \caption{Anchor sites are generated from the maximum coordination allowed by the element-specific co-bonding graph.
+    The maximum is found for each element separately.}
+    \label{fig:anchor_sites}
+\end{figure}
+
+\subsection{Adsorption sites}
+\noindent
+For single atoms, the adsorption site is trialed at the anchor site.
+It then is optimised with a calculator, and its coordination (based on cutoff radii) is checked.
+If the coordination stays the same, the site is stable and is accepted as a valid site.
+If the coordination changes, it is rejected as the site is unstable.
+The graph is then updated across all unique cliques (multiple graphically identical cliques will be present across the graph).
+
+###Show a coordination change of accepted and rejected cliques
+
+Adsorption sites are built from a formed chain of anchor sites of each element.
+For a chosen subset, the first anchor atom is placed on every distinct anchor point of the matching element.
+The remaining anchor atoms are placed on anchor points whose distances match the gas-phase intramolecular distances within a tolerance.
+This gives a candidate rigid placement of the molecule on the surface.
+Candidates whose bonded surface cliques are not connected through the local surface graph are discarded.
+The remaining placements are grouped by isomorphism of the union of their bonded surface environments.
+
+After enumeration, the representative geometry of each adsorption isomorphism class is optimised.
+The optimisation first performs a calculator-free rigid-body refinement against the anchor points.
+Then, when a calculator is available, the site is relaxed on the surface.
+If the relaxation fails, or if the bonding graph changes so that the intended adsorbate is no longer the same species, the site is pruned.
+Stable representative geometries are propagated to the other members of the same isomorphism class.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=60ex]{figures/adsorption_orbit_pruning.pdf}
+    \caption{Adsorption sites are generated by choosing canonical molecular anchor-orbit subsets, placing them on surface anchor points, geometrically optimising, and pruning unstable relaxed geometries.}
+    \label{fig:adsorption_pruning}
+\end{figure}
+
+\subsection{Diffusion sites}
+\noindent
+A diffusion site is a pair of adsorption-site members for the same adsorbate.
+The pair is considered only if the two bonded surface-clique unions are local to each other.
+For the stored graph representation, the package builds the surface-only ego graph around both endpoint sites and stamps the occupied endpoint labels into that graph.
+Graph isomorphism then groups equivalent hops, so translating the same hop across the surface does not create a new reaction type.
+
+The barrier is not calculated when the diffusion pair is enumerated.
+It is calculated when the KMC simulation first finds that one endpoint is occupied and the other endpoint is unoccupied.
+At that point, the package relaxes the initial and final endpoints and runs a nudged elastic band calculation between them.
+The NEB saddle gives the transition-state energy, from which the forward and reverse diffusion rates are calculated using the Eyring form.
+The schematic in Fig.\ref{fig:diffusion} shows the stored two-site process.
+
+\subsection{Bond sites}
+\noindent
+Bond sites are built from molecular graph templates.
+For a coupling reaction, the template is $A + B \rightleftharpoons C$.
+The package searches for a local triple of adsorption placements: one placement for fragment $A$, one for fragment $B$, and one for product $C$.
+The $A$ and $B$ placements must be close enough on the surface to react, and the $C$ placement must be local to their combined surface environment.
+Degenerate cases where two species claim the same adsorption clique are discarded.
+
+As with diffusion, the stored bond site is an isomorphism class, not a single surface position.
+The graph contains the local environment of the two fragment placements and the product placement.
+Equivalent triples are merged by graph isomorphism.
+When KMC first encounters an applicable member of a new lateral class, the package relaxes the $A+B$ and $C$ endpoints and runs an NEB calculation for the bond-forming or bond-breaking path.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=60ex]{figures/bond_site_process.pdf}
+    \caption{A bond reaction site stores a local triple containing two fragment adsorption sites and one product adsorption site.
+    The barrier is obtained from an endpoint relaxation and NEB calculation when that local process is first needed.}
+    \label{fig:bond_sites}
+\end{figure}
+
+\subsection{Online expansion of bond sites}
+\noindent
+Bond chemistry can create species that were not present on the surface at the beginning of the simulation.
+The package therefore expands the network after bond events.
+When a coupling event forms a new product, adsorption and diffusion sites for that product are generated and the product can participate in later bond reactions.
+When a dissociation event forms fragments, the fragment reaction channels are activated in the same way.
+This keeps the initial input small: the user can provide the gas-phase reactants and the surface, while new surface-only species are introduced as the trajectory reaches them.
+
+\subsection{Lazy calculation of barriers}
+\noindent
+The expensive part of online KMC is not graph matching; it is relaxation and NEB.
+Therefore barriers are calculated lazily.
+Enumeration creates possible adsorption, diffusion, and bond sites as graph objects.
+During KMC, a site member is first checked for applicability.
+The local lateral environment is then classified by graph isomorphism.
+Only if that lateral class has not been seen before does the package run the corresponding stability calculation or NEB.
+
+After a lateral class has been calculated, its energies and rates are cached.
+All future members with the same graph environment reuse the stored rate.
+For diffusion and bond reactions, the transition-state energy is used for both directions so that the forward and reverse rates remain thermodynamically consistent.
+The rate is then calculated with an Eyring expression,
+$k = \kappa k_{\mathrm{B}}T h^{-1}\exp(-E_a/k_{\mathrm{B}}T)$.
+Adsorption rates additionally include the gas partial pressure.
+
+\subsection{Lateral interactions}
+\noindent
+Lateral interactions are represented by changing the graph used to define a reaction rate.
+For a given site member, the package builds a local ego graph around the bonded surface clique and includes occupied neighbouring adsorbates as leaf nodes.
+Two members have the same lateral class only when these local occupied environments are graph-isomorphic.
+Thus the same adsorption, diffusion, or bond site can have different rates depending on which nearby adsorbates are present.
+
+This gives a practical compromise between a lattice model with fixed pair interactions and a fully new calculation for every surface configuration.
+The KMC loop only recomputes sites in the surface shell affected by the last event.
+If a new occupied environment appears, the corresponding barrier is calculated and cached.
+If the environment has appeared before, the cached rate is reused.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=60ex]{figures/lazy_lateral_interactions.pdf}
+    \caption{Lateral classes are local occupied graph environments.
+    Barrier calculations are lazy: a new lateral class triggers relaxation or NEB, while a repeated lateral class reuses the cached rate.}
+    \label{fig:lazy_lateral}
+\end{figure}
+
+%\section{Examples}
+%
+%\section{Plan}
+%

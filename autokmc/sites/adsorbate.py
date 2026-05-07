@@ -81,6 +81,7 @@ import networkx as nx
 from networkx.algorithms import isomorphism
 
 from autokmc.core.pbc import (
+    full_pbc_for_cell,
     minimum_image_vectors,
     wrap_positions_into_cell,
 )
@@ -1171,7 +1172,7 @@ def _build_pruning_atoms(
     surface_array = np.asarray(slab_tag + [2] * n_ads, dtype=np.int8)
 
     cell = np.array(G.graph["cell"], dtype=float)
-    pbc  = _effective_pbc(G, cell)
+    pbc  = full_pbc_for_cell(cell)
 
     atoms = Atoms(symbols=symbols, positions=positions, cell=cell, pbc=pbc)
     atoms.arrays["surface"] = surface_array

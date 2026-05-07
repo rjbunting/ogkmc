@@ -21,6 +21,21 @@ def full_pbc_for_cell(cell) -> np.ndarray:
     return np.zeros(3, dtype=bool)
 
 
+def graph_pbc_for_atoms(atoms) -> np.ndarray:
+    """Return graph-level PBC for tagged structures.
+
+    Adsorbate-only reactant graphs are gas-phase molecules.  They can carry a
+    vacuum cell from ``Atoms.center(vacuum=...)`` for calculator compatibility,
+    but they must remain non-periodic for ASE gas thermochemistry.
+    """
+    surface = atoms.arrays.get("surface")
+    if surface is not None:
+        surface_arr = np.asarray(surface, dtype=int)
+        if surface_arr.size and np.all(surface_arr == 2):
+            return np.zeros(3, dtype=bool)
+    return full_pbc_for_cell(atoms.get_cell())
+
+
 def set_full_pbc_if_cell(atoms):
     """Set ``atoms.pbc`` to T T T when ``atoms`` has a real cell."""
     if has_real_cell(atoms.get_cell()):
@@ -96,6 +111,7 @@ def wrap_positions_into_cell(
 
 __all__ = [
     "full_pbc_for_cell",
+    "graph_pbc_for_atoms",
     "has_real_cell",
     "minimum_image_distances",
     "minimum_image_vectors",

@@ -86,7 +86,7 @@ from ase.constraints import FixAtoms
 from ase.optimize import BFGS
 
 from autokmc.io.calculators import acquire_calculator
-from autokmc.sites.anchors import _effective_pbc
+from autokmc.core.pbc import full_pbc_for_cell
 from autokmc.sites.stability.adsorption import (
     SurfaceConnectivityError,
     AdsorbateDissociationError,
@@ -609,7 +609,7 @@ def _build_bond_atoms(
     n_react = len(symbols_react)
 
     cell = np.array(G.graph["cell"], dtype=float)
-    pbc  = _effective_pbc(G, cell)
+    pbc  = full_pbc_for_cell(cell)
 
     if base_atoms is not None:
         if len(base_atoms) != n_slab + n_lat + n_react:

@@ -90,7 +90,7 @@ from ase.constraints import FixAtoms
 from ase.neighborlist import NeighborList, natural_cutoffs
 
 from autokmc.io.calculators import acquire_calculator
-from autokmc.sites.anchors import _effective_pbc
+from autokmc.core.pbc import full_pbc_for_cell
 from autokmc.sites.adsorbate import AdsorbateSite, AdsorbateSiteLateral
 from autokmc.core.constants import NL_MULT_DEFAULT, LATERAL_SHELLS_DEFAULT
 from autokmc.utils.logging import get_logger
@@ -573,7 +573,7 @@ def _build_stability_atoms(
     positions = [G.nodes[n]["position"] for n in all_node_ids]
 
     cell = np.array(G.graph["cell"], dtype=float)
-    pbc  = _effective_pbc(G, cell)
+    pbc  = full_pbc_for_cell(cell)
 
     atoms = Atoms(
         symbols   = symbols,

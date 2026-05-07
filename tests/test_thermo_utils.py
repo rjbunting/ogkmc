@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+import numpy as np
 import pytest
 from ase import Atoms
 
@@ -56,6 +57,57 @@ def test_default_harmonic_cache_uses_temporary_directory(monkeypatch):
     assert seen["cache_dir"].name.startswith("autokmc_vib_")
     assert not seen["cache_dir"].exists()
     assert Path("_autokmc_vib_cache") != seen["cache_dir"]
+
+
+def test_gas_thermo_forces_nonperiodic_vibration_snapshot(monkeypatch):
+    seen: dict[str, tuple[bool, bool, bool]] = {}
+
+    def fake_vibrate(atoms, indices, *, options, cache_dir, label):
+        seen["pbc"] = tuple(bool(x) for x in atoms.pbc)
+        return [], [], []
+
+    monkeypatch.setattr(free_energy, "_vibrate", fake_vibrate)
+
+    free_energy.compute_gas_thermo(
+        Atoms(
+            "He",
+            positions=[[0.0, 0.0, 0.0]],
+            cell=np.eye(3) * 12.0,
+            pbc=[True, True, True],
+        ),
+        energy_ev=0.0,
+        temperature_k=300.0,
+        pressure_bar=1.0,
+        options=free_energy.FreeEnergyOptions(enabled=True),
+        geometry="monatomic",
+    )
+
+    assert seen["pbc"] == (False, False, False)
+
+
+def test_harmonic_thermo_promotes_mixed_slab_pbc(monkeypatch):
+    seen: dict[str, tuple[bool, bool, bool]] = {}
+
+    def fake_vibrate(atoms, indices, *, options, cache_dir, label):
+        seen["pbc"] = tuple(bool(x) for x in atoms.pbc)
+        return [], [], []
+
+    monkeypatch.setattr(free_energy, "_vibrate", fake_vibrate)
+
+    free_energy.compute_harmonic_thermo(
+        Atoms(
+            "CuO",
+            positions=[[0.0, 0.0, 0.0], [0.0, 0.0, 1.8]],
+            cell=np.eye(3) * 12.0,
+            pbc=[True, True, False],
+        ),
+        [1],
+        energy_ev=1.0,
+        temperature_k=300.0,
+        options=free_energy.FreeEnergyOptions(enabled=True),
+    )
+
+    assert seen["pbc"] == (True, True, True)
 
 
 def test_explicit_harmonic_cache_is_preserved(monkeypatch, tmp_path):

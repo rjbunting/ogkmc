@@ -183,11 +183,11 @@ def _get_cell(G: nx.Graph) -> tuple[np.ndarray, np.ndarray | None,
 def _effective_pbc(G: nx.Graph, cell: np.ndarray | None = None) -> np.ndarray:
     """Return periodic axes that are real for surface connectivity geometry.
 
-    ``build_graph`` keeps ``G.graph["pbc"]`` fully periodic for any structure
-    with a real cell, which is useful for ASE snapshots. Isolated
-    nanoparticles also have a real cell, but their surface geometry should be
-    treated as non-periodic. ``connectivity_pbc`` is inferred from actual
-    cross-image bonds and is the right selector for calc-free site geometry.
+    ``build_graph`` keeps material ``G.graph["pbc"]`` fully periodic for real
+    cells, which is useful for ASE snapshots. Isolated nanoparticles also have
+    a real cell, but their surface geometry should be treated as non-periodic.
+    ``connectivity_pbc`` is inferred from actual cross-image bonds and is the
+    right selector for calc-free site geometry.
     """
     if "connectivity_pbc" in G.graph:
         return np.asarray(G.graph["connectivity_pbc"], dtype=bool)
