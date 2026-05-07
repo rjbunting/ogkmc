@@ -75,7 +75,7 @@ adsorbate_sites:
 # Disable vibrational corrections for this long GPU debug run. Set enabled:
 # true once the reaction network is behaving as expected.
 free_energy:
-  enabled: false
+  enabled: true
   pressure_bar: 1.0
 
 kmc:
@@ -99,7 +99,7 @@ diffusion:
   climb: true
   spring_k: 0.1
   interpolation: linear
-  persist_neb_path: false
+  persist_neb_path: true
 
 bond:
   enabled: true

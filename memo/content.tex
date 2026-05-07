@@ -288,6 +288,11 @@ For diffusion and bond reactions, the transition-state energy is used for both d
 KMC is run from the current graph state using the standard residence-time algorithm.\cite{bortz1975nfold,gillespie1977ssa}
 At the start of a step, the package has a reaction list containing all currently possible adsorption, desorption, diffusion, bond-forming, and bond-breaking events.
 Each entry stores the site member, direction, and rate.
+For a calculated process, the rate is found from the barrier with the Eyring equation,\cite{eyring1935activated}
+\begin{equation}
+    k = \frac{k_{\mathrm{B}}T}{h}\exp\left(-\frac{E_a}{k_{\mathrm{B}}T}\right),
+\end{equation}
+where $E_a$ is the barrier, $T$ is the temperature, $k_{\mathrm{B}}$ is the Boltzmann constant, and $h$ is Planck's constant.
 
 The total rate is the sum of all rates in the reaction list,
 \begin{equation}

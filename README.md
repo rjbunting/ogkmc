@@ -106,6 +106,5 @@ Useful project areas:
 
 MIT
 
-
 ## Postscript
 God forsook this repository long ago... we commit to main and say a prayer.

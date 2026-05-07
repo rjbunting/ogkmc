@@ -131,6 +131,96 @@ def _add_slab_backdrop(fig, pos, bulk_mask, surf_pos):
     ))
 
 
+def _site_graph_nodes(G, site):
+    rows = []
+    for m_idx, node_ids in enumerate(site.member_node_ids):
+        for atom_i, nid in enumerate(node_ids):
+            if nid not in G:
+                continue
+            d = G.nodes[nid]
+            if d.get("type") == "adsorbate":
+                rows.append((m_idx, atom_i, nid, d))
+    return rows
+
+
+def _add_site_member_traces(fig, G, site, visible=True):
+    rows = _site_graph_nodes(G, site)
+    if not rows:
+        return
+
+    col = _iso_col(site.iso_class)
+    node_set = {nid for _, _, nid, _ in rows}
+    legend_group = f"iso {site.iso_class}"
+
+    # Anchor-bond edges for this iso-class only.
+    bond_from, bond_to = [], []
+    for _, _, nid, d in rows:
+        if not d.get("is_bonded"):
+            continue
+        for nb in G.neighbors(nid):
+            if G.nodes[nb].get("type") != "surface":
+                continue
+            bond_from.append(d["position"])
+            bond_to.append(G.nodes[nb]["position"])
+    if bond_from:
+        tr = _bond_lines3d(
+            np.array(bond_from), np.array(bond_to),
+            color="rgba(90,90,90,0.45)", width=2,
+            name=f"iso {site.iso_class} anchor bonds",
+        )
+        tr.visible = visible
+        tr.legendgroup = legend_group
+        fig.add_trace(tr)
+
+    # Intra-molecular bonds for this iso-class only.
+    drawn_pairs: set = set()
+    mol_from, mol_to = [], []
+    for _, _, nid, d in rows:
+        for nb in G.neighbors(nid):
+            if nb not in node_set:
+                continue
+            if not G.edges[nid, nb].get("intra_adsorbate"):
+                continue
+            key = (min(nid, nb), max(nid, nb))
+            if key in drawn_pairs:
+                continue
+            drawn_pairs.add(key)
+            mol_from.append(d["position"])
+            mol_to.append(G.nodes[nb]["position"])
+    if mol_from:
+        tr = _bond_lines3d(
+            np.array(mol_from), np.array(mol_to),
+            color=col, width=4,
+            name=f"iso {site.iso_class} C-O",
+        )
+        tr.visible = visible
+        tr.legendgroup = legend_group
+        fig.add_trace(tr)
+
+    grp: dict = {}
+    for _m_idx, _atom_i, _nid, d in rows:
+        key = (d["element"], bool(d.get("is_bonded")))
+        grp.setdefault(key, []).append(d["position"])
+
+    for (sym, bonded), pts in sorted(grp.items()):
+        tr = _atom_scatter3d(
+            np.array(pts),
+            colors=col,
+            sizes=10 if bonded else 6,
+            names=[f"iso{site.iso_class} {sym}"] * len(pts),
+            opacity=0.98 if bonded else 0.65,
+            symbol=_ADS_SYM.get(sym, "circle"),
+            line_color="black" if bonded else col,
+            line_width=1.0 if bonded else 0.0,
+            name=f"iso {site.iso_class} {sym} "
+                 f"({'bonded' if bonded else 'float'})",
+            showlegend=True,
+        )
+        tr.visible = visible
+        tr.legendgroup = legend_group
+        fig.add_trace(tr)
+
+
 # %% ── 1. Build Cu(111) slab ──────────────────────────────────────────────────
 _section("STAGE 1 — Build Cu(111) FCC slab")
 
@@ -283,6 +373,77 @@ print(f"Adsorbate nodes in G : {total_ads}  ({n_bonded} bonded)")
 print(f"Stable iso-classes   : {len(sites_CO)}")
 print(f"Total placements     : {sum(len(s.members) for s in sites_CO)}")
 
+print("\nPer-iso graph position audit:")
+for site in sites_CO:
+    rows = _site_graph_nodes(G, site)
+    expected = len(site.member_node_ids) * site.n_atoms
+    present = len(rows)
+    optimised = sum(1 for row in rows if row[3].get("optimised"))
+    missing_members = [
+        m_idx
+        for m_idx, node_ids in enumerate(site.member_node_ids)
+        if any(nid not in G for nid in node_ids)
+    ]
+    print(
+        f"  iso {site.iso_class:2d}: members={len(site.member_node_ids):4d}  "
+        f"nodes={present:4d}/{expected:<4d}  "
+        f"optimised={optimised:4d}/{present:<4d}  "
+        f"missing_members={len(missing_members)}"
+    )
+
+# The combined all-iso view below is dense: several stable iso-classes can sit
+# close enough that Plotly depth sorting or later traces visually cover earlier
+# ones.  This dropdown renders one iso-class at a time from the same graph-node
+# positions used by KMC.
+if sites_CO:
+    first_iso = sites_CO[0].iso_class
+    fig_iso = go.Figure()
+    _add_slab_backdrop(fig_iso, pos, bulk_mask, surf_pos)
+    backdrop_n = len(fig_iso.data)
+    iso_trace_ids: dict[int, list[int]] = {}
+
+    for site in sites_CO:
+        before = len(fig_iso.data)
+        _add_site_member_traces(
+            fig_iso, G, site,
+            visible=(site.iso_class == first_iso),
+        )
+        iso_trace_ids[site.iso_class] = list(range(before, len(fig_iso.data)))
+
+    buttons = []
+    for site in sites_CO:
+        iso_cls = int(site.iso_class)
+        visible = [
+            (i < backdrop_n) or (i in iso_trace_ids[iso_cls])
+            for i in range(len(fig_iso.data))
+        ]
+        buttons.append(dict(
+            label=f"iso {iso_cls}",
+            method="update",
+            args=[
+                {"visible": visible},
+                {"title": dict(
+                    text=(f"Stage 6 — isolated iso {iso_cls} "
+                          f"({len(site.member_node_ids)} members)"),
+                    font=dict(size=14),
+                )},
+            ],
+        ))
+
+    fig_iso.update_layout(**_layout(
+        f"Stage 6 — isolated iso {first_iso} "
+        f"({len(sites_CO[0].member_node_ids)} members)"
+    ))
+    fig_iso.update_layout(
+        updatemenus=[dict(
+            type="dropdown",
+            buttons=buttons,
+            x=0.01, y=0.99,
+            xanchor="left", yanchor="top",
+        )]
+    )
+    fig_iso.show()
+
 fig = go.Figure()
 _add_slab_backdrop(fig, pos, bulk_mask, surf_pos)
 
@@ -382,4 +543,3 @@ fig.show()
 # ```
 
 print("\nPipeline complete.")
-
