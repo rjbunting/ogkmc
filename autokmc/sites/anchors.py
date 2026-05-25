@@ -79,6 +79,7 @@ from ase.data import (
 )
 
 from autokmc.core.pbc import (
+    full_pbc_for_cell,
     minimum_image_distances,
     minimum_image_vectors,
     wrap_positions_into_cell,
@@ -168,7 +169,7 @@ def _get_cell(G: nx.Graph) -> tuple[np.ndarray, np.ndarray | None,
                                     np.ndarray, bool]:
     """Return ``(cell, cell_inv_or_None, pbc, use_mic)`` from *G*."""
     cell = np.array(G.graph["cell"], dtype=float)
-    pbc  = np.asarray(G.graph.get("pbc", [True, True, False]), dtype=bool)
+    pbc  = _effective_pbc(G, cell)
     use_mic = bool(pbc.any())
     cell_inv: np.ndarray | None = None
     if use_mic:
@@ -177,6 +178,22 @@ def _get_cell(G: nx.Graph) -> tuple[np.ndarray, np.ndarray | None,
         except np.linalg.LinAlgError:
             use_mic = False
     return cell, cell_inv, pbc, use_mic
+
+
+def _effective_pbc(G: nx.Graph, cell: np.ndarray | None = None) -> np.ndarray:
+    """Return periodic axes that are real for surface connectivity geometry.
+
+    ``build_graph`` keeps material ``G.graph["pbc"]`` fully periodic for real
+    cells, which is useful for ASE snapshots. Isolated nanoparticles also have
+    a real cell, but their surface geometry should be treated as non-periodic.
+    ``connectivity_pbc`` is inferred from actual cross-image bonds and is the
+    right selector for calc-free site geometry.
+    """
+    if "connectivity_pbc" in G.graph:
+        return np.asarray(G.graph["connectivity_pbc"], dtype=bool)
+    if cell is None:
+        cell = np.array(G.graph["cell"], dtype=float)
+    return np.asarray(G.graph.get("pbc", full_pbc_for_cell(cell)), dtype=bool)
 
 
 def _circular_centroid(
@@ -334,7 +351,11 @@ def _build_co_bond_graph(
     cbg = nx.Graph()
     cbg.add_nodes_from((n, dict(G.nodes[n])) for n in ids)
 
-    is_ortho = use_mic and np.allclose(cell - np.diag(np.diag(cell)), 0.0)
+    is_ortho = (
+        use_mic
+        and bool(np.asarray(pbc, dtype=bool).all())
+        and np.allclose(cell - np.diag(np.diag(cell)), 0.0)
+    )
 
     if is_ortho:
         boxsize = np.where(pbc, np.diag(cell), 0.0)
@@ -506,6 +527,24 @@ def _outward_normal(G: nx.Graph, centroid: np.ndarray) -> np.ndarray:
     return n / norm if norm > 1e-10 else np.array([0.0, 0.0, 1.0])
 
 
+def _outward_height_for_clique(
+    G: nx.Graph,
+    clique: frozenset,
+    position: np.ndarray,
+    cell: np.ndarray,
+    cell_inv: np.ndarray | None,
+    pbc: np.ndarray,
+    use_mic: bool,
+) -> float:
+    """Signed outward height of *position* above a surface clique."""
+    if use_mic:
+        z_ref = max(float(G.nodes[int(n)]["position"][2]) for n in clique)
+        return float(np.asarray(position, dtype=float)[2] - z_ref)
+    centroid = _clique_centroid(G, clique, cell, cell_inv, pbc, use_mic)
+    normal = _outward_normal(G, centroid)
+    return float(np.dot(np.asarray(position, dtype=float) - centroid, normal))
+
+
 def _optimise_position(
     G: nx.Graph,
     clique: frozenset,
@@ -584,11 +623,12 @@ def _optimise_position(
             mic_rel = b_pos - b_pos[0]
         lat_d = np.linalg.norm(mic_rel[:, :2] - mic_rel[:, :2].mean(0), axis=1)
         h     = np.sqrt(np.maximum(0.0, d_ideal ** 2 - lat_d ** 2))
-        z0    = float(b_pos[:, 2].max()) + float(h.mean())
+        z_min = float(b_pos[:, 2].max()) + max(float(h.mean()), 0.25)
+        z0    = z_min
         x0    = np.array([centroid[0], centroid[1], z0])
         res   = minimize(obj, x0, method="L-BFGS-B",
                          bounds=[(None, None), (None, None),
-                                 (float(b_pos[:, 2].max()), None)])
+                                 (z_min, None)])
     else:
         # Nanoparticle: constrained to the outward half-space.
         n_out  = _outward_normal(G, centroid)
@@ -601,7 +641,14 @@ def _optimise_position(
                          "fun": lambda p: float(np.dot(p - _c, _n))},
             options={"ftol": 1e-9, "maxiter": 500},
         )
-    return np.asarray(res.x, dtype=float)
+    out = np.asarray(res.x, dtype=float)
+    if not use_mic:
+        height = _outward_height_for_clique(
+            G, clique, out, cell, cell_inv, pbc, use_mic,
+        )
+        if height <= 1e-8:
+            out = out + (1e-8 - height) * _outward_normal(G, centroid)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -648,7 +695,7 @@ def _add_anchor_node(
     """
     nid = _next_node_id(G)
     cell = np.asarray(G.graph.get("cell", np.eye(3)), dtype=float)
-    pbc = np.asarray(G.graph.get("pbc", [True, True, False]), dtype=bool)
+    pbc = _effective_pbc(G, cell)
     if pbc.any():
         position = wrap_positions_into_cell(position, cell, pbc)
     G.add_node(
@@ -986,9 +1033,25 @@ def find_anchor_sites(
                 k_m, idx_m = clique_to_loc[member]
                 if R is not None and t is not None:
                     p_member = p_rep @ R.T + t
-                    n_prop += 1
+                    if _outward_height_for_clique(
+                        G,
+                        member,
+                        p_member,
+                        cell,
+                        cell_inv,
+                        pbc,
+                        use_mic,
+                    ) <= 1e-8:
+                        p_member = None
+                    else:
+                        n_prop += 1
                 else:
-                    # Fallback: independently optimise this member.
+                    p_member = None
+                if p_member is None:
+                    # Fallback: independently optimise this member. This is
+                    # required for nanoparticles, where graph-isomorphic local
+                    # patches can admit a Kabsch transform that places the
+                    # propagated anchor inside the particle.
                     p_member = _optimise_position(
                         G, member, r_cov,
                         opt_factor=opt_factor,

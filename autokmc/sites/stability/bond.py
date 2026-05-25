@@ -74,7 +74,6 @@ Public API
 
 from __future__ import annotations
 
-import copy
 import os
 from typing import TYPE_CHECKING
 
@@ -86,6 +85,8 @@ from ase import Atoms
 from ase.constraints import FixAtoms
 from ase.optimize import BFGS
 
+from autokmc.io.calculators import acquire_calculator
+from autokmc.core.pbc import full_pbc_for_cell
 from autokmc.sites.stability.adsorption import (
     SurfaceConnectivityError,
     AdsorbateDissociationError,
@@ -331,6 +332,7 @@ def check_bond_site_lateral(
 
     depth: int = LATERAL_SHELLS_DEFAULT if n_shells is None else int(n_shells)
 
+    gas_product = bool(getattr(brs, "gas_product", False))
     site_a, m_a, site_b, m_b, site_c, m_c = brs.members[member_index]
     # Read node IDs live from the AdsorbateSite objects rather than the cached
     # copies in brs.member_node_ids.  _materialise_adsorbate_nodes rebuilds
@@ -339,12 +341,20 @@ def check_bond_site_lateral(
     # updated and become stale after any re-materialisation.
     a_node_ids = list(site_a.member_node_ids[m_a])
     b_node_ids = list(site_b.member_node_ids[m_b])
-    c_node_ids = list(site_c.member_node_ids[m_c])
+    c_node_ids = (
+        []
+        if gas_product or site_c is None
+        else list(site_c.member_node_ids[m_c])
+    )
 
     clq_a = _member_clique_union(site_a, m_a)
     clq_b = _member_clique_union(site_b, m_b)
-    clq_c = _member_clique_union(site_c, m_c)
-    if not clq_a or not clq_b or not clq_c:
+    clq_c = (
+        frozenset()
+        if gas_product or site_c is None
+        else _member_clique_union(site_c, m_c)
+    )
+    if not clq_a or not clq_b or (not gas_product and not clq_c):
         raise ValueError(
             f"Member {member_index} of BondReactionSite "
             f"iso_class={brs.iso_class} has an empty bonded surface "
@@ -373,6 +383,15 @@ def check_bond_site_lateral(
         fp_index = {}
         brs._lateral_fp_index = fp_index   # type: ignore[attr-defined]
 
+    def _stamp_gas_product(target_lc: BondReactionLateral) -> BondReactionLateral:
+        if gas_product:
+            target_lc.gas_product = True
+            gas_reactant = getattr(brs, "gas_reactant", None)
+            target_lc.gas_pressure_bar = float(
+                getattr(gas_reactant, "partial_pressure_bar", 0.0) or 0.0
+            )
+        return target_lc
+
     def _drop_from_other_classes(new_lc=None) -> None:
         for other in brs.lateral_classes:
             if other is new_lc:
@@ -395,7 +414,7 @@ def check_bond_site_lateral(
                 "→ existing lateral_class=%d",
                 brs.iso_class, member_index, lc.lateral_class,
             )
-            return lc
+            return _stamp_gas_product(lc)
 
     _drop_from_other_classes(new_lc=None)
     new_lc = BondReactionLateral(
@@ -404,6 +423,7 @@ def check_bond_site_lateral(
         n_shells      = depth,
         members       = [member_index],
     )
+    _stamp_gas_product(new_lc)
     new_lc._fingerprint = fkey  # type: ignore[attr-defined]
     brs.lateral_classes.append(new_lc)
     fp_index.setdefault(fkey, []).append(new_lc)
@@ -531,7 +551,7 @@ def _build_bond_atoms(
     b_ordered = _ordered_endpoint_nodes(G, b_node_ids)
     c_present = [int(n) for n in c_node_ids if n in G]
 
-    if len(a_ordered) + len(b_ordered) != len(c_present):
+    if c_present and len(a_ordered) + len(b_ordered) != len(c_present):
         raise ValueError(
             f"Bond NEB layout: |A|+|B|={len(a_ordered)+len(b_ordered)} "
             f"differs from |C|={len(c_present)} — bond change must "
@@ -589,7 +609,7 @@ def _build_bond_atoms(
     n_react = len(symbols_react)
 
     cell = np.array(G.graph["cell"], dtype=float)
-    pbc  = np.asarray(G.graph.get("pbc", [True, True, False]), dtype=bool)
+    pbc  = full_pbc_for_cell(cell)
 
     if base_atoms is not None:
         if len(base_atoms) != n_slab + n_lat + n_react:
@@ -610,6 +630,7 @@ def _build_bond_atoms(
         all_syms = list(atoms.get_chemical_symbols())
         all_syms[n_slab + n_lat : n_slab + n_lat + n_react] = symbols_react
         atoms.set_chemical_symbols(all_syms)
+        atoms.set_pbc(pbc)
     else:
         symbols   = [G.nodes[n]["element"] for n in slab_lat_nodes] + symbols_react
         positions = [
@@ -628,6 +649,66 @@ def _build_bond_atoms(
     react_atom_indices = list(range(n_slab + n_lat, n_slab + n_lat + n_react))
     return (atoms, n_slab, n_lat, react_atom_indices,
             react_node_ids, react_node_ids_ab)
+
+
+def _gas_product_neb_endpoint(
+    *,
+    atoms_empty: Atoms,
+    atoms_ab: Atoms,
+    n_slab: int,
+    n_lat: int,
+    n_react: int,
+    react_nodes_ab: list[int],
+    gas_reactant,
+    G: nx.Graph,
+    lift_height: float,
+) -> Atoms:
+    """Return a same-size NEB endpoint with C(gas) lifted above A+B."""
+    if gas_reactant is None or getattr(gas_reactant, "atoms", None) is None:
+        raise ValueError("gas-product bond reaction requires a gas Reactant for C")
+
+    gas_atoms = gas_reactant.atoms
+    gas_symbols = list(gas_atoms.get_chemical_symbols())
+    target_symbols = [G.nodes[n]["element"] for n in react_nodes_ab]
+    if sorted(gas_symbols) != sorted(target_symbols):
+        raise ValueError(
+            "gas-product bond reaction is not atom-conserving: "
+            f"C(gas) symbols={gas_symbols} do not match A+B symbols={target_symbols}"
+        )
+
+    gas_pos = np.asarray(gas_atoms.get_positions(), dtype=float)
+    gas_centered = gas_pos - gas_pos.mean(axis=0)
+    available: dict[str, list[int]] = {}
+    for idx, sym in enumerate(gas_symbols):
+        available.setdefault(sym, []).append(idx)
+
+    ordered_gas_positions: list[np.ndarray] = []
+    for sym in target_symbols:
+        bucket = available.get(sym)
+        if not bucket:
+            raise ValueError(
+                f"gas-product endpoint cannot match required symbol {sym!r}"
+            )
+        ordered_gas_positions.append(gas_centered[bucket.pop(0)])
+
+    ab_positions = np.asarray(atoms_ab.get_positions(), dtype=float)
+    react_slice = slice(n_slab + n_lat, n_slab + n_lat + n_react)
+    centroid = ab_positions[react_slice].mean(axis=0)
+    lifted_center = centroid + np.array([0.0, 0.0, float(lift_height)])
+    lifted_positions = np.asarray(
+        [p + lifted_center for p in ordered_gas_positions],
+        dtype=float,
+    )
+
+    atoms_c = atoms_ab.copy()
+    pos = atoms_c.get_positions()
+    pos[: n_slab + n_lat] = atoms_empty.get_positions()
+    pos[react_slice] = lifted_positions
+    atoms_c.set_positions(pos)
+    symbols = list(atoms_c.get_chemical_symbols())
+    symbols[react_slice] = target_symbols
+    atoms_c.set_chemical_symbols(symbols)
+    return atoms_c
 
 
 # ---------------------------------------------------------------------------
@@ -662,50 +743,55 @@ def _relax_bond_endpoint(
     from autokmc.structure import optimise_structure
 
     try:
-        calc = copy.deepcopy(calculator)
-        atoms_opt = optimise_structure(
-            atoms_init,
-            calculator = calc,
-            fmax       = fmax,
-            steps      = max_steps,
-            verbose    = verbose,
-        )
-
-        forces = atoms_opt.get_forces()
-        if frozen_indices:
-            free_mask = np.ones(len(atoms_opt), dtype=bool)
-            free_mask[list(frozen_indices)] = False
-            max_force = float(np.linalg.norm(forces[free_mask], axis=1).max())
-        else:
-            max_force = float(np.linalg.norm(forces, axis=1).max())
-
-        if max_force > fmax:
-            raise OptimisationFailedError(
-                f"[{state_label}] LBFGS did not converge: "
-                f"max|F|={max_force:.4f} eV/Å after {max_steps} steps "
-                f"(fmax={fmax} eV/Å)."
+        with acquire_calculator(
+            calculator, purpose=f"bond {state_label} relaxation"
+        ) as calc:
+            atoms_opt = optimise_structure(
+                atoms_init,
+                calculator = calc,
+                fmax       = fmax,
+                steps      = max_steps,
+                verbose    = verbose,
             )
 
-        n_ads = n_lat + n_react
-        ads_indices = set(range(n_slab, n_slab + n_ads))
-        _check_connectivity_stable(
-            atoms_init, atoms_opt, n_slab, n_ads, state_label, nl_mult,
-            relevant_indices=ads_indices,
-            n_lat=n_lat,
-        )
-        for self_ids, self_order, lat_offset in self_groups:
-            _check_intended_coordination_stable(
-                atoms_opt, G, self_ids,
-                n_slab, lat_offset, nl_mult,
-                self_node_order=self_order,
-            )
+            forces = atoms_opt.get_forces()
+            if frozen_indices:
+                free_mask = np.ones(len(atoms_opt), dtype=bool)
+                free_mask[list(frozen_indices)] = False
+                max_force = float(np.linalg.norm(forces[free_mask], axis=1).max())
+            else:
+                max_force = float(np.linalg.norm(forces, axis=1).max())
 
-        energy = float(atoms_opt.get_potential_energy())
-        if verbose:
-            print(
-                f"  [{state_label}] E={energy:.4f} eV  "
-                f"max|F|={max_force:.4f} eV/Å  ✓ stable"
+            if max_force > fmax:
+                raise OptimisationFailedError(
+                    f"[{state_label}] LBFGS did not converge: "
+                    f"max|F|={max_force:.4f} eV/Å after {max_steps} steps "
+                    f"(fmax={fmax} eV/Å)."
+                )
+
+            energy = float(atoms_opt.get_potential_energy())
+            atoms_opt.set_pbc(atoms_init.get_pbc())
+
+            n_ads = n_lat + n_react
+            ads_indices = set(range(n_slab, n_slab + n_ads))
+            _check_connectivity_stable(
+                atoms_init, atoms_opt, n_slab, n_ads, state_label, nl_mult,
+                relevant_indices=ads_indices,
+                n_lat=n_lat,
             )
+            for self_ids, self_order, lat_offset in self_groups:
+                _check_intended_coordination_stable(
+                    atoms_opt, G, self_ids,
+                    n_slab, lat_offset, nl_mult,
+                    self_node_order=self_order,
+                )
+
+            if verbose:
+                print(
+                    f"  [{state_label}] E={energy:.4f} eV  "
+                    f"max|F|={max_force:.4f} eV/Å  ✓ stable"
+                )
+            atoms_opt.calc = None
         return atoms_opt, energy
 
     except (SurfaceConnectivityError, AdsorbateDissociationError,
@@ -732,8 +818,10 @@ def _make_neb_band(
 ) -> tuple["NEB", list[Atoms]]:
     """Build an ASE NEB band of ``n_images + 2`` images between A and B.
 
-    A fresh ``copy.deepcopy(calculator)`` is attached to every image (ASE
-    NEB forbids shared calculators between images).
+    The same calculator instance is attached to every image and ASE's
+    ``allow_shared_calculator`` path is enabled.  This is the current ASE
+    equivalent of deprecated ``SingleCalculatorNEB`` and avoids requiring
+    calculators to be deep-copyable.
     """
     images: list[Atoms] = [atoms_a.copy()]
     for _ in range(int(n_images)):
@@ -745,13 +833,14 @@ def _make_neb_band(
             im.set_constraint(FixAtoms(indices=list(frozen_indices)))
 
     for im in images:
-        im.calc = copy.deepcopy(calculator)
+        im.calc = calculator
 
     neb = NEB(
         images,
         k=float(spring_k),
         climb=bool(climb),
         method="improvedtangent",
+        allow_shared_calculator=True,
     )
 
     if interpolation == "idpp" and _idpp_interpolate is not None:
@@ -889,7 +978,8 @@ def check_bond_site_stability(
        coordination survives.
     3. Run a CI-NEB band of ``n_images`` interior images between the
        two relaxed endpoints with the requested *interpolation* and
-       *spring_k*.  Each image gets a fresh ``copy.deepcopy(calculator)``.
+       *spring_k*.  All images share one acquired calculator via ASE's
+       SingleCalculatorNEB-style path.
     4. Identify the TS as the highest-energy interior image; validate
        (no fragmentation into a third species, no collapse onto an
        endpoint); store all energies / atoms / (optional) full band on
@@ -920,6 +1010,7 @@ def check_bond_site_stability(
             f"{len(brs.member_node_ids)} member(s)."
         )
 
+    gas_product = bool(getattr(brs, "gas_product", False))
     site_a, m_a, site_b, m_b, site_c, m_c = brs.members[member_index]
     # Read node IDs live from the AdsorbateSite objects rather than the cached
     # copies in brs.member_node_ids.  _materialise_adsorbate_nodes rebuilds
@@ -928,12 +1019,20 @@ def check_bond_site_stability(
     # updated and become stale after any re-materialisation.
     a_node_ids = list(site_a.member_node_ids[m_a])
     b_node_ids = list(site_b.member_node_ids[m_b])
-    c_node_ids = list(site_c.member_node_ids[m_c])
+    c_node_ids = (
+        []
+        if gas_product or site_c is None
+        else list(site_c.member_node_ids[m_c])
+    )
 
     clq_a = _member_clique_union(site_a, m_a)
     clq_b = _member_clique_union(site_b, m_b)
-    clq_c = _member_clique_union(site_c, m_c)
-    if not clq_a or not clq_b or not clq_c:
+    clq_c = (
+        frozenset()
+        if gas_product or site_c is None
+        else _member_clique_union(site_c, m_c)
+    )
+    if not clq_a or not clq_b or (not gas_product and not clq_c):
         raise ValueError(
             f"Member {member_index} of BondReactionSite "
             f"iso_class={brs.iso_class} has an empty bonded surface "
@@ -988,52 +1087,105 @@ def check_bond_site_stability(
     lc.atoms_ab  = atoms_ab_opt
 
     # ── 2. C endpoint ───────────────────────────────────────────────────
-    # Greedily pair C's atoms to the AB reacting block (element + nearest
-    # position) so atom k aligns across endpoints for the NEB.
-    # BUG-B2 FIX: use the *relaxed* AB reacting-block positions from
-    # atoms_ab_opt rather than the unrelaxed graph positions stored on G.
-    # After AB relaxation A and B can move substantially from their initial
-    # placements; matching C against relaxed positions gives a physically
-    # meaningful atom correspondence and a smoother NEB initial path.
-    ab_symbols       = [G.nodes[n]["element"] for n in react_nodes_ab]
-    _relaxed_ab_pos  = atoms_ab_opt.get_positions()
-    ab_positions     = [
-        _relaxed_ab_pos[n_slab + n_lat + k] for k in range(n_react)
-    ]
-    c_present    = [int(n) for n in c_node_ids if n in G]
-    c_node_order = _greedy_pair_c_to_ab(G, ab_symbols, ab_positions, c_present)
+    if gas_product:
+        from autokmc.structure import optimise_structure
 
-    (atoms_c_init, _, _, _, react_nodes_c, _) = _build_bond_atoms(
-        G, lc, list(a_node_ids), list(b_node_ids), list(c_node_ids),
-        endpoint        = "c",
-        frozen_indices  = frozen_indices,
-        base_atoms      = atoms_ab_opt,
-        c_node_order    = c_node_order,
-    )
+        gas_reactant = getattr(brs, "gas_reactant", None)
+        gas_energy = getattr(gas_reactant, "energy", float("nan"))
+        if not np.isfinite(float(gas_energy)):
+            raise ValueError(
+                f"Gas product {brs.template.smiles_c!r} has no finite "
+                "gas-phase energy; cannot compute bond reaction energetics."
+            )
 
-    if verbose:
-        print(
-            f"  [endpoint C ] atoms={len(atoms_c_init)}  "
-            f"(slab={n_slab}, lat={n_lat}, react={n_react})"
+        atoms_empty_init = atoms_ab_opt[: n_slab + n_lat].copy()
+        if frozen_indices:
+            atoms_empty_init.set_constraint(
+                FixAtoms(indices=[i for i in frozen_indices if i < len(atoms_empty_init)])
+            )
+        with acquire_calculator(
+            calculator, purpose="bond gas-product empty-slab relaxation"
+        ) as calc:
+            atoms_empty_opt = optimise_structure(
+                atoms_empty_init,
+                calculator=calc,
+                fmax=fmax,
+                steps=max_steps,
+                verbose=verbose,
+            )
+            E_empty = float(atoms_empty_opt.get_potential_energy())
+            atoms_empty_opt.set_pbc(atoms_empty_init.get_pbc())
+            atoms_empty_opt.calc = None
+        E_c = E_empty + float(gas_energy)
+        atoms_c_opt = _gas_product_neb_endpoint(
+            atoms_empty=atoms_empty_opt,
+            atoms_ab=atoms_ab_opt,
+            n_slab=n_slab,
+            n_lat=n_lat,
+            n_react=n_react,
+            react_nodes_ab=react_nodes_ab,
+            gas_reactant=gas_reactant,
+            G=G,
+            lift_height=float(getattr(brs, "gas_lift_height", 6.0)),
+        )
+        lc.gas_product = True
+        lc.gas_pressure_bar = float(
+            getattr(gas_reactant, "partial_pressure_bar", 0.0) or 0.0
+        )
+        if verbose:
+            print(
+                f"  [endpoint C(gas)] E_empty={E_empty:.4f} eV  "
+                f"E_gas={float(gas_energy):.4f} eV  "
+                f"E_c={E_c:.4f} eV  "
+                f"NEB final molecule lifted {float(getattr(brs, 'gas_lift_height', 6.0)):.2f} Å"
+            )
+    else:
+        # Greedily pair C's atoms to the AB reacting block (element + nearest
+        # position) so atom k aligns across endpoints for the NEB.
+        # BUG-B2 FIX: use the *relaxed* AB reacting-block positions from
+        # atoms_ab_opt rather than the unrelaxed graph positions stored on G.
+        # After AB relaxation A and B can move substantially from their initial
+        # placements; matching C against relaxed positions gives a physically
+        # meaningful atom correspondence and a smoother NEB initial path.
+        ab_symbols       = [G.nodes[n]["element"] for n in react_nodes_ab]
+        _relaxed_ab_pos  = atoms_ab_opt.get_positions()
+        ab_positions     = [
+            _relaxed_ab_pos[n_slab + n_lat + k] for k in range(n_react)
+        ]
+        c_present    = [int(n) for n in c_node_ids if n in G]
+        c_node_order = _greedy_pair_c_to_ab(G, ab_symbols, ab_positions, c_present)
+
+        (atoms_c_init, _, _, _, react_nodes_c, _) = _build_bond_atoms(
+            G, lc, list(a_node_ids), list(b_node_ids), list(c_node_ids),
+            endpoint        = "c",
+            frozen_indices  = frozen_indices,
+            base_atoms      = atoms_ab_opt,
+            c_node_order    = c_node_order,
         )
 
-    # C endpoint has a single occupied group (C's atoms in matched order).
-    self_groups_c = [(self_c, react_nodes_c, n_lat)]
-    atoms_c_opt, E_c = _relax_bond_endpoint(
-        atoms_c_init,
-        calculator      = calculator,
-        fmax            = fmax,
-        max_steps       = max_steps,
-        frozen_indices  = frozen_indices,
-        nl_mult         = nl_mult,
-        n_slab          = n_slab,
-        n_lat           = n_lat,
-        n_react         = n_react,
-        G               = G,
-        self_groups     = self_groups_c,
-        state_label     = "endpoint_c",
-        verbose         = verbose,
-    )
+        if verbose:
+            print(
+                f"  [endpoint C ] atoms={len(atoms_c_init)}  "
+                f"(slab={n_slab}, lat={n_lat}, react={n_react})"
+            )
+
+        # C endpoint has a single occupied group (C's atoms in matched order).
+        self_groups_c = [(self_c, react_nodes_c, n_lat)]
+        atoms_c_opt, E_c = _relax_bond_endpoint(
+            atoms_c_init,
+            calculator      = calculator,
+            fmax            = fmax,
+            max_steps       = max_steps,
+            frozen_indices  = frozen_indices,
+            nl_mult         = nl_mult,
+            n_slab          = n_slab,
+            n_lat           = n_lat,
+            n_react         = n_react,
+            G               = G,
+            self_groups     = self_groups_c,
+            state_label     = "endpoint_c",
+            verbose         = verbose,
+        )
     lc.energy_c = E_c
     lc.atoms_c  = atoms_c_opt
 
@@ -1044,44 +1196,53 @@ def check_bond_site_stability(
             f"fmax={float(fmax):.4f} eV/Å  max_steps={int(max_steps)}"
         )
 
-    neb, images = _make_neb_band(
-        atoms_ab_opt, atoms_c_opt,
-        n_images       = int(n_images),
-        interpolation  = str(interpolation),
-        spring_k       = float(spring_k),
-        climb          = bool(climb),
-        calculator     = calculator,
-        frozen_indices = frozen_indices,
-    )
-
-    opt = BFGS(neb, logfile=_neb_optimizer_logfile(verbose))
-    opt.run(fmax=float(fmax), steps=int(max_steps))
-
-    if not opt.converged():
-        raise BondNEBNotConvergedError(
-            f"CI-NEB did not converge: fmax={fmax} eV/Å not reached in "
-            f"{max_steps} steps."
+    with acquire_calculator(calculator, purpose="bond NEB") as neb_calc:
+        neb, images = _make_neb_band(
+            atoms_ab_opt, atoms_c_opt,
+            n_images       = int(n_images),
+            interpolation  = str(interpolation),
+            spring_k       = float(spring_k),
+            climb          = bool(climb),
+            calculator     = neb_calc,
+            frozen_indices = frozen_indices,
         )
+        try:
+            opt = BFGS(neb, logfile=_neb_optimizer_logfile(verbose))
+            opt.run(fmax=float(fmax), steps=int(max_steps))
 
-    # ── 5. Identify TS = highest-energy interior image; validate ────────
-    energies = np.array([float(im.get_potential_energy()) for im in images])
-    interior = energies[1:-1]
-    if len(interior) == 0:
-        raise BondNEBNotConvergedError(
-            "NEB band has no interior images (n_images=0); "
-            "cannot identify a TS."
-        )
-    k_ts = 1 + int(np.argmax(interior))
-    E_ts = float(energies[k_ts])
-    atoms_ts = images[k_ts].copy()
+            if not opt.converged():
+                raise BondNEBNotConvergedError(
+                    f"CI-NEB did not converge: fmax={fmax} eV/Å not reached in "
+                    f"{max_steps} steps."
+                )
 
-    lc.energy_ts = E_ts
-    lc.atoms_ts  = atoms_ts
-    if persist_neb_path:
-        lc.neb_path_energies = [
-            float(im.get_potential_energy()) for im in images
-        ]
-        lc.atoms_neb_path = [im.copy() for im in images]
+            # ── 5. Identify TS = highest-energy interior image; validate ────────
+            energies = np.array([float(im.get_potential_energy()) for im in images])
+            interior = energies[1:-1]
+            if len(interior) == 0:
+                raise BondNEBNotConvergedError(
+                    "NEB band has no interior images (n_images=0); "
+                    "cannot identify a TS."
+                )
+            k_ts = 1 + int(np.argmax(interior))
+            E_ts = float(energies[k_ts])
+            atoms_ts = images[k_ts].copy()
+            atoms_ts.calc = None
+
+            lc.energy_ts = E_ts
+            lc.atoms_ts  = atoms_ts
+            if persist_neb_path:
+                lc.neb_path_energies = [
+                    float(im.get_potential_energy()) for im in images
+                ]
+                lc.atoms_neb_path = []
+                for im in images:
+                    snap = im.copy()
+                    snap.calc = None
+                    lc.atoms_neb_path.append(snap)
+        finally:
+            for im in images:
+                im.calc = None
 
     _check_bond_ts_validity(
         atoms_ts, atoms_ab_opt, atoms_c_opt,

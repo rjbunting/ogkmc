@@ -6,6 +6,43 @@ import numpy as np
 from ase.geometry import find_mic
 
 
+def has_real_cell(cell) -> bool:
+    """Return True when *cell* is a full-rank 3D lattice cell."""
+    cell_arr = np.asarray(cell, dtype=float)
+    if cell_arr.shape != (3, 3):
+        return False
+    return bool(np.linalg.matrix_rank(cell_arr) == 3)
+
+
+def full_pbc_for_cell(cell) -> np.ndarray:
+    """Use full PBC for structures with a real cell, otherwise no PBC."""
+    if has_real_cell(cell):
+        return np.ones(3, dtype=bool)
+    return np.zeros(3, dtype=bool)
+
+
+def graph_pbc_for_atoms(atoms) -> np.ndarray:
+    """Return graph-level PBC for tagged structures.
+
+    Adsorbate-only reactant graphs are gas-phase molecules.  They can carry a
+    vacuum cell from ``Atoms.center(vacuum=...)`` for calculator compatibility,
+    but they must remain non-periodic for ASE gas thermochemistry.
+    """
+    surface = atoms.arrays.get("surface")
+    if surface is not None:
+        surface_arr = np.asarray(surface, dtype=int)
+        if surface_arr.size and np.all(surface_arr == 2):
+            return np.zeros(3, dtype=bool)
+    return full_pbc_for_cell(atoms.get_cell())
+
+
+def set_full_pbc_if_cell(atoms):
+    """Set ``atoms.pbc`` to T T T when ``atoms`` has a real cell."""
+    if has_real_cell(atoms.get_cell()):
+        atoms.set_pbc(True)
+    return atoms
+
+
 def minimum_image_vectors(vectors, cell, pbc) -> np.ndarray:
     """Return minimum-image Cartesian vectors for any ``(..., 3)`` array.
 
@@ -73,7 +110,11 @@ def wrap_positions_into_cell(
 
 
 __all__ = [
+    "full_pbc_for_cell",
+    "graph_pbc_for_atoms",
+    "has_real_cell",
     "minimum_image_distances",
     "minimum_image_vectors",
+    "set_full_pbc_if_cell",
     "wrap_positions_into_cell",
 ]

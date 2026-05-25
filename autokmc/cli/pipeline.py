@@ -8,7 +8,14 @@ from pathlib import Path
 
 import numpy as np
 
-from autokmc.io.calculators import build_calculator, calculator_meta
+from autokmc.io.calculators import (
+    CalculatorPool,
+    acquire_calculator,
+    build_calculator,
+    calculator_meta,
+    primary_calculator,
+)
+from autokmc.io.checkpoint import CheckpointWriter, load_checkpoint
 from autokmc.io.config import RunConfig
 from autokmc.io.persistence import ReactionWriter
 from autokmc.io.summary import ReactionSummary, make_run_meta
@@ -82,49 +89,58 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
 
     # 1. Calculator
     _stage("Stage 1/7: preparing calculator", verbose=verbose_run)
-    calc = build_calculator(cfg.calculator)
+    calc_resource = build_calculator(cfg.calculator)
+    calc = primary_calculator(calc_resource)
     if calc is None:
         _log.warning("No calculator configured — falling back to ASE EMT.")
         from ase.calculators.emt import EMT
-        calc = EMT()
+        calc_resource = CalculatorPool([EMT()])
+        calc = primary_calculator(calc_resource)
     elif verbose_run:
         print(f"[autokmc]   calculator ready: {type(calc).__name__}")
 
     # 2. Structure
     s = cfg.structure
     _stage(f"Stage 2/7: building {s.kind} structure", verbose=verbose_run)
-    if s.kind == "surface":
-        atoms = build_surface(
-            composition       = s.composition,
-            crystal_structure = s.crystal_structure,
-            miller_index      = tuple(s.miller_index),
-            lattice_constant  = s.lattice_constant,
-            min_slab_size     = s.min_slab_size,
-            min_vacuum_size   = s.min_vacuum_size,
-            goal_x            = s.goal_x,
-            goal_y            = s.goal_y,
-            n_freeze_layers   = s.n_freeze_layers,
-            fmax              = s.fmax,
-            max_steps         = s.max_steps,
-            calculator        = calc,
-            verbose           = verbose_run,
-            **(s.extra_kwargs or {}),
-        )
-    elif s.kind == "nanoparticle":
-        atoms = build_nanoparticle(
-            composition       = s.composition,
-            crystal_structure = s.crystal_structure,
-            lattice_constant  = s.lattice_constant,
-            target_atoms      = int(s.n_atoms) if s.n_atoms else 600,
-            surface_energies  = s.surface_energies,
-            fmax              = s.fmax,
-            max_steps         = s.max_steps,
-            calculator        = calc,
-            verbose           = verbose_run,
-            **(s.extra_kwargs or {}),
-        )
-    else:
-        raise ValueError(f"unknown structure.kind={s.kind!r} (expected surface|nanoparticle)")
+    with acquire_calculator(calc_resource, purpose="structure construction") as calc:
+        if s.kind == "surface":
+            atoms = build_surface(
+                composition       = s.composition,
+                crystal_structure = s.crystal_structure,
+                miller_index      = tuple(s.miller_index),
+                lattice_constant  = s.lattice_constant,
+                min_slab_size     = s.min_slab_size,
+                min_vacuum_size   = s.min_vacuum_size,
+                goal_x            = s.goal_x,
+                goal_y            = s.goal_y,
+                n_freeze_layers   = s.n_freeze_layers,
+                fmax              = s.fmax,
+                max_steps         = s.max_steps,
+                calculator        = calc,
+                verbose           = verbose_run,
+                **(s.extra_kwargs or {}),
+            )
+        elif s.kind == "nanoparticle":
+            atoms = build_nanoparticle(
+                composition       = s.composition,
+                crystal_structure = s.crystal_structure,
+                lattice_constant  = s.lattice_constant,
+                target_atoms      = int(s.n_atoms) if s.n_atoms else 600,
+                surface_energies  = s.surface_energies,
+                fmax              = s.fmax,
+                max_steps         = s.max_steps,
+                surface_energy_facets    = s.surface_energy_facets,
+                surface_energy_layers    = s.surface_energy_layers,
+                surface_energy_vacuum    = s.surface_energy_vacuum,
+                surface_energy_fmax      = s.surface_energy_fmax,
+                surface_energy_max_steps = s.surface_energy_max_steps,
+                calculator        = calc,
+                verbose           = verbose_run,
+                **(s.extra_kwargs or {}),
+            )
+        else:
+            raise ValueError(f"unknown structure.kind={s.kind!r} (expected surface|nanoparticle)")
+        atoms.calc = None
 
     frozen_indices = list(atoms.info.get("frozen_indices", []) or []) or None
     if verbose_run:
@@ -168,7 +184,7 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
         vibration_displacement  = fe_cfg.vibration_displacement,
         vibration_nfree         = fe_cfg.vibration_nfree,
         include_ts_vibrations   = fe_cfg.include_ts_vibrations,
-        min_frequency_cm        = fe_cfg.min_frequency_cm,
+        min_frequency_ev        = fe_cfg.min_frequency_ev,
         default_symmetry_number = fe_cfg.default_symmetry_number,
         default_spin            = fe_cfg.default_spin,
         default_geometry        = fe_cfg.default_geometry,
@@ -188,7 +204,7 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
         rx = build_reactant(
             r.smiles,
             add_hydrogens             = r.add_hydrogens,
-            calculator                = calc if r.relax_in_gas else None,
+            calculator                = calc_resource if r.relax_in_gas else None,
             free_energy_options       = free_energy_options if fe_cfg.enabled else None,
             free_energy_temperature_k = cfg.kmc.temperature_k,
             partial_pressure_bar      = (
@@ -217,7 +233,7 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
     all_sites: list = []
     for rx in reactants_built:
         if verbose_run:
-            if asc.prune_stable_only and calc is not None:
+            if asc.prune_stable_only and calc_resource is not None:
                 print(
                     f"[autokmc]   {rx.smiles!r}: searching placements; "
                     "candidate iso-classes will each receive one stability "
@@ -231,7 +247,7 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
         sites = find_adsorbate_sites(
             G, rx,
             prune_stable_only = asc.prune_stable_only,
-            calculator        = calc,
+            calculator        = calc_resource,
             frozen_indices    = frozen_indices,
             prune_fmax        = asc.fmax,
             prune_max_steps   = asc.max_steps,
@@ -268,6 +284,14 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
     summary_collector = ReactionSummary(
         reactant_smiles={rx.smiles for rx in reactants_built},
     )
+    checkpoint_writer = None
+    if cfg.checkpoint.enabled:
+        checkpoint_path = cfg.checkpoint.path or str(out_dir / "checkpoint.pkl")
+        checkpoint_writer = CheckpointWriter(
+            checkpoint_path,
+            every_n_steps=cfg.checkpoint.every_n_steps,
+            metadata={"config_path": config_path},
+        )
 
     # 6b. Diffusion (NEB) sites — flat list across all SMILES
     diffusion_sites_flat: list = []
@@ -359,7 +383,7 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
                 rx_leaf = build_reactant(
                     cs,
                     add_hydrogens             = False,
-                    calculator                = calc,
+                    calculator                = calc_resource,
                     free_energy_options       = free_energy_options if fe_cfg.enabled else None,
                     free_energy_temperature_k = cfg.kmc.temperature_k,
                     # Leaf species are produced on-surface only — they are not
@@ -374,7 +398,7 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
                 leaf_sites = find_adsorbate_sites(
                     G, rx_leaf,
                     prune_stable_only = asc.prune_stable_only,
-                    calculator        = calc,
+                    calculator        = calc_resource,
                     frozen_indices    = frozen_indices,
                     prune_fmax        = asc.fmax,
                     prune_max_steps   = asc.max_steps,
@@ -412,18 +436,19 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
                 deduplicate_iso     = b.deduplicate_iso,
                 n_shells_pair       = b.pair_n_shells,
                 prune_by_triple     = False,   # always defer to after Stage 1
+                gas_species         = reactant_by_smi,
                 verbose             = verbose_run,
             )
 
             # Stage 1 — calculator-based A+B endpoint stability prune.
             # Runs on the full enumerated set so no viable site is discarded
             # before its stability has been assessed.
-            if b.prune_with_calculator and calc is not None and bond_sites:
+            if b.prune_with_calculator and calc_resource is not None and bond_sites:
                 species_by_smi: dict = {
                     canonical_smiles(rx.smiles): rx for rx in reactants_built
                 }
                 bond_sites = prune_unstable_bond_sites(
-                    G, bond_sites, species_by_smi, calc,
+                    G, bond_sites, species_by_smi, calc_resource,
                     frozen_indices = frozen_indices,
                     fmax           = b.prune_fmax,
                     max_steps      = b.prune_max_steps,
@@ -505,11 +530,40 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
             diffusion_prune_by_ads_pair = d.prune_by_adsorption_pair,
         )
 
+    initial_step = 0
+    initial_time_s = 0.0
+    if cfg.checkpoint.resume_from:
+        state = load_checkpoint(cfg.checkpoint.resume_from)
+        G = state.graph
+        reactants_built = list(state.reactants)
+        all_sites = list(state.adsorbate_sites)
+        kmc_initial_sites = list(state.adsorbate_sites)
+        diffusion_sites_flat = list(state.diffusion_sites)
+        bond_sites_for_kmc = list(state.bond_sites)
+        frozen_indices = state.frozen_indices
+        initial_step = int(state.step)
+        initial_time_s = float(state.time_s)
+        summary_collector = ReactionSummary(
+            reactant_smiles={rx.smiles for rx in reactants_built},
+        )
+        reaction_writer.close()
+        reaction_writer = ReactionWriter(
+            out_dir,
+            reactions_filename = cfg.output.reactions_filename,
+            calculator_meta    = calculator_meta(cfg.calculator),
+            append             = True,
+        )
+        if verbose_run:
+            print(
+                f"[autokmc] Resuming from checkpoint {cfg.checkpoint.resume_from}: "
+                f"step={initial_step}, t={initial_time_s:.4e} s"
+            )
+
     # 7. KMC
     _stage("Stage 7/7: starting KMC simulation", verbose=verbose_run)
     k = cfg.kmc
     summary = run_kmc_steps(
-        G, kmc_initial_sites, calc,
+        G, kmc_initial_sites, calc_resource,
         reactants                = reactants_built,
         temperature              = k.temperature_k,
         n_steps                  = k.n_steps,
@@ -531,6 +585,9 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
         reaction_writer          = reaction_writer,
         trajectory_writer        = trajectory_writer,
         summary_collector        = summary_collector,
+        checkpoint_writer        = checkpoint_writer,
+        initial_step             = initial_step,
+        initial_time_s           = initial_time_s,
     )
 
     finished_at = datetime.now(timezone.utc)
@@ -562,6 +619,10 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
         ),
         "reactions_dir": str(reaction_writer.reactions_root),
         "n_unique_reactions": reaction_writer.n_unique_reactions,
+        "checkpoint": (
+            str(checkpoint_writer.last_path or checkpoint_writer.path)
+            if checkpoint_writer is not None else None
+        ),
     }
     return summary
 

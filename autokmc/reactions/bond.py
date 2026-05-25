@@ -60,12 +60,14 @@ Public API
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Iterable
 
 import numpy as np
 import networkx as nx
 
+from autokmc.io.calculators import CalculatorConfigError, CalculatorPool
 from autokmc.sites.bond import BondReactionSite, BondReactionLateral
 from autokmc.reactions.rates import EA_MIN, DEFAULT_TRANSMISSION_COEFFICIENT, _eyring_prefactor
 from autokmc.sites.stability.bond import (
@@ -203,16 +205,25 @@ def is_bond_applicable(
     # the current graph-node ids, even after _materialise_adsorbate_nodes has
     # re-run for a species and invalidated the cached copies in
     # brs.member_node_ids.
+    gas_product = bool(getattr(brs, "gas_product", False))
     site_a, m_a, site_b, m_b, site_c, m_c = brs.members[member_index]
     a_nids = list(site_a.member_node_ids[m_a])
     b_nids = list(site_b.member_node_ids[m_b])
-    c_nids = list(site_c.member_node_ids[m_c])
+    c_nids = (
+        []
+        if gas_product or site_c is None
+        else list(site_c.member_node_ids[m_c])
+    )
     a_occ = _placement_occupied(G, a_nids)
     b_occ = _placement_occupied(G, b_nids)
-    c_occ = _placement_occupied(G, c_nids)
+    c_occ = False if gas_product else _placement_occupied(G, c_nids)
 
-    couple_state = (a_occ and b_occ and not c_occ)
-    dissoc_state = (c_occ and not a_occ and not b_occ)
+    if gas_product:
+        couple_state = a_occ and b_occ
+        dissoc_state = (not a_occ and not b_occ)
+    else:
+        couple_state = (a_occ and b_occ and not c_occ)
+        dissoc_state = (c_occ and not a_occ and not b_occ)
 
     if couple_state == dissoc_state:
         # Either both true (impossible — A+B+C can't all be in the right state)
@@ -223,7 +234,7 @@ def is_bond_applicable(
     if (
         not cliques_a
         or not cliques_b
-        or not cliques_c
+        or (not gas_product and not cliques_c)
         or _placements_share_exact_clique(cliques_a, cliques_b)
     ):
         return False, None
@@ -234,7 +245,7 @@ def is_bond_applicable(
     if couple_state:
         # Direction: A + B → C.  C will become occupied — its cliques
         # must be free except for what A or B already (themselves) hold.
-        if _cliques_blocked(G, cliques_c, a_set | b_set | c_set):
+        if (not gas_product) and _cliques_blocked(G, cliques_c, a_set | b_set | c_set):
             return False, None
         return True, "couple"
     else:
@@ -270,9 +281,14 @@ def _bond_energetics_cached(
             "unknown bond direction "
             f"{direction!r}; expected 'couple' or 'dissoc'"
         )
+    gas_pressure_bar = (
+        float(getattr(lc, "gas_pressure_bar", 0.0) or 0.0)
+        if getattr(lc, "gas_product", False) else 0.0
+    )
     key = (
         round(float(temperature),              9),
         round(float(transmission_coefficient), 9),
+        round(gas_pressure_bar, 12),
         str(direction),
     )
     cache: dict | None = getattr(lc, "_rate_cache", None)
@@ -298,6 +314,8 @@ def _bond_energetics_cached(
             de     = e_ab - e_c
             ea_kmc = max(EA_MIN, e_ts_eff - e_c)
         rate = float(prefactor * np.exp(-ea_kmc / kT))
+        if getattr(lc, "gas_product", False) and direction_ == "dissoc":
+            rate *= max(0.0, gas_pressure_bar)
         return float(de), float(ea_kmc), rate
 
     out_couple = _make("couple")
@@ -400,6 +418,8 @@ def get_applicable_bond_reactions(
                     )
                 lc.stable         = False
                 lc.invalid_reason = reason
+            except CalculatorConfigError:
+                raise
             except Exception as exc:
                 reason = f"{type(exc).__name__}: {exc}"
                 _log.error(
@@ -465,7 +485,36 @@ def compute_all_bond_reactions(
 ) -> list[BondReaction]:
     """Compute applicable bond events for every site; return the flat list."""
     out: list[BondReaction] = []
-    for brs in bond_reaction_sites:
+    sites = list(bond_reaction_sites)
+    if (
+        isinstance(calculator, CalculatorPool)
+        and len(calculator) > 1
+        and len(sites) > 1
+    ):
+        def _one(brs: BondReactionSite) -> list[BondReaction]:
+            return get_applicable_bond_reactions(
+                G, brs, calculator,
+                temperature              = temperature,
+                transmission_coefficient = transmission_coefficient,
+                frozen_indices           = frozen_indices,
+                fmax                     = fmax,
+                max_steps                = max_steps,
+                n_images                 = n_images,
+                climb                    = climb,
+                spring_k                 = spring_k,
+                interpolation            = interpolation,
+                nl_mult                  = nl_mult,
+                persist_neb_path         = persist_neb_path,
+                lateral_interactions     = lateral_interactions,
+                verbose                  = verbose,
+            )
+
+        with ThreadPoolExecutor(max_workers=calculator.max_workers) as ex:
+            for rxns in ex.map(_one, sites):
+                out.extend(rxns)
+        return out
+
+    for brs in sites:
         out.extend(get_applicable_bond_reactions(
             G, brs, calculator,
             temperature              = temperature,

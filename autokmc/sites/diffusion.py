@@ -153,12 +153,12 @@ class DiffusionLateral:
     entropy_a        : float | None = None
     entropy_b        : float | None = None
     entropy_ts       : float | None = None
-    frequencies_a_cm : list = field(default_factory=list)
-    frequencies_b_cm : list = field(default_factory=list)
-    frequencies_ts_cm: list = field(default_factory=list)
-    imaginary_a_cm   : list = field(default_factory=list)
-    imaginary_b_cm   : list = field(default_factory=list)
-    imaginary_ts_cm  : list = field(default_factory=list)
+    frequencies_a_ev : list = field(default_factory=list)
+    frequencies_b_ev : list = field(default_factory=list)
+    frequencies_ts_ev: list = field(default_factory=list)
+    imaginary_a_ev   : list = field(default_factory=list)
+    imaginary_b_ev   : list = field(default_factory=list)
+    imaginary_ts_ev  : list = field(default_factory=list)
     vib_indices_a    : list = field(default_factory=list)
     vib_indices_b    : list = field(default_factory=list)
     vib_indices_ts   : list = field(default_factory=list)

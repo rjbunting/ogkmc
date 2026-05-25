@@ -176,23 +176,32 @@ def _reaction_relative_dir(kind: str, iso: int, lat: int, smiles: str = "") -> s
     return f"{REACTIONS_DIR}/{sub}/{species}/{_kind_folder_name(sub, iso, lat)}"
 
 
-def _reaction_description(reaction, smiles: str) -> str:
+def _reaction_description(
+    reaction,
+    smiles: str,
+    *,
+    delta_ev: float | None = None,
+    barrier_ev: float | None = None,
+    energy_basis: str | None = None,
+) -> str:
     """Build the human-readable one-line event description for *reaction*."""
     kind = str(getattr(reaction, "kind", "adsorption"))
+    delta = float(reaction.delta_e) if delta_ev is None else float(delta_ev)
+    barrier = float(reaction.barrier) if barrier_ev is None else float(barrier_ev)
     if _kind_subdir(kind) == "diffusion":
-        return DIFFUSION_DESCRIPTION_FMT.format(
+        out = DIFFUSION_DESCRIPTION_FMT.format(
             smiles    = smiles,
             iso       = reaction.site.iso_class,
             member    = reaction.member_index,
             lateral   = reaction.lateral_class.lateral_class,
             direction = getattr(reaction, "direction", ""),
-            delta_e   = float(reaction.delta_e),
-            barrier   = float(reaction.barrier),
+            delta_e   = delta,
+            barrier   = barrier,
             rate      = float(reaction.rate),
         )
-    if _kind_subdir(kind) == "bond":
+    elif _kind_subdir(kind) == "bond":
         tpl = getattr(reaction.site, "template", None)
-        return BOND_DESCRIPTION_FMT.format(
+        out = BOND_DESCRIPTION_FMT.format(
             smiles_a  = getattr(tpl, "smiles_a", ""),
             smiles_b  = getattr(tpl, "smiles_b", ""),
             smiles_c  = getattr(tpl, "smiles_c", ""),
@@ -200,20 +209,24 @@ def _reaction_description(reaction, smiles: str) -> str:
             member    = reaction.member_index,
             lateral   = reaction.lateral_class.lateral_class,
             direction = getattr(reaction, "direction", ""),
-            delta_e   = float(reaction.delta_e),
-            barrier   = float(reaction.barrier),
+            delta_e   = delta,
+            barrier   = barrier,
             rate      = float(reaction.rate),
         )
-    return REACTION_DESCRIPTION_FMT.format(
-        kind     = kind,
-        smiles   = smiles,
-        iso      = reaction.site.iso_class,
-        member   = reaction.member_index,
-        lateral  = reaction.lateral_class.lateral_class,
-        delta_e  = float(reaction.delta_e),
-        barrier  = float(reaction.barrier),
-        rate     = float(reaction.rate),
-    )
+    else:
+        out = REACTION_DESCRIPTION_FMT.format(
+            kind     = kind,
+            smiles   = smiles,
+            iso      = reaction.site.iso_class,
+            member   = reaction.member_index,
+            lateral  = reaction.lateral_class.lateral_class,
+            delta_e  = delta,
+            barrier  = barrier,
+            rate     = float(reaction.rate),
+        )
+    if energy_basis == "free_energy":
+        out = out.replace("ΔE=", "ΔG=").replace("Ea=", "G‡=")
+    return out
 
 
 def _json_safe(o):
@@ -225,6 +238,172 @@ def _json_safe(o):
     if isinstance(o, list):
         return [_json_safe(x) for x in o]
     return o
+
+
+def _finite_float(value) -> float | None:
+    if value is None:
+        return None
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(out) or math.isinf(out):
+        return None
+    return out
+
+
+def _event_free_energetics(
+    reaction,
+    gas_free_energies: dict[str, float] | None = None,
+) -> tuple[float | None, float | None]:
+    """Derive event-direction ΔG and G-barrier from cached lateral data."""
+    explicit_delta = _finite_float(getattr(reaction, "delta_g", None))
+    explicit_barrier = _finite_float(getattr(reaction, "barrier_g", None))
+    if explicit_delta is not None or explicit_barrier is not None:
+        return explicit_delta, explicit_barrier
+
+    from autokmc.reactions.rates import EA_MIN as _EA_MIN
+
+    kind = str(getattr(reaction, "kind", ""))
+    sub = _kind_subdir(kind)
+    lc = getattr(reaction, "lateral_class", None)
+    if lc is None:
+        return None, None
+
+    if sub == "adsorption":
+        smiles = _reaction_smiles(reaction)
+        g_gas = (
+            None if gas_free_energies is None
+            else _finite_float(gas_free_energies.get(smiles))
+        )
+        g_occ = _finite_float(getattr(lc, "g_occupied", None))
+        g_unocc = _finite_float(getattr(lc, "g_unoccupied", None))
+        if g_occ is None or g_unocc is None or g_gas is None:
+            return None, None
+        if kind == "desorption":
+            delta_g = g_unocc + g_gas - g_occ
+        else:
+            delta_g = g_occ - (g_unocc + g_gas)
+        return float(delta_g), float(max(_EA_MIN, delta_g + _EA_MIN))
+
+    if sub == "diffusion":
+        g_a = _finite_float(getattr(lc, "g_a", None))
+        g_b = _finite_float(getattr(lc, "g_b", None))
+        g_ts = _finite_float(getattr(lc, "g_ts", None))
+        if g_a is None or g_b is None or g_ts is None:
+            return None, None
+        g_ts_eff = max(g_ts, max(g_a, g_b) + _EA_MIN)
+        if getattr(reaction, "direction", None) == "b_to_a":
+            delta_g = g_a - g_b
+            barrier_g = max(_EA_MIN, g_ts_eff - g_b)
+        else:
+            delta_g = g_b - g_a
+            barrier_g = max(_EA_MIN, g_ts_eff - g_a)
+        return float(delta_g), float(barrier_g)
+
+    if sub == "bond":
+        g_ab = _finite_float(getattr(lc, "g_ab", None))
+        g_c = _finite_float(getattr(lc, "g_c", None))
+        g_ts = _finite_float(getattr(lc, "g_ts", None))
+        if g_ab is None or g_c is None or g_ts is None:
+            return None, None
+        g_ts_eff = max(g_ts, max(g_ab, g_c) + _EA_MIN)
+        if getattr(reaction, "direction", None) == "dissoc":
+            delta_g = g_ab - g_c
+            barrier_g = max(_EA_MIN, g_ts_eff - g_c)
+        else:
+            delta_g = g_c - g_ab
+            barrier_g = max(_EA_MIN, g_ts_eff - g_ab)
+        return float(delta_g), float(barrier_g)
+
+    return None, None
+
+
+def _event_electronic_energetics(
+    reaction,
+    gas_energies: dict[str, float] | None = None,
+) -> tuple[float | None, float | None]:
+    """Derive event-direction electronic ΔE and barrier from cached data."""
+    from autokmc.reactions.rates import EA_MIN as _EA_MIN
+
+    kind = str(getattr(reaction, "kind", ""))
+    sub = _kind_subdir(kind)
+    lc = getattr(reaction, "lateral_class", None)
+    if lc is None:
+        return None, None
+
+    if sub == "adsorption":
+        smiles = _reaction_smiles(reaction)
+        e_gas = (
+            None if gas_energies is None
+            else _finite_float(gas_energies.get(smiles))
+        )
+        e_occ = _finite_float(getattr(lc, "energy_occupied", None))
+        e_unocc = _finite_float(getattr(lc, "energy_unoccupied", None))
+        if e_occ is None or e_unocc is None or e_gas is None:
+            return None, None
+        if kind == "desorption":
+            delta_e = e_unocc + e_gas - e_occ
+        else:
+            delta_e = e_occ - (e_unocc + e_gas)
+        return float(delta_e), float(max(_EA_MIN, delta_e + _EA_MIN))
+
+    if sub == "diffusion":
+        e_a = _finite_float(getattr(lc, "energy_a", None))
+        e_b = _finite_float(getattr(lc, "energy_b", None))
+        e_ts = _finite_float(getattr(lc, "energy_ts", None))
+        if e_a is None or e_b is None or e_ts is None:
+            return None, None
+        e_ts_eff = max(e_ts, max(e_a, e_b) + _EA_MIN)
+        if getattr(reaction, "direction", None) == "b_to_a":
+            delta_e = e_a - e_b
+            barrier_e = max(_EA_MIN, e_ts_eff - e_b)
+        else:
+            delta_e = e_b - e_a
+            barrier_e = max(_EA_MIN, e_ts_eff - e_a)
+        return float(delta_e), float(barrier_e)
+
+    if sub == "bond":
+        e_ab = _finite_float(getattr(lc, "energy_ab", None))
+        e_c = _finite_float(getattr(lc, "energy_c", None))
+        e_ts = _finite_float(getattr(lc, "energy_ts", None))
+        if e_ab is None or e_c is None or e_ts is None:
+            return None, None
+        e_ts_eff = max(e_ts, max(e_ab, e_c) + _EA_MIN)
+        if getattr(reaction, "direction", None) == "dissoc":
+            delta_e = e_ab - e_c
+            barrier_e = max(_EA_MIN, e_ts_eff - e_c)
+        else:
+            delta_e = e_c - e_ab
+            barrier_e = max(_EA_MIN, e_ts_eff - e_ab)
+        return float(delta_e), float(barrier_e)
+
+    return None, None
+
+
+def _event_rate_basis(
+    *,
+    rate_delta_ev: float | None,
+    rate_barrier_ev: float | None,
+    delta_e_ev: float | None,
+    barrier_ev: float | None,
+    delta_g_ev: float | None,
+    barrier_g_ev: float | None,
+) -> str:
+    def _same(a: float | None, b: float | None) -> bool:
+        return a is not None and b is not None and math.isclose(
+            a, b, rel_tol=1e-9, abs_tol=1e-12,
+        )
+
+    if _same(rate_delta_ev, delta_g_ev) and _same(rate_barrier_ev, barrier_g_ev):
+        return "free_energy"
+    if _same(rate_delta_ev, delta_e_ev) and _same(rate_barrier_ev, barrier_ev):
+        return "electronic"
+    if delta_g_ev is None and barrier_g_ev is None:
+        if delta_e_ev is None and barrier_ev is None:
+            return "electronic"
+        return "unknown"
+    return "unknown"
 
 
 class ReactionWriter:
@@ -254,6 +433,7 @@ class ReactionWriter:
         reactions_filename: str = REACTIONS_FILENAME,
         reactions_dir: str = REACTIONS_DIR,
         calculator_meta: dict[str, Any] | None = None,
+        append: bool = False,
     ):
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -261,7 +441,8 @@ class ReactionWriter:
         self.reactions_root.mkdir(parents=True, exist_ok=True)
 
         self._jsonl_path: Path = self.output_dir / reactions_filename
-        self._fp: TextIO | None = self._jsonl_path.open("w", encoding="utf-8")
+        mode = "a" if append else "w"
+        self._fp: TextIO | None = self._jsonl_path.open(mode, encoding="utf-8")
         self._calc_meta: dict[str, Any] = dict(calculator_meta or {})
         self._n_written: int = 0
 
@@ -480,20 +661,20 @@ class ReactionWriter:
                 },
                 "vibrations": {
                     "state_a": {
-                        "real_cm":          list(getattr(lc, "frequencies_a_cm",  []) or []),
-                        "imag_cm":          list(getattr(lc, "imaginary_a_cm",    []) or []),
+                        "real_ev":          list(getattr(lc, "frequencies_a_ev",  []) or []),
+                        "imag_ev":          list(getattr(lc, "imaginary_a_ev",    []) or []),
                         "zpe_ev":           getattr(lc, "zpe_a",     None),
                         "entropy_ev_per_k": getattr(lc, "entropy_a", None),
                     },
                     "state_b": {
-                        "real_cm":          list(getattr(lc, "frequencies_b_cm",  []) or []),
-                        "imag_cm":          list(getattr(lc, "imaginary_b_cm",    []) or []),
+                        "real_ev":          list(getattr(lc, "frequencies_b_ev",  []) or []),
+                        "imag_ev":          list(getattr(lc, "imaginary_b_ev",    []) or []),
                         "zpe_ev":           getattr(lc, "zpe_b",     None),
                         "entropy_ev_per_k": getattr(lc, "entropy_b", None),
                     },
                     "transition": {
-                        "real_cm":          list(getattr(lc, "frequencies_ts_cm", []) or []),
-                        "imag_cm":          list(getattr(lc, "imaginary_ts_cm",   []) or []),
+                        "real_ev":          list(getattr(lc, "frequencies_ts_ev", []) or []),
+                        "imag_ev":          list(getattr(lc, "imaginary_ts_ev",   []) or []),
                         "zpe_ev":           getattr(lc, "zpe_ts",     None),
                         "entropy_ev_per_k": getattr(lc, "entropy_ts", None),
                     },
@@ -585,6 +766,31 @@ class ReactionWriter:
                     "transition_raw": None if e_ts     is None else float(e_ts),
                     "transition_eff": None if e_ts_eff is None else float(e_ts_eff),
                 },
+                "free_energies_ev": {
+                    "g_ab": None if getattr(lc, "g_ab", None) is None else float(lc.g_ab),
+                    "g_c":  None if getattr(lc, "g_c",  None) is None else float(lc.g_c),
+                    "g_ts": None if getattr(lc, "g_ts", None) is None else float(lc.g_ts),
+                },
+                "vibrations": {
+                    "state_ab": {
+                        "real_ev":          list(getattr(lc, "frequencies_ab_ev", []) or []),
+                        "imag_ev":          list(getattr(lc, "imaginary_ab_ev",   []) or []),
+                        "zpe_ev":           getattr(lc, "zpe_ab",     None),
+                        "entropy_ev_per_k": getattr(lc, "entropy_ab", None),
+                    },
+                    "state_c": {
+                        "real_ev":          list(getattr(lc, "frequencies_c_ev", []) or []),
+                        "imag_ev":          list(getattr(lc, "imaginary_c_ev",   []) or []),
+                        "zpe_ev":           getattr(lc, "zpe_c",     None),
+                        "entropy_ev_per_k": getattr(lc, "entropy_c", None),
+                    },
+                    "transition": {
+                        "real_ev":          list(getattr(lc, "frequencies_ts_ev", []) or []),
+                        "imag_ev":          list(getattr(lc, "imaginary_ts_ev",   []) or []),
+                        "zpe_ev":           getattr(lc, "zpe_ts",     None),
+                        "entropy_ev_per_k": getattr(lc, "entropy_ts", None),
+                    },
+                },
                 "barriers_ev": {
                     "couple_raw": ea_couple_raw,
                     "couple_kmc": ea_couple_kmc,
@@ -659,14 +865,14 @@ class ReactionWriter:
                 },
                 "vibrations": {
                     "occupied": {
-                        "real_cm":          list(getattr(lc, "frequencies_occupied_cm",   []) or []),
-                        "imag_cm":          list(getattr(lc, "imaginary_occupied_cm",     []) or []),
+                        "real_ev":          list(getattr(lc, "frequencies_occupied_ev",   []) or []),
+                        "imag_ev":          list(getattr(lc, "imaginary_occupied_ev",     []) or []),
                         "zpe_ev":           getattr(lc, "zpe_occupied",     None),
                         "entropy_ev_per_k": getattr(lc, "entropy_occupied", None),
                     },
                     "unoccupied": {
-                        "real_cm":          list(getattr(lc, "frequencies_unoccupied_cm", []) or []),
-                        "imag_cm":          list(getattr(lc, "imaginary_unoccupied_cm",   []) or []),
+                        "real_ev":          list(getattr(lc, "frequencies_unoccupied_ev", []) or []),
+                        "imag_ev":          list(getattr(lc, "imaginary_unoccupied_ev",   []) or []),
                         "zpe_ev":           getattr(lc, "zpe_unoccupied",     None),
                         "entropy_ev_per_k": getattr(lc, "entropy_unoccupied", None),
                     },
@@ -814,7 +1020,36 @@ class ReactionWriter:
             folder, reaction, step, gas_energies, gas_free_energies, fired=True,
         )
 
-        description = _reaction_description(reaction, smiles)
+        rate_delta_ev = _finite_float(getattr(reaction, "delta_e", None))
+        rate_barrier_ev = _finite_float(getattr(reaction, "barrier", None))
+        delta_e_ev, barrier_ev = _event_electronic_energetics(
+            reaction,
+            gas_energies=gas_energies,
+        )
+        delta_g_ev, barrier_g_ev = _event_free_energetics(
+            reaction,
+            gas_free_energies=gas_free_energies,
+        )
+        rate_energy_basis = _event_rate_basis(
+            rate_delta_ev=rate_delta_ev,
+            rate_barrier_ev=rate_barrier_ev,
+            delta_e_ev=delta_e_ev,
+            barrier_ev=barrier_ev,
+            delta_g_ev=delta_g_ev,
+            barrier_g_ev=barrier_g_ev,
+        )
+        if delta_e_ev is None and rate_energy_basis != "free_energy":
+            delta_e_ev = rate_delta_ev
+        if barrier_ev is None and rate_energy_basis != "free_energy":
+            barrier_ev = rate_barrier_ev
+
+        description = _reaction_description(
+            reaction,
+            smiles,
+            delta_ev=rate_delta_ev,
+            barrier_ev=rate_barrier_ev,
+            energy_basis=rate_energy_basis,
+        )
 
         rec = ReactionRecord(
             schema_version  = PERSISTENCE_SCHEMA_VERSION,
@@ -827,19 +1062,16 @@ class ReactionWriter:
             member_index    = int(reaction.member_index),
             lateral_class   = int(reaction.lateral_class.lateral_class),
             rate_hz         = float(reaction.rate),
-            delta_e_ev      = float(reaction.delta_e),
-            barrier_ev      = float(reaction.barrier),
+            delta_e_ev      = delta_e_ev,
+            barrier_ev      = barrier_ev,
             description     = description,
             reaction_dir    = str(folder.relative_to(self.output_dir)),
             direction       = getattr(reaction, "direction", None),
-            delta_g_ev      = (
-                None if getattr(reaction, "delta_g", None) is None
-                else float(reaction.delta_g)
-            ),
-            barrier_g_ev    = (
-                None if getattr(reaction, "barrier_g", None) is None
-                else float(reaction.barrier_g)
-            ),
+            delta_g_ev      = delta_g_ev,
+            barrier_g_ev    = barrier_g_ev,
+            rate_energy_basis = rate_energy_basis,
+            rate_delta_ev     = rate_delta_ev,
+            rate_barrier_ev   = rate_barrier_ev,
         )
 
         self._fp.write(json.dumps(rec.to_jsonable()) + "\n")

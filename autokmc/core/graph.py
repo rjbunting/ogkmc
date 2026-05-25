@@ -31,10 +31,12 @@ Edges connect atoms whose covalent-radius neighbour-lists overlap (ASE
 Graph-level metadata (``G.graph[...]``):
 
 * ``"cell"`` – :class:`numpy.ndarray`, shape ``(3, 3)`` (rows = lattice vectors).
-* ``"pbc"``  – :class:`numpy.ndarray` of three :class:`bool`.  **Derived** from
-  the neighbour-list — an axis is True iff at least one bond crosses
-  the cell image along it (so a nanoparticle in a periodic cubic cell
-  with sufficient vacuum reports ``pbc=array([False, False, False])``).
+* ``"pbc"``  – :class:`numpy.ndarray` of three :class:`bool`.  Material
+  structures with a real cell are stored as fully periodic
+  (``[True, True, True]``); adsorbate-only gas reactants stay non-periodic.
+* ``"connectivity_pbc"`` – :class:`numpy.ndarray` of three :class:`bool`.
+  Derived from the neighbour-list — an axis is True iff at least one bond
+  crosses the cell image along it.
 * ``"hull_equations"`` – ``(n_facets, 4)`` convex-hull equations array,
   present only for nanoparticle structures.
 """
@@ -51,6 +53,7 @@ from ase.data import covalent_radii as ASE_COVALENT_RADII
 from ase.neighborlist import NeighborList, natural_cutoffs
 
 from autokmc.core.constants import NL_MULT_DEFAULT
+from autokmc.core.pbc import graph_pbc_for_atoms
 from autokmc.utils.logging import get_logger
 
 _log = get_logger(__name__)
@@ -116,6 +119,10 @@ def build_graph(
             f"{invalid_codes}; expected only 0=bulk, 1=surface, 2=adsorbate"
         )
 
+    declared_pbc = np.asarray(atoms.get_pbc(), dtype=bool)
+    graph_pbc = graph_pbc_for_atoms(atoms)
+    atoms.set_pbc(graph_pbc)
+
     cutoffs = natural_cutoffs(atoms, mult=nl_mult)
     nl = NeighborList(cutoffs, self_interaction=False, bothways=True)
     nl.update(atoms)
@@ -124,6 +131,7 @@ def build_graph(
 
     cell_arr = np.array(atoms.get_cell(), dtype=float)
     G.graph["cell"] = cell_arr
+    G.graph["pbc"] = graph_pbc.copy()
 
     positions      = atoms.get_positions()
     symbols        = atoms.get_chemical_symbols()
@@ -139,8 +147,9 @@ def build_graph(
             covalent_radius = float(ASE_COVALENT_RADII[atomic_numbers[i]]),
         )
 
-    # Track per-axis whether *any* bond crosses an image — this defines the
-    # graph's effective periodicity.
+    # Track per-axis whether *any* bond crosses an image. This is diagnostic
+    # connectivity metadata; material graph structures keep full PBC when
+    # they have a real cell, while adsorbate-only reactants stay non-periodic.
     pbc_effective = np.zeros(3, dtype=bool)
 
     # Walk the bothways=True neighbour list and add each bond once (i<j),
@@ -161,27 +170,21 @@ def build_graph(
                        distance=d,
                        offset=(int(off[0]), int(off[1]), int(off[2])))
 
-    G.graph["pbc"] = pbc_effective
+    G.graph["connectivity_pbc"] = pbc_effective
 
-    # Warn if user-declared PBC disagrees with what the bonding-derived
-    # effective PBC says.  Common causes: a slab's vacuum gap is too small
-    # so atoms bond across z (False→True), or a nanoparticle is centred in
-    # a too-small periodic cell (False→True), or a nominally periodic axis
-    # has no inter-image bonds because the cell vector is huge (True→False
-    # — usually fine and intentional).  Only the first case is a real bug.
-    user_pbc = np.asarray(atoms.get_pbc(), dtype=bool)
-    if not np.array_equal(user_pbc, pbc_effective):
-        # We only warn for the dangerous direction (user said no-PBC but
-        # bonding says yes).  The other direction is the documented NP
-        # convention and is silent.
-        unexpected = (~user_pbc) & pbc_effective
+    # Warn if the caller's original PBC declaration hid cross-image bonds.
+    # Material structures with a real cell are stored with full PBC, but this
+    # still catches too-small vacuum gaps or cells in inputs that arrived with
+    # a partially/non-periodic PBC setting.
+    if not np.array_equal(declared_pbc, pbc_effective):
+        unexpected = (~declared_pbc) & pbc_effective
         if unexpected.any():
             warnings.warn(
                 f"build_graph: cross-image bonds detected along axes "
-                f"{np.where(unexpected)[0].tolist()} where atoms.pbc was "
-                f"{user_pbc.tolist()}.  Effective pbc is "
+                f"{np.where(unexpected)[0].tolist()} where input atoms.pbc was "
+                f"{declared_pbc.tolist()}.  Connectivity pbc is "
                 f"{pbc_effective.tolist()}.  This is usually a vacuum-gap "
-                f"or cell-size bug; downstream code uses G.graph['pbc'].",
+                f"or cell-size bug.",
                 RuntimeWarning,
                 stacklevel=2,
             )
@@ -195,7 +198,7 @@ def build_graph(
 
     _log.debug(
         "build_graph: %d nodes, %d edges, pbc=%s, nl_mult=%g",
-        G.number_of_nodes(), G.number_of_edges(), pbc_effective.tolist(), nl_mult,
+        G.number_of_nodes(), G.number_of_edges(), G.graph["pbc"].tolist(), nl_mult,
     )
 
     return G

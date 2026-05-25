@@ -77,6 +77,7 @@ from autokmc.sites.diffusion import (
     rebuild_diffusion_reverse_indexes,
 )
 from autokmc.species.reactant import Reactant, build_reactant
+from autokmc.io.calculators import CalculatorConfigError
 from autokmc.core.constants import (
     BOND_MAX_HOPS,
     BOND_PAIR_N_SHELLS,
@@ -270,6 +271,8 @@ def _ensure_species_known(
             nl_mult               = nl_mult,
             partial_pressure_bar = 0.0,
         )
+    except CalculatorConfigError:
+        raise
     except Exception as exc:
         _log.warning(
             "expand_bond_sites: build_reactant(%r) failed: %s "
@@ -291,6 +294,8 @@ def _ensure_species_known(
             prune_max_steps   = prune_max_steps,
             verbose           = verbose,
         )
+    except CalculatorConfigError:
+        raise
     except Exception as exc:
         _log.warning(
             "expand_bond_sites: find_adsorbate_sites(%r) failed: %s",
@@ -578,6 +583,7 @@ def expand_bond_sites_for_new_species(
         # before calculator stability pruning, or a stable representative can
         # be discarded in favour of an unstable smaller-ego one.
         prune_by_triple     = False,
+        gas_species         = reg["species"],
         verbose             = verbose,
     )
 

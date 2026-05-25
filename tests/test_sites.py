@@ -7,21 +7,35 @@ from types import SimpleNamespace
 import networkx as nx
 import numpy as np
 import pytest
+from ase import Atoms
+from ase.calculators.singlepoint import SinglePointCalculator
 
+from autokmc.sites.anchors import (
+    _get_cell,
+    _optimise_position,
+    _outward_height_for_clique,
+)
 from autokmc.sites.adsorbate import (
     AdsorbateSite,
+    AdsorbateSiteLateral,
+    _adsorbate_pose_is_outward,
     find_adsorbate_sites,
+    _geometry_connectivity_mismatch,
+    optimise_adsorbate_site_positions,
+    prune_unstable_adsorbate_sites,
     rebuild_adsorbate_reverse_indexes,
     push_member_positions_to_graph,
 )
 from autokmc.sites.bond import (
     BondReactionSite,
     BondReactionTemplate,
+    find_bond_sites,
     _prune_one_per_adsorption_triple,
     rebuild_bond_reverse_indexes,
 )
 from autokmc.sites.diffusion import rebuild_diffusion_reverse_indexes
 from autokmc.sites.stability.adsorption import check_adsorbate_site_lateral
+from autokmc.sites.stability.adsorption import check_site_stability
 
 
 def test_sites_package_exports_public_api():
@@ -95,6 +109,169 @@ def test_find_adsorbate_sites_no_anchor_path_clears_stale_state():
     assert G.graph["clique_to_members"] == {}
 
 
+def test_methane_site_enumeration_keeps_single_h_top_mode():
+    G = nx.Graph()
+    G.graph["cell"] = np.eye(3) * 20.0
+    G.graph["pbc"] = np.array([True, True, False])
+    G.add_node(
+        1,
+        type="surface",
+        element="Cu",
+        position=np.array([0.0, 0.0, 0.0]),
+        index=0,
+        covalent_radius=1.32,
+    )
+    atoms = Atoms(
+        "CH4",
+        positions=[
+            [0.0, 0.0, 0.0],
+            [1.0, 1.0, 1.0],
+            [1.0, -1.0, -1.0],
+            [-1.0, 1.0, -1.0],
+            [-1.0, -1.0, 1.0],
+        ],
+    )
+    reactant_graph = nx.Graph()
+    reactant_graph.add_node(0, element="C", covalent_radius=0.76)
+    for idx in range(1, 5):
+        reactant_graph.add_node(idx, element="H", covalent_radius=0.31)
+        reactant_graph.add_edge(0, idx)
+    reactant = SimpleNamespace(
+        smiles="C",
+        atoms=atoms,
+        graph=reactant_graph,
+        anchor_atoms=[1, 2, 3, 4],
+        unique_nodes={"C": [[0]], "H": [[1, 2, 3, 4]]},
+    )
+
+    sites = find_adsorbate_sites(
+        G,
+        reactant,
+        prune_stable_only=False,
+        n_shells_anchor=1,
+        n_shells_pair=1,
+        include_partial=True,
+    )
+
+    assert sites
+    assert {
+        tuple(i for i, clique in enumerate(site.atom_cliques) if clique is not None)
+        for site in sites
+    } == {(1,)}
+
+
+def test_methyl_site_enumeration_keeps_carbon_top_mode():
+    G = nx.Graph()
+    G.graph["cell"] = np.eye(3) * 20.0
+    G.graph["pbc"] = np.array([True, True, False])
+    G.add_node(
+        1,
+        type="surface",
+        element="Cu",
+        position=np.array([0.0, 0.0, 0.0]),
+        index=0,
+        covalent_radius=1.32,
+    )
+    atoms = Atoms(
+        "CH3",
+        positions=[
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [-0.5, 0.866, 0.0],
+            [-0.5, -0.866, 0.0],
+        ],
+    )
+    reactant_graph = nx.Graph()
+    reactant_graph.add_node(0, element="C", covalent_radius=0.76)
+    for idx in range(1, 4):
+        reactant_graph.add_node(idx, element="H", covalent_radius=0.31)
+        reactant_graph.add_edge(0, idx)
+    reactant = SimpleNamespace(
+        smiles="[CH3]",
+        atoms=atoms,
+        graph=reactant_graph,
+        anchor_atoms=[0],
+        unique_nodes={"C": [[0]], "H": [[1, 2, 3]]},
+    )
+
+    sites = find_adsorbate_sites(
+        G,
+        reactant,
+        prune_stable_only=False,
+        n_shells_anchor=1,
+        n_shells_pair=1,
+        include_partial=True,
+    )
+
+    assert sites
+    assert {
+        tuple(i for i, clique in enumerate(site.atom_cliques) if clique is not None)
+        for site in sites
+    } == {(0,)}
+    assert all(site.atom_cliques[0] == frozenset({1}) for site in sites)
+
+
+def test_methyl_carbon_top_geometry_survives_calc_free_refinement():
+    G = nx.Graph()
+    G.graph["cell"] = np.eye(3) * 20.0
+    G.graph["pbc"] = np.array([True, True, False])
+    G.add_node(
+        1,
+        type="surface",
+        element="Cu",
+        position=np.array([0.0, 0.0, 0.0]),
+        index=0,
+        covalent_radius=1.32,
+    )
+    atoms = Atoms(
+        "CH3",
+        positions=[
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [-0.5, 0.866, 0.0],
+            [-0.5, -0.866, 0.0],
+        ],
+    )
+    reactant_graph = nx.Graph()
+    reactant_graph.add_node(0, element="C", covalent_radius=0.76)
+    for idx in range(1, 4):
+        reactant_graph.add_node(idx, element="H", covalent_radius=0.31)
+        reactant_graph.add_edge(0, idx)
+    reactant = SimpleNamespace(
+        smiles="[CH3]",
+        atoms=atoms,
+        graph=reactant_graph,
+        anchor_atoms=[0],
+        unique_nodes={"C": [[0]], "H": [[1, 2, 3]]},
+    )
+
+    sites = find_adsorbate_sites(
+        G,
+        reactant,
+        prune_stable_only=False,
+        n_shells_anchor=1,
+        n_shells_pair=1,
+        include_partial=True,
+    )
+    G.graph["adsorbate_sites"] = {"[CH3]": sites}
+
+    refined = optimise_adsorbate_site_positions(
+        G,
+        "[CH3]",
+        reactant,
+        n_restarts=1,
+        try_flip=False,
+        max_connectivity_attempts=1,
+        max_iter=1,
+    )
+
+    assert len(refined) == 1
+    assert _geometry_connectivity_mismatch(
+        G, refined[0], reactant, refined[0].positions
+    ) is None
+    assert np.all(refined[0].positions[1:, 2] > refined[0].positions[0, 2])
+
+
 def test_rebuild_diffusion_reverse_indexes_replaces_old_entries():
     G = nx.Graph()
     old_clique = frozenset({9})
@@ -164,6 +341,597 @@ def test_bond_prune_key_keeps_unrelated_species_with_same_iso_numbers():
     pruned = _prune_one_per_adsorption_triple([brs_first, brs_second])
 
     assert pruned == [brs_first, brs_second]
+
+
+def test_find_bond_sites_allows_gas_product_without_c_surface_site():
+    G = nx.Graph()
+    G.graph["cell"] = np.eye(3) * 10.0
+    G.graph["pbc"] = np.array([True, True, False])
+    G.add_node(1, type="surface", element="Pt")
+    G.add_node(2, type="surface", element="Pt")
+    G.add_edge(1, 2)
+    clique_a = frozenset({1})
+    clique_b = frozenset({2})
+    G.add_node(
+        10,
+        type="adsorbate",
+        element="C",
+        reactant="[C]",
+        iso_class=0,
+        reactant_index=0,
+        clique=clique_a,
+        occupied=False,
+        siblings=(),
+    )
+    G.add_node(
+        20,
+        type="adsorbate",
+        element="O",
+        reactant="[O]",
+        iso_class=0,
+        reactant_index=0,
+        clique=clique_b,
+        occupied=False,
+        siblings=(),
+    )
+    G.add_edge(10, 1, anchor_bond=True)
+    G.add_edge(20, 2, anchor_bond=True)
+    site_a = _site("[C]", 0, 10, clique_a)
+    site_b = _site("[O]", 0, 20, clique_b)
+    gas_c = SimpleNamespace(
+        smiles="[C]=O",
+        atoms=Atoms("CO", positions=[[0.0, 0.0, 0.0], [1.15, 0.0, 0.0]]),
+        energy=-1.0,
+        partial_pressure_bar=2.0,
+    )
+
+    bond_sites = find_bond_sites(
+        G,
+        [site_a, site_b],
+        [BondReactionTemplate("[C]", "[O]", "[C]=O")],
+        max_hops=1,
+        prune_by_triple=False,
+        gas_species={"[C]=O": gas_c},
+    )
+
+    assert len(bond_sites) == 1
+    brs = bond_sites[0]
+    assert brs.gas_product is True
+    assert brs.gas_reactant is gas_c
+    assert brs.members[0][4:] == (None, -1)
+    assert brs.member_node_ids[0] == ([10], [20], [])
+    assert brs._member_cliques[0] == ((clique_a,), (clique_b,), tuple())
+
+
+def test_geometry_refinement_retries_until_required_connectivity(monkeypatch):
+    G = nx.Graph()
+    G.graph["cell"] = np.eye(3) * 20.0
+    G.graph["pbc"] = np.array([False, False, False])
+    G.add_node(
+        1,
+        type="surface",
+        element="Pt",
+        position=np.array([0.0, 0.0, 0.0]),
+        index=0,
+    )
+
+    site = AdsorbateSite(
+        reactant="[O]",
+        n_atoms=1,
+        atom_cliques=[frozenset({1})],
+        positions=np.array([[10.0, 0.0, 0.0]]),
+        iso_class=0,
+        members=[[frozenset({1})]],
+        member_node_ids=[],
+    )
+    G.graph["adsorbate_sites"] = {"[O]": [site]}
+    reactant_graph = nx.Graph()
+    reactant_graph.add_node(0, element="O")
+    reactant = SimpleNamespace(
+        smiles="[O]",
+        atoms=Atoms("O", positions=[[0.0, 0.0, 0.0]]),
+        graph=reactant_graph,
+    )
+
+    calls = {"n": 0}
+
+    def fake_minimize(_fn, _x0, **_kwargs):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            return SimpleNamespace(fun=10.0, x=np.zeros(6))
+        return SimpleNamespace(
+            fun=1.0,
+            x=np.array([-10.0, 0.0, 1.8, 0.0, 0.0, 0.0]),
+        )
+
+    monkeypatch.setattr("scipy.optimize.minimize", fake_minimize)
+
+    optimise_adsorbate_site_positions(
+        G,
+        "[O]",
+        reactant,
+        n_restarts=1,
+        try_flip=False,
+        max_connectivity_attempts=3,
+        max_iter=1,
+    )
+
+    assert calls["n"] == 3
+    assert site.positions[0, 2] == pytest.approx(1.8)
+
+
+def test_geometry_refinement_rejects_iso_class_after_failed_connectivity(monkeypatch):
+    G = nx.Graph()
+    G.graph["cell"] = np.eye(3) * 20.0
+    G.graph["pbc"] = np.array([False, False, False])
+    G.add_node(
+        1,
+        type="surface",
+        element="Pt",
+        position=np.array([0.0, 0.0, 0.0]),
+        index=0,
+    )
+    G.add_node(
+        10,
+        type="adsorbate",
+        element="O",
+        reactant="[O]",
+        reactant_index=0,
+        clique=frozenset({1}),
+        occupied=False,
+    )
+    G.add_edge(10, 1, anchor_bond=True)
+
+    site = AdsorbateSite(
+        reactant="[O]",
+        n_atoms=1,
+        atom_cliques=[frozenset({1})],
+        positions=np.array([[10.0, 0.0, 0.0]]),
+        iso_class=0,
+        members=[[frozenset({1})]],
+        member_node_ids=[[10]],
+    )
+    G.graph["adsorbate_sites"] = {"[O]": [site]}
+    reactant_graph = nx.Graph()
+    reactant_graph.add_node(0, element="O")
+    reactant = SimpleNamespace(
+        smiles="[O]",
+        atoms=Atoms("O", positions=[[0.0, 0.0, 0.0]]),
+        graph=reactant_graph,
+    )
+
+    monkeypatch.setattr(
+        "scipy.optimize.minimize",
+        lambda _fn, _x0, **_kwargs: SimpleNamespace(fun=10.0, x=np.zeros(6)),
+    )
+
+    out = optimise_adsorbate_site_positions(
+        G,
+        "[O]",
+        reactant,
+        n_restarts=1,
+        try_flip=False,
+        max_connectivity_attempts=2,
+        max_iter=1,
+    )
+
+    assert out == []
+    assert G.graph["adsorbate_sites"]["[O]"] == []
+    assert 10 not in G
+    assert G.graph["clique_to_members"] == {}
+
+
+def test_geometry_refinement_repels_unbonded_atoms_from_bonded_surface(monkeypatch):
+    G = nx.Graph()
+    G.graph["cell"] = np.eye(3) * 20.0
+    G.graph["pbc"] = np.array([False, False, False])
+    G.add_node(
+        1,
+        type="surface",
+        element="Pt",
+        position=np.array([0.0, 0.0, 0.0]),
+        index=0,
+    )
+
+    site = AdsorbateSite(
+        reactant="[CH]",
+        n_atoms=2,
+        atom_cliques=[frozenset({1}), None],
+        positions=np.array([[1.8, 0.0, 0.0], [0.0, 0.0, 0.2]]),
+        iso_class=0,
+        members=[[frozenset({1}), None]],
+        member_node_ids=[],
+    )
+    G.graph["adsorbate_sites"] = {"[CH]": [site]}
+    reactant_graph = nx.Graph()
+    reactant_graph.add_node(0, element="C")
+    reactant_graph.add_node(1, element="H")
+    reactant_graph.add_edge(0, 1)
+    reactant = SimpleNamespace(
+        smiles="[CH]",
+        atoms=Atoms("CH", positions=site.positions.copy()),
+        graph=reactant_graph,
+    )
+    seen = {}
+
+    def fake_minimize(fn, _x0, **_kwargs):
+        seen["energy"] = float(fn(np.zeros(6)))
+        return SimpleNamespace(fun=seen["energy"], x=np.zeros(6))
+
+    monkeypatch.setattr("scipy.optimize.minimize", fake_minimize)
+
+    optimise_adsorbate_site_positions(
+        G,
+        "[CH]",
+        reactant,
+        restraint_weight=0.0,
+        repulsion_weight=1.0,
+        n_restarts=1,
+        try_flip=False,
+        max_connectivity_attempts=1,
+        max_iter=1,
+    )
+
+    assert seen["energy"] > 1.0
+
+
+def test_adsorbate_pruning_reads_energy_before_detaching_calculator(monkeypatch):
+    G = nx.Graph()
+    G.graph["cell"] = np.eye(3) * 10.0
+    G.graph["pbc"] = np.array([True, True, True])
+    G.add_node(
+        0,
+        type="surface",
+        element="Pt",
+        position=np.array([0.0, 0.0, 0.0]),
+        index=0,
+    )
+
+    site = AdsorbateSite(
+        reactant="[O]",
+        n_atoms=1,
+        atom_cliques=[frozenset({0})],
+        positions=np.array([[0.0, 0.0, 1.8]]),
+        iso_class=0,
+        members=[[frozenset({0})]],
+        member_node_ids=[],
+    )
+    reactant = SimpleNamespace(
+        smiles="[O]",
+        atoms=Atoms("O", positions=[[0.0, 0.0, 0.0]]),
+        graph=nx.Graph(),
+    )
+    reactant.graph.add_node(0, element="O")
+
+    def fake_optimise_structure(atoms, **_kwargs):
+        opt = atoms.copy()
+        opt.calc = SinglePointCalculator(
+            opt,
+            energy=-12.3,
+            forces=np.zeros((len(opt), 3)),
+        )
+        return opt
+
+    monkeypatch.setattr(
+        "autokmc.structure.optimise_structure",
+        fake_optimise_structure,
+    )
+
+    stable = prune_unstable_adsorbate_sites(
+        G,
+        [site],
+        reactant,
+        calculator=object(),
+        fmax=0.05,
+        max_steps=1,
+    )
+
+    assert stable == [site]
+
+
+def test_adsorbate_pruning_projects_relaxed_adsorbate_back_to_graph_frame(monkeypatch):
+    G = nx.Graph()
+    G.graph["cell"] = np.eye(3) * 20.0
+    G.graph["pbc"] = np.array([False, False, False])
+    for nid, x in ((0, 0.0), (1, 3.0)):
+        G.add_node(
+            nid,
+            type="surface",
+            element="Pt",
+            position=np.array([x, 0.0, 0.0]),
+            index=nid,
+        )
+    G.add_edge(0, 1)
+    for nid, x, surf in ((10, 0.0, 0), (20, 3.0, 1)):
+        G.add_node(
+            nid,
+            type="adsorbate",
+            element="O",
+            position=np.array([x, 0.0, 1.8]),
+            reactant="[O]",
+            reactant_index=0,
+            clique=frozenset({surf}),
+            is_bonded=True,
+            occupied=False,
+        )
+        G.add_edge(surf, nid, anchor_bond=True)
+
+    site = AdsorbateSite(
+        reactant="[O]",
+        n_atoms=1,
+        atom_cliques=[frozenset({0})],
+        positions=np.array([[0.0, 0.0, 1.8]]),
+        iso_class=0,
+        members=[[frozenset({0})], [frozenset({1})]],
+        member_node_ids=[[10], [20]],
+        n_shells_settled=1,
+    )
+    G.graph["adsorbate_sites"] = {"[O]": [site]}
+    rebuild_adsorbate_reverse_indexes(G)
+
+    reactant = SimpleNamespace(
+        smiles="[O]",
+        atoms=Atoms("O", positions=[[0.0, 0.0, 0.0]]),
+        graph=nx.Graph(),
+    )
+    reactant.graph.add_node(0, element="O")
+
+    def fake_optimise_structure(atoms, **_kwargs):
+        opt = atoms.copy()
+        pos = opt.get_positions()
+        pos[:, 2] -= 0.5
+        opt.set_positions(pos)
+        opt.calc = SinglePointCalculator(
+            opt,
+            energy=-1.0,
+            forces=np.zeros((len(opt), 3)),
+        )
+        return opt
+
+    monkeypatch.setattr(
+        "autokmc.structure.optimise_structure",
+        fake_optimise_structure,
+    )
+
+    stable = prune_unstable_adsorbate_sites(
+        G,
+        [site],
+        reactant,
+        calculator=object(),
+        fmax=0.05,
+        max_steps=1,
+    )
+
+    assert stable == [site]
+    assert G.nodes[10]["position"][2] == pytest.approx(1.8)
+    assert G.nodes[20]["position"][2] == pytest.approx(1.8)
+
+
+def test_slab_anchor_optimisation_keeps_top_site_above_surface(monkeypatch):
+    G = nx.Graph()
+    G.graph["cell"] = np.eye(3) * 20.0
+    G.graph["pbc"] = np.array([True, True, False])
+    G.add_node(
+        1,
+        type="surface",
+        element="Pt",
+        position=np.array([0.0, 0.0, 0.0]),
+        index=0,
+        covalent_radius=1.36,
+    )
+    captured = {}
+
+    def fake_minimize(_fn, x0, **kwargs):
+        captured["x0"] = np.asarray(x0, dtype=float)
+        captured["bounds"] = kwargs["bounds"]
+        return SimpleNamespace(x=np.asarray(x0, dtype=float))
+
+    monkeypatch.setattr("scipy.optimize.minimize", fake_minimize)
+
+    pos = _optimise_position(
+        G,
+        frozenset({1}),
+        r_cov_ads=0.76,
+        opt_factor=0.85,
+        repulsion_weight=0.0,
+    )
+
+    assert captured["bounds"][2][0] > 0.0
+    assert pos[2] == pytest.approx(captured["bounds"][2][0])
+
+
+def test_nanoparticle_anchor_optimisation_uses_connectivity_pbc(monkeypatch):
+    G = nx.Graph()
+    G.graph["cell"] = np.eye(3) * 20.0
+    G.graph["pbc"] = np.array([True, True, True])
+    G.graph["connectivity_pbc"] = np.array([False, False, False])
+    G.add_node(
+        0,
+        type="surface",
+        element="Pt",
+        position=np.array([0.0, 0.0, 0.0]),
+        index=0,
+        covalent_radius=1.36,
+    )
+    G.add_node(
+        1,
+        type="surface",
+        element="Pt",
+        position=np.array([2.0, 0.0, 0.0]),
+        index=1,
+        covalent_radius=1.36,
+    )
+
+    captured = {}
+
+    def fake_minimize(fn, x0, **kwargs):
+        captured["method"] = kwargs["method"]
+        captured["constraints"] = kwargs.get("constraints")
+        captured["bounds"] = kwargs.get("bounds")
+        captured["x0"] = np.asarray(x0, dtype=float)
+        return SimpleNamespace(x=np.asarray(x0, dtype=float), fun=float(fn(x0)))
+
+    monkeypatch.setattr("scipy.optimize.minimize", fake_minimize)
+
+    pos = _optimise_position(
+        G,
+        frozenset({1}),
+        r_cov_ads=0.76,
+        repulsion_weight=0.0,
+    )
+
+    assert captured["method"] == "SLSQP"
+    assert captured["constraints"]["type"] == "ineq"
+    assert captured["bounds"] is None
+    assert pos[0] > 2.0
+    assert pos[2] == pytest.approx(0.0)
+
+
+def test_nanoparticle_propagation_rejects_inward_positions():
+    G = nx.Graph()
+    G.graph["cell"] = np.eye(3) * 20.0
+    G.graph["pbc"] = np.array([True, True, True])
+    G.graph["connectivity_pbc"] = np.array([False, False, False])
+    G.add_node(
+        0,
+        type="surface",
+        element="Pt",
+        position=np.array([0.0, 0.0, 0.0]),
+        covalent_radius=1.36,
+    )
+    G.add_node(
+        1,
+        type="surface",
+        element="Pt",
+        position=np.array([2.0, 0.0, 0.0]),
+        covalent_radius=1.36,
+    )
+
+    cell, cell_inv, pbc, use_mic = _get_cell(G)
+
+    assert not use_mic
+    assert _outward_height_for_clique(
+        G, frozenset({1}), np.array([3.0, 0.0, 0.0]),
+        cell, cell_inv, pbc, use_mic,
+    ) > 0.0
+    assert _outward_height_for_clique(
+        G, frozenset({1}), np.array([1.5, 0.0, 0.0]),
+        cell, cell_inv, pbc, use_mic,
+    ) < 0.0
+    assert _adsorbate_pose_is_outward(
+        G, [frozenset({1})], np.array([[3.0, 0.0, 0.0]]), pbc,
+    )
+    assert not _adsorbate_pose_is_outward(
+        G, [frozenset({1})], np.array([[1.5, 0.0, 0.0]]), pbc,
+    )
+
+
+def test_slab_propagation_rejects_positions_below_surface():
+    G = nx.Graph()
+    G.graph["cell"] = np.eye(3) * 20.0
+    G.graph["pbc"] = np.array([True, True, True])
+    G.graph["connectivity_pbc"] = np.array([True, True, False])
+    G.add_node(
+        0,
+        type="surface",
+        element="Pt",
+        position=np.array([0.0, 0.0, 5.0]),
+        covalent_radius=1.36,
+    )
+    G.add_node(
+        1,
+        type="surface",
+        element="Pt",
+        position=np.array([2.0, 0.0, 5.0]),
+        covalent_radius=1.36,
+    )
+
+    cell, cell_inv, pbc, use_mic = _get_cell(G)
+
+    assert use_mic
+    assert _outward_height_for_clique(
+        G, frozenset({0, 1}), np.array([1.0, 0.0, 6.0]),
+        cell, cell_inv, pbc, use_mic,
+    ) > 0.0
+    assert _outward_height_for_clique(
+        G, frozenset({0, 1}), np.array([1.0, 0.0, 4.5]),
+        cell, cell_inv, pbc, use_mic,
+    ) < 0.0
+    assert _adsorbate_pose_is_outward(
+        G, [frozenset({0, 1})], np.array([[1.0, 0.0, 6.0]]), pbc,
+    )
+    assert not _adsorbate_pose_is_outward(
+        G, [frozenset({0, 1})], np.array([[1.0, 0.0, 4.5]]), pbc,
+    )
+
+
+def test_adsorption_lateral_structures_use_full_calculator_pbc(monkeypatch):
+    G = nx.Graph()
+    G.graph["cell"] = np.eye(3) * 20.0
+    G.graph["pbc"] = np.array([True, True, True])
+    G.graph["connectivity_pbc"] = np.array([True, True, False])
+    G.add_node(
+        0,
+        type="surface",
+        element="Pt",
+        position=np.array([0.0, 0.0, 5.0]),
+        index=0,
+        covalent_radius=1.36,
+    )
+    G.add_node(
+        10,
+        type="adsorbate",
+        element="O",
+        position=np.array([0.0, 0.0, 6.0]),
+        clique=frozenset({0}),
+        reactant="[O]",
+        reactant_index=0,
+        occupied=False,
+        siblings=(),
+    )
+    G.add_edge(0, 10, anchor_bond=True)
+
+    site = AdsorbateSite(
+        reactant="[O]",
+        n_atoms=1,
+        atom_cliques=[frozenset({0})],
+        positions=np.array([[0.0, 0.0, 6.0]]),
+        iso_class=0,
+        members=[[frozenset({0})]],
+        member_node_ids=[[10]],
+    )
+    lateral = AdsorbateSiteLateral(
+        lateral_class=0,
+        ego_graph=G.subgraph([0, 10]).copy(),
+    )
+
+    def fake_optimise_structure(atoms, **_kwargs):
+        opt = atoms.copy()
+        opt.set_pbc([True, True, True])
+        opt.calc = SinglePointCalculator(
+            opt,
+            energy=-1.0,
+            forces=np.zeros((len(opt), 3)),
+        )
+        return opt
+
+    monkeypatch.setattr(
+        "autokmc.structure.optimise_structure",
+        fake_optimise_structure,
+    )
+
+    check_site_stability(
+        G,
+        site,
+        0,
+        lateral,
+        calculator=object(),
+        fmax=0.05,
+        max_steps=1,
+    )
+
+    assert tuple(lateral.atoms_occupied.pbc) == (True, True, True)
+    assert tuple(lateral.atoms_unoccupied.pbc) == (True, True, True)
 
 
 def test_adsorption_lateral_reassignment_removes_old_membership():

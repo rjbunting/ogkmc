@@ -24,13 +24,16 @@ class ReactionRecord:
     member_index:    int
     lateral_class:   int
     rate_hz:         float
-    delta_e_ev:      float
-    barrier_ev:      float
+    delta_e_ev:      float | None
+    barrier_ev:      float | None
     description:     str
     reaction_dir:    str
     direction:       str | None = None
     delta_g_ev:      float | None = None
     barrier_g_ev:    float | None = None
+    rate_energy_basis: str | None = None
+    rate_delta_ev:     float | None = None
+    rate_barrier_ev:   float | None = None
 
     def to_jsonable(self) -> dict[str, Any]:
         d = asdict(self)

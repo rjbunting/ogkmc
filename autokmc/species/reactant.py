@@ -51,13 +51,14 @@ import networkx as nx
 from networkx.algorithms import isomorphism
 
 from ase import Atoms
-from ase.data import covalent_radii as ASE_COVALENT_RADII
 from ase.optimize import LBFGS
 
 from autokmc.core.graph import build_graph
 from autokmc.core.constants import NL_MULT_DEFAULT, RANDOM_SEED
+from autokmc.io.calculators import acquire_calculator
 from autokmc.species.smiles import smiles_to_dirname
 from autokmc.utils.logging import get_logger
+from autokmc.utils.rdkit_logging import silence_rdkit_warnings
 
 _log = get_logger(__name__)
 
@@ -124,10 +125,10 @@ class Reactant:
     zpe          : float                       = field(default=float("nan"))
     #: Standard-state entropy (eV/K).
     entropy      : float                       = field(default=float("nan"))
-    #: Real vibrational frequencies (cm⁻¹).
-    frequencies_cm : list                      = field(default_factory=list)
-    #: Imaginary / spurious low-mode frequencies (cm⁻¹) — kept for audit.
-    imaginary_cm   : list                      = field(default_factory=list)
+    #: Real vibrational mode energies (eV).
+    frequencies_ev : list                      = field(default_factory=list)
+    #: Imaginary / spurious low-mode energies (eV) — kept for audit.
+    imaginary_ev   : list                      = field(default_factory=list)
     #: Partial pressure (bar) of this reactant — multiplies the
     #: adsorption rate in :func:`autokmc.reactions.adsorption._energetics_cached`
     #: so the persisted ΔG / barrier remain at the 1-bar reference.
@@ -162,6 +163,7 @@ def _smiles_to_atoms(smiles: str, *, add_hydrogens: bool = True) -> Atoms:
     Atoms
         Non-periodic structure with no calculator attached.
     """
+    silence_rdkit_warnings()
     try:
         from rdkit import Chem
         from rdkit.Chem import AllChem
@@ -330,24 +332,28 @@ def find_anchor_atoms(
 
     * it is a vertex of the convex hull of the relaxed Cartesian
       coordinates, **or**
-    * its covalent-radius sphere protrudes through (or to within
-      *hull_tol* Å of) any hull facet — i.e. it is *almost* on the hull
-      and a surface atom approaching from outside could still reach it.
+    * its atom centre lies within *hull_tol* Å of any hull facet — i.e. it
+      is almost coplanar with the molecular exterior but was not selected
+      as a strict hull vertex.
+
+    If any non-hydrogen atom is exposed, hydrogen atoms are dropped from the
+    anchor set.  This keeps hydrocarbon fragments such as CH3 carbon-bound
+    while still allowing H-bound activation geometries for closed-shell CH4,
+    where the central carbon is buried and only hydrogens are exposed.
 
     Degenerate cases (single atom, diatomic, planar molecule with fewer
     than four atoms) raise ``QhullError`` from
     :class:`scipy.spatial.ConvexHull`.  In that case **every atom is
-    treated as an anchor** — a permissive fallback that does no harm
-    because the downstream clash filter and anchor-distance filter still
-    reject infeasible placements.
+    treated as geometrically exposed** before the non-H preference above is
+    applied.
 
     Parameters
     ----------
     reactant : Reactant
     hull_tol : float
-        Tolerance in Å added to the per-atom covalent radius when
-        deciding whether a non-vertex atom is "close enough" to a hull
-        facet to count as exposed.  Default 0.1.
+        Centre-to-facet tolerance in Å for deciding whether a non-vertex
+        atom is close enough to the molecular exterior to count as exposed.
+        Default 0.1.
 
     Returns
     -------
@@ -357,33 +363,39 @@ def find_anchor_atoms(
     """
     from scipy.spatial import ConvexHull, QhullError
 
+    def _prefer_non_hydrogen(exposed_atoms: set[int]) -> list[int]:
+        symbols = reactant.atoms.get_chemical_symbols()
+        heavy = sorted(
+            int(i) for i in exposed_atoms
+            if symbols[int(i)] != "H"
+        )
+        return heavy if heavy else sorted(int(i) for i in exposed_atoms)
+
     pts = reactant.atoms.get_positions()
     n_atoms = len(pts)
     if n_atoms < 4:
-        return list(range(n_atoms))
+        return _prefer_non_hydrogen(set(range(n_atoms)))
 
     try:
         hull = ConvexHull(pts)
     except QhullError:
         # Coplanar / collinear → every atom is treated as an anchor.
-        return list(range(n_atoms))
+        return _prefer_non_hydrogen(set(range(n_atoms)))
 
     exposed: set[int] = set(int(v) for v in hull.vertices)
 
-    numbers = reactant.atoms.get_atomic_numbers()
     eqs     = hull.equations                 # (n_facets, 4) – a x + b y + c z + d = 0
     normals = eqs[:, :3]
     offsets = eqs[:, 3]
     for i in range(n_atoms):
         if i in exposed:
             continue
-        r_cov_i = float(ASE_COVALENT_RADII[int(numbers[i])])
         # signed distance is negative inside hull, zero on facet, positive outside.
         signed = normals @ pts[i] + offsets
-        if np.any(signed + r_cov_i > -hull_tol):
+        if np.any(signed >= -float(hull_tol)):
             exposed.add(i)
 
-    return sorted(exposed)
+    return _prefer_non_hydrogen(exposed)
 
 
 # ---------------------------------------------------------------------------
@@ -456,18 +468,20 @@ def build_reactant(
     # 2. Optional ASE relaxation + energy
     energy = float("nan")
     if calculator is not None:
-        _optimise(atoms, calculator, fmax=fmax, steps=steps)
-        try:
-            energy = float(atoms.get_potential_energy())
-        except Exception as exc:
-            # Don't silently swallow calculator failures — users see
-            # `nan` and assume "no calculator", but it might mean the
-            # calculator crashed.  Warn loudly via the package logger.
-            _log.warning(
-                "build_reactant(%r): calculator failed to evaluate energy "
-                "after relaxation (%s); Reactant.energy left as NaN.",
-                smiles, exc,
-            )
+        with acquire_calculator(calculator, purpose="gas-phase reactant relaxation") as calc:
+            _optimise(atoms, calc, fmax=fmax, steps=steps)
+            try:
+                energy = float(atoms.get_potential_energy())
+            except Exception as exc:
+                # Don't silently swallow calculator failures — users see
+                # `nan` and assume "no calculator", but it might mean the
+                # calculator crashed.  Warn loudly via the package logger.
+                _log.warning(
+                    "build_reactant(%r): calculator failed to evaluate energy "
+                    "after relaxation (%s); Reactant.energy left as NaN.",
+                    smiles, exc,
+                )
+        atoms.calc = None
 
     # 3. Tag every atom as adsorbate (molecules have no bulk interior and are
     #    not part of the surface — they will adsorb onto it).
@@ -526,8 +540,8 @@ def build_reactant(
             reactant.gibbs_energy   = float(thermo["g_total_ev"])
             reactant.zpe            = float(thermo["zpe_ev"])
             reactant.entropy        = float(thermo["entropy_ev_per_k"])
-            reactant.frequencies_cm = list(thermo["frequencies_cm"])
-            reactant.imaginary_cm   = list(thermo["imaginary_cm"])
+            reactant.frequencies_ev = list(thermo["frequencies_ev"])
+            reactant.imaginary_ev   = list(thermo["imaginary_ev"])
             reactant.thermo_meta = {
                 "geometry":        thermo.get("geometry"),
                 "symmetry_number": thermo.get("symmetry_number"),

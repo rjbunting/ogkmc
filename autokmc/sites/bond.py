@@ -82,6 +82,8 @@ from typing import Any, Iterable
 import networkx as nx
 from networkx.algorithms import isomorphism
 
+from autokmc.io.calculators import CalculatorConfigError, acquire_calculator
+from autokmc.core.pbc import full_pbc_for_cell
 from autokmc.sites.adsorbate import (
     AdsorbateSite,
     _get_surface_apsp,
@@ -99,6 +101,7 @@ from autokmc.core.constants import (
     PRUNE_MAX_STEPS,
 )
 from autokmc.utils.logging import get_logger
+from autokmc.utils.rdkit_logging import silence_rdkit_warnings
 
 _log = get_logger(__name__)
 
@@ -112,6 +115,7 @@ def _canon_smiles(smi: str) -> str:
     if smi is None:
         return ""
     try:
+        silence_rdkit_warnings()
         from rdkit import Chem
     except ImportError:
         return str(smi)
@@ -235,15 +239,17 @@ class BondReactionLateral:
     entropy_ab       : float | None = None
     entropy_c        : float | None = None
     entropy_ts       : float | None = None
-    frequencies_ab_cm : list = field(default_factory=list)
-    frequencies_c_cm  : list = field(default_factory=list)
-    frequencies_ts_cm : list = field(default_factory=list)
-    imaginary_ab_cm   : list = field(default_factory=list)
-    imaginary_c_cm    : list = field(default_factory=list)
-    imaginary_ts_cm   : list = field(default_factory=list)
+    frequencies_ab_ev : list = field(default_factory=list)
+    frequencies_c_ev  : list = field(default_factory=list)
+    frequencies_ts_ev : list = field(default_factory=list)
+    imaginary_ab_ev   : list = field(default_factory=list)
+    imaginary_c_ev    : list = field(default_factory=list)
+    imaginary_ts_ev   : list = field(default_factory=list)
     vib_indices_ab    : list = field(default_factory=list)
     vib_indices_c     : list = field(default_factory=list)
     vib_indices_ts    : list = field(default_factory=list)
+    gas_product       : bool = False
+    gas_pressure_bar  : float = 0.0
 
 
 @dataclass
@@ -281,6 +287,9 @@ class BondReactionSite:
     #: smallest / most-direct iso-class per adsorption triple.
     ego_graph             : Any = None
     n_shells_pair_settled : int = 0
+    gas_product           : bool = False
+    gas_reactant          : Any = None
+    gas_lift_height       : float = 6.0
 
     # Cached per-member tuples ``(cliques_a, cliques_b, cliques_c)`` —
     # populated by :func:`find_bond_sites`.  Used by :mod:`autokmc.reactions.bond`
@@ -760,7 +769,10 @@ def _prune_one_per_adsorption_triple(
         sa, _, sb, _, sc, _ = brs.members[0]
         a_key = (_canon_smiles(sa.reactant), int(sa.iso_class))
         b_key = (_canon_smiles(sb.reactant), int(sb.iso_class))
-        c_key = (_canon_smiles(sc.reactant), int(sc.iso_class))
+        if getattr(brs, "gas_product", False) or sc is None:
+            c_key = ("gas", brs.template.smiles_c, -1)
+        else:
+            c_key = (_canon_smiles(sc.reactant), int(sc.iso_class))
         ab_key = (
             tuple(sorted((a_key, b_key)))
             if brs.template.is_symmetric
@@ -811,6 +823,9 @@ def find_bond_sites(
     deduplicate_iso: bool = True,
     n_shells_pair: int = BOND_PAIR_N_SHELLS,
     prune_by_triple: bool = BOND_PRUNE_BY_TRIPLE,
+    gas_species: dict[str, Any] | None = None,
+    allow_gas_products: bool = True,
+    gas_lift_height: float = 6.0,
     verbose: bool = False,
 ) -> list[BondReactionSite]:
     """Enumerate bond-reaction triples that satisfy the locality constraints.
@@ -891,11 +906,19 @@ def find_bond_sites(
 
     out: list[BondReactionSite] = []
 
+    gas_species = dict(gas_species or {})
+
     for tpl in templates:
         sites_a = by_smiles.get(tpl.smiles_a, [])
         sites_b = by_smiles.get(tpl.smiles_b, [])
         sites_c = by_smiles.get(tpl.smiles_c, [])
-        if not (sites_a and sites_b and sites_c):
+        gas_reactant = gas_species.get(tpl.smiles_c)
+        gas_product = (
+            bool(allow_gas_products)
+            and not sites_c
+            and gas_reactant is not None
+        )
+        if not (sites_a and sites_b and (sites_c or gas_product)):
             if verbose:
                 missing = [
                     name for name, lst in (
@@ -912,9 +935,11 @@ def find_bond_sites(
 
         flat_a = _flatten_sites(sites_a)
         flat_b = _flatten_sites(sites_b)
-        flat_c = _flatten_sites(sites_c)
         surface_index_b = _surface_node_index_for_placements(flat_b)
-        surface_index_c = _surface_node_index_for_placements(flat_c)
+        flat_c = [] if gas_product else _flatten_sites(sites_c)
+        surface_index_c = (
+            {} if gas_product else _surface_node_index_for_placements(flat_c)
+        )
 
         n_considered = 0
         n_kept       = 0
@@ -951,6 +976,70 @@ def find_bond_sites(
                     continue
 
                 ab_union = clq_a | clq_b
+
+                if gas_product:
+                    n_kept += 1
+
+                    a_nids = list(sa.member_node_ids[ma])
+                    b_nids = list(sb.member_node_ids[mb])
+                    c_nids: list[int] = []
+                    ns_a = max(int(getattr(sa, "n_shells_settled", 0) or 0),
+                               int(n_shells_pair))
+                    ns_b = max(int(getattr(sb, "n_shells_settled", 0) or 0),
+                               int(n_shells_pair))
+                    ns_c = int(n_shells_pair)
+
+                    try:
+                        ego = _build_triple_ego_graph(
+                            G, a_nids, b_nids, c_nids,
+                            clq_a, clq_b, frozenset(),
+                            ns_a, ns_b, ns_c,
+                            is_symmetric=tpl.is_symmetric,
+                        )
+                    except Exception as exc:  # pragma: no cover
+                        _log.debug(
+                            "find_bond_sites: gas-product ego build failed: %s",
+                            exc,
+                        )
+                        ego = None
+
+                    merged = False
+                    if deduplicate_iso and ego is not None:
+                        fkey = _triple_fingerprint(ego)
+                        for brs in fp_index.get(fkey, ()):
+                            if brs.ego_graph is None:
+                                continue
+                            gm = isomorphism.GraphMatcher(
+                                ego, brs.ego_graph,
+                                node_match=_triple_node_match,
+                            )
+                            if gm.is_isomorphic():
+                                brs.n_shells_pair_settled = max(
+                                    brs.n_shells_pair_settled,
+                                    max(ns_a, ns_b, ns_c),
+                                )
+                                merged = True
+                                break
+
+                    if not merged:
+                        brs = BondReactionSite(
+                            template              = tpl,
+                            iso_class             = -1,
+                            ego_graph             = ego,
+                            n_shells_pair_settled = max(ns_a, ns_b, ns_c),
+                            gas_product           = True,
+                            gas_reactant          = gas_reactant,
+                            gas_lift_height       = float(gas_lift_height),
+                        )
+                        out.append(brs)
+                        if ego is not None:
+                            fkey = _triple_fingerprint(ego)
+                            fp_index.setdefault(fkey, []).append(brs)
+
+                    brs.members.append((sa, ma, sb, mb, None, -1))
+                    brs.member_node_ids.append((list(a_nids), list(b_nids), []))
+                    brs._member_cliques.append((cliques_a, cliques_b, tuple()))
+                    continue
 
                 for j_c in _nearby_placement_indices(
                     G, surface_index_c, ab_union, int(max_hops),
@@ -1015,6 +1104,7 @@ def find_bond_sites(
                             iso_class             = -1,   # renumbered below
                             ego_graph             = ego,
                             n_shells_pair_settled = max(ns_a, ns_b, ns_c),
+                            gas_product           = False,
                         )
                         out.append(brs)
                         if ego is not None:
@@ -1160,7 +1250,7 @@ def _build_ab_pruning_atoms(
     )
 
     cell = np.array(G.graph["cell"], dtype=float)
-    pbc  = np.asarray(G.graph.get("pbc", [True, True, False]), dtype=bool)
+    pbc  = full_pbc_for_cell(cell)
 
     atoms = Atoms(symbols=symbols, positions=positions, cell=cell, pbc=pbc)
     atoms.arrays["surface"] = surface_array
@@ -1246,6 +1336,7 @@ def prune_unstable_bond_sites(
     max_steps: int = PRUNE_MAX_STEPS,
     nl_mult: float = NL_MULT_DEFAULT,
     verbose: bool = False,
+    debug_output_dir: str | None = None,
 ) -> list[BondReactionSite]:
     """Drop bond-reaction iso-classes whose A+B endpoint is bond-changing-unstable.
 
@@ -1275,10 +1366,16 @@ def prune_unstable_bond_sites(
         topology.  Pass ``G.graph["bond_registry"]["species"]`` after
         :func:`autokmc.kmc.expansion.initialise_bond_registry` has run.
     calculator
-        ASE-compatible calculator.  A :func:`copy.deepcopy` is made for
-        each relaxation so the caller's instance is never mutated.
+        ASE-compatible calculator or CalculatorPool.  A calculator is
+        acquired for each relaxation; calculator instances are never
+        deep-copied.
     frozen_indices, fmax, max_steps, nl_mult, verbose
         See :func:`autokmc.sites.adsorbate.prune_unstable_adsorbate_sites`.
+    debug_output_dir
+        Optional directory for debugging endpoint pruning.  When supplied,
+        the unrelaxed and relaxed representative A+B endpoint structures are
+        written as ``extxyz`` files under one folder per pre-pruning
+        ``bond_iso``.
 
     Returns
     -------
@@ -1287,7 +1384,6 @@ def prune_unstable_bond_sites(
         **renumbered** to be sequential.
         ``G.graph["bond_reaction_sites"]`` is updated in place.
     """
-    import copy
     import numpy as np
 
     if calculator is None or not bond_sites:
@@ -1295,6 +1391,29 @@ def prune_unstable_bond_sites(
 
     from autokmc.structure import optimise_structure
     from autokmc.core.graph import build_graph
+
+    debug_dir = None
+    if debug_output_dir is not None:
+        from pathlib import Path
+
+        debug_dir = Path(debug_output_dir)
+        debug_dir.mkdir(parents=True, exist_ok=True)
+
+    def _write_debug_endpoint(bond_iso, filename: str, atoms) -> None:
+        if debug_dir is None:
+            return
+        try:
+            from ase.io import write as ase_write
+
+            out_dir = debug_dir / f"bond_iso_{int(bond_iso):03d}"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            ase_write(out_dir / filename, atoms, format="extxyz")
+        except Exception as exc:
+            _log.warning(
+                "prune_unstable_bond_sites: failed to write debug endpoint "
+                "%s for bond_iso=%s (%s)",
+                filename, bond_iso, exc,
+            )
 
     if verbose:
         print(
@@ -1309,7 +1428,7 @@ def prune_unstable_bond_sites(
     def _placement_id(s, m):
         return (id(s), int(m))
 
-    def _check_pair(sa, ma, sb, mb) -> bool:
+    def _check_pair(sa, ma, sb, mb, bond_iso) -> bool:
         key = frozenset({_placement_id(sa, ma), _placement_id(sb, mb)})
         if key in cache:
             return cache[key]
@@ -1342,34 +1461,42 @@ def prune_unstable_bond_sites(
             cache[key] = True
             return True
 
+        _write_debug_endpoint(bond_iso, "endpoint_ab_before_opt.extxyz", atoms_init)
+
         intended = _intended_ab_edges(
             sa, react_a, n_slab, node_to_ase,
             sb, react_b, n_slab + n_a, ma, mb,
         )
 
         try:
-            calc_copy = copy.deepcopy(calculator)
-            atoms_opt = optimise_structure(
-                atoms_init,
-                calculator = calc_copy,
-                fmax       = fmax,
-                steps      = max_steps,
-                verbose    = False,
-            )
+            with acquire_calculator(
+                calculator, purpose="bond-site pruning"
+            ) as calc:
+                atoms_opt = optimise_structure(
+                    atoms_init,
+                    calculator = calc,
+                    fmax       = fmax,
+                    steps      = max_steps,
+                    verbose    = False,
+                )
+                forces = atoms_opt.get_forces()
+                if frozen_indices:
+                    free_mask = np.ones(len(atoms_opt), dtype=bool)
+                    free_mask[list(frozen_indices)] = False
+                    max_force = float(np.linalg.norm(forces[free_mask], axis=1).max())
+                else:
+                    max_force = float(np.linalg.norm(forces, axis=1).max())
+                atoms_opt.calc = None
         except Exception as exc:
+            if isinstance(exc, CalculatorConfigError):
+                raise
             _log.debug(
                 "prune_unstable_bond_sites: relaxation raised %s", exc,
             )
             cache[key] = False
             return False
 
-        forces = atoms_opt.get_forces()
-        if frozen_indices:
-            free_mask = np.ones(len(atoms_opt), dtype=bool)
-            free_mask[list(frozen_indices)] = False
-            max_force = float(np.linalg.norm(forces[free_mask], axis=1).max())
-        else:
-            max_force = float(np.linalg.norm(forces, axis=1).max())
+        _write_debug_endpoint(bond_iso, "endpoint_ab_after_opt.extxyz", atoms_opt)
 
         if max_force > fmax:
             cache[key] = False
@@ -1397,7 +1524,7 @@ def prune_unstable_bond_sites(
         if not brs.members:
             continue
         sa, ma, sb, mb, _sc, _mc = brs.members[0]
-        viable = _check_pair(sa, ma, sb, mb)
+        viable = _check_pair(sa, ma, sb, mb, brs.iso_class)
         if viable:
             survivors.append(brs)
             if verbose:

@@ -13,6 +13,8 @@ from typing import Any
 import networkx as nx
 import numpy as np
 
+from autokmc.core.pbc import full_pbc_for_cell
+
 CELL = "cell"
 PBC = "pbc"
 HULL_EQUATIONS = "hull_equations"
@@ -42,8 +44,12 @@ def get_cell(G: nx.Graph) -> np.ndarray:
 
 
 def get_pbc(G: nx.Graph) -> np.ndarray:
-    """Return effective graph PBC metadata as a bool length-3 array."""
-    return np.asarray(G.graph.get(PBC, [True, True, False]), dtype=bool)
+    """Return graph PBC metadata as a bool length-3 array."""
+    if PBC in G.graph:
+        return np.asarray(G.graph[PBC], dtype=bool)
+    if CELL in G.graph:
+        return full_pbc_for_cell(G.graph[CELL])
+    return np.zeros(3, dtype=bool)
 
 
 def get_anchor_sites(G: nx.Graph, element: str | None = None) -> Any:

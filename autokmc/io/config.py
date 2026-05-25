@@ -85,6 +85,11 @@ class StructureCfg:
     # Nanoparticle-only knobs (used when kind == "nanoparticle"):
     n_atoms: int | None = None
     surface_energies: dict | None = None
+    surface_energy_facets: tuple = ((1, 1, 1), (1, 0, 0), (1, 1, 0))
+    surface_energy_layers: int = 6
+    surface_energy_vacuum: float = 10.0
+    surface_energy_fmax: float | None = None
+    surface_energy_max_steps: int | None = None
     extra_kwargs: dict = field(default_factory=dict)
 
 
@@ -244,7 +249,7 @@ class FreeEnergyCfg:
     vibration_displacement  : float = 0.01
     vibration_nfree         : int   = 2
     include_ts_vibrations   : bool  = True
-    min_frequency_cm        : float = 12.0
+    min_frequency_ev        : float = 0.0015
     default_symmetry_number : int   = 1
     default_spin            : float = 0.0
     default_geometry        : str   = "auto"
@@ -252,6 +257,14 @@ class FreeEnergyCfg:
     #: pickle files.  ``None`` (default) → an ephemeral per-call dir
     #: under the OS temp area is used and removed after analysis.
     cache_dir               : str | None = None
+
+
+@dataclass
+class CheckpointCfg:
+    enabled: bool = False
+    path: str | None = None
+    every_n_steps: int = 1
+    resume_from: str | None = None
 
 
 @dataclass
@@ -266,6 +279,7 @@ class RunConfig:
     diffusion:        DiffusionCfg       = field(default_factory=DiffusionCfg)
     bond:             BondCfg            = field(default_factory=BondCfg)
     free_energy:      FreeEnergyCfg      = field(default_factory=FreeEnergyCfg)
+    checkpoint:       CheckpointCfg      = field(default_factory=CheckpointCfg)
 
 
 # ---------------------------------------------------------------------------
@@ -300,6 +314,7 @@ def _coerce(cls, value: Any, *, path: str = ""):
             "diffusion":       DiffusionCfg,
             "bond":            BondCfg,
             "free_energy":     FreeEnergyCfg,
+            "checkpoint":      CheckpointCfg,
         },
     }
     nested_for_cls = nested_map.get(cls.__name__, {})
@@ -332,6 +347,8 @@ def _coerce(cls, value: Any, *, path: str = ""):
             kwargs[f.name] = tuple(int(x) for x in v)
         elif f.name == "bond_types":
             kwargs[f.name] = tuple(str(x) for x in v)
+        elif f.name == "surface_energy_facets":
+            kwargs[f.name] = tuple(tuple(int(i) for i in facet) for facet in v)
         else:
             kwargs[f.name] = v
     return cls(**kwargs)

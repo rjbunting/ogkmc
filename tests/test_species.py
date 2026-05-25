@@ -6,9 +6,10 @@ import sys
 from types import ModuleType, SimpleNamespace
 
 import pytest
+from ase import Atoms
 
 from autokmc.species.bond_chemistry import _strip_dummy_atoms_from_smiles
-from autokmc.species.reactant import _smiles_to_atoms
+from autokmc.species.reactant import _smiles_to_atoms, find_anchor_atoms
 from autokmc.species.smiles import smiles_to_dirname
 
 
@@ -84,12 +85,55 @@ def test_species_package_exports_public_api():
     assert species.smiles_to_dirname("[C]/[O]") == "(C)_(O)"
 
 
+def test_methane_anchor_atoms_exclude_buried_carbon():
+    atoms = Atoms(
+        "CH4",
+        positions=[
+            [0.0, 0.0, 0.0],
+            [1.0, 1.0, 1.0],
+            [1.0, -1.0, -1.0],
+            [-1.0, 1.0, -1.0],
+            [-1.0, -1.0, 1.0],
+        ],
+    )
+
+    assert find_anchor_atoms(SimpleNamespace(atoms=atoms)) == [1, 2, 3, 4]
+
+
+def test_methyl_anchor_atoms_prefer_carbon_over_hydrogen():
+    atoms = Atoms(
+        "CH3",
+        positions=[
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [-0.5, 0.866, 0.0],
+            [-0.5, -0.866, 0.0],
+        ],
+    )
+
+    assert find_anchor_atoms(SimpleNamespace(atoms=atoms)) == [0]
+
+
 def test_io_uses_shared_smiles_dirname_helper():
     from autokmc.io import persistence, summary
 
     label = "[C]/[O]↔[C]\\[O]"
     assert persistence._smiles_to_dirname(label) == smiles_to_dirname(label)
     assert summary._smiles_to_dirname(label) == smiles_to_dirname(label)
+
+
+def test_rdkit_isolated_h_warning_is_suppressed(capfd):
+    pytest.importorskip("rdkit")
+    from rdkit import Chem
+
+    from autokmc.utils.rdkit_logging import silence_rdkit_warnings
+
+    silence_rdkit_warnings()
+    for _ in range(3):
+        Chem.RemoveHs(Chem.MolFromSmiles("[H]"))
+
+    _out, err = capfd.readouterr()
+    assert "not removing hydrogen atom without neighbors" not in err
 
 
 def test_gas_cache_dir_uses_safe_smiles_label(monkeypatch, tmp_path):
@@ -113,8 +157,8 @@ def test_gas_cache_dir_uses_safe_smiles_label(monkeypatch, tmp_path):
             "g_total_ev": 1.0,
             "zpe_ev": 0.0,
             "entropy_ev_per_k": 0.0,
-            "frequencies_cm": [],
-            "imaginary_cm": [],
+            "frequencies_ev": [],
+            "imaginary_ev": [],
             "geometry": "monatomic",
             "symmetry_number": 1,
             "spin": 0,

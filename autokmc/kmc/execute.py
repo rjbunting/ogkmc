@@ -100,6 +100,7 @@ def execute_reaction(G: nx.Graph, reaction) -> set:
 
     if getattr(reaction, "kind", None) == "bond":
         brs: BondReactionSite = reaction.site
+        gas_product = bool(getattr(brs, "gas_product", False))
         site_a, m_a, site_b, m_b, site_c, m_c = brs.members[reaction.member_index]
         direction = getattr(reaction, "direction", None)
         if direction not in {"couple", "dissoc"}:
@@ -111,26 +112,29 @@ def execute_reaction(G: nx.Graph, reaction) -> set:
         cliques = (
             _affected_surface_cliques(G, site_a, m_a)
             | _affected_surface_cliques(G, site_b, m_b)
-            | _affected_surface_cliques(G, site_c, m_c)
         )
+        if not gas_product and site_c is not None:
+            cliques |= _affected_surface_cliques(G, site_c, m_c)
         if direction == "couple":
             if not _member_occupied(G, site_a, m_a):
                 raise ValueError("stale bond reaction: A member is not occupied")
             if not _member_occupied(G, site_b, m_b):
                 raise ValueError("stale bond reaction: B member is not occupied")
-            if _member_occupied(G, site_c, m_c):
+            if (not gas_product) and _member_occupied(G, site_c, m_c):
                 raise ValueError("stale bond reaction: C member is already occupied")
             _set_member_occupied(G, site_a, m_a, False)
             _set_member_occupied(G, site_b, m_b, False)
-            _set_member_occupied(G, site_c, m_c, True)
+            if not gas_product:
+                _set_member_occupied(G, site_c, m_c, True)
         else:
-            if not _member_occupied(G, site_c, m_c):
+            if (not gas_product) and not _member_occupied(G, site_c, m_c):
                 raise ValueError("stale bond reaction: C member is not occupied")
             if _member_occupied(G, site_a, m_a):
                 raise ValueError("stale bond reaction: A member is already occupied")
             if _member_occupied(G, site_b, m_b):
                 raise ValueError("stale bond reaction: B member is already occupied")
-            _set_member_occupied(G, site_c, m_c, False)
+            if not gas_product:
+                _set_member_occupied(G, site_c, m_c, False)
             _set_member_occupied(G, site_a, m_a, True)
             _set_member_occupied(G, site_b, m_b, True)
         return cliques

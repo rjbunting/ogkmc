@@ -34,8 +34,10 @@ from pathlib import Path
 from typing import Any, Iterable, Sequence
 
 import numpy as np
-from ase import Atoms, units
+from ase import Atoms
 
+from autokmc.core.pbc import has_real_cell
+from autokmc.io.calculators import acquire_calculator
 from autokmc.utils.logging import get_logger
 
 _log = get_logger(__name__)
@@ -74,10 +76,10 @@ class FreeEnergyOptions:
         If ``True``, run a second harmonic vibrational analysis on the
         NEB / bond TS structure (drops the principal imaginary mode).  If
         ``False``, the TS gets only an averaged endpoint ZPE correction.
-    min_frequency_cm : float
-        Modes with ``|ν| < min_frequency_cm`` are treated as imaginary /
+    min_frequency_ev : float
+        Modes with ``|E_vib| < min_frequency_ev`` are treated as imaginary /
         spurious and dropped from the harmonic partition function.  The
-        raw values are still persisted under ``imaginary_cm``.
+        raw values are still persisted under ``imaginary_ev``.
     cache_dir : str | None
         Directory where ASE writes the per-displacement ``.json`` cache.
         ``None`` → an ephemeral dir under the OS temp area is used and
@@ -88,7 +90,7 @@ class FreeEnergyOptions:
     vibration_displacement  : float        = 0.01
     vibration_nfree         : int          = 2
     include_ts_vibrations   : bool         = True
-    min_frequency_cm        : float        = 12.0
+    min_frequency_ev        : float        = 0.0015
     default_symmetry_number : int          = 1
     default_spin            : float        = 0.0
     default_geometry        : str          = "auto"   # "auto" | "linear" | "nonlinear" | "monatomic"
@@ -104,35 +106,41 @@ def _ensure_calc(atoms: Atoms, calculator) -> None:
         atoms.calc = calculator
 
 
-def _split_real_imag(
+def _normalise_harmonic_pbc(atoms: Atoms) -> None:
+    """Avoid mixed PBC when calculator-backed vibrations run on slab systems."""
+    pbc = np.asarray(atoms.get_pbc(), dtype=bool)
+    if pbc.any() and has_real_cell(atoms.get_cell()):
+        atoms.set_pbc(True)
+
+
+def _split_real_imag_ev(
     energies_ev: Sequence[complex] | Sequence[float],
     *,
-    min_frequency_cm: float,
+    min_frequency_ev: float,
 ) -> tuple[list[float], list[float]]:
-    """Split ASE Vibrations energies (eV, may be complex) into real & imag cm⁻¹.
+    """Split ASE Vibrations mode energies into real and imaginary eV buckets.
 
-    Modes with ``|ν| < min_frequency_cm`` are treated as spurious imaginary
-    contributions and routed into the ``imag_cm`` bucket regardless of
+    Modes with ``|E| < min_frequency_ev`` are treated as spurious imaginary
+    contributions and routed into the ``imag_ev`` bucket regardless of
     sign (small soft modes blow up entropy estimates).
     """
-    real_cm: list[float] = []
-    imag_cm: list[float] = []
+    real_ev: list[float] = []
+    imag_ev: list[float] = []
     for e in energies_ev:
         e_complex = complex(e)
         # ASE convention: imaginary energies are stored as 1j * |e|.
         if abs(e_complex.imag) > abs(e_complex.real):
-            nu_cm = abs(e_complex.imag) / units.invcm
-            imag_cm.append(float(nu_cm))
+            imag_ev.append(float(abs(e_complex.imag)))
             continue
-        nu_cm = e_complex.real / units.invcm
-        if abs(nu_cm) < float(min_frequency_cm):
-            imag_cm.append(float(abs(nu_cm)))
+        e_real = float(e_complex.real)
+        if abs(e_real) < float(min_frequency_ev):
+            imag_ev.append(float(abs(e_real)))
         else:
-            if nu_cm <= 0.0:
-                imag_cm.append(float(abs(nu_cm)))
+            if e_real <= 0.0:
+                imag_ev.append(float(abs(e_real)))
             else:
-                real_cm.append(float(nu_cm))
-    return real_cm, imag_cm
+                real_ev.append(float(e_real))
+    return real_ev, imag_ev
 
 
 def _cache_context(
@@ -188,7 +196,7 @@ def _vibrate(
 ) -> tuple[list[float], list[float], list[complex]]:
     """Run ASE :class:`~ase.vibrations.Vibrations`.
 
-    Returns ``(real_cm, imag_cm, raw_energies_ev)`` where ``raw_energies_ev``
+    Returns ``(real_ev, imag_ev, raw_energies_ev)`` where ``raw_energies_ev``
     is the unfiltered list of mode energies (some may be complex) suitable
     for handing to ASE's :class:`~ase.thermochemistry.HarmonicThermo`.
     """
@@ -220,10 +228,10 @@ def _vibrate(
     vib.clean(empty_files=False)
     vib.run()
     energies = list(vib.get_energies())
-    real_cm, imag_cm = _split_real_imag(
-        energies, min_frequency_cm=options.min_frequency_cm,
+    real_ev, imag_ev = _split_real_imag_ev(
+        energies, min_frequency_ev=options.min_frequency_ev,
     )
-    return real_cm, imag_cm, energies
+    return real_ev, imag_ev, energies
 
 
 # ---------------------------------------------------------------------------
@@ -259,7 +267,7 @@ def compute_gas_thermo(
 
     Returns a dict with keys:
     ``g_corr_ev``, ``g_total_ev``, ``zpe_ev``, ``entropy_ev_per_k``,
-    ``frequencies_cm``, ``imaginary_cm``, ``geometry``,
+    ``frequencies_ev``, ``imaginary_ev``, ``geometry``,
     ``symmetry_number``, ``spin``, ``temperature_k``, ``pressure_bar``,
     ``pressure_pa``.
 
@@ -275,8 +283,8 @@ def compute_gas_thermo(
             "g_total_ev":            float(energy_ev),
             "zpe_ev":                0.0,
             "entropy_ev_per_k":      0.0,
-            "frequencies_cm":        [],
-            "imaginary_cm":          [],
+            "frequencies_ev":        [],
+            "imaginary_ev":          [],
             "geometry":              None,
             "symmetry_number":       None,
             "spin":                  None,
@@ -288,7 +296,9 @@ def compute_gas_thermo(
     from ase.thermochemistry import IdealGasThermo
 
     snap = atoms.copy()
-    _ensure_calc(snap, calculator)
+    snap.set_pbc(False)
+    if calculator is not None:
+        snap.calc = None
 
     sym  = int(symmetry_number if symmetry_number is not None
                else options.default_symmetry_number)
@@ -297,25 +307,24 @@ def compute_gas_thermo(
 
     label = f"gas_{snap.get_chemical_formula(empirical=False)}"
 
-    with _cache_context(options, cache_dir) as cache_root_raw:
-        cache_root = _cache_path(cache_root_raw)
-        real_cm, imag_cm, raw_energies = _vibrate(
-            snap, indices=None, options=options,
-            cache_dir=cache_root, label=label,
-        )
+    with acquire_calculator(calculator, purpose="gas-phase thermochemistry") as calc:
+        _ensure_calc(snap, calc)
+        with _cache_context(options, cache_dir) as cache_root_raw:
+            cache_root = _cache_path(cache_root_raw)
+            real_ev, imag_ev, raw_energies = _vibrate(
+                snap, indices=None, options=options,
+                cache_dir=cache_root, label=label,
+            )
 
     # IdealGasThermo wants vibrational energies in eV (real, positive).
-    # Use `real_cm` which has already been filtered by `_split_real_imag`
-    # (min_frequency_cm threshold applied).  The raw `raw_energies` list
+    # Use `real_ev` which has already been filtered by `_split_real_imag_ev`.
+    # The raw `raw_energies` list
     # contains spurious near-zero / imaginary modes that would inflate the
     # vibrational partition function and make the computed entropy diverge.
     # IdealGasThermo selects the appropriate number of modes (subtracting
     # translations / rotations) based on `geometry`, so pass all real
     # modes sorted descending.
-    vib_energies_ev = np.asarray(
-        [nu * units.invcm for nu in sorted(real_cm, reverse=True)],
-        dtype=float,
-    )
+    vib_energies_ev = np.asarray(sorted(real_ev, reverse=True), dtype=float)
 
     thermo = IdealGasThermo(
         vib_energies     = vib_energies_ev,
@@ -351,8 +360,8 @@ def compute_gas_thermo(
         "g_total_ev":            float(g_total),
         "zpe_ev":                float(zpe),
         "entropy_ev_per_k":      float(s),
-        "frequencies_cm":        list(real_cm),
-        "imaginary_cm":          list(imag_cm),
+        "frequencies_ev":        list(real_ev),
+        "imaginary_ev":          list(imag_ev),
         "geometry":              geom,
         "symmetry_number":       sym,
         "spin":                  spin_,
@@ -414,8 +423,8 @@ def compute_harmonic_thermo(
             "g_total_ev":       float(energy_ev),
             "zpe_ev":           0.0,
             "entropy_ev_per_k": 0.0,
-            "frequencies_cm":   [],
-            "imaginary_cm":     [],
+            "frequencies_ev":   [],
+            "imaginary_ev":     [],
             "vib_indices":      indices,
             "temperature_k":    float(temperature_k),
         }
@@ -430,58 +439,61 @@ def compute_harmonic_thermo(
     from ase.thermochemistry import HarmonicThermo
 
     snap = atoms.copy()
-    _ensure_calc(snap, calculator)
+    _normalise_harmonic_pbc(snap)
+    if calculator is not None:
+        snap.calc = None
+    with acquire_calculator(calculator, purpose="harmonic thermochemistry") as calc:
+        _ensure_calc(snap, calc)
+        with _cache_context(options, cache_dir) as cache_root_raw:
+            cache_root = _cache_path(cache_root_raw)
+            real_ev, imag_ev, raw_energies = _vibrate(
+                snap, indices=indices, options=options,
+                cache_dir=cache_root, label=label,
+            )
 
-    with _cache_context(options, cache_dir) as cache_root_raw:
-        cache_root = _cache_path(cache_root_raw)
-        real_cm, imag_cm, raw_energies = _vibrate(
-            snap, indices=indices, options=options,
-            cache_dir=cache_root, label=label,
-        )
-
-        # HarmonicThermo wants real, positive energies in eV.
-        vib_energies_ev: list[float] = []
-        for e in raw_energies:
-            ec = complex(e)
-            if abs(ec.imag) > abs(ec.real):
-                if drop_imaginary:
+            # HarmonicThermo wants real, positive energies in eV.
+            vib_energies_ev: list[float] = []
+            for e in raw_energies:
+                ec = complex(e)
+                if abs(ec.imag) > abs(ec.real):
+                    if drop_imaginary:
+                        continue
+                    vib_energies_ev.append(float(abs(ec.imag)))
                     continue
-                vib_energies_ev.append(float(abs(ec.imag)))
-                continue
-            nu_cm = ec.real / units.invcm
-            if nu_cm <= 0.0 or abs(nu_cm) < options.min_frequency_cm:
-                if drop_imaginary:
-                    continue
-            vib_energies_ev.append(float(abs(ec.real)))
+                e_real = float(ec.real)
+                if e_real <= 0.0 or abs(e_real) < options.min_frequency_ev:
+                    if drop_imaginary:
+                        continue
+                vib_energies_ev.append(float(abs(e_real)))
 
-        vib_arr = np.asarray(sorted(vib_energies_ev, reverse=True), dtype=float)
-        if vib_arr.size == 0:
-            # No modes survived — return a zero correction rather than letting
-            # HarmonicThermo blow up.
-            return {
-                "enabled":          True,
-                "g_corr_ev":        0.0,
-                "g_total_ev":       float(energy_ev),
-                "zpe_ev":           0.0,
-                "entropy_ev_per_k": 0.0,
-                "frequencies_cm":   list(real_cm),
-                "imaginary_cm":     list(imag_cm),
-                "vib_indices":      indices,
-                "temperature_k":    float(temperature_k),
-            }
+            vib_arr = np.asarray(sorted(vib_energies_ev, reverse=True), dtype=float)
+            if vib_arr.size == 0:
+                # No modes survived — return a zero correction rather than letting
+                # HarmonicThermo blow up.
+                return {
+                    "enabled":          True,
+                    "g_corr_ev":        0.0,
+                    "g_total_ev":       float(energy_ev),
+                    "zpe_ev":           0.0,
+                    "entropy_ev_per_k": 0.0,
+                    "frequencies_ev":   list(real_ev),
+                    "imaginary_ev":     list(imag_ev),
+                    "vib_indices":      indices,
+                    "temperature_k":    float(temperature_k),
+                }
 
-        thermo = HarmonicThermo(
-            vib_energies    = vib_arr,
-            potentialenergy = float(energy_ev),
-        )
-        g_total = float(thermo.get_helmholtz_energy(
-            temperature=float(temperature_k), verbose=False,
-        ))
-        zpe = float(thermo.get_ZPE_correction())
-        s   = float(thermo.get_entropy(
-            temperature=float(temperature_k), verbose=False,
-        ))
-        g_corr = g_total - float(energy_ev)
+            thermo = HarmonicThermo(
+                vib_energies    = vib_arr,
+                potentialenergy = float(energy_ev),
+            )
+            g_total = float(thermo.get_helmholtz_energy(
+                temperature=float(temperature_k), verbose=False,
+            ))
+            zpe = float(thermo.get_ZPE_correction())
+            s   = float(thermo.get_entropy(
+                temperature=float(temperature_k), verbose=False,
+            ))
+            g_corr = g_total - float(energy_ev)
 
     return {
         "enabled":          True,
@@ -489,8 +501,8 @@ def compute_harmonic_thermo(
         "g_total_ev":       float(g_total),
         "zpe_ev":           float(zpe),
         "entropy_ev_per_k": float(s),
-        "frequencies_cm":   list(real_cm),
-        "imaginary_cm":     list(imag_cm),
+        "frequencies_ev":   list(real_ev),
+        "imaginary_ev":     list(imag_ev),
         "vib_indices":      indices,
         "temperature_k":    float(temperature_k),
     }

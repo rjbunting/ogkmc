@@ -34,6 +34,7 @@ from autokmc.core.constants import (
     RAYCAST_COVERAGE_THRESHOLD,
     RAYCAST_N_DISC_SAMPLE,
 )
+from autokmc.core.pbc import set_full_pbc_if_cell
 
 _log = logging.getLogger(__name__)
 
@@ -54,9 +55,11 @@ def tag_surface_atoms(atoms: Atoms, surface_mask: np.ndarray) -> None:
     atoms.arrays["surface"] = surface_mask.astype(np.int8)
 
 
-def has_pbc_connectivity(atoms: Atoms,
-                         nl_mult: float = NL_MULT_DEFAULT) -> bool:
-    """Return ``True`` if at least one bonded pair crosses a periodic boundary.
+def _pbc_connectivity_axes(
+    atoms: Atoms,
+    nl_mult: float = NL_MULT_DEFAULT,
+) -> np.ndarray:
+    """Return axes where at least one bonded pair crosses a periodic boundary.
 
     Builds an ASE :class:`~ase.neighborlist.NeighborList` and inspects the
     integer cell-image offsets for every neighbour.  A non-zero offset
@@ -70,32 +73,41 @@ def has_pbc_connectivity(atoms: Atoms,
         Multiplier for :func:`~ase.neighborlist.natural_cutoffs`.  Defaults
         to :data:`autokmc.core.constants.NL_MULT_DEFAULT`.
 
-    Returns
-    -------
-    bool
-        ``True``  → periodic slab   → use :func:`find_surface_atoms_raycasting`.
-        ``False`` → nanoparticle    → use :func:`find_surface_atoms_convexhull`.
+    Structures with a real cell are normalised to full PBC before the
+    neighbour-list is built.  The returned axes describe bonding connectivity,
+    not the structure's stored PBC metadata.
     """
     from ase.neighborlist import NeighborList, natural_cutoffs
 
+    set_full_pbc_if_cell(atoms)
     pbc_axes = np.asarray(atoms.get_pbc(), dtype=bool)
     if not pbc_axes.any():
-        return False
+        return np.zeros(3, dtype=bool)
 
     cutoffs = natural_cutoffs(atoms, mult=nl_mult)
     nl = NeighborList(cutoffs, self_interaction=False, bothways=False)
     nl.update(atoms)
 
+    connected = np.zeros(3, dtype=bool)
     for i in range(len(atoms)):
         _, offsets = nl.get_neighbors(i)
         if not len(offsets):
             continue
-        # Only count cross-image bonds along axes the user actually marked
-        # periodic.  This makes the test honest for partial-PBC cells.
+        # Only count cross-image bonds along axes marked periodic.
         masked = np.asarray(offsets) * pbc_axes[np.newaxis, :]
-        if masked.any():
-            return True
-    return False
+        connected |= masked.any(axis=0)
+    return connected
+
+
+def has_pbc_connectivity(atoms: Atoms,
+                         nl_mult: float = NL_MULT_DEFAULT) -> bool:
+    """Return ``True`` if at least one bonded pair crosses a periodic boundary.
+
+    ``True`` indicates a periodic slab and dispatches to ray-casting surface
+    classification. ``False`` indicates an isolated nanoparticle and
+    dispatches to convex-hull classification.
+    """
+    return bool(_pbc_connectivity_axes(atoms, nl_mult=nl_mult).any())
 
 
 # ---------------------------------------------------------------------------
@@ -146,15 +158,16 @@ def find_surface_atoms(
         variable-length tuple, so ``mask, indices, method = ...`` and
         ``mask, indices, hull, method = ...`` continue to work.
     """
-    pbc = has_pbc_connectivity(atoms, nl_mult=nl_mult)
+    pbc_axes = _pbc_connectivity_axes(atoms, nl_mult=nl_mult)
 
-    if pbc:
+    if pbc_axes.any():
         surface_mask, surface_indices = find_surface_atoms_raycasting(
             atoms,
             surf_radius_factor=surf_radius_factor,
             which=which,
             coverage_threshold=coverage_threshold,
             n_disc_sample=n_disc_sample,
+            pbc_axes=pbc_axes,
         )
         if tag_atoms:
             tag_surface_atoms(atoms, surface_mask)
@@ -204,6 +217,7 @@ def find_surface_atoms_raycasting(
     which: str = "top",
     coverage_threshold: float = RAYCAST_COVERAGE_THRESHOLD,
     n_disc_sample: int = RAYCAST_N_DISC_SAMPLE,
+    pbc_axes: np.ndarray | None = None,
 ):
     """Classify surface atoms by per-atom disc-coverage ray-casting.
 
@@ -213,11 +227,14 @@ def find_surface_atoms_raycasting(
     if which not in ("top", "bottom", "both"):
         raise ValueError(f"which must be 'top', 'bottom', or 'both', got {which!r}")
 
+    set_full_pbc_if_cell(atoms)
     pos      = atoms.get_positions()          # (N, 3)
     cell     = np.array(atoms.get_cell())     # (3, 3)
     cell_inv = np.linalg.inv(cell)            # full 3×3 inverse: handles
     #                                          # tilted slab cells correctly.
-    pbc_axes = np.asarray(atoms.get_pbc(), dtype=bool)
+    if pbc_axes is None:
+        pbc_axes = _pbc_connectivity_axes(atoms)
+    pbc_axes = np.asarray(pbc_axes, dtype=bool)
     N        = len(atoms)
 
     # Per-atom capture radius from covalent radii
