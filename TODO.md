@@ -13,21 +13,16 @@ Need way to still activate them or release into gas in 1 step
 check_adsorbate_sites.py (adsorbate site stability):
 Need to do cases when adsorbate bonds will stretch on the surface (oxygen)
 
-check_diffusion_sites.py:
+sites.py:
 Need to prune further... there has to be some way, but I'm just unsure!
 Shared-calculator NEB is now used to support non-deepcopyable ML calculators.
 This may need to change for DFT calculators where passing wavefunctions
 between separate image calculators is important.
 
-check_diffusion_sites.py (_check_ts_validity endpoint-collapse):
-The endpoint-collapse check only raises ``TransitionStateInvalidError`` for
-images 1 (adjacent to A) or n_interior (adjacent to B).  If image 2 is the
-highest-energy point and its energy is nearly identical to E_a, no exception
-is raised.  A more robust check would test ``abs(E_ts - E_a) < energy_tol``
-or ``abs(E_ts - E_b) < energy_tol`` regardless of index, or require that
-E_ts exceeds both endpoints by at least ``energy_tol``.
+transition states:
+Need to add transition state validation with a variety of methods
 
-find_transfer_sites.py:
+transfer.py:
 This is a new module that I haven't implemented yet, but it will be responsible for finding transfer sites for reactions
 that involve the transfer of atoms from one species to another.
 
