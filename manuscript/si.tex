@@ -1,0 +1,116 @@
+\documentclass[journal=jacsat,manuscript=suppinfo]{achemso}
+
+\usepackage[version=3]{mhchem}
+\usepackage{siunitx}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{longtable}
+\usepackage{pdflscape}
+
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+
+\author{Rhys J. Bunting}
+\email{bunting4@llnl.gov}
+\affiliation[LLNL]
+{Quantum Simulations Group, Materials Science Division and Laboratory for Energy Applications for the Future, Lawrence Livermore National Laboratory, Livermore, California 94550, United States}
+\author{Tuan Anh Pham}
+\email{pham16@llnl.gov}
+\affiliation[LLNL]
+{Quantum Simulations Group, Materials Science Division and Laboratory for Energy Applications for the Future, Lawrence Livermore National Laboratory, Livermore, California 94550, United States}
+
+\title
+{Coupling Catalyst Activity and Degradation: Modeling Oxygen Evolution Reaction with Surface Dissolution for IrO$_2$(110)}
+
+\abbreviations{KMC, DFT, OER}
+\keywords{microkinetic modeling, density functional theory, kinetic Monte Carlo, oxygen evolution reaction, degradation, dissolution}
+
+\begin{document}
+
+\newpage
+
+\section{Reaction list}
+
+The complete \ce{O2}-stabilized reaction lists used for the kinetic Monte Carlo simulations are listed below.
+These are the reaction lists used for the quasi-equilibrium dissolution sampling described in the main text.
+Each entry includes the reaction template, free energy change, barrier, and rate where applicable.
+The unstable one-site adsorbates removed from the one-site reaction list are shown in Table~\ref{tab:unstable-one-site-adsorbates}.
+The excluded two-site structures and transition-state templates are shown in Tables~\ref{tab:excluded-structures} and \ref{tab:excluded-ts}, respectively.
+The complete printable reaction lists follow in Tables~\ref{tab:si-one-site-reaction-list}--\ref{tab:si-dissolution-5-reaction-list}.
+
+\begin{table}[htbp]
+    \centering
+    \caption{Unstable one-site adsorbates removed from the reaction list.}
+    \label{tab:unstable-one-site-adsorbates}
+    \small
+    \begin{tabular}{@{}ll@{}}
+        \toprule
+        Site & Unstable adsorbates \\
+        \midrule
+        Bridge & \ce{H2O}, \ce{H2O2} \\
+        Bridge, -\ce{Ir}(bri) & \ce{H2O2} \\
+        Trigonal & \ce{H2O}, \ce{H2O2}, \ce{OOH} \\
+        Trigonal, -\ce{Ir}(bri) & \ce{H2O}, \ce{H2O2} \\
+        Trigonal, -\ce{Ir}(top) & \ce{H2O}, \ce{H2O2} \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+\begin{table}[htbp]
+    \centering
+    \caption{Excluded two-site structure templates.}
+    \label{tab:excluded-structures}
+    \small
+    \begin{tabular}{@{}llll@{}}
+        \toprule
+        Site 1 & Site 2 & Adsorbate 1 & Adsorbate 2 \\
+        \midrule
+        Trigonal & Bridge & \ce{O2} & vacant \\
+        Trigonal, -\ce{Ir}(top) & Bridge & \ce{O2} & vacant \\
+        Trigonal & Top & \ce{O2} & vacant \\
+        Trigonal & Bridge, -\ce{Ir}(bri) & \ce{O2} & vacant \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+\begin{table}[htbp]
+    \centering
+    \caption{Excluded two-site transition state templates.}
+    \label{tab:excluded-ts}
+    \footnotesize
+    \setlength{\tabcolsep}{2pt}
+    \renewcommand{\arraystretch}{1.08}
+    \begin{tabular}{@{}>{\raggedright\arraybackslash}p{0.22\textwidth}>{\raggedright\arraybackslash}p{0.22\textwidth}>{\centering\arraybackslash}p{0.095\textwidth}>{\centering\arraybackslash}p{0.095\textwidth}>{\centering\arraybackslash}p{0.095\textwidth}>{\centering\arraybackslash}p{0.095\textwidth}@{}}
+        \toprule
+        Site 1 & Site 2 & Reactant 1 & Reactant 2 & Product 1 & Product 2 \\
+        \midrule
+        Trigonal, -\ce{Ir}(bri) & Top & \ce{O} & \ce{OH} & \ce{OOH} & vacant \\
+        Top & Trigonal, -\ce{Ir}(bri) & \ce{OH} & vacant & vacant & \ce{OH} \\
+        Top & Trigonal, -\ce{Ir}(bri) & \ce{O} & \ce{OH} & \ce{OOH} & vacant \\
+        Trigonal, -\ce{Ir}(bri)/-\ce{Ir}(top) & Top & \ce{O} & \ce{O} & \ce{O2} & vacant \\
+        Trigonal, -\ce{Ir}(top) & Bridge & \ce{O} & \ce{OH} & \ce{OOH} & vacant \\
+        Trigonal, -\ce{Ir}(bri)/-\ce{Ir}(top) & Top & \ce{OH} & \ce{OH} & \ce{H2O2} & vacant \\
+        Bridge, -\ce{Ir}(bri) & Trigonal, -\ce{Ir}(top) & \ce{O} & \ce{OH} & \ce{OOH} & vacant \\
+        Bridge, -\ce{Ir}(bri) & Trigonal, -2\ce{Ir}(top) & \ce{O} & \ce{OH} & \ce{OOH} & vacant \\
+        Bridge & Trigonal, -\ce{Ir}(top) & \ce{O} & \ce{OH} & \ce{OOH} & vacant \\
+        Bridge, -\ce{Ir}(bri) & Trigonal & \ce{O} & \ce{OH} & \ce{OOH} & vacant \\
+        Top & Trigonal & \ce{OH} & \ce{OH} & \ce{H2O2} & vacant \\
+        Top & Trigonal & \ce{OH} & vacant & vacant & \ce{OH} \\
+        Top & Trigonal, -\ce{Ir}(bri) & \ce{H2O} & vacant & \ce{OH} & \ce{H} \\
+        Top & Trigonal, -\ce{Ir}(bri)/-\ce{Ir}(top) & \ce{H2O} & vacant & \ce{OH} & \ce{H} \\
+        Trigonal, -\ce{Ir}(bri)/-\ce{Ir}(top) & Top & \ce{H2O} & vacant & \ce{OH} & \ce{H} \\
+        Trigonal, -2\ce{Ir}(top) & Bridge & \ce{OH} & \ce{OH} & \ce{H2O2} & vacant \\
+        Trigonal, -2\ce{Ir}(top) & Bridge & \ce{O} & \ce{OH} & \ce{OOH} & vacant \\
+        Trigonal, -2\ce{Ir}(top) & Bridge, -\ce{Ir}(bri) & \ce{OH} & \ce{OH} & \ce{H2O2} & vacant \\
+        Bridge & Trigonal & \ce{O} & \ce{OH} & \ce{OOH} & vacant \\
+        Top & Trigonal & \ce{O} & \ce{OH} & \ce{OOH} & vacant \\
+        Top & Trigonal, -\ce{Ir}(bri)/-\ce{Ir}(top) & \ce{O} & \ce{O} & \ce{O2} & vacant \\
+        Trigonal, -\ce{Ir}(top) & Bridge, -\ce{Ir}(bri) & \ce{O} & \ce{OH} & \ce{OOH} & vacant \\
+        Top & Trigonal, -\ce{Ir}(bri) & \ce{O} & vacant & vacant & \ce{O} \\
+        Trigonal, -\ce{Ir}(bri)/-\ce{Ir}(top) & Top & \ce{O} & \ce{OH} & \ce{OOH} & vacant \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+\input{si_reaction_list_tables}
+
+\end{document}
