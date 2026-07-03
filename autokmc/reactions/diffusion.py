@@ -319,6 +319,7 @@ def get_applicable_diffusions(
     lateral_interactions: bool = True,
     free_energy_options=None,
     vib_cache_root: str | None = None,
+    calculation_cache_root: str | None = None,
 ) -> list[DiffusionReaction]:
     """Enumerate all currently-applicable hop events for one DiffusionSite.
 
@@ -375,6 +376,7 @@ def get_applicable_diffusions(
                     free_energy_options       = free_energy_options,
                     free_energy_temperature_k = float(temperature),
                     vib_cache_root            = vib_cache_root,
+                    calculation_cache_root    = calculation_cache_root,
                 )
             except DiffusionStabilityError as exc:
                 reason = f"{type(exc).__name__}: {exc}"
@@ -461,6 +463,7 @@ def compute_all_diffusions(
     lateral_interactions: bool = True,
     free_energy_options=None,
     vib_cache_root: str | None = None,
+    calculation_cache_root: str | None = None,
 ) -> list[DiffusionReaction]:
     """Compute applicable hops for every DiffusionSite; return the flat list."""
     all_reactions: list[DiffusionReaction] = []
@@ -487,6 +490,7 @@ def compute_all_diffusions(
                 lateral_interactions     = lateral_interactions,
                 free_energy_options      = free_energy_options,
                 vib_cache_root           = vib_cache_root,
+                calculation_cache_root   = calculation_cache_root,
             )
 
         with ThreadPoolExecutor(max_workers=calculator.max_workers) as ex:
@@ -512,6 +516,7 @@ def compute_all_diffusions(
             lateral_interactions     = lateral_interactions,
             free_energy_options      = free_energy_options,
             vib_cache_root           = vib_cache_root,
+            calculation_cache_root   = calculation_cache_root,
         )
         all_reactions.extend(rxns)
     return all_reactions

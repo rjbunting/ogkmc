@@ -791,6 +791,11 @@ class ReactionWriter:
                         "entropy_ev_per_k": getattr(lc, "entropy_ts", None),
                     },
                 },
+                "atom_matching": {
+                    "method": getattr(lc, "atom_matching_method", None),
+                    "atom_mapping": list(getattr(lc, "atom_mapping", []) or []),
+                    "diagnostics": dict(getattr(lc, "matching_diagnostics", {}) or {}),
+                },
                 "barriers_ev": {
                     "couple_raw": ea_couple_raw,
                     "couple_kmc": ea_couple_kmc,

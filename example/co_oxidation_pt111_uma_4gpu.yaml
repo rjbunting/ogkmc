@@ -1,5 +1,5 @@
-# autokmc - CO oxidation on Au(111) with FAIR-Chem UMA on 4 GPUs
-# Run with:    autokmc run example/co_oxidation_au111_uma_4gpu.yaml
+# autokmc - CO oxidation on Pt(111) with FAIR-Chem UMA on 4 GPUs
+# Run with:    autokmc run example/co_oxidation_pt111_uma_4gpu.yaml
 schema_version: "1"
 
 output:
@@ -16,16 +16,16 @@ checkpoint:
 
 structure:
   kind: surface
-  composition: Au
+  composition: Pt
   crystal_structure: fcc
   miller_index: [1, 1, 1]
-  lattice_constant: 4.0782
+  lattice_constant: 3.9242
   min_slab_size: 10.0
   min_vacuum_size: 12.0
-  goal_x: 20.0
-  goal_y: 20.0
+  goal_x: 16.0
+  goal_y: 16.0
   n_freeze_layers: 2
-  fmax: 0.05
+  fmax: 0.01
   max_steps: 1000
 
 reactants:
@@ -79,11 +79,11 @@ free_energy:
   pressure_bar: 1.0
 
 kmc:
-  temperature_k: 500.0
-  n_steps: 100000
+  temperature_k: 300.0
+  n_steps: 10000000
   transmission_coefficient: 1.0
   fmax: 0.05
-  max_steps: 500
+  max_steps: 1000
   log_every: 10
   random_seed: 69
   lateral_interactions: true
@@ -94,11 +94,11 @@ diffusion:
   n_shells_pair: 1
   prune_by_adsorption_pair: true
   fmax: 0.05
-  max_steps: 500
+  max_steps: 1000
   n_images: 8
   climb: true
   spring_k: 0.1
-  interpolation: linear
+  interpolation: idpp
   persist_neb_path: true
 
 bond:
@@ -116,12 +116,14 @@ bond:
   prune_by_triple: true
   prune_with_calculator: true
   prune_fmax: 0.05
-  prune_max_steps: 200
+  prune_max_steps: 1000
 
   neb_fmax: 0.05
-  neb_max_steps: 500
+  neb_max_steps: 1000
   neb_n_images: 8
   neb_climb: true
   neb_spring_k: 0.1
-  neb_interpolation: linear
+  neb_interpolation: idpp
+  atom_matching: auto
+  matching_trials: 8
   persist_neb_path: true

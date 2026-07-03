@@ -83,6 +83,7 @@ from autokmc.core.constants import (
     BOND_PAIR_N_SHELLS,
     BOND_PRUNE_BY_TRIPLE,
     BOND_PRUNE_WITH_CALCULATOR,
+    BOND_GAS_LIFT_HEIGHT,
     DIFFUSION_MAX_HOPS,
     MAX_PAIR_SHELLS,
     NL_MULT_DEFAULT,
@@ -338,6 +339,7 @@ def expand_bond_sites_for_new_species(
     bond_pair_n_shells: int = BOND_PAIR_N_SHELLS,
     bond_prune_by_triple: bool = BOND_PRUNE_BY_TRIPLE,
     bond_prune_with_calculator: bool = BOND_PRUNE_WITH_CALCULATOR,
+    gas_lift_height: float = BOND_GAS_LIFT_HEIGHT,
     verbose: bool = False,
 ) -> list[BondReactionSite]:
     """Add a newly-formed species to the bond-reaction registry and expand.
@@ -584,6 +586,7 @@ def expand_bond_sites_for_new_species(
         # be discarded in favour of an unstable smaller-ego one.
         prune_by_triple     = False,
         gas_species         = reg["species"],
+        gas_lift_height     = float(gas_lift_height),
         verbose             = verbose,
     )
 

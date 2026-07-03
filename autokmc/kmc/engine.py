@@ -224,6 +224,7 @@ def _recompute_affected_sites(
     partial_pressures: dict[str, float] | None = None,
     free_energy_options=None,
     vib_cache_root: str | None = None,
+    calculation_cache_root: str | None = None,
 ) -> tuple[list[Reaction | DiffusionReaction | BondReaction], list[DiffusionSite]]:
     """Recompute lateral classes and rates for every member in the lateral
     shell of the just-toggled member.
@@ -280,6 +281,7 @@ def _recompute_affected_sites(
                         partial_pressures        = partial_pressures,
                         free_energy_options      = free_energy_options,
                         vib_cache_root           = vib_cache_root,
+                        calculation_cache_root   = calculation_cache_root,
                     )
                     updated_reactions.extend(rxns)
                     if rxn_index is not None:
@@ -403,12 +405,14 @@ def _recompute_affected_sites(
             partial_pressures        = partial_pressures,
             free_energy_options      = free_energy_options,
             vib_cache_root           = vib_cache_root,
+            calculation_cache_root   = calculation_cache_root,
         )
         updated_reactions.extend(rxns)
         if rxn_index is not None:
             rxn_index.install_site(site, rxns)
 
     dkwargs = dict(diffusion_kwargs or {})
+    dkwargs.pop("calculation_cache_root", None)
     for ds in ds_to_update.values():
         rxns = get_applicable_diffusions(
             G, ds, calculator,
@@ -419,6 +423,7 @@ def _recompute_affected_sites(
             lateral_interactions     = lateral_interactions,
             free_energy_options      = free_energy_options,
             vib_cache_root           = vib_cache_root,
+            calculation_cache_root   = calculation_cache_root,
             **dkwargs,
         )
         updated_reactions.extend(rxns)
@@ -426,6 +431,7 @@ def _recompute_affected_sites(
             rxn_index.install_site(ds, rxns)
 
     bkwargs = dict(bond_kwargs or {})
+    bkwargs.pop("calculation_cache_root", None)
     for brs in brs_to_update.values():
         rxns = get_applicable_bond_reactions(
             G, brs, calculator,
@@ -434,6 +440,7 @@ def _recompute_affected_sites(
             frozen_indices           = frozen_indices,
             lateral_interactions     = lateral_interactions,
             verbose                  = verbose,
+            calculation_cache_root   = calculation_cache_root,
             **bkwargs,
         )
         updated_reactions.extend(rxns)
@@ -473,10 +480,12 @@ def run_kmc_steps(
     # ── Free-energy / thermochemistry hooks ───────────────────────────────
     free_energy_options=None,
     vib_cache_root: str | None = None,
+    calculation_cache_root: str | None = None,
     # ── Optional persistence hooks (autokmc.io.persistence) ──────────────────
     reaction_writer=None,
     trajectory_writer=None,
     summary_collector=None,
+    product_tracker=None,
     checkpoint_writer=None,
     initial_step: int = 0,
     initial_time_s: float = 0.0,
@@ -558,6 +567,9 @@ def run_kmc_steps(
         Optional aggregator.  When supplied, ``.add()`` is called for each
         executed event so per-reaction-type statistics are available at the
         end of the run via ``summary_collector.to_dict()``.
+    product_tracker : autokmc.io.products.ProductMechanismTracker | None
+        Optional lineage tracker.  When supplied, product formation events
+        and causal mechanisms are recorded for publication-oriented outputs.
 
     Returns
     -------
@@ -617,6 +629,7 @@ def run_kmc_steps(
         partial_pressures        = pressures,
         free_energy_options      = free_energy_options,
         vib_cache_root           = vib_cache_root,
+        calculation_cache_root   = calculation_cache_root,
     )
 
     if verbose:
@@ -629,6 +642,9 @@ def run_kmc_steps(
     # ── Diffusion channel: initial NEB sweep ──────────────────────────────
     diffusion_sites = list(diffusion_sites or [])
     diffusion_kwargs = dict(diffusion_kwargs or {})
+    if calculation_cache_root is None:
+        calculation_cache_root = diffusion_kwargs.get("calculation_cache_root")
+    diffusion_kwargs.pop("calculation_cache_root", None)
     if verbose:
         if diffusion_sites:
             n_diff_members = sum(len(ds.member_node_ids) for ds in diffusion_sites)
@@ -650,6 +666,7 @@ def run_kmc_steps(
             lateral_interactions     = lateral_interactions,
             free_energy_options      = free_energy_options,
             vib_cache_root           = vib_cache_root,
+            calculation_cache_root   = calculation_cache_root,
             **diffusion_kwargs,
         )
         if verbose:
@@ -662,6 +679,9 @@ def run_kmc_steps(
     # ── Bond channel: initial NEB sweep ───────────────────────────────────
     bond_sites = list(bond_sites or [])
     bond_kwargs = dict(bond_kwargs or {})
+    if calculation_cache_root is None:
+        calculation_cache_root = bond_kwargs.get("calculation_cache_root")
+    bond_kwargs.pop("calculation_cache_root", None)
     bond_growth_kwargs = dict(bond_growth_kwargs or {})
     if verbose:
         if bond_sites:
@@ -682,6 +702,7 @@ def run_kmc_steps(
             frozen_indices           = frozen_indices,
             verbose                  = verbose,
             lateral_interactions     = lateral_interactions,
+            calculation_cache_root   = calculation_cache_root,
             **bond_kwargs,
         )
         if verbose:
@@ -773,14 +794,6 @@ def run_kmc_steps(
                 if any(nid in G and G.nodes[nid].get("occupied", False) for nid in nids)
             )
 
-    # max_n_shells for the lateral-shell expansion in _recompute_affected_sites.
-    # This must match the BFS depth used by check_adsorbate_site_lateral so that
-    # the incremental trigger radius is consistent with the lateral environment
-    # actually being evaluated.  Both are driven by LATERAL_SHELLS_DEFAULT.
-    # When lateral_interactions=False no lateral re-classification is needed —
-    # set max_n_shells=0 so only clique-touching members are recomputed.
-    max_n_shells: int = LATERAL_SHELLS_DEFAULT if lateral_interactions else 0
-
     history: list[tuple] = []
     reaction_counts: dict[str, int] = {
         "adsorption": 0, "desorption": 0, "diffusion": 0,
@@ -788,6 +801,22 @@ def run_kmc_steps(
     }
     current_time = float(initial_time_s or 0.0)
     steps_executed = 0
+
+    if product_tracker is not None:
+        try:
+            product_tracker.seed_from_graph(
+                G, adsorbate_sites, step=start_step, time_s=current_time,
+            )
+        except Exception as exc:  # pragma: no cover
+            _log.warning("product_tracker.seed_from_graph failed: %s", exc)
+
+    # max_n_shells for the lateral-shell expansion in _recompute_affected_sites.
+    # This must match the BFS depth used by check_adsorbate_site_lateral so that
+    # the incremental trigger radius is consistent with the lateral environment
+    # actually being evaluated.  Both are driven by LATERAL_SHELLS_DEFAULT.
+    # When lateral_interactions=False no lateral re-classification is needed —
+    # set max_n_shells=0 so only clique-touching members are recomputed.
+    max_n_shells: int = LATERAL_SHELLS_DEFAULT if lateral_interactions else 0
 
     # Optional: trajectory writer (extxyz append) needs an atoms snapshot.
     # The reaction writer does NOT — it pulls atoms straight from
@@ -832,6 +861,18 @@ def run_kmc_steps(
         if chosen.kind == "bond":
             sub = "bond_" + getattr(chosen, "direction", "couple")
             reaction_counts[sub] = reaction_counts.get(sub, 0) + 1
+
+        if product_tracker is not None:
+            try:
+                product_tracker.record_event(
+                    G,
+                    chosen,
+                    step=step,
+                    time_s=current_time,
+                    tau_s=tau,
+                )
+            except Exception as exc:  # pragma: no cover
+                _log.warning("product_tracker.record_event failed: %s", exc)
 
         # Persist the event — the reaction writer materialises the per-
         # lateral-class folder lazily on first sighting and otherwise just
@@ -928,6 +969,7 @@ def run_kmc_steps(
             partial_pressures        = pressures,
             free_energy_options      = free_energy_options,
             vib_cache_root           = vib_cache_root,
+            calculation_cache_root   = calculation_cache_root,
         )
 
         # Bond events (coupling A+B→C *or* dissociation C→A+B) may introduce
@@ -1106,6 +1148,7 @@ def run_kmc_steps(
                     partial_pressures        = pressures,
                     free_energy_options      = free_energy_options,
                     vib_cache_root           = vib_cache_root,
+                    calculation_cache_root   = calculation_cache_root,
                 )
                 if verbose:
                     _n_new_ads_rxns = sum(
@@ -1162,6 +1205,7 @@ def run_kmc_steps(
                         lateral_interactions     = lateral_interactions,
                         free_energy_options      = free_energy_options,
                         vib_cache_root           = vib_cache_root,
+                        calculation_cache_root   = calculation_cache_root,
                         **_dkwargs,
                     )
                 except Exception as exc:  # pragma: no cover
@@ -1242,6 +1286,7 @@ def run_kmc_steps(
                         frozen_indices           = frozen_indices,
                         verbose                  = verbose,
                         lateral_interactions     = lateral_interactions,
+                        calculation_cache_root   = calculation_cache_root,
                         **bond_kwargs,
                     )
                     for brs in new_brs:

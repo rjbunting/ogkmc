@@ -27,6 +27,12 @@ from autokmc.core.constants import (
     REACTIONS_FILENAME,
     SUMMARY_FILENAME,
     TRAJECTORY_FILENAME,
+    PRODUCTS_FILENAME,
+    PRODUCT_TIMESERIES_FILENAME,
+    PRODUCT_EPISODES_FILENAME,
+    MECHANISM_SUMMARY_FILENAME,
+    CALCULATION_CACHE_DIR,
+    ISAAC_EXPORT_FILENAME,
     TRAJ_DUMP_EVERY,
     PRUNE_FMAX,
     PRUNE_MAX_STEPS,
@@ -44,6 +50,10 @@ from autokmc.core.constants import (
     BOND_PAIR_N_SHELLS,
     BOND_PRUNE_BY_TRIPLE,
     BOND_PRUNE_WITH_CALCULATOR,
+    BOND_NEB_INTERPOLATION,
+    BOND_ATOM_MATCHING,
+    BOND_MATCHING_TRIALS,
+    BOND_GAS_LIFT_HEIGHT,
     MAX_PAIR_SHELLS,
 )
 from autokmc.reactions.rates import DEFAULT_TRANSMISSION_COEFFICIENT
@@ -60,6 +70,13 @@ class OutputCfg:
     reactions_filename:    str = REACTIONS_FILENAME
     summary_filename:      str = SUMMARY_FILENAME
     trajectory_filename:   str = TRAJECTORY_FILENAME
+    products_filename:     str = PRODUCTS_FILENAME
+    product_timeseries_filename: str = PRODUCT_TIMESERIES_FILENAME
+    product_episodes_filename:   str = PRODUCT_EPISODES_FILENAME
+    mechanism_summary_filename:  str = MECHANISM_SUMMARY_FILENAME
+    calculation_cache_enabled:   bool = True
+    calculation_cache_dir:       str = CALCULATION_CACHE_DIR
+    isaac_export_filename:       str = ISAAC_EXPORT_FILENAME
     trajectory_dump_every: int = TRAJ_DUMP_EVERY
     log_level: str = "INFO"
 
@@ -193,6 +210,7 @@ class BondCfg:
     include_dissociation:   bool = True
     include_coupling:       bool = True
     deduplicate_iso:        bool = True
+    gas_lift_height:        float = BOND_GAS_LIFT_HEIGHT
     # When True, every leaf species (fragment / coupling product) implied
     # by the templates that is *not* already in ``reactants`` is built and
     # has its adsorbate sites enumerated automatically.  When False, the
@@ -220,7 +238,9 @@ class BondCfg:
     neb_n_images:            int   = NEB_N_IMAGES
     neb_climb:               bool  = NEB_CLIMB
     neb_spring_k:            float = NEB_SPRING_K
-    neb_interpolation:       str   = NEB_INTERPOLATION
+    neb_interpolation:       str   = BOND_NEB_INTERPOLATION
+    atom_matching:           str   = BOND_ATOM_MATCHING
+    matching_trials:         int   = BOND_MATCHING_TRIALS
     persist_neb_path:        bool  = False
 
 

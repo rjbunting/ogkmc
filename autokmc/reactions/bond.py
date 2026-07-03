@@ -81,7 +81,9 @@ from autokmc.core.constants import (
     NEB_N_IMAGES,
     NEB_CLIMB,
     NEB_SPRING_K,
-    NEB_INTERPOLATION,
+    BOND_NEB_INTERPOLATION,
+    BOND_ATOM_MATCHING,
+    BOND_MATCHING_TRIALS,
     NL_MULT_DEFAULT,
 )
 from autokmc.utils.logging import get_logger
@@ -343,11 +345,14 @@ def get_applicable_bond_reactions(
     n_images: int = NEB_N_IMAGES,
     climb: bool = NEB_CLIMB,
     spring_k: float = NEB_SPRING_K,
-    interpolation: str = NEB_INTERPOLATION,
+    interpolation: str = BOND_NEB_INTERPOLATION,
+    atom_matching: str = BOND_ATOM_MATCHING,
+    matching_trials: int = BOND_MATCHING_TRIALS,
     nl_mult: float = NL_MULT_DEFAULT,
     persist_neb_path: bool = False,
     lateral_interactions: bool = True,
     verbose: bool = False,
+    calculation_cache_root: str | None = None,
 ) -> list[BondReaction]:
     """Enumerate currently-applicable bond events for one BondReactionSite.
 
@@ -399,9 +404,12 @@ def get_applicable_bond_reactions(
                     climb            = climb,
                     spring_k         = spring_k,
                     interpolation    = interpolation,
+                    atom_matching    = atom_matching,
+                    matching_trials  = matching_trials,
                     nl_mult          = nl_mult,
                     persist_neb_path = persist_neb_path,
                     verbose          = verbose,
+                    calculation_cache_root = calculation_cache_root,
                 )
             except BondStabilityError as exc:
                 reason = f"{type(exc).__name__}: {exc}"
@@ -477,11 +485,14 @@ def compute_all_bond_reactions(
     n_images: int = NEB_N_IMAGES,
     climb: bool = NEB_CLIMB,
     spring_k: float = NEB_SPRING_K,
-    interpolation: str = NEB_INTERPOLATION,
+    interpolation: str = BOND_NEB_INTERPOLATION,
+    atom_matching: str = BOND_ATOM_MATCHING,
+    matching_trials: int = BOND_MATCHING_TRIALS,
     nl_mult: float = NL_MULT_DEFAULT,
     persist_neb_path: bool = False,
     lateral_interactions: bool = True,
     verbose: bool = False,
+    calculation_cache_root: str | None = None,
 ) -> list[BondReaction]:
     """Compute applicable bond events for every site; return the flat list."""
     out: list[BondReaction] = []
@@ -503,10 +514,13 @@ def compute_all_bond_reactions(
                 climb                    = climb,
                 spring_k                 = spring_k,
                 interpolation            = interpolation,
+                atom_matching            = atom_matching,
+                matching_trials          = matching_trials,
                 nl_mult                  = nl_mult,
                 persist_neb_path         = persist_neb_path,
                 lateral_interactions     = lateral_interactions,
                 verbose                  = verbose,
+                calculation_cache_root   = calculation_cache_root,
             )
 
         with ThreadPoolExecutor(max_workers=calculator.max_workers) as ex:
@@ -526,10 +540,13 @@ def compute_all_bond_reactions(
             climb                    = climb,
             spring_k                 = spring_k,
             interpolation            = interpolation,
+            atom_matching            = atom_matching,
+            matching_trials          = matching_trials,
             nl_mult                  = nl_mult,
             persist_neb_path         = persist_neb_path,
             lateral_interactions     = lateral_interactions,
             verbose                  = verbose,
+            calculation_cache_root   = calculation_cache_root,
         ))
     return out
 

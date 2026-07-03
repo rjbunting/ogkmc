@@ -90,6 +90,14 @@ from ase.constraints import FixAtoms
 from ase.neighborlist import NeighborList, natural_cutoffs
 
 from autokmc.io.calculators import acquire_calculator
+from autokmc.io.calculation_cache import (
+    apply_cached_states,
+    calculation_cache_key,
+    load_calculation_record,
+    make_calculation_record,
+    state_payload,
+    write_calculation_record,
+)
 from autokmc.core.pbc import full_pbc_for_cell
 from autokmc.sites.adsorbate import AdsorbateSite, AdsorbateSiteLateral
 from autokmc.core.constants import NL_MULT_DEFAULT, LATERAL_SHELLS_DEFAULT
@@ -834,6 +842,7 @@ def check_site_stability(
     free_energy_options=None,
     free_energy_temperature_k: float | None = None,
     vib_cache_root: str | None = None,
+    calculation_cache_root: str | None = None,
 ) -> tuple[float, float]:
     """Relax the occupied and unoccupied structures and check for stability.
 
@@ -912,6 +921,75 @@ def check_site_stability(
         nid for nid in adsorbate_site.member_node_ids[member_index]
         if nid in G
     )
+    cache_kind = "adsorption"
+    cache_key: str | None = None
+    cache_parameters = {
+        "fmax": float(fmax),
+        "max_steps": int(max_steps),
+        "nl_mult": float(nl_mult),
+        "free_energy_enabled": bool(
+            free_energy_options is not None
+            and getattr(free_energy_options, "enabled", False)
+        ),
+        "temperature_k": (
+            None if free_energy_temperature_k is None
+            else float(free_energy_temperature_k)
+        ),
+    }
+    if calculation_cache_root is not None:
+        try:
+            atoms_occ_init, _, _, _ = _build_stability_atoms(
+                G, lateral_class, self_node_ids,
+                include_self=True,
+                frozen_indices=frozen_indices,
+            )
+            atoms_unocc_init, _, _, _ = _build_stability_atoms(
+                G, lateral_class, self_node_ids,
+                include_self=False,
+                frozen_indices=frozen_indices,
+            )
+            cache_inputs = {
+                "occupied_initial": atoms_occ_init,
+                "unoccupied_initial": atoms_unocc_init,
+            }
+            cache_identity = {
+                "kind": cache_kind,
+                "reactant_smiles": adsorbate_site.reactant,
+                "iso_class": int(adsorbate_site.iso_class),
+                "lateral_class": int(lateral_class.lateral_class),
+            }
+            cache_key = calculation_cache_key(
+                kind=cache_kind,
+                identity=cache_identity,
+                parameters=cache_parameters,
+                inputs=cache_inputs,
+            )
+            cached = load_calculation_record(
+                calculation_cache_root, cache_kind, cache_key,
+            )
+            if cached is not None and apply_cached_states(
+                lateral_class,
+                cached,
+                {
+                    "occupied": ("energy_occupied", "atoms_occupied"),
+                    "unoccupied": ("energy_unoccupied", "atoms_unoccupied"),
+                },
+            ):
+                if verbose:
+                    print(
+                        f"  [cache] adsorption iso={adsorbate_site.iso_class} "
+                        f"lat={lateral_class.lateral_class}: loaded "
+                        "occupied/unoccupied relaxations"
+                    )
+                return float(lateral_class.energy_occupied), float(lateral_class.energy_unoccupied)
+        except Exception as exc:
+            _log.debug(
+                "check_site_stability: calculation cache lookup failed "
+                "(iso=%d lat=%d): %s",
+                adsorbate_site.iso_class,
+                lateral_class.lateral_class,
+                exc,
+            )
 
     def _relax_and_check(include_self: bool) -> tuple:
         state = "occupied" if include_self else "unoccupied"
@@ -1173,4 +1251,57 @@ def check_site_stability(
         adsorbate_site.iso_class, member_index,
         lateral_class.lateral_class, E_occ, E_unocc,
     )
+    if calculation_cache_root is not None and cache_key is not None:
+        occupied_props = {
+            name: getattr(lateral_class, name, None)
+            for name in (
+                "g_correction_occupied",
+                "g_occupied",
+                "zpe_occupied",
+                "entropy_occupied",
+                "frequencies_occupied_ev",
+                "imaginary_occupied_ev",
+                "vib_indices_occupied",
+            )
+        }
+        unoccupied_props = {
+            name: getattr(lateral_class, name, None)
+            for name in (
+                "g_correction_unoccupied",
+                "g_unoccupied",
+                "zpe_unoccupied",
+                "entropy_unoccupied",
+                "frequencies_unoccupied_ev",
+                "imaginary_unoccupied_ev",
+                "vib_indices_unoccupied",
+            )
+        }
+        record = make_calculation_record(
+            kind=cache_kind,
+            cache_key=cache_key,
+            operation={
+                "label": f"adsorption:{adsorbate_site.reactant}",
+                "reactant_smiles": adsorbate_site.reactant,
+                "iso_class": int(adsorbate_site.iso_class),
+                "lateral_class": int(lateral_class.lateral_class),
+                "temperature_k": cache_parameters["temperature_k"],
+            },
+            parameters=cache_parameters,
+            inputs={
+                "reactant_smiles": adsorbate_site.reactant,
+                "iso_class": int(adsorbate_site.iso_class),
+                "lateral_class": int(lateral_class.lateral_class),
+            },
+            states={
+                "occupied": state_payload(
+                    atoms_occ, energy_ev=E_occ, properties=occupied_props,
+                ),
+                "unoccupied": state_payload(
+                    atoms_unocc, energy_ev=E_unocc, properties=unoccupied_props,
+                ),
+            },
+        )
+        write_calculation_record(
+            calculation_cache_root, cache_kind, cache_key, record,
+        )
     return E_occ, E_unocc

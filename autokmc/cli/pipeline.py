@@ -16,8 +16,10 @@ from autokmc.io.calculators import (
     primary_calculator,
 )
 from autokmc.io.checkpoint import CheckpointWriter, load_checkpoint
+from autokmc.io.calculation_cache import write_isaac_export
 from autokmc.io.config import RunConfig
 from autokmc.io.persistence import ReactionWriter
+from autokmc.io.products import ProductMechanismTracker
 from autokmc.io.summary import ReactionSummary, make_run_meta
 from autokmc.io.trajectory import TrajectoryWriter
 from autokmc.utils.logging import get_logger
@@ -194,6 +196,11 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
         fe_cfg.cache_dir if fe_cfg.cache_dir
         else str(out_dir / "vib_cache")
     )
+    calculation_cache_root: str | None = (
+        str(out_dir / cfg.output.calculation_cache_dir)
+        if cfg.output.calculation_cache_enabled
+        else None
+    )
 
     # 4. Reactants
     _stage("Stage 4/7: building gas-phase reactants", verbose=verbose_run)
@@ -226,6 +233,7 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
 
     if not reactants_built:
         raise ValueError("config.reactants is empty — supply at least one SMILES.")
+    user_reactant_smiles = {rx.smiles for rx in reactants_built}
 
     # 5. Adsorbate sites for every reactant
     _stage("Stage 5/7: enumerating and pruning adsorbate sites", verbose=verbose_run)
@@ -282,7 +290,10 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
         dump_every = cfg.output.trajectory_dump_every,
     )
     summary_collector = ReactionSummary(
-        reactant_smiles={rx.smiles for rx in reactants_built},
+        reactant_smiles=user_reactant_smiles,
+    )
+    product_tracker = ProductMechanismTracker(
+        initial_reactant_smiles=user_reactant_smiles,
     )
     checkpoint_writer = None
     if cfg.checkpoint.enabled:
@@ -437,6 +448,7 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
                 n_shells_pair       = b.pair_n_shells,
                 prune_by_triple     = False,   # always defer to after Stage 1
                 gas_species         = reactant_by_smi,
+                gas_lift_height     = b.gas_lift_height,
                 verbose             = verbose_run,
             )
 
@@ -507,6 +519,8 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
             climb            = b.neb_climb,
             spring_k         = b.neb_spring_k,
             interpolation    = b.neb_interpolation,
+            atom_matching    = b.atom_matching,
+            matching_trials  = b.matching_trials,
             persist_neb_path = b.persist_neb_path,
         )
         bond_growth_kwargs = dict(
@@ -525,6 +539,7 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
             bond_types                  = tuple(b.bond_types),
             include_ring_bonds          = b.include_ring_bonds,
             include_homo_coupling       = b.include_homo_coupling,
+            gas_lift_height             = b.gas_lift_height,
             diffusion_max_hops          = d.max_hops,
             diffusion_n_shells_pair     = d.n_shells_pair,
             diffusion_prune_by_ads_pair = d.prune_by_adsorption_pair,
@@ -544,7 +559,10 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
         initial_step = int(state.step)
         initial_time_s = float(state.time_s)
         summary_collector = ReactionSummary(
-            reactant_smiles={rx.smiles for rx in reactants_built},
+            reactant_smiles=user_reactant_smiles,
+        )
+        product_tracker = ProductMechanismTracker(
+            initial_reactant_smiles=user_reactant_smiles,
         )
         reaction_writer.close()
         reaction_writer = ReactionWriter(
@@ -582,9 +600,11 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
         bond_growth_kwargs       = bond_growth_kwargs,
         free_energy_options      = free_energy_options if fe_cfg.enabled else None,
         vib_cache_root           = vib_cache_root,
+        calculation_cache_root   = calculation_cache_root,
         reaction_writer          = reaction_writer,
         trajectory_writer        = trajectory_writer,
         summary_collector        = summary_collector,
+        product_tracker          = product_tracker,
         checkpoint_writer        = checkpoint_writer,
         initial_step             = initial_step,
         initial_time_s           = initial_time_s,
@@ -608,11 +628,29 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
         run_meta        = run_meta,
         final_occupancy = summary.get("final_occupancy"),
     )
+    product_outputs = product_tracker.write(
+        out_dir,
+        run_meta                    = run_meta,
+        final_occupancy             = summary.get("final_occupancy"),
+        products_filename           = cfg.output.products_filename,
+        product_timeseries_filename = cfg.output.product_timeseries_filename,
+        product_episodes_filename   = cfg.output.product_episodes_filename,
+        mechanism_summary_filename  = cfg.output.mechanism_summary_filename,
+    )
+    isaac_export_path = write_isaac_export(
+        calculation_cache_root,
+        out_dir / cfg.output.isaac_export_filename,
+    )
     reaction_writer.close()
 
     summary["outputs"] = {
         "events":        str(reaction_writer.jsonl_path),
         "summary":       str(summary_path),
+        **product_outputs,
+        "calculation_cache": calculation_cache_root,
+        "isaac_records": (
+            str(isaac_export_path) if isaac_export_path is not None else None
+        ),
         "trajectory": (
             str(trajectory_writer.output_path)
             if trajectory_writer.enabled else None

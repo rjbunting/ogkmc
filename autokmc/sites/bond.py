@@ -250,6 +250,12 @@ class BondReactionLateral:
     vib_indices_ts    : list = field(default_factory=list)
     gas_product       : bool = False
     gas_pressure_bar  : float = 0.0
+    #: Atom-correspondence diagnostics chosen for the bond NEB.  For surface
+    #: products, ``atom_mapping`` is C graph-node order aligned to the AB
+    #: reacting block; for gas products it is the gas atom order.
+    atom_matching_method : str | None = None
+    atom_mapping         : list = field(default_factory=list)
+    matching_diagnostics : dict = field(default_factory=dict)
 
 
 @dataclass

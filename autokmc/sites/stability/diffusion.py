@@ -83,6 +83,15 @@ from ase.constraints import FixAtoms
 from ase.optimize import BFGS
 
 from autokmc.io.calculators import acquire_calculator
+from autokmc.io.calculation_cache import (
+    apply_cached_states,
+    atoms_to_json,
+    calculation_cache_key,
+    load_calculation_record,
+    make_calculation_record,
+    state_payload,
+    write_calculation_record,
+)
 from autokmc.core.pbc import full_pbc_for_cell
 from autokmc.sites.diffusion import (
     DiffusionSite,
@@ -879,6 +888,7 @@ def check_diffusion_stability(
     free_energy_options=None,
     free_energy_temperature_k: float | None = None,
     vib_cache_root: str | None = None,
+    calculation_cache_root: str | None = None,
 ) -> tuple[float, float, float]:
     """Relax both endpoints and the NEB band; store and return energies.
 
@@ -971,6 +981,26 @@ def check_diffusion_stability(
 
     self_a = frozenset(int(n) for n in a_node_ids if n in G)
     self_b = frozenset(int(n) for n in b_node_ids if n in G)
+    cache_kind = "diffusion"
+    cache_key: str | None = None
+    cache_parameters = {
+        "fmax": float(fmax),
+        "max_steps": int(max_steps),
+        "n_images": int(n_images),
+        "climb": bool(climb),
+        "spring_k": float(spring_k),
+        "interpolation": str(interpolation),
+        "nl_mult": float(nl_mult),
+        "persist_neb_path": bool(persist_neb_path),
+        "free_energy_enabled": bool(
+            free_energy_options is not None
+            and getattr(free_energy_options, "enabled", False)
+        ),
+        "temperature_k": (
+            None if free_energy_temperature_k is None
+            else float(free_energy_temperature_k)
+        ),
+    }
 
     # ── 1. Endpoint A relaxation ────────────────────────────────────────
     atoms_a_init, n_slab, n_lat, mig_idx_a, mig_node_order_a = _build_diffusion_atoms(
@@ -979,6 +1009,60 @@ def check_diffusion_stability(
         frozen_indices    = frozen_indices,
     )
     n_mig = len(mig_idx_a)
+
+    if calculation_cache_root is not None:
+        try:
+            atoms_b_seed, _, _, _, _ = _build_diffusion_atoms(
+                G, lateral_class, list(a_node_ids), list(b_node_ids),
+                endpoint_position="b",
+                frozen_indices=frozen_indices,
+            )
+            cache_identity = {
+                "kind": cache_kind,
+                "reactant_smiles": diffusion_site.reactant,
+                "iso_class": int(diffusion_site.iso_class),
+                "lateral_class": int(lateral_class.lateral_class),
+            }
+            cache_key = calculation_cache_key(
+                kind=cache_kind,
+                identity=cache_identity,
+                parameters=cache_parameters,
+                inputs={
+                    "state_a_initial": atoms_a_init,
+                    "state_b_seed_initial": atoms_b_seed,
+                },
+            )
+            cached = load_calculation_record(
+                calculation_cache_root, cache_kind, cache_key,
+            )
+            if cached is not None and apply_cached_states(
+                lateral_class,
+                cached,
+                {
+                    "state_a": ("energy_a", "atoms_a"),
+                    "state_b": ("energy_b", "atoms_b"),
+                    "transition": ("energy_ts", "atoms_ts"),
+                },
+            ):
+                if verbose:
+                    print(
+                        f"  [cache] diffusion iso={diffusion_site.iso_class} "
+                        f"lat={lateral_class.lateral_class}: loaded "
+                        "endpoint/NEB calculation"
+                    )
+                return (
+                    float(lateral_class.energy_a),
+                    float(lateral_class.energy_b),
+                    float(lateral_class.energy_ts),
+                )
+        except Exception as exc:
+            _log.debug(
+                "check_diffusion_stability: calculation cache lookup failed "
+                "(diff_iso=%d lat=%d): %s",
+                diffusion_site.iso_class,
+                lateral_class.lateral_class,
+                exc,
+            )
 
     if verbose:
         print(
@@ -1206,4 +1290,80 @@ def check_diffusion_stability(
         diffusion_site.iso_class, member_index, lateral_class.lateral_class,
         E_a, E_b, E_ts, E_ts - E_a, E_ts - E_b,
     )
+    if calculation_cache_root is not None and cache_key is not None:
+        props_a = {
+            name: getattr(lateral_class, name, None)
+            for name in (
+                "g_correction_a",
+                "g_a",
+                "zpe_a",
+                "entropy_a",
+                "frequencies_a_ev",
+                "imaginary_a_ev",
+            )
+        }
+        props_b = {
+            name: getattr(lateral_class, name, None)
+            for name in (
+                "g_correction_b",
+                "g_b",
+                "zpe_b",
+                "entropy_b",
+                "frequencies_b_ev",
+                "imaginary_b_ev",
+            )
+        }
+        props_ts = {
+            name: getattr(lateral_class, name, None)
+            for name in (
+                "g_correction_ts",
+                "g_ts",
+                "zpe_ts",
+                "entropy_ts",
+                "frequencies_ts_ev",
+                "imaginary_ts_ev",
+            )
+        }
+        neb = None
+        if getattr(lateral_class, "atoms_neb_path", None):
+            neb = {
+                "energies_ev": list(getattr(lateral_class, "neb_path_energies", []) or []),
+                "path": [
+                    atoms_to_json(im)
+                    for im in (getattr(lateral_class, "atoms_neb_path", []) or [])
+                ],
+            }
+        record = make_calculation_record(
+            kind=cache_kind,
+            cache_key=cache_key,
+            operation={
+                "label": f"diffusion:{diffusion_site.reactant}",
+                "reaction": f"{diffusion_site.reactant}* site_a -> site_b",
+                "reactant_smiles": diffusion_site.reactant,
+                "iso_class": int(diffusion_site.iso_class),
+                "lateral_class": int(lateral_class.lateral_class),
+                "temperature_k": cache_parameters["temperature_k"],
+            },
+            parameters=cache_parameters,
+            inputs={
+                "reactant_smiles": diffusion_site.reactant,
+                "iso_class": int(diffusion_site.iso_class),
+                "lateral_class": int(lateral_class.lateral_class),
+            },
+            states={
+                "state_a": state_payload(
+                    atoms_a_opt, energy_ev=E_a, properties=props_a,
+                ),
+                "state_b": state_payload(
+                    atoms_b_opt, energy_ev=E_b, properties=props_b,
+                ),
+                "transition": state_payload(
+                    atoms_ts, energy_ev=E_ts, properties=props_ts,
+                ),
+            },
+            neb=neb,
+        )
+        write_calculation_record(
+            calculation_cache_root, cache_kind, cache_key, record,
+        )
     return E_a, E_b, E_ts

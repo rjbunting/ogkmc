@@ -134,6 +134,9 @@ def test_load_new_checkpoint_and_parallel_fields(tmp_path):
 schema_version: "1"
 output:
   dir: ./out
+  calculation_cache_enabled: true
+  calculation_cache_dir: calc_cache
+  isaac_export_filename: isaac_upload.json
 reactants:
   - smiles: "[C-]#[O+]"
     add_hydrogens: false
@@ -160,6 +163,31 @@ structure:
     assert cfg.checkpoint.enabled is True
     assert cfg.checkpoint.every_n_steps == 5
     assert cfg.structure.surface_energy_facets == ((1, 1, 1), (1, 0, 0))
+    assert cfg.output.calculation_cache_enabled is True
+    assert cfg.output.calculation_cache_dir == "calc_cache"
+    assert cfg.output.isaac_export_filename == "isaac_upload.json"
+
+
+def test_load_bond_matching_fields(tmp_path):
+    pytest.importorskip("yaml")
+    p = _write(tmp_path, """
+schema_version: "1"
+reactants:
+  - smiles: "[OH]"
+    add_hydrogens: false
+bond:
+  enabled: true
+  neb_interpolation: idpp
+  atom_matching: hungarian
+  matching_trials: 12
+  gas_lift_height: 4.5
+""")
+    cfg = load_config(p)
+    assert cfg.bond.enabled is True
+    assert cfg.bond.neb_interpolation == "idpp"
+    assert cfg.bond.atom_matching == "hungarian"
+    assert cfg.bond.matching_trials == 12
+    assert cfg.bond.gas_lift_height == 4.5
 
 
 def test_unknown_extension(tmp_path):

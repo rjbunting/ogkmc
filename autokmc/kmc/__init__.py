@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from autokmc.kmc.callbacks import (
+    ProductTrackerLike,
     ReactionWriterLike,
     SummaryCollectorLike,
     TrajectoryWriterLike,
@@ -21,6 +22,7 @@ __all__ = [
     "ReactionWriterLike",
     "SummaryCollectorLike",
     "TrajectoryWriterLike",
+    "ProductTrackerLike",
     "bond_species_known",
     "choose_reaction",
     "execute_reaction",

@@ -365,6 +365,7 @@ def get_applicable_reactions(
     partial_pressures: dict[str, float] | None = None,
     free_energy_options=None,
     vib_cache_root: str | None = None,
+    calculation_cache_root: str | None = None,
 ) -> list[AdsorptionReaction]:
     """Enumerate all applicable adsorption / desorption events for one site.
 
@@ -440,6 +441,7 @@ def get_applicable_reactions(
                     free_energy_options       = free_energy_options,
                     free_energy_temperature_k = float(temperature),
                     vib_cache_root            = vib_cache_root,
+                    calculation_cache_root    = calculation_cache_root,
                 )
             except SiteStabilityError as exc:
                 lc.stable = False
@@ -498,6 +500,7 @@ def compute_all_reactions(
     partial_pressures: dict[str, float] | None = None,
     free_energy_options=None,
     vib_cache_root: str | None = None,
+    calculation_cache_root: str | None = None,
 ) -> list[AdsorptionReaction]:
     """Compute applicable reactions for every site and return the flat list."""
     gas_energies = _build_gas_energy_lookup(reactants)
@@ -522,6 +525,7 @@ def compute_all_reactions(
                 partial_pressures        = partial_pressures,
                 free_energy_options      = free_energy_options,
                 vib_cache_root           = vib_cache_root,
+                calculation_cache_root   = calculation_cache_root,
             )
 
         with ThreadPoolExecutor(max_workers=calculator.max_workers) as ex:
@@ -543,6 +547,7 @@ def compute_all_reactions(
             partial_pressures        = partial_pressures,
             free_energy_options      = free_energy_options,
             vib_cache_root           = vib_cache_root,
+            calculation_cache_root   = calculation_cache_root,
         )
         all_reactions.extend(rxns)
     return all_reactions

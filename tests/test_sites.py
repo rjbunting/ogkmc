@@ -36,6 +36,7 @@ from autokmc.sites.bond import (
 from autokmc.sites.diffusion import rebuild_diffusion_reverse_indexes
 from autokmc.sites.stability.adsorption import check_adsorbate_site_lateral
 from autokmc.sites.stability.adsorption import check_site_stability
+from autokmc.sites.stability.bond import _select_c_to_ab_mapping
 
 
 def test_sites_package_exports_public_api():
@@ -58,6 +59,35 @@ def test_stability_package_exports_public_api():
     assert callable(stability.check_adsorbate_site_lateral)
     assert callable(stability.check_diffusion_site_lateral)
     assert callable(stability.check_bond_site_lateral)
+
+
+def test_bond_atom_matching_uses_hungarian_mic_assignment():
+    G = nx.Graph()
+    G.graph["cell"] = np.eye(3) * 10.0
+    # C nodes are deliberately out of order.  Node 10 is closest to the first
+    # AB atom only under minimum-image distance across the x boundary.
+    G.add_node(10, type="adsorbate", element="H", position=np.array([0.2, 0.0, 0.0]), reactant_index=2)
+    G.add_node(11, type="adsorbate", element="H", position=np.array([2.1, 0.0, 0.0]), reactant_index=0)
+    G.add_node(12, type="adsorbate", element="H", position=np.array([4.1, 0.0, 0.0]), reactant_index=1)
+    ab_symbols = ["H", "H", "H"]
+    ab_positions = [
+        np.array([9.8, 0.0, 0.0]),
+        np.array([2.0, 0.0, 0.0]),
+        np.array([4.0, 0.0, 0.0]),
+    ]
+
+    order, diag = _select_c_to_ab_mapping(
+        G,
+        ab_symbols,
+        ab_positions,
+        [10, 11, 12],
+        atom_matching="hungarian",
+        matching_trials=1,
+    )
+
+    assert order == [10, 11, 12]
+    assert diag["selected_method"] == "hungarian"
+    assert diag["selected"]["max_distance_ang"] == pytest.approx(0.4)
 
 
 def _site(smiles: str, iso: int, node_id: int, clique: frozenset[int]):
