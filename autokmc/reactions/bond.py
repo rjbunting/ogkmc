@@ -287,11 +287,16 @@ def _bond_energetics_cached(
         float(getattr(lc, "gas_pressure_bar", 0.0) or 0.0)
         if getattr(lc, "gas_product", False) else 0.0
     )
+    use_g = all(
+        getattr(lc, name, None) is not None
+        for name in ("g_ab", "g_c", "g_ts")
+    )
     key = (
         round(float(temperature),              9),
         round(float(transmission_coefficient), 9),
         round(gas_pressure_bar, 12),
         str(direction),
+        bool(use_g),
     )
     cache: dict | None = getattr(lc, "_rate_cache", None)
     if cache is None:
@@ -301,9 +306,16 @@ def _bond_energetics_cached(
     if hit is not None:
         return hit
 
-    e_ab = float(lc.energy_ab)   # type: ignore[arg-type]
-    e_c  = float(lc.energy_c)    # type: ignore[arg-type]
-    e_ts = float(lc.energy_ts)   # type: ignore[arg-type]
+    if use_g:
+        e_ab = float(lc.g_ab)
+        e_c = float(lc.g_c)
+        e_ts = float(lc.g_ts)
+    else:
+        e_ab = float(lc.energy_ab)   # type: ignore[arg-type]
+        e_c  = float(lc.energy_c)    # type: ignore[arg-type]
+        e_ts = float(lc.energy_ts)   # type: ignore[arg-type]
+    if not all(np.isfinite(value) for value in (e_ab, e_c, e_ts)):
+        raise ValueError(f"bond energies must be finite, got {(e_ab, e_c, e_ts)!r}")
 
     e_ts_eff = max(e_ts, max(e_ab, e_c) + EA_MIN)
     prefactor, kT = _eyring_prefactor(temperature, transmission_coefficient)
@@ -318,12 +330,14 @@ def _bond_energetics_cached(
         rate = float(prefactor * np.exp(-ea_kmc / kT))
         if getattr(lc, "gas_product", False) and direction_ == "dissoc":
             rate *= max(0.0, gas_pressure_bar)
+        if not all(np.isfinite(value) for value in (de, ea_kmc, rate)):
+            raise ValueError("bond energetics produced non-finite values")
         return float(de), float(ea_kmc), rate
 
     out_couple = _make("couple")
     out_dissoc = _make("dissoc")
-    cache[key[:-1] + ("couple",)] = out_couple
-    cache[key[:-1] + ("dissoc",)] = out_dissoc
+    cache[key[:3] + ("couple", bool(use_g))] = out_couple
+    cache[key[:3] + ("dissoc", bool(use_g))] = out_dissoc
 
     return out_couple if direction == "couple" else out_dissoc
 
@@ -353,6 +367,8 @@ def get_applicable_bond_reactions(
     lateral_interactions: bool = True,
     verbose: bool = False,
     calculation_cache_root: str | None = None,
+    free_energy_options=None,
+    vib_cache_root: str | None = None,
 ) -> list[BondReaction]:
     """Enumerate currently-applicable bond events for one BondReactionSite.
 
@@ -410,6 +426,9 @@ def get_applicable_bond_reactions(
                     persist_neb_path = persist_neb_path,
                     verbose          = verbose,
                     calculation_cache_root = calculation_cache_root,
+                    free_energy_options       = free_energy_options,
+                    free_energy_temperature_k = float(temperature),
+                    vib_cache_root            = vib_cache_root,
                 )
             except BondStabilityError as exc:
                 reason = f"{type(exc).__name__}: {exc}"
@@ -428,22 +447,6 @@ def get_applicable_bond_reactions(
                 lc.invalid_reason = reason
             except CalculatorConfigError:
                 raise
-            except Exception as exc:
-                reason = f"{type(exc).__name__}: {exc}"
-                _log.error(
-                    "bond_iso=%d m=%d lat=%d: unexpected error during "
-                    "check_bond_site_stability — marking as invalid: %s",
-                    brs.iso_class, m_idx, lc.lateral_class, reason,
-                    exc_info=True,
-                )
-                if verbose:
-                    print(
-                        f"  ✗  bond_iso={brs.iso_class} m={m_idx} "
-                        f"lat={lc.lateral_class}: unexpected error: {reason}\n"
-                        f"     → marked as invalid (will not be admitted to KMC)"
-                    )
-                lc.stable         = False
-                lc.invalid_reason = reason
 
         if not lc.stable:
             continue
@@ -493,6 +496,8 @@ def compute_all_bond_reactions(
     lateral_interactions: bool = True,
     verbose: bool = False,
     calculation_cache_root: str | None = None,
+    free_energy_options=None,
+    vib_cache_root: str | None = None,
 ) -> list[BondReaction]:
     """Compute applicable bond events for every site; return the flat list."""
     out: list[BondReaction] = []
@@ -521,6 +526,8 @@ def compute_all_bond_reactions(
                 lateral_interactions     = lateral_interactions,
                 verbose                  = verbose,
                 calculation_cache_root   = calculation_cache_root,
+                free_energy_options      = free_energy_options,
+                vib_cache_root           = vib_cache_root,
             )
 
         with ThreadPoolExecutor(max_workers=calculator.max_workers) as ex:
@@ -547,6 +554,8 @@ def compute_all_bond_reactions(
             lateral_interactions     = lateral_interactions,
             verbose                  = verbose,
             calculation_cache_root   = calculation_cache_root,
+            free_energy_options      = free_energy_options,
+            vib_cache_root           = vib_cache_root,
         ))
     return out
 

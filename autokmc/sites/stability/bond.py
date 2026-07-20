@@ -91,13 +91,15 @@ from ase.optimize import BFGS
 from autokmc.io.calculators import acquire_calculator
 from autokmc.io.calculation_cache import (
     apply_cached_states,
-    atoms_to_json,
     calculation_cache_key,
+    calculator_identity,
     load_calculation_record,
     make_calculation_record,
     state_payload,
     write_calculation_record,
 )
+from autokmc.io.reaction_graph import normalise_reaction_graph
+from autokmc.species.smiles import smiles_to_dirname
 from autokmc.core.pbc import full_pbc_for_cell, minimum_image_vectors
 from autokmc.sites.stability.adsorption import (
     SurfaceConnectivityError,
@@ -1402,6 +1404,9 @@ def check_bond_site_stability(
     persist_neb_path: bool = False,
     verbose: bool = False,
     calculation_cache_root: str | None = None,
+    free_energy_options=None,
+    free_energy_temperature_k: float | None = None,
+    vib_cache_root: str | None = None,
 ) -> tuple[float, float, float]:
     """Relax both endpoints and the CI-NEB band; return ``(E_ab, E_c, E_ts)``.
 
@@ -1484,6 +1489,7 @@ def check_bond_site_stability(
     self_c = frozenset(int(n) for n in c_node_ids if n in G)
     cache_kind = "bond"
     cache_key: str | None = None
+    cache_graph: nx.Graph | None = None
     cache_parameters = {
         "fmax": float(fmax),
         "max_steps": int(max_steps),
@@ -1494,10 +1500,22 @@ def check_bond_site_stability(
         "atom_matching": str(atom_matching),
         "matching_trials": int(matching_trials),
         "nl_mult": float(nl_mult),
+        "n_shells": int(lc.n_shells),
         "persist_neb_path": bool(persist_neb_path),
         "gas_product": bool(gas_product),
         "gas_lift_height": float(getattr(brs, "gas_lift_height", 6.0)),
+        "calculator": calculator_identity(calculator),
     }
+    if free_energy_options is not None:
+        cache_parameters["free_energy"] = {
+            "vibration_displacement": float(free_energy_options.vibration_displacement),
+            "vibration_nfree": int(free_energy_options.vibration_nfree),
+            "include_ts_vibrations": bool(free_energy_options.include_ts_vibrations),
+            "min_frequency_ev": float(free_energy_options.min_frequency_ev),
+            "default_symmetry_number": int(free_energy_options.default_symmetry_number),
+            "default_spin": float(free_energy_options.default_spin),
+            "default_geometry": str(free_energy_options.default_geometry),
+        }
 
     # ── 1. AB endpoint ──────────────────────────────────────────────────
     (atoms_ab_init, n_slab, n_lat, react_idx,
@@ -1514,6 +1532,8 @@ def check_bond_site_stability(
 
     if calculation_cache_root is not None:
         try:
+            cache_graph = normalise_reaction_graph(lc.ego_graph)
+            cache_graph.graph["n_shells"] = int(lc.n_shells)
             tpl = getattr(brs, "template", None)
             cache_identity = {
                 "kind": cache_kind,
@@ -1540,7 +1560,12 @@ def check_bond_site_stability(
                 inputs=cache_inputs,
             )
             cached = load_calculation_record(
-                calculation_cache_root, cache_kind, cache_key,
+                calculation_cache_root,
+                cache_kind,
+                cache_key,
+                reaction_graph=cache_graph,
+                operation=cache_identity,
+                parameters=cache_parameters,
             )
             if cached is not None and apply_cached_states(
                 lc,
@@ -1793,6 +1818,81 @@ def check_bond_site_stability(
         n_interior = len(interior),
     )
 
+    if (
+        free_energy_options is not None
+        and getattr(free_energy_options, "enabled", False)
+        and free_energy_temperature_k is not None
+    ):
+        from pathlib import Path as _Path
+        from autokmc.thermo.free_energy import compute_harmonic_thermo
+
+        tpl = brs.template
+        process = smiles_to_dirname(
+            f"{tpl.smiles_a}+{tpl.smiles_b}~{tpl.smiles_c}"
+        )
+        cache_root = _Path(vib_cache_root) if vib_cache_root is not None else None
+        per_lat_dir = (
+            cache_root / f"bond_{process}" /
+            f"bond_iso{brs.iso_class}_lat{lc.lateral_class}"
+            if cache_root is not None else None
+        )
+        vib_indices = list(range(n_slab + n_lat, n_slab + n_lat + n_react))
+
+        def _harm(atoms, label, energy_ev):
+            return compute_harmonic_thermo(
+                atoms,
+                vib_indices,
+                energy_ev=float(energy_ev),
+                temperature_k=float(free_energy_temperature_k),
+                calculator=calculator,
+                options=free_energy_options,
+                cache_dir=str(per_lat_dir) if per_lat_dir is not None else None,
+                label=label,
+                drop_imaginary=True,
+            )
+
+        ab_thermo = _harm(atoms_ab_opt, "state_ab", E_ab)
+        if gas_product:
+            gas_reactant = brs.gas_reactant
+            gas_g = float(getattr(gas_reactant, "gibbs_energy", float("nan")))
+            gas_e = float(getattr(gas_reactant, "energy", float("nan")))
+            if not np.isfinite(gas_g) or not np.isfinite(gas_e):
+                raise ValueError(
+                    f"gas product {tpl.smiles_c!r} lacks finite free-energy data"
+                )
+            c_thermo = {
+                "g_corr_ev": gas_g - gas_e,
+                "g_total_ev": float(E_c) + gas_g - gas_e,
+                "zpe_ev": float(getattr(gas_reactant, "zpe", 0.0)),
+                "entropy_ev_per_k": float(getattr(gas_reactant, "entropy", 0.0)),
+                "frequencies_ev": list(getattr(gas_reactant, "frequencies_ev", []) or []),
+                "imaginary_ev": list(getattr(gas_reactant, "imaginary_ev", []) or []),
+            }
+        else:
+            c_thermo = _harm(atoms_c_opt, "state_c", E_c)
+
+        if getattr(free_energy_options, "include_ts_vibrations", True):
+            ts_thermo = _harm(atoms_ts, "ts", E_ts)
+        else:
+            average = 0.5 * (ab_thermo["g_corr_ev"] + c_thermo["g_corr_ev"])
+            ts_thermo = {
+                "g_corr_ev": float(average),
+                "g_total_ev": float(E_ts) + float(average),
+                "zpe_ev": None,
+                "entropy_ev_per_k": None,
+                "frequencies_ev": [],
+                "imaginary_ev": [],
+            }
+
+        for suffix, thermo in (("ab", ab_thermo), ("c", c_thermo), ("ts", ts_thermo)):
+            setattr(lc, f"g_correction_{suffix}", thermo["g_corr_ev"])
+            setattr(lc, f"g_{suffix}", thermo["g_total_ev"])
+            setattr(lc, f"zpe_{suffix}", thermo["zpe_ev"])
+            setattr(lc, f"entropy_{suffix}", thermo["entropy_ev_per_k"])
+            setattr(lc, f"frequencies_{suffix}_ev", list(thermo["frequencies_ev"]))
+            setattr(lc, f"imaginary_{suffix}_ev", list(thermo["imaginary_ev"]))
+            setattr(lc, f"vib_indices_{suffix}", list(vib_indices))
+
     lc.stable = True
     if verbose:
         print(
@@ -1845,10 +1945,7 @@ def check_bond_site_stability(
         if getattr(lc, "atoms_neb_path", None):
             neb = {
                 "energies_ev": list(getattr(lc, "neb_path_energies", []) or []),
-                "path": [
-                    atoms_to_json(im)
-                    for im in (getattr(lc, "atoms_neb_path", []) or [])
-                ],
+                "path_atoms": list(getattr(lc, "atoms_neb_path", []) or []),
             }
         record = make_calculation_record(
             kind=cache_kind,
@@ -1888,6 +1985,7 @@ def check_bond_site_stability(
                     atoms_ts, energy_ev=E_ts, properties=props_ts,
                 ),
             },
+            reaction_graph=cache_graph,
             neb=neb,
             lateral_attributes={
                 "atom_matching_method": getattr(lc, "atom_matching_method", None),

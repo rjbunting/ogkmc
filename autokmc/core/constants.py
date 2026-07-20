@@ -186,7 +186,7 @@ KABSCH_MAX_MAPPINGS: int = 6969
 
 #: Schema version stamped onto every reaction event and summary JSON document
 #: written by :mod:`autokmc.io.persistence`.  Bump on any breaking schema change.
-PERSISTENCE_SCHEMA_VERSION: str = "1"
+PERSISTENCE_SCHEMA_VERSION: str = "2"
 
 #: Default config-file schema version expected by :mod:`autokmc.io.config`.
 CONFIG_SCHEMA_VERSION: str = "1"
@@ -215,11 +215,8 @@ LATERAL_SHELLS_DEFAULT: int = 0
 #: Default basenames written by :func:`autokmc.cli.pipeline.run_from_config`.
 REACTIONS_FILENAME:   str = "events.jsonl"
 SUMMARY_FILENAME:     str = "summary.json"
+RUN_MANIFEST_FILENAME: str = "run_manifest.json"
 TRAJECTORY_FILENAME:  str = "kmc.extxyz"
-PRODUCTS_FILENAME:    str = "products.json"
-PRODUCT_TIMESERIES_FILENAME: str = "product_timeseries.csv"
-PRODUCT_EPISODES_FILENAME:   str = "product_episodes.jsonl"
-MECHANISM_SUMMARY_FILENAME:  str = "mechanism_summary.json"
 CALCULATION_CACHE_DIR:       str = "calculation_cache"
 ISAAC_EXPORT_FILENAME:       str = "isaac_records.json"
 REACTIONS_DIR:        str = "reactions"

@@ -1,31 +1,28 @@
 # autokmc - CO oxidation on Pt nanoparticle with FAIR-Chem UMA on 4 GPUs
-# Run with:    autokmc run example/co_oxidation_pt111_uma_4gpu.yaml
+# Run with:    autokmc run example/co_oxidation_ptnano_uma_4gpu.yaml
 schema_version: "1"
 
 output:
-  dir: ./runs/co_oxidation_au111_uma_4gpu
+  dir: ./runs/co_oxidation_ptnano_uma_4gpu
   trajectory_dump_every: 10
   log_level: INFO
 
 checkpoint:
   enabled: true
-  path: ./runs/co_oxidation_au111_uma_4gpu/checkpoint.pkl
+  path: ./runs/co_oxidation_ptnano_uma_4gpu/checkpoint.pkl
   every_n_steps: 10
   # To restart a stopped run, set:
-  # resume_from: ./runs/co_oxidation_au111_uma_4gpu/checkpoint.pkl
+  # resume_from: ./runs/co_oxidation_ptnano_uma_4gpu/checkpoint.pkl
 
 structure:
   kind: nanoparticle
-  composition: Au
+  composition: Pt
   crystal_structure: fcc
   lattice_constant: 3.9242
   # Approximate number of atoms in the Wulff-construction nanoparticle.
   n_atoms: 600
-  # surface_energies cannot be expressed as tuple-keyed YAML; leave null to
-  # use the built-in FCC defaults: {(1,1,1): 1.10, (1,0,0): 1.29, (1,1,0): 1.51} J/m².
-  # To use Au-specific values (e.g. from DFT), override in Python:
-  #   from autokmc.structure import build_nanoparticle
-  #   atoms = build_nanoparticle(..., surface_energies={(1,1,1): 0.69, (1,0,0): 0.83, (1,1,0): 0.97})
+  # Leave null to calculate Pt surface energies for the Wulff construction
+  # with the configured UMA calculator.
   surface_energies: null
 
 reactants:
@@ -75,7 +72,7 @@ adsorbate_sites:
 # Disable vibrational corrections for this long GPU debug run. Set enabled:
 # true once the reaction network is behaving as expected.
 free_energy:
-  enabled: true
+  enabled: false
   pressure_bar: 1.0
 
 kmc:

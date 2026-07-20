@@ -183,3 +183,27 @@ def test_gas_cache_dir_uses_safe_smiles_label(monkeypatch, tmp_path):
     )
 
     assert captured["cache_dir"].endswith("gas_(C)_(O)")
+
+
+def test_relax_false_still_computes_single_point_energy(monkeypatch):
+    import autokmc.species.reactant as reactant_mod
+
+    atoms = reactant_mod._smiles_to_atoms("[O]")
+    atoms.arrays["surface"] = [2]
+
+    class FakeCalc:
+        pass
+
+    monkeypatch.setattr(reactant_mod, "_smiles_to_atoms", lambda *_a, **_k: atoms)
+    monkeypatch.setattr(
+        reactant_mod,
+        "_optimise",
+        lambda *_a, **_k: pytest.fail("relaxation should be skipped"),
+    )
+    monkeypatch.setattr(atoms, "get_potential_energy", lambda: -1.25)
+
+    reactant = reactant_mod.build_reactant(
+        "[O]", calculator=FakeCalc(), relax=False,
+    )
+
+    assert reactant.energy == pytest.approx(-1.25)

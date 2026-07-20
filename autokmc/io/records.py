@@ -28,6 +28,11 @@ class ReactionRecord:
     barrier_ev:      float | None
     description:     str
     reaction_dir:    str
+    inputs:          list[dict[str, Any]]
+    outputs:         list[dict[str, Any]]
+    template:        dict[str, Any] | None
+    gas_product:     bool
+    run_id:          str | None = None
     direction:       str | None = None
     delta_g_ev:      float | None = None
     barrier_g_ev:    float | None = None

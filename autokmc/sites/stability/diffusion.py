@@ -85,13 +85,15 @@ from ase.optimize import BFGS
 from autokmc.io.calculators import acquire_calculator
 from autokmc.io.calculation_cache import (
     apply_cached_states,
-    atoms_to_json,
     calculation_cache_key,
+    calculator_identity,
     load_calculation_record,
     make_calculation_record,
     state_payload,
     write_calculation_record,
 )
+from autokmc.io.reaction_graph import normalise_reaction_graph
+from autokmc.species.smiles import smiles_to_dirname
 from autokmc.core.pbc import full_pbc_for_cell
 from autokmc.sites.diffusion import (
     DiffusionSite,
@@ -983,6 +985,7 @@ def check_diffusion_stability(
     self_b = frozenset(int(n) for n in b_node_ids if n in G)
     cache_kind = "diffusion"
     cache_key: str | None = None
+    cache_graph: nx.Graph | None = None
     cache_parameters = {
         "fmax": float(fmax),
         "max_steps": int(max_steps),
@@ -991,6 +994,7 @@ def check_diffusion_stability(
         "spring_k": float(spring_k),
         "interpolation": str(interpolation),
         "nl_mult": float(nl_mult),
+        "n_shells": int(lateral_class.n_shells),
         "persist_neb_path": bool(persist_neb_path),
         "free_energy_enabled": bool(
             free_energy_options is not None
@@ -1000,7 +1004,18 @@ def check_diffusion_stability(
             None if free_energy_temperature_k is None
             else float(free_energy_temperature_k)
         ),
+        "calculator": calculator_identity(calculator),
     }
+    if free_energy_options is not None:
+        cache_parameters["free_energy"] = {
+            "vibration_displacement": float(free_energy_options.vibration_displacement),
+            "vibration_nfree": int(free_energy_options.vibration_nfree),
+            "include_ts_vibrations": bool(free_energy_options.include_ts_vibrations),
+            "min_frequency_ev": float(free_energy_options.min_frequency_ev),
+            "default_symmetry_number": int(free_energy_options.default_symmetry_number),
+            "default_spin": float(free_energy_options.default_spin),
+            "default_geometry": str(free_energy_options.default_geometry),
+        }
 
     # ── 1. Endpoint A relaxation ────────────────────────────────────────
     atoms_a_init, n_slab, n_lat, mig_idx_a, mig_node_order_a = _build_diffusion_atoms(
@@ -1012,6 +1027,8 @@ def check_diffusion_stability(
 
     if calculation_cache_root is not None:
         try:
+            cache_graph = normalise_reaction_graph(lateral_class.ego_graph)
+            cache_graph.graph["n_shells"] = int(lateral_class.n_shells)
             atoms_b_seed, _, _, _, _ = _build_diffusion_atoms(
                 G, lateral_class, list(a_node_ids), list(b_node_ids),
                 endpoint_position="b",
@@ -1033,7 +1050,12 @@ def check_diffusion_stability(
                 },
             )
             cached = load_calculation_record(
-                calculation_cache_root, cache_kind, cache_key,
+                calculation_cache_root,
+                cache_kind,
+                cache_key,
+                reaction_graph=cache_graph,
+                operation=cache_identity,
+                parameters=cache_parameters,
             )
             if cached is not None and apply_cached_states(
                 lateral_class,
@@ -1222,31 +1244,22 @@ def check_diffusion_stability(
             _Path(vib_cache_root) if vib_cache_root is not None else None
         )
         per_lat_dir = (
-            cache_dir_root /
+            cache_dir_root / f"diff_{smiles_to_dirname(diffusion_site.reactant)}" /
             f"diff_iso{diffusion_site.iso_class}_lat{lateral_class.lateral_class}"
             if cache_dir_root is not None else None
         )
 
         def _harm(atoms, label, energy_ev, drop_imag):
-            try:
-                return compute_harmonic_thermo(
-                    atoms, vib_indices,
-                    energy_ev      = float(energy_ev),
-                    temperature_k  = float(free_energy_temperature_k),
-                    calculator     = calculator,
-                    options        = free_energy_options,
-                    cache_dir      = (str(per_lat_dir) if per_lat_dir is not None else None),
-                    label          = label,
-                    drop_imaginary = drop_imag,
-                )
-            except Exception as exc:                          # pragma: no cover
-                _log.warning(
-                    "check_diffusion_stability: harmonic thermo for %s "
-                    "failed (diff_iso=%d, lat=%d): %s — leaving G=NaN.",
-                    label, diffusion_site.iso_class,
-                    lateral_class.lateral_class, exc,
-                )
-                return None
+            return compute_harmonic_thermo(
+                atoms, vib_indices,
+                energy_ev      = float(energy_ev),
+                temperature_k  = float(free_energy_temperature_k),
+                calculator     = calculator,
+                options        = free_energy_options,
+                cache_dir      = (str(per_lat_dir) if per_lat_dir is not None else None),
+                label          = label,
+                drop_imaginary = drop_imag,
+            )
 
         a_thermo  = _harm(atoms_a_opt, "state_a", E_a,  True)
         b_thermo  = _harm(atoms_b_opt, "state_b", E_b,  True)
@@ -1328,10 +1341,7 @@ def check_diffusion_stability(
         if getattr(lateral_class, "atoms_neb_path", None):
             neb = {
                 "energies_ev": list(getattr(lateral_class, "neb_path_energies", []) or []),
-                "path": [
-                    atoms_to_json(im)
-                    for im in (getattr(lateral_class, "atoms_neb_path", []) or [])
-                ],
+                "path_atoms": list(getattr(lateral_class, "atoms_neb_path", []) or []),
             }
         record = make_calculation_record(
             kind=cache_kind,
@@ -1361,6 +1371,7 @@ def check_diffusion_stability(
                     atoms_ts, energy_ev=E_ts, properties=props_ts,
                 ),
             },
+            reaction_graph=cache_graph,
             neb=neb,
         )
         write_calculation_record(

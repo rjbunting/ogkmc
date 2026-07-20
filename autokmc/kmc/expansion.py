@@ -244,6 +244,9 @@ def _ensure_species_known(
     prune_max_steps: int,
     add_hydrogens: bool,
     verbose: bool,
+    free_energy_options=None,
+    free_energy_temperature_k: float | None = None,
+    vib_cache_root: str | None = None,
 ) -> bool:
     """Build a Reactant + find adsorbate sites for *smi* if not already known.
 
@@ -271,6 +274,9 @@ def _ensure_species_known(
             add_hydrogens         = add_hydrogens,
             nl_mult               = nl_mult,
             partial_pressure_bar = 0.0,
+            free_energy_options       = free_energy_options,
+            free_energy_temperature_k = free_energy_temperature_k,
+            vib_cache_root            = vib_cache_root,
         )
     except CalculatorConfigError:
         raise
@@ -341,6 +347,9 @@ def expand_bond_sites_for_new_species(
     bond_prune_with_calculator: bool = BOND_PRUNE_WITH_CALCULATOR,
     gas_lift_height: float = BOND_GAS_LIFT_HEIGHT,
     verbose: bool = False,
+    free_energy_options=None,
+    free_energy_temperature_k: float | None = None,
+    vib_cache_root: str | None = None,
 ) -> list[BondReactionSite]:
     """Add a newly-formed species to the bond-reaction registry and expand.
 
@@ -415,6 +424,9 @@ def expand_bond_sites_for_new_species(
         prune_max_steps = prune_max_steps,
         add_hydrogens   = add_hydrogens,
         verbose         = verbose,
+        free_energy_options       = free_energy_options,
+        free_energy_temperature_k = free_energy_temperature_k,
+        vib_cache_root            = vib_cache_root,
     )
     if not built_ok:
         # Still mark as expanded so we do not retry on every KMC step.
@@ -490,6 +502,9 @@ def expand_bond_sites_for_new_species(
                     prune_max_steps = prune_max_steps,
                     add_hydrogens   = add_hydrogens,
                     verbose         = verbose,
+                    free_energy_options       = free_energy_options,
+                    free_energy_temperature_k = free_energy_temperature_k,
+                    vib_cache_root            = vib_cache_root,
                 )
                 if reg["adsorbate_sites"].get(smi):
                     newly_built.append(smi)

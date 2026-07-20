@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+import random
 
 import networkx as nx
+import numpy as np
 import pytest
 
-from autokmc.kmc.engine import _final_occupancy_by_species
+from autokmc.kmc.engine import (
+    _capture_rng_state,
+    _final_occupancy_by_species,
+    _restore_rng_state,
+)
 from autokmc.kmc.execute import execute_reaction
 from autokmc.kmc.expansion import (
     _rebuild_bond_reverse_indexes,
@@ -108,6 +114,22 @@ def test_final_occupancy_accumulates_duplicate_species_iso_keys():
     ]
 
     assert _final_occupancy_by_species(sites) == {"[O]:iso0": 3}
+
+
+@pytest.mark.parametrize("kind", ["numpy", "python"])
+def test_checkpoint_rng_state_continues_exact_random_stream(kind):
+    rng = np.random.default_rng(91) if kind == "numpy" else random.Random(91)
+    draw = rng.random
+    _ = [draw() for _ in range(4)]
+    state = _capture_rng_state(rng)
+    expected = [draw() for _ in range(8)]
+
+    restored = _restore_rng_state(
+        np.random.default_rng(0) if kind == "numpy" else random.Random(0),
+        state,
+    )
+
+    assert [restored.random() for _ in range(8)] == expected
 
 
 def test_rebuild_bond_reverse_indexes_keeps_existing_and_new_sites():

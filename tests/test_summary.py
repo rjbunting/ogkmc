@@ -23,6 +23,7 @@ def test_summary_aggregates_per_type(make_reaction):
     assert out["totals"]["reactions"] == 3
     assert out["totals"]["by_kind"] == {"adsorption": 2, "desorption": 1}
     assert len(out["by_reaction_type"]) == 2
+    assert "production_summary" not in out
 
     ads = next(b for b in out["by_reaction_type"] if b["kind"] == "adsorption")
     assert ads["count"] == 2

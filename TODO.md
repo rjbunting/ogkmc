@@ -1,29 +1,45 @@
-structure.py:
-Need to consider oxides where the oxygen can react i.e. make the metal the surface and the oxygen the adsorbate
+# AutoKMC Roadmap
 
-find_anchors.py:
-Sometimes large k values are found. Need to tinker with this. Options are: check for blocking atoms set k_max manually reduce the factor
-Sometimes n_shell can be too big for the surface. Need to raise error when this happens
+This file tracks unresolved scientific or architectural work. Implemented
+behavior is documented under [`docs/`](docs/index.md).
 
-find_adsorbate_sites.py:
-Set the tolerance to something reasonable. Can test this more later (probably too small) Solve beyond rigid molecule -
-can have variable orbits? maybe? IMPORTANT: Weakly adsorbing molecules (like CH4) will form no bonds to surface.
-Need way to still activate them or release into gas in 1 step
+## Catalyst and surface models
 
-check_adsorbate_sites.py (adsorbate site stability):
-Need to do cases when adsorbate bonds will stretch on the surface (oxygen)
+- Extend oxide support so lattice oxygen can participate in reactions while
+  metal atoms retain the catalyst-surface role.
+- Improve anchor enumeration for cases that generate unexpectedly large
+  cliques. Candidate approaches include blocker checks, an explicit `k_max`,
+  and calibration of the covalent-radius factor.
+- Raise a clear error when a requested local shell exceeds the usable surface
+  graph instead of producing a misleading site class.
 
-sites.py:
-Need to prune further... there has to be some way, but I'm just unsure!
-Shared-calculator NEB is now used to support non-deepcopyable ML calculators.
-This may need to change for DFT calculators where passing wavefunctions
-between separate image calculators is important.
+## Adsorbate placement and stability
 
-transition states:
-Need to add transition state validation with a variety of methods
+- Calibrate geometric tolerances with a broader set of molecules and surfaces.
+- Go beyond rigid-molecule placement so internal bonds may stretch or rearrange
+  during adsorption, particularly for oxygen-containing species.
+- Define a physically useful path for weakly adsorbing molecules that form no
+  explicit surface bond but may still activate or return to the gas phase.
+- Investigate additional site-pruning descriptors without discarding stable
+  candidates before calculator-based validation.
 
-transfer.py:
-This is a new module that I haven't implemented yet, but it will be responsible for finding transfer sites for reactions
-that involve the transfer of atoms from one species to another.
+## Calculators and transition paths
 
-####
+- Review calculator allocation for DFT NEB workflows where wavefunction reuse
+  between images may matter. The current independent-calculator pool is aimed
+  primarily at non-deepcopyable machine-learning calculators.
+- Expand transition-state validation beyond the current connectivity,
+  endpoint, energy, and image-position checks where a system-specific
+  vibrational or reaction-coordinate test is needed.
+
+## New chemistry
+
+- Add transfer reactions in which atoms move between two adsorbed species.
+  This requires transfer templates, placement enumeration, endpoint mapping,
+  stability/NEB handling, event transitions, and offline lineage support.
+
+## Deliberate non-goal
+
+Reaction-database fallback matching is topology based and intentionally ignores
+Cartesian geometry. This is a method limitation, not an open bug; see
+[ISAAC Reaction Database](docs/reaction-database.md#deliberate-geometry-limitation).

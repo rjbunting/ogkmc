@@ -13,13 +13,21 @@ from autokmc.core.constants import TRAJ_DUMP_EVERY
 class TrajectoryWriter:
 	"""Periodic extended-XYZ dumper."""
 
-	def __init__(self, output_path: str | Path, *, dump_every: int = TRAJ_DUMP_EVERY):
+	def __init__(
+		self,
+		output_path: str | Path,
+		*,
+		dump_every: int = TRAJ_DUMP_EVERY,
+		append: bool = False,
+	):
 		self.output_path = Path(output_path)
 		self.dump_every = int(dump_every)
+		self.append = bool(append)
 		self._n_frames: int = 0
 		if self.dump_every > 0:
 			self.output_path.parent.mkdir(parents=True, exist_ok=True)
-			self.output_path.write_text("")
+			if not self.append:
+				self.output_path.write_text("")
 
 	@property
 	def n_frames(self) -> int:

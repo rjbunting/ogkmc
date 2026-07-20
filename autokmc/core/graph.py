@@ -120,6 +120,10 @@ def build_graph(
         )
 
     declared_pbc = np.asarray(atoms.get_pbc(), dtype=bool)
+    # Neighbor-list construction needs the material cell to be fully periodic,
+    # but callers must not see their Atoms object mutated as a side effect.
+    atoms = atoms.copy()
+    atoms.arrays["surface"] = np.asarray(surface_mask).copy()
     graph_pbc = graph_pbc_for_atoms(atoms)
     atoms.set_pbc(graph_pbc)
 

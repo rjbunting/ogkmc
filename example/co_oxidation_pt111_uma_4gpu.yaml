@@ -3,16 +3,16 @@
 schema_version: "1"
 
 output:
-  dir: ./runs/co_oxidation_au111_uma_4gpu
+  dir: ./runs/co_oxidation_pt111_uma_4gpu
   trajectory_dump_every: 10
   log_level: INFO
 
 checkpoint:
   enabled: true
-  path: ./runs/co_oxidation_au111_uma_4gpu/checkpoint.pkl
+  path: ./runs/co_oxidation_pt111_uma_4gpu/checkpoint.pkl
   every_n_steps: 10
   # To restart a stopped run, set:
-  # resume_from: ./runs/co_oxidation_au111_uma_4gpu/checkpoint.pkl
+  # resume_from: ./runs/co_oxidation_pt111_uma_4gpu/checkpoint.pkl
 
 structure:
   kind: surface
@@ -75,7 +75,7 @@ adsorbate_sites:
 # Disable vibrational corrections for this long GPU debug run. Set enabled:
 # true once the reaction network is behaving as expected.
 free_energy:
-  enabled: true
+  enabled: false
   pressure_bar: 1.0
 
 kmc:

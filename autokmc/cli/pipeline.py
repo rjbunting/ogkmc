@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import logging
+import json
+import uuid
+from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -16,11 +19,14 @@ from autokmc.io.calculators import (
     primary_calculator,
 )
 from autokmc.io.checkpoint import CheckpointWriter, load_checkpoint
-from autokmc.io.calculation_cache import write_isaac_export
+from autokmc.io.calculation_cache import (
+    initialise_calculation_database,
+    write_isaac_export,
+)
 from autokmc.io.config import RunConfig
 from autokmc.io.persistence import ReactionWriter
-from autokmc.io.products import ProductMechanismTracker
 from autokmc.io.summary import ReactionSummary, make_run_meta
+from autokmc.io.run_manifest import finish_run_manifest, start_run_manifest
 from autokmc.io.trajectory import TrajectoryWriter
 from autokmc.utils.logging import get_logger
 
@@ -82,6 +88,36 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
 
     out_dir = Path(cfg.output.dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = out_dir / cfg.output.run_manifest_filename
+    resume_state = (
+        load_checkpoint(cfg.checkpoint.resume_from)
+        if cfg.checkpoint.resume_from else None
+    )
+    manifest_run_id: str | None = None
+    if cfg.checkpoint.resume_from and manifest_path.is_file():
+        try:
+            manifest_run_id = str(
+                json.loads(manifest_path.read_text(encoding="utf-8")).get("run_id")
+                or ""
+            )
+        except (OSError, json.JSONDecodeError, TypeError):
+            manifest_run_id = None
+    checkpoint_run_id = (
+        None if resume_state is None else resume_state.metadata.get("run_id")
+    )
+    if (
+        manifest_run_id and checkpoint_run_id is not None
+        and manifest_run_id != str(checkpoint_run_id)
+    ):
+        raise ValueError(
+            "checkpoint run_id does not match the output run manifest: "
+            f"{checkpoint_run_id!r} != {manifest_run_id!r}"
+        )
+    run_id = manifest_run_id or (
+        str(checkpoint_run_id) if checkpoint_run_id is not None else None
+    )
+    if not run_id:
+        run_id = str(uuid.uuid4())
 
     log_level = getattr(logging, str(cfg.output.log_level).upper(), logging.INFO)
     logging.basicConfig(level=log_level, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -165,6 +201,8 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
     _stage("Stage 3/7: classifying surface atoms and building graph", verbose=verbose_run)
     surface_result = find_surface_atoms(atoms, tag_atoms=True)
     G = build_graph(atoms)
+    G.graph["run_id"] = run_id
+    G.graph["frozen_indices"] = list(frozen_indices or [])
     if verbose_run:
         n_surface = len(surface_result.indices)
         print(
@@ -201,6 +239,8 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
         if cfg.output.calculation_cache_enabled
         else None
     )
+    if calculation_cache_root is not None:
+        initialise_calculation_database(calculation_cache_root, run_id=run_id)
 
     # 4. Reactants
     _stage("Stage 4/7: building gas-phase reactants", verbose=verbose_run)
@@ -211,7 +251,8 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
         rx = build_reactant(
             r.smiles,
             add_hydrogens             = r.add_hydrogens,
-            calculator                = calc_resource if r.relax_in_gas else None,
+            calculator                = calc_resource,
+            relax                     = r.relax_in_gas,
             free_energy_options       = free_energy_options if fe_cfg.enabled else None,
             free_energy_temperature_k = cfg.kmc.temperature_k,
             partial_pressure_bar      = (
@@ -233,8 +274,6 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
 
     if not reactants_built:
         raise ValueError("config.reactants is empty — supply at least one SMILES.")
-    user_reactant_smiles = {rx.smiles for rx in reactants_built}
-
     # 5. Adsorbate sites for every reactant
     _stage("Stage 5/7: enumerating and pruning adsorbate sites", verbose=verbose_run)
     asc = cfg.adsorbate_sites
@@ -280,28 +319,27 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
 
     # 6. Persistence hooks
     _stage("Stage 6/7: preparing persistence and optional reaction channels", verbose=verbose_run)
+    is_resume = bool(cfg.checkpoint.resume_from)
     reaction_writer = ReactionWriter(
         out_dir,
         reactions_filename = cfg.output.reactions_filename,
         calculator_meta    = calculator_meta(cfg.calculator),
+        append             = is_resume,
+        run_id             = run_id,
     )
     trajectory_writer = TrajectoryWriter(
         out_dir / cfg.output.trajectory_filename,
         dump_every = cfg.output.trajectory_dump_every,
+        append = is_resume,
     )
-    summary_collector = ReactionSummary(
-        reactant_smiles=user_reactant_smiles,
-    )
-    product_tracker = ProductMechanismTracker(
-        initial_reactant_smiles=user_reactant_smiles,
-    )
+    summary_collector = ReactionSummary()
     checkpoint_writer = None
     if cfg.checkpoint.enabled:
         checkpoint_path = cfg.checkpoint.path or str(out_dir / "checkpoint.pkl")
         checkpoint_writer = CheckpointWriter(
             checkpoint_path,
             every_n_steps=cfg.checkpoint.every_n_steps,
-            metadata={"config_path": config_path},
+            metadata={"config_path": config_path, "run_id": run_id},
         )
 
     # 6b. Diffusion (NEB) sites — flat list across all SMILES
@@ -547,8 +585,13 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
 
     initial_step = 0
     initial_time_s = 0.0
+    initial_history: list = []
+    initial_reaction_counts: dict[str, int] = {}
+    initial_rng_state: dict | None = None
     if cfg.checkpoint.resume_from:
-        state = load_checkpoint(cfg.checkpoint.resume_from)
+        if resume_state is None:  # defensive; resume_from guarantees this above
+            raise RuntimeError("checkpoint resume state was not loaded")
+        state = resume_state
         G = state.graph
         reactants_built = list(state.reactants)
         all_sites = list(state.adsorbate_sites)
@@ -558,19 +601,12 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
         frozen_indices = state.frozen_indices
         initial_step = int(state.step)
         initial_time_s = float(state.time_s)
-        summary_collector = ReactionSummary(
-            reactant_smiles=user_reactant_smiles,
-        )
-        product_tracker = ProductMechanismTracker(
-            initial_reactant_smiles=user_reactant_smiles,
-        )
-        reaction_writer.close()
-        reaction_writer = ReactionWriter(
-            out_dir,
-            reactions_filename = cfg.output.reactions_filename,
-            calculator_meta    = calculator_meta(cfg.calculator),
-            append             = True,
-        )
+        initial_history = list(state.history)
+        initial_reaction_counts = dict(state.reaction_counts)
+        initial_rng_state = getattr(state, "rng_state", None)
+        G.graph["run_id"] = run_id
+        G.graph["frozen_indices"] = list(frozen_indices or [])
+        summary_collector = ReactionSummary.from_events(reaction_writer.jsonl_path)
         if verbose_run:
             print(
                 f"[autokmc] Resuming from checkpoint {cfg.checkpoint.resume_from}: "
@@ -580,6 +616,30 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
     # 7. KMC
     _stage("Stage 7/7: starting KMC simulation", verbose=verbose_run)
     k = cfg.kmc
+    start_run_manifest(
+        manifest_path,
+        graph=G,
+        adsorbate_sites=kmc_initial_sites,
+        feed_reactants=[
+            {
+                "smiles": reactant.smiles,
+                "partial_pressure_bar": reactant.partial_pressure_bar,
+            }
+            for reactant in reactants_built
+            if canonical_smiles(reactant.smiles)
+            in {canonical_smiles(item.smiles) for item in cfg.reactants}
+        ],
+        temperature_k=k.temperature_k,
+        random_seed=k.random_seed,
+        structure_kind=cfg.structure.kind,
+        composition=cfg.structure.composition,
+        config_path=config_path,
+        events_filename=cfg.output.reactions_filename,
+        initial_step=initial_step,
+        initial_time_s=initial_time_s,
+        run_id=run_id,
+        resolved_config=asdict(cfg),
+    )
     summary = run_kmc_steps(
         G, kmc_initial_sites, calc_resource,
         reactants                = reactants_built,
@@ -604,10 +664,12 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
         reaction_writer          = reaction_writer,
         trajectory_writer        = trajectory_writer,
         summary_collector        = summary_collector,
-        product_tracker          = product_tracker,
         checkpoint_writer        = checkpoint_writer,
         initial_step             = initial_step,
         initial_time_s           = initial_time_s,
+        initial_history          = initial_history,
+        initial_reaction_counts  = initial_reaction_counts,
+        initial_rng_state        = initial_rng_state,
     )
 
     finished_at = datetime.now(timezone.utc)
@@ -628,25 +690,22 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
         run_meta        = run_meta,
         final_occupancy = summary.get("final_occupancy"),
     )
-    product_outputs = product_tracker.write(
-        out_dir,
-        run_meta                    = run_meta,
-        final_occupancy             = summary.get("final_occupancy"),
-        products_filename           = cfg.output.products_filename,
-        product_timeseries_filename = cfg.output.product_timeseries_filename,
-        product_episodes_filename   = cfg.output.product_episodes_filename,
-        mechanism_summary_filename  = cfg.output.mechanism_summary_filename,
-    )
     isaac_export_path = write_isaac_export(
         calculation_cache_root,
         out_dir / cfg.output.isaac_export_filename,
     )
     reaction_writer.close()
+    finish_run_manifest(
+        manifest_path,
+        final_step=initial_step + int(summary.get("steps_executed", 0) or 0),
+        final_time_s=float(summary.get("time", initial_time_s) or initial_time_s),
+        steps_executed=int(summary.get("steps_executed", 0) or 0),
+    )
 
     summary["outputs"] = {
         "events":        str(reaction_writer.jsonl_path),
         "summary":       str(summary_path),
-        **product_outputs,
+        "run_manifest":  str(manifest_path),
         "calculation_cache": calculation_cache_root,
         "isaac_records": (
             str(isaac_export_path) if isaac_export_path is not None else None

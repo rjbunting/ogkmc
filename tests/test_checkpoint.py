@@ -36,6 +36,8 @@ def test_checkpoint_roundtrip_strips_calculators(tmp_path):
         frozen_indices=[0],
         history=[(1, 0.1)],
         reaction_counts={"adsorption": 1},
+        rng_state={"type": "numpy-generator", "state": {"counter": 4}},
+        metadata={"run_id": "run-123"},
     )
     path = save_checkpoint(tmp_path / "checkpoint.pkl", state)
     loaded = load_checkpoint(path)
@@ -45,6 +47,8 @@ def test_checkpoint_roundtrip_strips_calculators(tmp_path):
     assert loaded.time_s == 1.25
     assert loaded.frozen_indices == [0]
     assert loaded.graph.graph["atoms"].calc is None
+    assert loaded.rng_state == {"type": "numpy-generator", "state": {"counter": 4}}
+    assert loaded.metadata["run_id"] == "run-123"
 
 
 def test_checkpoint_preserves_hashable_keys_that_strip_to_dict(tmp_path):
