@@ -249,6 +249,11 @@ def _optimise(atoms: Atoms, calculator, *, fmax: float = 0.05,
     atoms.calc = calculator
     opt = LBFGS(atoms, logfile=logfile)
     opt.run(fmax=fmax, steps=steps)
+    if not opt.converged():
+        raise RuntimeError(
+            f"gas-phase optimization did not converge within {steps} steps "
+            f"at fmax={fmax} eV/Å"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -418,6 +423,7 @@ def build_reactant(
     spin: float | None = None,
     geometry: str | None = None,
     vib_cache_root: str | None = None,
+    relax: bool = True,
 ) -> Reactant:
     """Build a :class:`Reactant` from a SMILES string.
 
@@ -469,17 +475,18 @@ def build_reactant(
     energy = float("nan")
     if calculator is not None:
         with acquire_calculator(calculator, purpose="gas-phase reactant relaxation") as calc:
-            _optimise(atoms, calc, fmax=fmax, steps=steps)
+            if relax:
+                _optimise(atoms, calc, fmax=fmax, steps=steps)
+            atoms.calc = calc
             try:
                 energy = float(atoms.get_potential_energy())
             except Exception as exc:
-                # Don't silently swallow calculator failures — users see
-                # `nan` and assume "no calculator", but it might mean the
-                # calculator crashed.  Warn loudly via the package logger.
-                _log.warning(
-                    "build_reactant(%r): calculator failed to evaluate energy "
-                    "after relaxation (%s); Reactant.energy left as NaN.",
-                    smiles, exc,
+                raise RuntimeError(
+                    f"build_reactant({smiles!r}) could not evaluate its gas-phase energy"
+                ) from exc
+            if not np.isfinite(energy):
+                raise ValueError(
+                    f"build_reactant({smiles!r}) returned non-finite gas energy {energy!r}"
                 )
         atoms.calc = None
 
@@ -516,44 +523,37 @@ def build_reactant(
         and free_energy_temperature_k is not None
         and not (isinstance(energy, float) and np.isnan(energy))
     ):
-        try:
-            from autokmc.thermo.free_energy import compute_gas_thermo
-            from pathlib import Path as _Path
+        from autokmc.thermo.free_energy import compute_gas_thermo
+        from pathlib import Path as _Path
 
-            cache_dir = (
-                str(_Path(vib_cache_root) / f"gas_{smiles_to_dirname(smiles)}")
-                if vib_cache_root is not None else None
-            )
-            thermo = compute_gas_thermo(
-                atoms,
-                energy_ev       = float(energy),
-                temperature_k   = float(free_energy_temperature_k),
-                pressure_bar    = float(partial_pressure_bar),
-                calculator      = calculator,
-                options         = free_energy_options,
-                symmetry_number = symmetry_number,
-                spin            = spin,
-                geometry        = geometry,
-                cache_dir       = cache_dir,
-            )
-            reactant.g_correction   = float(thermo["g_corr_ev"])
-            reactant.gibbs_energy   = float(thermo["g_total_ev"])
-            reactant.zpe            = float(thermo["zpe_ev"])
-            reactant.entropy        = float(thermo["entropy_ev_per_k"])
-            reactant.frequencies_ev = list(thermo["frequencies_ev"])
-            reactant.imaginary_ev   = list(thermo["imaginary_ev"])
-            reactant.thermo_meta = {
-                "geometry":        thermo.get("geometry"),
-                "symmetry_number": thermo.get("symmetry_number"),
-                "spin":            thermo.get("spin"),
-                "temperature_k":   thermo.get("temperature_k"),
-                "pressure_bar":    thermo.get("pressure_bar"),
-            }
-        except Exception as exc:                            # pragma: no cover
-            _log.warning(
-                "build_reactant(%r): gas-phase thermo failed (%s); "
-                "free-energy fields left as NaN.",
-                smiles, exc,
-            )
+        cache_dir = (
+            str(_Path(vib_cache_root) / f"gas_{smiles_to_dirname(smiles)}")
+            if vib_cache_root is not None else None
+        )
+        thermo = compute_gas_thermo(
+            atoms,
+            energy_ev       = float(energy),
+            temperature_k   = float(free_energy_temperature_k),
+            pressure_bar    = float(partial_pressure_bar),
+            calculator      = calculator,
+            options         = free_energy_options,
+            symmetry_number = symmetry_number,
+            spin            = spin,
+            geometry        = geometry,
+            cache_dir       = cache_dir,
+        )
+        reactant.g_correction   = float(thermo["g_corr_ev"])
+        reactant.gibbs_energy   = float(thermo["g_total_ev"])
+        reactant.zpe            = float(thermo["zpe_ev"])
+        reactant.entropy        = float(thermo["entropy_ev_per_k"])
+        reactant.frequencies_ev = list(thermo["frequencies_ev"])
+        reactant.imaginary_ev   = list(thermo["imaginary_ev"])
+        reactant.thermo_meta = {
+            "geometry":        thermo.get("geometry"),
+            "symmetry_number": thermo.get("symmetry_number"),
+            "spin":            thermo.get("spin"),
+            "temperature_k":   thermo.get("temperature_k"),
+            "pressure_bar":    thermo.get("pressure_bar"),
+        }
 
     return reactant

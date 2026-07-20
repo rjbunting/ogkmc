@@ -6,7 +6,8 @@ import json
 from types import SimpleNamespace
 
 import pytest
-from ase.io import read as ase_read
+from ase.constraints import FixAtoms
+from ase.io import read as ase_read, write as ase_write
 
 from autokmc.io.persistence import (
     ReactionWriter,
@@ -15,12 +16,33 @@ from autokmc.io.persistence import (
 from autokmc.io.atoms import atoms_from_graph
 
 
-def test_atoms_from_graph_includes_only_occupied_adsorbates(synth_graph):
+def test_atoms_from_graph_includes_only_occupied_adsorbates(tmp_path, synth_graph):
+    synth_graph.graph["schema"] = "test-graph-v1"
+    synth_graph.graph["run_id"] = "run-123"
+    synth_graph.graph["frozen_indices"] = [0]
+    synth_graph.nodes[100].update(
+        reactant="[C-]#[O+]", reactant_index=0,
+        site_iso_class=2, site_member_index=1,
+    )
     atoms = atoms_from_graph(synth_graph)
     syms = atoms.get_chemical_symbols()
     assert syms == ["Cu", "Cu", "C"]
     assert tuple(atoms.pbc) == (True, True, True)
     assert atoms.cell[0, 0] == 10.0
+    assert atoms.arrays["graph_node_id"].tolist() == ["0", "1", "100"]
+    assert atoms.arrays["node_type"].tolist() == ["bulk", "surface", "adsorbate"]
+    assert atoms.arrays["reactant_smiles"].tolist()[-1] == "[C-]#[O+]"
+    assert atoms.info["autokmc_graph_schema"] == "test-graph-v1"
+    assert atoms.info["run_id"] == "run-123"
+    assert isinstance(atoms.constraints[0], FixAtoms)
+    assert atoms.constraints[0].get_indices().tolist() == [0]
+    path = tmp_path / "snapshot.extxyz"
+    ase_write(path, atoms, format="extxyz")
+    restored = ase_read(path, format="extxyz")
+    assert restored.arrays["graph_node_id"].tolist() == ["0", "1", "100"]
+    assert restored.arrays["reactant_smiles"].tolist()[-1] == "[C-]#[O+]"
+    assert restored.info["run_id"] == "run-123"
+    assert restored.arrays["frozen"].tolist() == [True, False, False]
 
 
 def test_atoms_from_graph_excludes_unoccupied(synth_graph):
@@ -45,6 +67,7 @@ def test_reaction_writer_creates_per_lateral_class_folder(
         step=1, time_s=1.0e-6, tau_s=1.0e-6, reaction=stub_reaction,
         gas_energies={"[C-]#[O+]": -14.0},
     )
+    w.close()
 
     folder = tmp_path / "reactions" / "adsorption" / "(C-)#(O+)" / "iso0_lat0"
     assert folder.is_dir()
@@ -57,6 +80,9 @@ def test_reaction_writer_creates_per_lateral_class_folder(
     payload = json.loads(jsonl[0])
     assert payload["schema_version"] == PERSISTENCE_SCHEMA_VERSION
     assert payload["kind"] == "adsorption"
+    assert payload["inputs"][0]["phase"] == "gas"
+    assert payload["outputs"][0]["phase"] == "surface"
+    assert payload["outputs"][0]["placement_id"].startswith("placement-")
     assert payload["reaction_dir"] == "reactions/adsorption/(C-)#(O+)/iso0_lat0"
     assert "ΔE" in payload["description"]
 
@@ -101,6 +127,27 @@ def test_reaction_writer_reuses_folder_across_events(
 
     jsonl = (tmp_path / "events.jsonl").read_text().strip().splitlines()
     assert len(jsonl) == 2
+
+
+def test_reaction_writer_append_restores_counts_and_run_id(
+    tmp_path, stub_reaction, tiny_atoms
+):
+    stub_reaction.lateral_class.atoms_occupied = tiny_atoms.copy()
+    stub_reaction.lateral_class.atoms_unoccupied = tiny_atoms.copy()[:2]
+    first = ReactionWriter(tmp_path, run_id="run-a")
+    first.record(step=1, time_s=1e-6, tau_s=1e-6, reaction=stub_reaction)
+    first.close()
+
+    resumed = ReactionWriter(tmp_path, append=True, run_id="run-a")
+    resumed.record(step=2, time_s=2e-6, tau_s=1e-6, reaction=stub_reaction)
+    resumed.close()
+
+    rows = [json.loads(line) for line in (tmp_path / "events.jsonl").read_text().splitlines()]
+    assert [row["step"] for row in rows] == [1, 2]
+    assert all(row["run_id"] == "run-a" for row in rows)
+    folder = tmp_path / "reactions" / "adsorption" / "(C-)#(O+)" / "iso0_lat0"
+    metadata = json.loads((folder / "reaction.json").read_text())
+    assert metadata["stats"] == {"count": 2, "first_step": 1, "last_step": 2}
 
 
 def test_reaction_writer_warns_when_no_atoms(tmp_path, stub_reaction):

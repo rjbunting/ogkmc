@@ -166,6 +166,7 @@ structure:
     assert cfg.output.calculation_cache_enabled is True
     assert cfg.output.calculation_cache_dir == "calc_cache"
     assert cfg.output.isaac_export_filename == "isaac_upload.json"
+    assert cfg.output.run_manifest_filename == "run_manifest.json"
 
 
 def test_load_bond_matching_fields(tmp_path):
@@ -200,3 +201,22 @@ def test_unknown_extension(tmp_path):
 def test_missing_file():
     with pytest.raises(FileNotFoundError):
         load_config("does/not/exist.yaml")
+
+
+@pytest.mark.parametrize(
+    "fragment",
+    [
+        "diffusion:\n  enabled: 'false'\n",
+        "bond:\n  neb_climb: 'true'\n",
+        "kmc:\n  temperature_k: 0\n",
+        "free_energy:\n  vibration_nfree: 3\n",
+    ],
+)
+def test_strict_validation_rejects_coercible_types_and_invalid_ranges(tmp_path, fragment):
+    pytest.importorskip("yaml")
+    path = _write(
+        tmp_path,
+        "schema_version: '1'\nreactants:\n  - smiles: '[O]'\n" + fragment,
+    )
+    with pytest.raises(ConfigError):
+        load_config(path)

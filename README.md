@@ -24,8 +24,9 @@ AutoKMC can:
 - Compute KMC rates from electronic energies, with optional vibrational
   free-energy corrections.
 - Run KMC trajectories with on-the-fly reaction-network expansion.
-- Write publication-oriented product rates and mechanism traces.
-- Cache expensive optimization results as reloadable JSON.
+- Write a structured event log for downstream analysis.
+- Reuse expensive optimization results from graph-searchable ISAAC records
+  with checksum-verified `.extxyz` structures.
 - Export calculation records in the ISAAC AI-ready scientific record format.
 
 ## Installation
@@ -59,13 +60,17 @@ After installation, the main commands are:
 ```bash
 autokmc validate-config path/to/config.yaml
 autokmc run path/to/config.yaml
+autokmc analyze RUN_DIR
+autokmc rebuild-index CALCULATION_CACHE_DIR
 ```
 
 Without installing the console entry point, use:
 
 ```bash
-python -m autokmc.cli.main validate-config path/to/config.yaml
-python -m autokmc.cli.main run path/to/config.yaml
+python -m autokmc.cli validate-config path/to/config.yaml
+python -m autokmc.cli run path/to/config.yaml
+python -m autokmc.cli analyze RUN_DIR
+python -m autokmc.cli rebuild-index CALCULATION_CACHE_DIR
 ```
 
 Validation only checks that the configuration can be parsed. It does not run
@@ -90,7 +95,7 @@ output:
 
 structure:
   kind: surface
-  composition: Cu
+  composition: Pt
   crystal_structure: fcc
   miller_index: [1, 1, 1]
   min_slab_size: 8.0
@@ -144,11 +149,25 @@ The example files in `example/` are larger FAIR-Chem UMA workflows intended as
 production-style starting points. They require the relevant FAIR-Chem
 installation, model access, and GPU environment.
 
+## Documentation
+
+The focused documentation is under [`docs/`](docs/index.md):
+
+- [Architecture and scientific workflow](docs/architecture.md)
+- [Configuration reference](docs/configuration.md)
+- [Outputs, restart, and offline analysis](docs/outputs-and-analysis.md)
+- [ISAAC reaction database](docs/reaction-database.md)
+- [Development guide](docs/development.md)
+
+The README gives the shortest path to a first run. The documentation pages are
+the reference for complete option tables, persistence contracts, matching
+semantics, and manuscript post-processing.
+
 ## Configuration Overview
 
 AutoKMC configs are YAML or TOML files. The main sections are:
 
-- `output`: output directory, filenames, trajectory cadence, calculation cache,
+- `output`: output directory, filenames, trajectory cadence, reaction database,
   ISAAC export, and log level.
 - `structure`: slab or nanoparticle construction.
 - `reactants`: gas-phase species, SMILES strings, pressures, and gas
@@ -270,12 +289,12 @@ By default, outputs are written under `output.dir`.
 Important files:
 
 - `events.jsonl`: one JSON record per accepted KMC event.
+- `run_manifest.json`: a run UUID, the exact input text and resolved config,
+  feed species, initial state, clock origin, and catalyst normalization
+  metadata needed for reproducible analysis.
 - `summary.json`: run metadata, reaction counts, and final occupancy.
-- `kmc.extxyz`: trajectory snapshots at the configured cadence.
-- `products.json`: product counts, rates, selectivity, and first/last times.
-- `product_timeseries.csv`: cumulative product formation over KMC time.
-- `product_episodes.jsonl`: one product event per line, with its causal chain.
-- `mechanism_summary.json`: mechanism fingerprints grouped by product.
+- `kmc.extxyz`: trajectory snapshots with graph node/species/site identities
+  and a per-atom frozen mask at the configured cadence.
 - `isaac_records.json`: ISAAC AI-ready scientific record bundle.
 - `checkpoint.pkl`: restart state when checkpointing is enabled.
 
@@ -304,52 +323,106 @@ reactions/
 `reaction.json` stores the energies, barriers, vibrational data when present,
 calculator metadata, and references to the structures written in that folder.
 
-## Product Rates And Mechanisms
+## Post-Processing Events
 
-The product outputs are intended for publication analysis.
+Product rates and mechanisms are intentionally calculated after KMC. Event
+schema v2 records the canonical gas/surface inputs and outputs of every fired
+reaction, including stable surface-placement ids. The live KMC graph does not
+store product lineage.
 
-AutoKMC currently treats a gas product event as either:
+Analyze a completed run with:
 
-- desorption of a species that was not listed in the initial reactants, or
-- a bond-coupling event whose `C` endpoint is an explicit gas product and is
-  not one of the initial reactants.
-
-`products.json` gives the production rate in Hz for each product species:
-
-```text
-rate_hz = product_count / total_kmc_time_s
+```bash
+autokmc analyze runs/co_oxidation_pt111_uma_4gpu
+# Optional stationary-state window:
+autokmc analyze RUN_DIR --start-time 1.0e-4 --end-time 5.0e-4 --blocks 20
+# If output.run_manifest_filename was customized:
+autokmc analyze RUN_DIR --manifest custom_manifest.json
 ```
 
-`product_episodes.jsonl` preserves the mechanism for each product event. It
-stores the lineage of the produced species and the sequence of events that led
-to it, such as adsorption, diffusion, bond coupling, and desorption.
+A product is defined strictly as a species not listed among the feed reactants
+that leaves an occupied surface placement through a desorption event. For each
+product desorption, the analyzer follows the consumed surface placement
+backward through the events that formed it. Diffusion is collapsed, bond
+formation branches into both precursor histories, and immediate reversible
+bond recrossings are removed from the reported chemical mechanism.
 
-## Calculation Cache
+The observed product rate is the number of product desorptions divided by the
+selected KMC time window. It is not the microscopic `rate_hz` propensity on an
+individual event. The analyzer writes:
+
+```text
+analysis/
+  analysis_summary.json
+  product_rates.csv
+  product_events.jsonl
+  mechanisms.csv
+  rate_blocks.csv
+```
+
+`product_rates.csv` includes the per-simulation rate, an exact two-sided 95%
+Garwood Poisson counting interval, and the rate normalized by the number of
+classified surface atoms.
+`mechanisms.csv` groups identical back-propagated mechanisms and reports their
+counts, fractions, and observed rates. Logs written before event schema v2 do
+not contain enough surface-state information for this analysis and must be
+rerun.
+
+## Reaction Database
 
 Optimization and NEB calculations are usually the slowest part of a run.
-AutoKMC writes reloadable cache records by default:
+AutoKMC writes graph-searchable reaction records by default:
 
 ```text
 calculation_cache/
-  adsorption/<hash>.json
-  diffusion/<hash>.json
-  bond/<hash>.json
+  index.sqlite3
+  records/<record_id>/
+    isaac_record.json
+    reaction_graph.json
+    occupied.extxyz         # adsorption
+    unoccupied.extxyz
+    state_a.extxyz          # diffusion
+    state_b.extxyz
+    state_ab.extxyz         # bond
+    state_c.extxyz
+    ts.extxyz               # diffusion and bond
+    neb_path.extxyz         # optional
 ```
 
-Each cache record contains:
+Each record contains:
 
-- a deterministic key based on the calculation inputs and settings,
-- relaxed endpoint structures embedded as JSON,
-- energies and optional thermochemistry,
-- transition-state and NEB path data when available,
-- AutoKMC metadata needed to repopulate the lateral class,
-- an ISAAC v1.05 record representation.
+- one ISAAC v1.05 evidence record as the source of truth,
+- a portable labelled reaction graph used for database matching,
+- required `.extxyz` endpoint and transition-state assets,
+- SHA-256 checksums for every graph and structure asset,
+- endpoint energies, barriers, and optional thermochemistry as ISAAC
+  descriptors,
+- method and optimizer/NEB settings used to establish compatibility,
+- an optional multi-frame `neb_path.extxyz` when the path was retained.
 
-On a later run, AutoKMC tries to load a matching complete cache record before
-running the expensive calculation again. If the geometry, parameters, matching
-settings, or relevant inputs change, the key changes and AutoKMC recomputes.
+On a later run, AutoKMC first checks the exact calculation key. It can then
+search the SQLite index for the same reaction, calculator/settings, and graph
+fingerprint. A candidate is accepted only after full labelled graph
+isomorphism and checksum verification. Run-local node ids, `iso_class`, and
+`lateral_class` numbers are not portable graph labels; chemical identity,
+endpoint roles, elements, bond roles, and topology are. A missing, unreadable,
+or modified required asset rejects the hit and the calculation is recomputed.
 
-Configure the cache with:
+Geometry is intentionally not part of fallback graph matching. Two records
+with the same labelled topology may therefore match even when their Cartesian
+coordinates differ. This is a known limitation of the method; the reused
+record's `.extxyz` assets preserve the actual geometry and checksums used for
+the stored calculation.
+
+If `index.sqlite3` is missing or corrupt, AutoKMC rebuilds it from verified
+ISAAC record folders. You can also do this explicitly with
+`autokmc rebuild-index CALCULATION_CACHE_DIR`.
+
+The loaded primitive energies and structures repopulate the lateral class.
+AutoKMC still computes the rate for the current KMC conditions, so temperature-
+and pressure-dependent rates are not frozen into the database.
+
+Configure the reaction database with:
 
 ```yaml
 output:
@@ -360,13 +433,16 @@ output:
 
 The ISAAC export follows the public
 [ISAAC AI-ready scientific record](https://github.com/ISAAC-DOE/isaac-ai-ready-record)
-v1.05 schema. Numerical quantities are written as ISAAC descriptors; embedded
-AutoKMC structures are referenced as assets.
+v1.05 schema. Numerical quantities are written as ISAAC descriptors and
+structures are external assets rather than embedded JSON. The configured
+`isaac_export_filename` is a JSON array in which every element is one complete
+ISAAC record; keep the corresponding `calculation_cache/records/` folders with
+the export so its relative asset URIs remain reproducible.
 
 ## Checkpoint Restart
 
 Checkpointing saves the live KMC state, including graph occupancy and discovered
-sites:
+sites, reaction counts, history, and random-number-generator state:
 
 ```yaml
 checkpoint:
@@ -376,9 +452,15 @@ checkpoint:
   # resume_from: ./runs/my_run/checkpoint.pkl
 ```
 
-Use checkpoints to resume a stopped simulation. Use the calculation cache to
+Use checkpoints to resume a stopped simulation. Use the reaction database to
 avoid repeating expensive optimization and NEB calculations. They solve
 different problems and are useful together.
+
+Resume into the same `output.dir`. AutoKMC appends `events.jsonl` and
+`kmc.extxyz`, restores reaction-folder counters and the RNG stream, rebuilds
+the cumulative summary from the event log, and adds a continuation segment to
+the existing run manifest. See
+[Outputs, Restart, and Offline Analysis](docs/outputs-and-analysis.md#checkpoint-continuation).
 
 ## Suggested Workflow
 
@@ -388,7 +470,7 @@ different problems and are useful together.
 4. Enable diffusion with a small number of KMC steps.
 5. Enable bond reactions and keep `persist_neb_path: true` while debugging.
 6. Turn on free-energy corrections once the network looks reasonable.
-7. Use `products.json` and `mechanism_summary.json` for publication tables.
+7. Run `autokmc analyze RUN_DIR` for product rates and mechanisms.
 8. Keep `calculation_cache/` with the run artifacts so results can be reused
    and audited later.
 
@@ -397,7 +479,11 @@ different problems and are useful together.
 Run tests with:
 
 ```bash
-python -m pytest
+python -m pip install -e ".[cli,test,dev]"
+python -m compileall -q autokmc
+ruff check autokmc tests
+mypy --follow-imports=skip autokmc/io/config.py autokmc/io/checkpoint.py autokmc/analysis/products.py
+pytest --cov=autokmc --cov-report=term-missing --cov-fail-under=50
 ```
 
 Useful package areas:
@@ -407,8 +493,9 @@ Useful package areas:
 - `autokmc/sites`: adsorption, diffusion, bond-site, and stability logic.
 - `autokmc/reactions`: reaction objects and rate calculations.
 - `autokmc/kmc`: KMC state, sampling, execution, and on-the-fly expansion.
-- `autokmc/io`: config loading, calculator construction, persistence, product
-  outputs, calculation cache, and ISAAC export.
+- `autokmc/io`: config loading, calculator construction, event persistence,
+  reaction database, and ISAAC export.
+- `autokmc/analysis`: offline product-rate and mechanism reconstruction.
 - `autokmc/thermo`: gas and adsorbate thermochemistry helpers.
 
 ## Troubleshooting
@@ -420,8 +507,9 @@ Useful package areas:
   larger `matching_trials`.
 - If no reactions are available, inspect adsorption-site pruning and gas-phase
   reactant energies.
-- If product rates are zero, confirm that the product is not listed as an
-  initial reactant and that desorption or gas-product bond events can occur.
+- If post-processed product rates are zero, inspect `events.jsonl` for a
+  desorption of a non-feed surface species. Direct gas-forming bond events are
+  intentionally not counted by the strict product definition.
 
 ## License
 

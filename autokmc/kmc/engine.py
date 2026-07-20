@@ -63,6 +63,7 @@ from autokmc.reactions.bond import (
 )
 from autokmc.kmc.expansion import expand_bond_sites_after_event
 from autokmc.kmc.execute import execute_reaction
+from autokmc.io.event_transitions import reaction_transition
 from autokmc.kmc.index import _ReactionIndex
 from autokmc.kmc.sampling import choose_reaction, sample_tau, total_rate
 from autokmc.kmc.state import (
@@ -82,6 +83,29 @@ from autokmc.utils.logging import get_logger
 from autokmc.core.constants import LATERAL_SHELLS_DEFAULT
 
 _log = get_logger(__name__)
+
+
+def _capture_rng_state(rng) -> dict | None:
+    if isinstance(rng, np.random.Generator):
+        return {"kind": "numpy", "state": rng.bit_generator.state}
+    if isinstance(rng, random.Random):
+        return {"kind": "python", "state": rng.getstate()}
+    return None
+
+
+def _restore_rng_state(rng, payload: dict | None):
+    if payload is None:
+        return rng
+    kind = payload.get("kind")
+    if kind == "numpy":
+        generator = rng if isinstance(rng, np.random.Generator) else np.random.default_rng()
+        generator.bit_generator.state = payload["state"]
+        return generator
+    if kind == "python":
+        generator = rng if isinstance(rng, random.Random) else random.Random()
+        generator.setstate(payload["state"])
+        return generator
+    raise ValueError(f"unsupported checkpoint RNG kind: {kind!r}")
 
 
 # Sampling, indexing, state mutation, and event execution live in focused
@@ -412,7 +436,10 @@ def _recompute_affected_sites(
             rxn_index.install_site(site, rxns)
 
     dkwargs = dict(diffusion_kwargs or {})
-    dkwargs.pop("calculation_cache_root", None)
+    for reserved in (
+        "calculation_cache_root", "free_energy_options", "vib_cache_root",
+    ):
+        dkwargs.pop(reserved, None)
     for ds in ds_to_update.values():
         rxns = get_applicable_diffusions(
             G, ds, calculator,
@@ -431,7 +458,10 @@ def _recompute_affected_sites(
             rxn_index.install_site(ds, rxns)
 
     bkwargs = dict(bond_kwargs or {})
-    bkwargs.pop("calculation_cache_root", None)
+    for reserved in (
+        "calculation_cache_root", "free_energy_options", "vib_cache_root",
+    ):
+        bkwargs.pop(reserved, None)
     for brs in brs_to_update.values():
         rxns = get_applicable_bond_reactions(
             G, brs, calculator,
@@ -441,6 +471,8 @@ def _recompute_affected_sites(
             lateral_interactions     = lateral_interactions,
             verbose                  = verbose,
             calculation_cache_root   = calculation_cache_root,
+            free_energy_options      = free_energy_options,
+            vib_cache_root           = vib_cache_root,
             **bkwargs,
         )
         updated_reactions.extend(rxns)
@@ -485,10 +517,12 @@ def run_kmc_steps(
     reaction_writer=None,
     trajectory_writer=None,
     summary_collector=None,
-    product_tracker=None,
     checkpoint_writer=None,
     initial_step: int = 0,
     initial_time_s: float = 0.0,
+    initial_history: list | None = None,
+    initial_reaction_counts: dict[str, int] | None = None,
+    initial_rng_state: dict | None = None,
 ) -> dict:
     """Run a KMC simulation in place on *G* for up to ``n_steps`` events.
 
@@ -567,10 +601,6 @@ def run_kmc_steps(
         Optional aggregator.  When supplied, ``.add()`` is called for each
         executed event so per-reaction-type statistics are available at the
         end of the run via ``summary_collector.to_dict()``.
-    product_tracker : autokmc.io.products.ProductMechanismTracker | None
-        Optional lineage tracker.  When supplied, product formation events
-        and causal mechanisms are recorded for publication-oriented outputs.
-
     Returns
     -------
     dict
@@ -584,6 +614,7 @@ def run_kmc_steps(
         rng = np.random.default_rng()
     elif isinstance(rng, int):
         rng = np.random.default_rng(rng)
+    rng = _restore_rng_state(rng, initial_rng_state)
 
     gas_energies = _build_gas_energy_lookup(reactants)
     gas_g_lookup = _build_gas_g_lookup(reactants)
@@ -644,7 +675,10 @@ def run_kmc_steps(
     diffusion_kwargs = dict(diffusion_kwargs or {})
     if calculation_cache_root is None:
         calculation_cache_root = diffusion_kwargs.get("calculation_cache_root")
-    diffusion_kwargs.pop("calculation_cache_root", None)
+    for reserved in (
+        "calculation_cache_root", "free_energy_options", "vib_cache_root",
+    ):
+        diffusion_kwargs.pop(reserved, None)
     if verbose:
         if diffusion_sites:
             n_diff_members = sum(len(ds.member_node_ids) for ds in diffusion_sites)
@@ -681,7 +715,10 @@ def run_kmc_steps(
     bond_kwargs = dict(bond_kwargs or {})
     if calculation_cache_root is None:
         calculation_cache_root = bond_kwargs.get("calculation_cache_root")
-    bond_kwargs.pop("calculation_cache_root", None)
+    for reserved in (
+        "calculation_cache_root", "free_energy_options", "vib_cache_root",
+    ):
+        bond_kwargs.pop(reserved, None)
     bond_growth_kwargs = dict(bond_growth_kwargs or {})
     if verbose:
         if bond_sites:
@@ -703,6 +740,8 @@ def run_kmc_steps(
             verbose                  = verbose,
             lateral_interactions     = lateral_interactions,
             calculation_cache_root   = calculation_cache_root,
+            free_energy_options      = free_energy_options,
+            vib_cache_root           = vib_cache_root,
             **bond_kwargs,
         )
         if verbose:
@@ -748,15 +787,12 @@ def run_kmc_steps(
         for rxn in reactions:
             if rxn is None:
                 continue
-            try:
-                reaction_writer.ensure_reaction(
-                    rxn,
-                    step=step_for_discovery,
-                    gas_energies=gas_energies,
-                    gas_free_energies=gas_g_lookup,
-                )
-            except Exception as exc:  # pragma: no cover
-                _log.warning("reaction_writer.ensure_reaction failed: %s", exc)
+            reaction_writer.ensure_reaction(
+                rxn,
+                step=step_for_discovery,
+                gas_energies=gas_energies,
+                gas_free_energies=gas_g_lookup,
+            )
 
     def _persist_invalid_diffusion_sites(sites: Iterable[DiffusionSite]) -> None:
         """Write invalid diffusion records for supplied sites only."""
@@ -765,12 +801,7 @@ def run_kmc_steps(
         for ds in sites:
             for lc in ds.lateral_classes:
                 if lc.stable is False:
-                    try:
-                        reaction_writer.write_invalid_diffusion(ds, lc)
-                    except Exception as exc:  # pragma: no cover
-                        _log.warning(
-                            "reaction_writer.write_invalid_diffusion failed: %s", exc
-                        )
+                    reaction_writer.write_invalid_diffusion(ds, lc)
 
     start_step = int(initial_step or 0)
     _persist_reactions(
@@ -794,21 +825,17 @@ def run_kmc_steps(
                 if any(nid in G and G.nodes[nid].get("occupied", False) for nid in nids)
             )
 
-    history: list[tuple] = []
+    history: list[tuple] = list(initial_history or [])
     reaction_counts: dict[str, int] = {
         "adsorption": 0, "desorption": 0, "diffusion": 0,
         "bond": 0, "bond_couple": 0, "bond_dissoc": 0,
     }
+    reaction_counts.update({
+        str(key): int(value)
+        for key, value in (initial_reaction_counts or {}).items()
+    })
     current_time = float(initial_time_s or 0.0)
     steps_executed = 0
-
-    if product_tracker is not None:
-        try:
-            product_tracker.seed_from_graph(
-                G, adsorbate_sites, step=start_step, time_s=current_time,
-            )
-        except Exception as exc:  # pragma: no cover
-            _log.warning("product_tracker.seed_from_graph failed: %s", exc)
 
     # max_n_shells for the lateral-shell expansion in _recompute_affected_sites.
     # This must match the BFS depth used by check_adsorbate_site_lateral so that
@@ -822,12 +849,9 @@ def run_kmc_steps(
     # The reaction writer does NOT — it pulls atoms straight from
     # ``reaction.lateral_class.atoms_{occupied,unoccupied}`` (the relaxed
     # structures stamped on by check_site_stability).
-    if trajectory_writer is not None:
-        try:
-            from autokmc.io.atoms import atoms_from_graph
-            trajectory_writer.maybe_write(atoms_from_graph(G), step=start_step)
-        except Exception as exc:  # pragma: no cover
-            _log.warning("trajectory_writer initial frame failed: %s", exc)
+    if trajectory_writer is not None and not getattr(trajectory_writer, "append", False):
+        from autokmc.io.atoms import atoms_from_graph
+        trajectory_writer.maybe_write(atoms_from_graph(G), step=start_step)
 
     for step in range(start_step + 1, start_step + int(n_steps) + 1):
         q_total = rxn_index.total_rate()
@@ -855,6 +879,9 @@ def run_kmc_steps(
         tau = float(np.log(1.0 / u_tau) / q_total)
         current_time += tau
 
+        persisted_transition = (
+            reaction_transition(chosen) if reaction_writer is not None else None
+        )
         affected = execute_reaction(G, chosen)
         steps_executed += 1
         reaction_counts[chosen.kind] = reaction_counts.get(chosen.kind, 0) + 1
@@ -862,39 +889,22 @@ def run_kmc_steps(
             sub = "bond_" + getattr(chosen, "direction", "couple")
             reaction_counts[sub] = reaction_counts.get(sub, 0) + 1
 
-        if product_tracker is not None:
-            try:
-                product_tracker.record_event(
-                    G,
-                    chosen,
-                    step=step,
-                    time_s=current_time,
-                    tau_s=tau,
-                )
-            except Exception as exc:  # pragma: no cover
-                _log.warning("product_tracker.record_event failed: %s", exc)
-
         # Persist the event — the reaction writer materialises the per-
         # lateral-class folder lazily on first sighting and otherwise just
         # appends a row to events.jsonl.
         if reaction_writer is not None:
-            try:
-                reaction_writer.record(
-                    step          = step,
-                    time_s        = current_time,
-                    tau_s         = tau,
-                    reaction      = chosen,
-                    gas_energies  = gas_energies,
-                    gas_free_energies = gas_g_lookup,
-                )
-            except Exception as exc:  # pragma: no cover
-                _log.warning("reaction_writer.record failed: %s", exc)
+            reaction_writer.record(
+                step          = step,
+                time_s        = current_time,
+                tau_s         = tau,
+                reaction      = chosen,
+                gas_energies  = gas_energies,
+                gas_free_energies = gas_g_lookup,
+                transition    = persisted_transition,
+            )
 
         if summary_collector is not None:
-            try:
-                summary_collector.add(chosen, step=step)
-            except Exception as exc:  # pragma: no cover
-                _log.warning("summary_collector.add failed: %s", exc)
+            summary_collector.add(chosen, step=step)
 
         history.append((
             step,
@@ -1046,18 +1056,15 @@ def run_kmc_steps(
             _grow_kw = dict(bond_growth_kwargs or {})
             _grow_kw["verbose"] = verbose
             _grow_kw.setdefault("frozen_indices", frozen_indices)
+            _grow_kw.setdefault("free_energy_options", free_energy_options)
+            _grow_kw.setdefault("free_energy_temperature_k", float(temperature))
+            _grow_kw.setdefault("vib_cache_root", vib_cache_root)
 
-            try:
-                new_brs = expand_bond_sites_after_event(
-                    G, chosen,
-                    calculator=calculator,
-                    **_grow_kw,
-                )
-            except CalculatorConfigError:
-                raise
-            except Exception as exc:  # pragma: no cover
-                _log.warning("expand_bond_sites_after_event failed: %s", exc)
-                new_brs = []
+            new_brs = expand_bond_sites_after_event(
+                G, chosen,
+                calculator=calculator,
+                **_grow_kw,
+            )
 
             # ── New adsorbate iso-classes from the registry ───────────────
             # find_adsorbate_sites (called inside _ensure_species_known)
@@ -1187,31 +1194,26 @@ def run_kmc_steps(
                         f"{len(_new_diff)} site-pair(s)"
                     )
                 _dkwargs = dict(diffusion_kwargs or {})
-                try:
-                    if verbose:
-                        _n_diff_members = sum(
-                            len(getattr(ds, "member_node_ids", ())) for ds in _new_diff
-                        )
-                        print(
-                            f"[KMC]    Running diffusion applicability and NEB "
-                            f"sweep for {_n_diff_members} new hop member(s)."
-                        )
-                    compute_all_diffusions(
-                        G, _new_diff, calculator,
-                        temperature              = temperature,
-                        transmission_coefficient = transmission_coefficient,
-                        frozen_indices           = frozen_indices,
-                        verbose                  = verbose,
-                        lateral_interactions     = lateral_interactions,
-                        free_energy_options      = free_energy_options,
-                        vib_cache_root           = vib_cache_root,
-                        calculation_cache_root   = calculation_cache_root,
-                        **_dkwargs,
+                if verbose:
+                    _n_diff_members = sum(
+                        len(getattr(ds, "member_node_ids", ())) for ds in _new_diff
                     )
-                except Exception as exc:  # pragma: no cover
-                    _log.warning(
-                        "compute_all_diffusions for new species failed: %s", exc
+                    print(
+                        f"[KMC]    Running diffusion applicability and NEB "
+                        f"sweep for {_n_diff_members} new hop member(s)."
                     )
+                compute_all_diffusions(
+                    G, _new_diff, calculator,
+                    temperature              = temperature,
+                    transmission_coefficient = transmission_coefficient,
+                    frozen_indices           = frozen_indices,
+                    verbose                  = verbose,
+                    lateral_interactions     = lateral_interactions,
+                    free_energy_options      = free_energy_options,
+                    vib_cache_root           = vib_cache_root,
+                    calculation_cache_root   = calculation_cache_root,
+                    **_dkwargs,
+                )
                 if verbose:
                     _n_new_diff_rxns = sum(
                         len(getattr(ds, "applicable_reactions", None) or [])
@@ -1287,6 +1289,8 @@ def run_kmc_steps(
                         verbose                  = verbose,
                         lateral_interactions     = lateral_interactions,
                         calculation_cache_root   = calculation_cache_root,
+                        free_energy_options      = free_energy_options,
+                        vib_cache_root           = vib_cache_root,
                         **bond_kwargs,
                     )
                     for brs in new_brs:
@@ -1322,51 +1326,12 @@ def run_kmc_steps(
         # Periodic trajectory dump (cadence enforced inside the writer).
         # Writes one extended-XYZ frame to the trajectory_writer's output file.
         if trajectory_writer is not None:
-            try:
-                from autokmc.io.atoms import atoms_from_graph
-                trajectory_writer.maybe_write(atoms_from_graph(G), step=step)
-            except Exception as exc:  # pragma: no cover
-                _log.warning("trajectory_writer.maybe_write failed: %s", exc)
+            from autokmc.io.atoms import atoms_from_graph
+            trajectory_writer.maybe_write(atoms_from_graph(G), step=step)
 
         if checkpoint_writer is not None:
-            try:
-                checkpoint_writer.maybe_write(
-                    step=step,
-                    time_s=current_time,
-                    graph=G,
-                    adsorbate_sites=adsorbate_sites,
-                    diffusion_sites=diffusion_sites,
-                    bond_sites=bond_sites,
-                    reactants=(
-                        list(reactants.values())
-                        if isinstance(reactants, dict)
-                        else (
-                            list(reactants)
-                            if isinstance(reactants, Iterable)
-                            and not isinstance(reactants, Reactant)
-                            else [reactants]
-                        )
-                    ),
-                    frozen_indices=frozen_indices,
-                    history=history,
-                    reaction_counts=reaction_counts,
-                )
-            except Exception as exc:  # pragma: no cover
-                _log.warning("checkpoint_writer.maybe_write failed: %s", exc)
-
-    # Close trajectory writer if we own a handle.
-    if trajectory_writer is not None:
-        try:
-            trajectory_writer.close()
-        except Exception:  # pragma: no cover
-            pass
-
-    if checkpoint_writer is not None and steps_executed > 0:
-        final_step = start_step + steps_executed
-        try:
             checkpoint_writer.maybe_write(
-                step=final_step,
-                force=True,
+                step=step,
                 time_s=current_time,
                 graph=G,
                 adsorbate_sites=adsorbate_sites,
@@ -1385,9 +1350,38 @@ def run_kmc_steps(
                 frozen_indices=frozen_indices,
                 history=history,
                 reaction_counts=reaction_counts,
+                rng_state=_capture_rng_state(rng),
             )
-        except Exception as exc:  # pragma: no cover
-            _log.warning("final checkpoint write failed: %s", exc)
+
+    # Close trajectory writer if we own a handle.
+    if trajectory_writer is not None:
+        trajectory_writer.close()
+
+    if checkpoint_writer is not None and steps_executed > 0:
+        final_step = start_step + steps_executed
+        checkpoint_writer.maybe_write(
+            step=final_step,
+            force=True,
+            time_s=current_time,
+            graph=G,
+            adsorbate_sites=adsorbate_sites,
+            diffusion_sites=diffusion_sites,
+            bond_sites=bond_sites,
+            reactants=(
+                list(reactants.values())
+                if isinstance(reactants, dict)
+                else (
+                    list(reactants)
+                    if isinstance(reactants, Iterable)
+                    and not isinstance(reactants, Reactant)
+                    else [reactants]
+                )
+            ),
+            frozen_indices=frozen_indices,
+            history=history,
+            reaction_counts=reaction_counts,
+            rng_state=_capture_rng_state(rng),
+        )
 
     final_occupancy = _final_occupancy_by_species(adsorbate_sites)
 

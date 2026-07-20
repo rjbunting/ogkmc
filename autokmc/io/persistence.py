@@ -55,6 +55,8 @@ from __future__ import annotations
 
 import json
 import math
+import os
+import tempfile
 from pathlib import Path
 from typing import Any, TextIO
 
@@ -74,10 +76,30 @@ from autokmc.core.constants import (
     DIFFUSION_FOLDER_FMT,
 )
 from autokmc.io.records import ReactionRecord
+from autokmc.io.event_transitions import reaction_transition
 from autokmc.species.smiles import smiles_to_dirname as _smiles_to_dirname
 from autokmc.utils.logging import get_logger
 
 _log = get_logger(__name__)
+
+
+def _atomic_json(path: Path, payload: Any) -> None:
+    """Write one complete JSON document without exposing partial contents."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(_json_safe(payload), handle, indent=2, allow_nan=False)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except Exception:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -434,6 +456,7 @@ class ReactionWriter:
         reactions_dir: str = REACTIONS_DIR,
         calculator_meta: dict[str, Any] | None = None,
         append: bool = False,
+        run_id: str | None = None,
     ):
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -444,10 +467,41 @@ class ReactionWriter:
         mode = "a" if append else "w"
         self._fp: TextIO | None = self._jsonl_path.open(mode, encoding="utf-8")
         self._calc_meta: dict[str, Any] = dict(calculator_meta or {})
+        self.run_id = None if run_id is None else str(run_id)
         self._n_written: int = 0
 
         # Per (sub, species, iso, lat) bookkeeping for reaction.json files.
         self._folder_meta: dict[tuple[str, str, int, int], dict[str, Any]] = {}
+        if append:
+            self._restore_existing_state()
+
+    def _restore_existing_state(self) -> None:
+        """Restore counters for an append-mode checkpoint continuation."""
+        try:
+            with self._jsonl_path.open("r", encoding="utf-8") as handle:
+                self._n_written = sum(1 for line in handle if line.strip())
+        except OSError:
+            self._n_written = 0
+
+        for path in self.reactions_root.glob("*/*/*/reaction.json"):
+            try:
+                relative = path.relative_to(self.reactions_root)
+                sub, species = relative.parts[:2]
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                key = (
+                    str(sub),
+                    str(species),
+                    int(payload["iso_class"]),
+                    int(payload["lateral_class"]),
+                )
+                stats = payload.get("stats") or {}
+                self._folder_meta[key] = {
+                    "count": int(stats.get("count", 0) or 0),
+                    "first_step": stats.get("first_step"),
+                    "last_step": stats.get("last_step"),
+                }
+            except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+                _log.warning("Ignoring unreadable reaction metadata during resume: %s", path)
 
     # ------------------------------------------------------------------
     @property
@@ -903,8 +957,8 @@ class ReactionWriter:
                 },
                 "calculator": dict(self._calc_meta),
             }
-        with (folder / "reaction.json").open("w", encoding="utf-8") as fp:
-            json.dump(_json_safe(payload), fp, indent=2)
+        payload["run_id"] = self.run_id
+        _atomic_json(folder / "reaction.json", payload)
 
     # ------------------------------------------------------------------
     def ensure_reaction(
@@ -990,8 +1044,8 @@ class ReactionWriter:
             },
             "calculator": dict(self._calc_meta),
         }
-        with (folder / "reaction.json").open("w", encoding="utf-8") as fp:
-            json.dump(_json_safe(payload), fp, indent=2)
+        payload["run_id"] = self.run_id
+        _atomic_json(folder / "reaction.json", payload)
 
         self._folder_meta[key] = {"count": 0, "first_step": None, "last_step": None}
         _log.info(
@@ -1011,6 +1065,7 @@ class ReactionWriter:
         reaction,
         gas_energies: dict[str, float] | None = None,
         gas_free_energies: dict[str, float] | None = None,
+        transition: dict[str, Any] | None = None,
         # Backwards-compat — ignored under the new per-reaction-folder layout.
         atoms_initial: Atoms | None = None,
         atoms_final:   Atoms | None = None,
@@ -1018,6 +1073,8 @@ class ReactionWriter:
         """Persist one KMC event (lazy folder creation + JSONL append)."""
         if self._fp is None:
             raise RuntimeError("ReactionWriter has been closed")
+
+        transition = dict(transition or reaction_transition(reaction))
 
         smiles = _reaction_smiles(reaction)
         folder = self._ensure_reaction_folder(reaction)
@@ -1071,6 +1128,11 @@ class ReactionWriter:
             barrier_ev      = barrier_ev,
             description     = description,
             reaction_dir    = str(folder.relative_to(self.output_dir)),
+            inputs          = list(transition["inputs"]),
+            outputs         = list(transition["outputs"]),
+            template        = transition.get("template"),
+            gas_product     = bool(transition.get("gas_product", False)),
+            run_id          = self.run_id,
             direction       = getattr(reaction, "direction", None),
             delta_g_ev      = delta_g_ev,
             barrier_g_ev    = barrier_g_ev,

@@ -12,7 +12,7 @@ from typing import Any
 from ase import Atoms
 
 
-CHECKPOINT_SCHEMA_VERSION = "1"
+CHECKPOINT_SCHEMA_VERSION = "2"
 
 
 @dataclass
@@ -34,6 +34,7 @@ class CheckpointState:
 	history: list
 	reaction_counts: dict
 	metadata: dict[str, Any]
+	rng_state: dict[str, Any] | None = None
 
 
 def _is_hashable(value) -> bool:
@@ -120,6 +121,7 @@ def make_checkpoint_state(
 	frozen_indices: list[int] | None = None,
 	history: list | None = None,
 	reaction_counts: dict | None = None,
+	rng_state: dict[str, Any] | None = None,
 	metadata: dict[str, Any] | None = None,
 ) -> CheckpointState:
 	return CheckpointState(
@@ -138,6 +140,7 @@ def make_checkpoint_state(
 			"written_at": datetime.now(timezone.utc).isoformat(),
 			**dict(metadata or {}),
 		},
+		rng_state=_strip_calculators(rng_state),
 	)
 
 
@@ -160,6 +163,12 @@ def load_checkpoint(path: str | Path) -> CheckpointState:
 		state = CheckpointState(**state)
 	if not isinstance(state, CheckpointState):
 		raise TypeError(f"checkpoint {path!s} does not contain a CheckpointState")
+	if state.schema_version == "1":
+		# Version 1 did not persist the random-number-generator state.  It can
+		# still be resumed, but only version-2 continuations are bitwise
+		# equivalent to an uninterrupted run.
+		state.rng_state = None
+		state.schema_version = CHECKPOINT_SCHEMA_VERSION
 	if state.schema_version != CHECKPOINT_SCHEMA_VERSION:
 		raise ValueError(
 			f"checkpoint schema_version={state.schema_version!r} does not match "

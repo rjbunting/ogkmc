@@ -61,20 +61,21 @@ Yippeeeee
 Kinetic modeling seeks to describe the reactivity and selectivity a catalyst has toward the conversion of reactants to products.
 The desired outcome is to theoretically predict these key catalyst properties accurately to find new active and selective catalysts.
 There are a variety of methods employed to achieve this.
-The simplest method is from volcano plots, where the adsorption energies of key intermediates are calculated and fitted to a Bell–Evans–Polanyi principle relationship.
+The simplest method is to use volcano plots, where the adsorption energies of key intermediates are calculated and fitted to a Bell–Evans–Polanyi principle relationship.
 This can be combined with linear scaling, giving an optimal adsorption energy for a key intermediate to have the most activity toward a certain product.
-With this, no explicit kinetic rate information of elementary reactions on the surface are included.
+With this, no explicit kinetic rate information of elementary reactions on the surface are calculated.
 Beyond this method is micro-kinetic modeling, where the kinetic rates of key elementary steps on the surface are considered.
 A steady state is assumed, where the gradient of the concentration of all surface species (the rate) equals 0.
-Reactions are surface specific and not site specific, causing a reduction in information.
-Despite this, surface species concentrations and the surface specific rates of elementary reactions can be discerned.
-For atomic level information of surface reactions, kinetic Monte Carlo offers that resolution, where surface site occupation by species, and subsequent reactions between surface species are considered.
-This allows the reaction to physically take place, going beyond surface concentrations.
+However, reactions are surface specific and not site specific, causing a reduction in information.
+Despite this, surface species concentrations and the surface specific rates of elementary reactions can still be discerned.
+For atomic level information of surface reactions, kinetic Monte Carlo offers that resolution, where surface site occupation by species, and subsequent reactions between surface species, are considered.
+This allows the reaction to explicitly take place, going beyond surface concentrations.
 
-Beyond the example of volcano plots, foreknowledge of the reaction mechanism is required, or, an exhaustive amount of reaction pathways are required to be considered to safely capture the dominant reaction pathway.
-With this, if new mechanisms are the dominant pathway for new classes of catalysts, the reactivity would be underestimated.
+The key issue with kinetic modeling is that foreknowledge of the reaction mechanism is required.
+Another strategy is to consider an exhaustive amount of reaction pathways, ensuring the dominant reaction pathway is safely captured.
+The major implication of this is that if new mechanisms are the dominant pathway for new classes of catalysts, the reactivity would be underestimated.
 A new method that builds the reaction network lazily, when new reactions on the surface become possible, would radically transform kinetic modeling.
-Some methods, such as with adaptive KMC, have attempted to extend KMC as an on the fly method, yet no complete online method has been developed yet.
+Some methods, such as with adaptive KMC, have attempted to extend KMC as an on the fly method.
 Here, a method is developed that considers possible graph evolutions as reaction classes.
 With this method, denoted as online graph kinetic Monte Carlo (OGKMC), reaction products, reactivity, selectivity, and the dominant reaction pathway can be found, with only a catalyst structure, reactants, and reaction conditions as inputs.
 %\section{Results and Discussion}
