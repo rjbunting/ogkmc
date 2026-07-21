@@ -57,6 +57,7 @@ def test_load_yaml_ok(tmp_path):
     assert cfg.calculator.import_path == "ase.calculators.emt.EMT"
     assert cfg.kmc.n_steps == 10
     assert cfg.diffusion.enabled is False
+    assert cfg.free_energy.symmetry_tolerance == pytest.approx(0.3)
 
 
 def test_load_toml_ok(tmp_path):
@@ -210,6 +211,7 @@ def test_missing_file():
         "bond:\n  neb_climb: 'true'\n",
         "kmc:\n  temperature_k: 0\n",
         "free_energy:\n  vibration_nfree: 3\n",
+        "free_energy:\n  symmetry_tolerance: 0\n",
     ],
 )
 def test_strict_validation_rejects_coercible_types_and_invalid_ranges(tmp_path, fragment):
@@ -219,4 +221,20 @@ def test_strict_validation_rejects_coercible_types_and_invalid_ranges(tmp_path, 
         "schema_version: '1'\nreactants:\n  - smiles: '[O]'\n" + fragment,
     )
     with pytest.raises(ConfigError):
+        load_config(path)
+
+
+def test_duplicate_canonical_reactants_are_rejected(tmp_path):
+    pytest.importorskip("yaml")
+    path = _write(
+        tmp_path,
+        """
+schema_version: "1"
+reactants:
+  - smiles: "C(O)"
+  - smiles: "OC"
+""",
+    )
+
+    with pytest.raises(ConfigError, match="duplicates reactants\\[0\\]"):
         load_config(path)

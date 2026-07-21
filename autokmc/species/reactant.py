@@ -133,8 +133,8 @@ class Reactant:
     #: adsorption rate in :func:`autokmc.reactions.adsorption._energetics_cached`
     #: so the persisted ΔG / barrier remain at the 1-bar reference.
     partial_pressure_bar : float               = 1.0
-    #: Free-floating dict for any extra thermo metadata
-    #: (geometry / symmetry_number / spin / temperature_k / pressure_bar).
+    #: Free-floating dict for thermochemistry metadata, including geometry,
+    #: rotational-symmetry inference, spin, temperature, and pressure.
     thermo_meta  : dict                        = field(default_factory=dict)
 
 
@@ -549,11 +549,14 @@ def build_reactant(
         reactant.frequencies_ev = list(thermo["frequencies_ev"])
         reactant.imaginary_ev   = list(thermo["imaginary_ev"])
         reactant.thermo_meta = {
-            "geometry":        thermo.get("geometry"),
-            "symmetry_number": thermo.get("symmetry_number"),
-            "spin":            thermo.get("spin"),
-            "temperature_k":   thermo.get("temperature_k"),
-            "pressure_bar":    thermo.get("pressure_bar"),
+            "geometry":               thermo.get("geometry"),
+            "symmetry_number":        thermo.get("symmetry_number"),
+            "symmetry_number_source": thermo.get("symmetry_number_source"),
+            "point_group":            thermo.get("point_group"),
+            "symmetry_tolerance":     thermo.get("symmetry_tolerance"),
+            "spin":                   thermo.get("spin"),
+            "temperature_k":          thermo.get("temperature_k"),
+            "pressure_bar":           thermo.get("pressure_bar"),
         }
 
     return reactant

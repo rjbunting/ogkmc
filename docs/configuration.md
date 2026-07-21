@@ -67,7 +67,7 @@ zero. Unconverged structure optimization is an error.
 | `add_hydrogens` | `true` | Add implicit hydrogens during molecular construction. |
 | `relax_in_gas` | `true` | Relax gas geometry. If false, a finite single-point energy is still computed. |
 | `partial_pressure_bar` | `null` | Species pressure; falls back to `free_energy.pressure_bar`. Zero prevents gas adsorption. |
-| `symmetry_number` | `null` | Ideal-gas symmetry number; otherwise uses the free-energy default. |
+| `symmetry_number` | `null` | Optional ideal-gas symmetry-number override. By default it is inferred from the final gas geometry with pymatgen. |
 | `spin` | `null` | Spin value used by ideal-gas thermochemistry. |
 | `geometry` | `null` | `auto`, `linear`, `nonlinear`, or `monatomic`. |
 
@@ -190,14 +190,18 @@ explicitly.
 | `vibration_nfree` | `2` | Must be `2` or `4`. |
 | `include_ts_vibrations` | `true` | Compute transition-state vibrations. |
 | `min_frequency_ev` | `0.0015` eV | Low-frequency floor used by thermochemistry. |
-| `default_symmetry_number` | `1` | Gas symmetry fallback. |
+| `symmetry_tolerance` | `0.3` Å | Cartesian tolerance used by pymatgen for molecular point-group and rotational-symmetry inference. |
 | `default_spin` | `0.0` | Gas spin fallback. |
 | `default_geometry` | `auto` | `auto`, `linear`, `nonlinear`, or `monatomic`. |
 | `cache_dir` | `null` | Persistent vibration-cache root; defaults below the run directory. |
 
 Free-energy work can dominate runtime. The supplied platinum GPU examples
 disable it intentionally for network-debug runs and can be switched on for
-production thermochemistry.
+production thermochemistry. For multi-atom gas species, AutoKMC records the
+inferred rotational symmetry number, point group, tolerance, and inference
+source in the reactant thermochemistry metadata and run manifest. Set a
+reactant-specific `symmetry_number` only when an explicit override is
+scientifically necessary.
 
 ## `checkpoint`
 

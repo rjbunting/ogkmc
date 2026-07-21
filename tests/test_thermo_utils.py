@@ -36,6 +36,123 @@ def test_split_real_imag_ev_treats_negative_real_modes_as_imaginary():
     assert imag_ev == pytest.approx([0.080, 0.0004, 0.090])
 
 
+@pytest.mark.parametrize(
+    ("atoms", "expected_number", "expected_point_group"),
+    [
+        (Atoms("He", positions=[[0.0, 0.0, 0.0]]), 1, "K_h"),
+        (
+            Atoms("CO", positions=[[0.0, 0.0, 0.0], [0.0, 0.0, 1.13]]),
+            1,
+            "C*v",
+        ),
+        (
+            Atoms("O2", positions=[[0.0, 0.0, 0.0], [0.0, 0.0, 1.21]]),
+            2,
+            "D*h",
+        ),
+        (
+            Atoms(
+                "OH2",
+                positions=[
+                    [0.0, 0.0, 0.0],
+                    [0.757, 0.586, 0.0],
+                    [-0.757, 0.586, 0.0],
+                ],
+            ),
+            2,
+            "C2v",
+        ),
+    ],
+)
+def test_infer_rotational_symmetry_number(atoms, expected_number, expected_point_group):
+    symmetry_number, point_group = free_energy._infer_rotational_symmetry_number(
+        atoms,
+        tolerance=0.3,
+    )
+
+    assert symmetry_number == expected_number
+    assert point_group == expected_point_group
+
+
+def test_gas_thermo_infers_and_records_rotational_symmetry(monkeypatch):
+    captured: dict = {}
+
+    def fake_vibrate(_atoms, indices, *, options, cache_dir, label):
+        return [], [], []
+
+    class FakeIdealGasThermo:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def get_gibbs_energy(self, *, temperature, pressure, verbose):
+            return 1.25
+
+        def get_ZPE_correction(self):
+            return 0.05
+
+        def get_entropy(self, *, temperature, pressure, verbose):
+            return 0.001
+
+    import ase.thermochemistry as ase_thermochemistry
+
+    monkeypatch.setattr(free_energy, "_vibrate", fake_vibrate)
+    monkeypatch.setattr(ase_thermochemistry, "IdealGasThermo", FakeIdealGasThermo)
+
+    result = free_energy.compute_gas_thermo(
+        Atoms("O2", positions=[[0.0, 0.0, 0.0], [0.0, 0.0, 1.21]]),
+        energy_ev=1.0,
+        temperature_k=300.0,
+        pressure_bar=1.0,
+        options=free_energy.FreeEnergyOptions(enabled=True, symmetry_tolerance=0.2),
+    )
+
+    assert captured["symmetrynumber"] == 2
+    assert result["symmetry_number"] == 2
+    assert result["symmetry_number_source"] == "inferred"
+    assert result["point_group"] == "D*h"
+    assert result["symmetry_tolerance"] == pytest.approx(0.2)
+
+
+def test_explicit_gas_symmetry_number_bypasses_inference(monkeypatch):
+    def fail_if_called(*_args, **_kwargs):
+        raise AssertionError("automatic inference should not run for an explicit override")
+
+    def fake_vibrate(_atoms, indices, *, options, cache_dir, label):
+        return [], [], []
+
+    class FakeIdealGasThermo:
+        def __init__(self, **_kwargs):
+            pass
+
+        def get_gibbs_energy(self, *, temperature, pressure, verbose):
+            return 1.0
+
+        def get_ZPE_correction(self):
+            return 0.0
+
+        def get_entropy(self, *, temperature, pressure, verbose):
+            return 0.0
+
+    import ase.thermochemistry as ase_thermochemistry
+
+    monkeypatch.setattr(free_energy, "_infer_rotational_symmetry_number", fail_if_called)
+    monkeypatch.setattr(free_energy, "_vibrate", fake_vibrate)
+    monkeypatch.setattr(ase_thermochemistry, "IdealGasThermo", FakeIdealGasThermo)
+
+    result = free_energy.compute_gas_thermo(
+        Atoms("O2", positions=[[0.0, 0.0, 0.0], [0.0, 0.0, 1.21]]),
+        energy_ev=1.0,
+        temperature_k=300.0,
+        pressure_bar=1.0,
+        options=free_energy.FreeEnergyOptions(enabled=True),
+        symmetry_number=2,
+    )
+
+    assert result["symmetry_number"] == 2
+    assert result["symmetry_number_source"] == "explicit"
+    assert result["point_group"] is None
+
+
 def test_default_harmonic_cache_uses_temporary_directory(monkeypatch):
     seen: dict[str, Path] = {}
 

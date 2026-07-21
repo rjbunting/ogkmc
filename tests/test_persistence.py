@@ -32,6 +32,8 @@ def test_atoms_from_graph_includes_only_occupied_adsorbates(tmp_path, synth_grap
     assert atoms.arrays["graph_node_id"].tolist() == ["0", "1", "100"]
     assert atoms.arrays["node_type"].tolist() == ["bulk", "surface", "adsorbate"]
     assert atoms.arrays["reactant_smiles"].tolist()[-1] == "[C-]#[O+]"
+    assert atoms.arrays["site_iso_class"].tolist()[-1] == "2"
+    assert atoms.arrays["site_member_index"].tolist()[-1] == "1"
     assert atoms.info["autokmc_graph_schema"] == "test-graph-v1"
     assert atoms.info["run_id"] == "run-123"
     assert isinstance(atoms.constraints[0], FixAtoms)
@@ -49,6 +51,13 @@ def test_atoms_from_graph_excludes_unoccupied(synth_graph):
     synth_graph.nodes[100]["occupied"] = False
     atoms = atoms_from_graph(synth_graph)
     assert atoms.get_chemical_symbols() == ["Cu", "Cu"]
+
+
+def test_atoms_from_graph_uses_legacy_iso_class_as_metadata_fallback(synth_graph):
+    synth_graph.nodes[100]["iso_class"] = 7
+    atoms = atoms_from_graph(synth_graph)
+
+    assert atoms.arrays["site_iso_class"].tolist()[-1] == "7"
 
 
 def test_reaction_writer_creates_per_lateral_class_folder(

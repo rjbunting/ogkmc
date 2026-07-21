@@ -12,6 +12,7 @@ import pytest
 from autokmc.kmc.engine import (
     _capture_rng_state,
     _final_occupancy_by_species,
+    _reactants_for_checkpoint,
     _restore_rng_state,
 )
 from autokmc.kmc.execute import execute_reaction
@@ -24,6 +25,8 @@ from autokmc.kmc.expansion import (
 from autokmc.kmc.sampling import _RateSegmentTree
 from autokmc.reactions.bond import _bond_energetics_cached, is_bond_applicable
 from autokmc.sites.bond import BondReactionLateral
+from autokmc.species.reactant import Reactant
+from ase import Atoms
 
 
 def _site(smiles: str, iso: int, node_id: int, clique: frozenset[int]):
@@ -130,6 +133,17 @@ def test_checkpoint_rng_state_continues_exact_random_stream(kind):
     )
 
     assert [restored.random() for _ in range(8)] == expected
+
+
+def test_checkpoint_reactants_include_runtime_registry_species():
+    initial = Reactant("[O]", Atoms("O"), nx.Graph())
+    discovered = Reactant("[OH]", Atoms("OH"), nx.Graph())
+    G = nx.Graph()
+    G.graph["bond_registry"] = {
+        "species": {"[O]": initial, "[OH]": discovered},
+    }
+
+    assert _reactants_for_checkpoint([initial], G) == [initial, discovered]
 
 
 def test_rebuild_bond_reverse_indexes_keeps_existing_and_new_sites():
@@ -448,7 +462,11 @@ def test_bond_expansion_defers_triple_prune_until_after_stability(monkeypatch):
     )
 
     def fake_find_bond_sites(*args, **kwargs):
-        calls.append(("find", kwargs["prune_by_triple"]))
+        calls.append((
+            "find",
+            kwargs["prune_by_triple"],
+            kwargs["deduplicate_iso"],
+        ))
         return [kept, dropped]
 
     def fake_prune_unstable(*args, **kwargs):
@@ -474,12 +492,80 @@ def test_bond_expansion_defers_triple_prune_until_after_stability(monkeypatch):
         calculator=object(),
         bond_prune_by_triple=True,
         bond_prune_with_calculator=True,
+        deduplicate_iso=False,
     )
 
     assert out == [kept]
     assert calls == [
-        ("find", False),
+        ("find", False, False),
         ("stability", [-1, -1]),
         ("triple", [-1]),
         ("rebuild", 1),
     ]
+
+
+def test_runtime_bond_expansion_honours_disabled_reaction_families(monkeypatch):
+    from autokmc.kmc import expansion
+
+    G = nx.Graph()
+    initialise_bond_registry(
+        G,
+        reactants={"C": SimpleNamespace(smiles="C")},
+        adsorbate_sites={"C": [SimpleNamespace(member_node_ids=[[1]])]},
+    )
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("disabled template family was derived")
+
+    monkeypatch.setattr(expansion, "derive_dissociation_templates", unexpected)
+    monkeypatch.setattr(expansion, "derive_coupling_templates", unexpected)
+
+    assert expand_bond_sites_for_new_species(
+        G,
+        "C",
+        calculator=None,
+        include_dissociation=False,
+        include_coupling=False,
+    ) == []
+
+
+def test_runtime_bond_expansion_does_not_build_disabled_leaf_species(monkeypatch):
+    from autokmc.kmc import expansion
+
+    G = nx.Graph()
+    site = SimpleNamespace(member_node_ids=[[1]])
+    initialise_bond_registry(
+        G,
+        reactants={"C": SimpleNamespace(smiles="C")},
+        adsorbate_sites={"C": [site]},
+    )
+    template = SimpleNamespace(
+        smiles_a="[A]",
+        smiles_b="[B]",
+        smiles_c="C",
+        source="dissociation",
+    )
+    monkeypatch.setattr(
+        expansion,
+        "derive_dissociation_templates",
+        lambda *args, **kwargs: [template],
+    )
+    monkeypatch.setattr(
+        expansion,
+        "derive_coupling_templates",
+        lambda *args, **kwargs: [],
+    )
+    monkeypatch.setattr(
+        expansion,
+        "find_bond_sites",
+        lambda *args, **kwargs: pytest.fail("unavailable template was enumerated"),
+    )
+
+    assert expand_bond_sites_for_new_species(
+        G,
+        "C",
+        calculator=None,
+        auto_build_leaf_species=False,
+    ) == []
+    assert "[A]" not in G.graph["bond_registry"]["species"]
+    assert "[B]" not in G.graph["bond_registry"]["species"]

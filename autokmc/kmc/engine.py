@@ -38,6 +38,7 @@ from autokmc.sites.adsorbate import AdsorbateSite
 from autokmc.sites.diffusion import DiffusionSite
 from autokmc.sites.bond import BondReactionSite
 from autokmc.species.reactant import Reactant
+from autokmc.species.smiles import canonical_smiles
 from autokmc.reactions.adsorption import (
     AdsorptionReaction as Reaction,  # alias keeps existing type hints valid
     _build_gas_energy_lookup,
@@ -106,6 +107,39 @@ def _restore_rng_state(rng, payload: dict | None):
         generator.setstate(payload["state"])
         return generator
     raise ValueError(f"unsupported checkpoint RNG kind: {kind!r}")
+
+
+def _reactants_for_checkpoint(reactants, G: nx.Graph) -> list:
+    """Return initial and dynamically discovered species for restart."""
+    if isinstance(reactants, dict):
+        initial = list(reactants.values())
+    elif isinstance(reactants, Iterable) and not isinstance(reactants, Reactant):
+        initial = list(reactants)
+    else:
+        initial = [reactants]
+
+    registry_species = (
+        G.graph.get("bond_registry", {}).get("species", {}) or {}
+    )
+    candidates = initial + list(registry_species.values())
+    result: list = []
+    seen_species: set[str] = set()
+    seen_other: set[int] = set()
+    for item in candidates:
+        if item is None:
+            continue
+        if isinstance(item, Reactant):
+            key = canonical_smiles(item.smiles)
+            if key in seen_species:
+                continue
+            seen_species.add(key)
+        else:
+            identity = id(item)
+            if identity in seen_other:
+                continue
+            seen_other.add(identity)
+        result.append(item)
+    return result
 
 
 # Sampling, indexing, state mutation, and event execution live in focused
@@ -1337,16 +1371,7 @@ def run_kmc_steps(
                 adsorbate_sites=adsorbate_sites,
                 diffusion_sites=diffusion_sites,
                 bond_sites=bond_sites,
-                reactants=(
-                    list(reactants.values())
-                    if isinstance(reactants, dict)
-                    else (
-                        list(reactants)
-                        if isinstance(reactants, Iterable)
-                        and not isinstance(reactants, Reactant)
-                        else [reactants]
-                    )
-                ),
+                reactants=_reactants_for_checkpoint(reactants, G),
                 frozen_indices=frozen_indices,
                 history=history,
                 reaction_counts=reaction_counts,
@@ -1367,16 +1392,7 @@ def run_kmc_steps(
             adsorbate_sites=adsorbate_sites,
             diffusion_sites=diffusion_sites,
             bond_sites=bond_sites,
-            reactants=(
-                list(reactants.values())
-                if isinstance(reactants, dict)
-                else (
-                    list(reactants)
-                    if isinstance(reactants, Iterable)
-                    and not isinstance(reactants, Reactant)
-                    else [reactants]
-                )
-            ),
+            reactants=_reactants_for_checkpoint(reactants, G),
             frozen_indices=frozen_indices,
             history=history,
             reaction_counts=reaction_counts,

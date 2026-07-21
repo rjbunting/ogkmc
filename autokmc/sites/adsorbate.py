@@ -1053,7 +1053,7 @@ def _materialise_adsorbate_nodes(
         )
         rep_positions = np.asarray(ms.positions, dtype=float)
 
-        for atom_cliques in ms.members:
+        for member_index, atom_cliques in enumerate(ms.members):
             # Geometry for this member (falls back to representative if any
             # bonded clique is missing from the position index).
             positions = _member_positions(
@@ -1083,6 +1083,8 @@ def _materialise_adsorbate_nodes(
                     covalent_radius = react_radii[i],
                     reactant        = smiles,
                     iso_class       = int(ms.iso_class),
+                    site_iso_class  = int(ms.iso_class),
+                    site_member_index = int(member_index),
                     reactant_index  = int(i),
                     clique          = (frozenset(clq) if clq is not None else None),
                     k               = (len(clq) if clq is not None else 0),

@@ -277,10 +277,15 @@ free_energy:
   vibration_displacement: 0.01
   vibration_nfree: 2
   include_ts_vibrations: true
+  symmetry_tolerance: 0.3
 ```
 
-Gas-phase reactants can declare pressure, symmetry number, spin, and geometry
-under `reactants`.
+Gas-phase rotational symmetry numbers are inferred from the final molecular
+coordinates with pymatgen and recorded with the detected point group in the
+thermochemistry metadata and run manifest. Reactants can still declare
+`symmetry_number` as an explicit override. Pressure, spin, and geometry remain
+configurable under `reactants`; spin cannot generally be inferred from
+molecular geometry.
 
 ## Outputs
 

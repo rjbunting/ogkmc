@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import networkx as nx
+from types import SimpleNamespace
 from ase import Atoms
 from ase.calculators.emt import EMT
 
@@ -77,3 +78,35 @@ def test_checkpoint_preserves_hashable_keys_that_strip_to_dict(tmp_path):
     assert isinstance(loaded_key, HashableDict)
     assert dict(loaded_key) == {"kind": "lat", "index": 0}
     assert loaded_atoms.calc is None
+
+
+def test_checkpoint_preserves_shared_site_and_registry_identity(tmp_path):
+    site = SimpleNamespace(iso_class=0, calc=EMT())
+    diffusion = SimpleNamespace(site_a=site)
+    reactant = SimpleNamespace(smiles="[O]", atoms=Atoms("O"))
+    reactant.atoms.calc = EMT()
+    G = nx.Graph()
+    G.graph["adsorbate_clique_to_members"] = {frozenset({1}): [(site, 0)]}
+    G.graph["bond_registry"] = {
+        "species": {"[O]": reactant},
+        "adsorbate_sites": {"[O]": [site]},
+    }
+
+    state = make_checkpoint_state(
+        step=1,
+        time_s=0.1,
+        graph=G,
+        adsorbate_sites=[site],
+        diffusion_sites=[diffusion],
+        bond_sites=[],
+        reactants=[reactant],
+    )
+    loaded = load_checkpoint(save_checkpoint(tmp_path / "shared.pkl", state))
+
+    restored_site = loaded.adsorbate_sites[0]
+    assert loaded.graph.graph["adsorbate_clique_to_members"][frozenset({1})][0][0] is restored_site
+    assert loaded.graph.graph["bond_registry"]["adsorbate_sites"]["[O]"][0] is restored_site
+    assert loaded.diffusion_sites[0].site_a is restored_site
+    assert loaded.graph.graph["bond_registry"]["species"]["[O]"] is loaded.reactants[0]
+    assert restored_site.calc is None
+    assert loaded.reactants[0].atoms.calc is None

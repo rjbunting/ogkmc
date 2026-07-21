@@ -34,7 +34,6 @@ reactants:
     add_hydrogens: false
     relax_in_gas: true
     partial_pressure_bar: 1.0
-    symmetry_number: 1
     geometry: linear
 
   # O2 feed; bond dissociation templates produce O* + O* <=> O2.
@@ -42,7 +41,6 @@ reactants:
     add_hydrogens: false
     relax_in_gas: true
     partial_pressure_bar: 0.2
-    symmetry_number: 2
     geometry: linear
     spin: 1.0
 
