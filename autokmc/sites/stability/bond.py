@@ -1512,7 +1512,7 @@ def check_bond_site_stability(
             "vibration_nfree": int(free_energy_options.vibration_nfree),
             "include_ts_vibrations": bool(free_energy_options.include_ts_vibrations),
             "min_frequency_ev": float(free_energy_options.min_frequency_ev),
-            "default_symmetry_number": int(free_energy_options.default_symmetry_number),
+            "symmetry_tolerance": float(free_energy_options.symmetry_tolerance),
             "default_spin": float(free_energy_options.default_spin),
             "default_geometry": str(free_energy_options.default_geometry),
         }

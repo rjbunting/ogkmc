@@ -116,7 +116,8 @@ class ReactantCfg:
     #: Default ``None`` → fall back to ``free_energy.pressure_bar``.
     partial_pressure_bar: float | None = None
     #: Symmetry number σ for IdealGasThermo (e.g. 2 for H₂, 12 for CH₄).
-    #: Default ``None`` → ``free_energy.default_symmetry_number`` (1).
+    #: Default ``None`` infers it from the final gas-phase geometry with
+    #: pymatgen.  Retained as an override for unusual or distorted structures.
     symmetry_number: int | None        = None
     #: Spin S (number of unpaired electrons / 2).  Default ``None`` →
     #: ``free_energy.default_spin`` (0).
@@ -265,7 +266,9 @@ class FreeEnergyCfg:
     vibration_nfree         : int   = 2
     include_ts_vibrations   : bool  = True
     min_frequency_ev        : float = 0.0015
-    default_symmetry_number : int   = 1
+    #: Cartesian tolerance (Å) used by pymatgen's molecular point-group
+    #: analyzer when a reactant does not provide ``symmetry_number``.
+    symmetry_tolerance      : float = 0.3
     default_spin            : float = 0.0
     default_geometry        : str   = "auto"
     #: Optional persistent cache directory for ASE ``Vibrations`` JSON
@@ -404,6 +407,8 @@ def _require_number(value: Any, path: str, *, minimum: float | None = None,
 
 def _validate_config(cfg: RunConfig) -> None:
     """Apply strict type, enum, and physical range validation."""
+    from autokmc.species.smiles import canonical_smiles
+
     _require_bool(cfg.output.calculation_cache_enabled, "output.calculation_cache_enabled")
     _require_int(cfg.output.trajectory_dump_every, "output.trajectory_dump_every", minimum=0)
     if str(cfg.output.log_level).upper() not in {"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"}:
@@ -423,6 +428,7 @@ def _validate_config(cfg: RunConfig) -> None:
     if cfg.structure.n_atoms is not None:
         _require_int(cfg.structure.n_atoms, "structure.n_atoms", minimum=1)
 
+    seen_reactants: dict[str, int] = {}
     for index, reactant in enumerate(cfg.reactants):
         prefix = f"reactants[{index}]"
         if not isinstance(reactant.smiles, str) or not reactant.smiles.strip():
@@ -437,6 +443,15 @@ def _validate_config(cfg: RunConfig) -> None:
             _require_number(reactant.spin, f"{prefix}.spin", minimum=0.0)
         if reactant.geometry not in {None, "auto", "linear", "nonlinear", "monatomic"}:
             raise ConfigError(f"{prefix}.geometry has unsupported value {reactant.geometry!r}")
+        canonical = canonical_smiles(reactant.smiles)
+        if canonical in seen_reactants:
+            first = seen_reactants[canonical]
+            raise ConfigError(
+                f"{prefix}.smiles duplicates reactants[{first}].smiles after "
+                f"canonicalisation ({canonical!r}); combine their feed settings "
+                "into one reactant entry"
+            )
+        seen_reactants[canonical] = index
 
     _require_bool(cfg.adsorbate_sites.prune_stable_only, "adsorbate_sites.prune_stable_only")
     _require_number(cfg.adsorbate_sites.fmax, "adsorbate_sites.fmax", strictly_positive=True)
@@ -491,7 +506,11 @@ def _validate_config(cfg: RunConfig) -> None:
         raise ConfigError("free_energy.vibration_nfree must be 2 or 4")
     _require_bool(cfg.free_energy.include_ts_vibrations, "free_energy.include_ts_vibrations")
     _require_number(cfg.free_energy.min_frequency_ev, "free_energy.min_frequency_ev", minimum=0.0)
-    _require_int(cfg.free_energy.default_symmetry_number, "free_energy.default_symmetry_number", minimum=1)
+    _require_number(
+        cfg.free_energy.symmetry_tolerance,
+        "free_energy.symmetry_tolerance",
+        strictly_positive=True,
+    )
     _require_number(cfg.free_energy.default_spin, "free_energy.default_spin", minimum=0.0)
     if cfg.free_energy.default_geometry not in {"auto", "linear", "nonlinear", "monatomic"}:
         raise ConfigError("free_energy.default_geometry is unsupported")

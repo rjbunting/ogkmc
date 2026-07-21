@@ -46,11 +46,18 @@ def atoms_from_graph(G: nx.Graph) -> Atoms:
 			dtype=str,
 		)
 
+	def _site_iso_class(node) -> str:
+		data = G.nodes[node]
+		return str(data.get("site_iso_class", data.get("iso_class", "_")))
+
 	atoms.new_array("graph_node_id", np.asarray([str(node) for node in all_ids], dtype=str))
 	atoms.new_array("node_type", _text("type"))
 	atoms.new_array("reactant_smiles", _text("reactant"))
 	atoms.new_array("reactant_index", _text("reactant_index"))
-	atoms.new_array("site_iso_class", _text("site_iso_class"))
+	atoms.new_array(
+		"site_iso_class",
+		np.asarray([_site_iso_class(node) for node in all_ids], dtype=str),
+	)
 	atoms.new_array("site_member_index", _text("site_member_index"))
 	atoms.new_array(
 		"occupied",

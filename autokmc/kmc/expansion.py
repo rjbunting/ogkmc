@@ -338,6 +338,10 @@ def expand_bond_sites_for_new_species(
     include_ring_bonds: bool = False,
     add_hydrogens: bool = True,
     include_homo_coupling: bool = True,
+    include_dissociation: bool = True,
+    include_coupling: bool = True,
+    deduplicate_iso: bool = True,
+    auto_build_leaf_species: bool = True,
     find_diffusion: bool = False,
     diffusion_max_hops: int = DIFFUSION_MAX_HOPS,
     diffusion_n_shells_pair: int = N_SHELLS_DEFAULT,
@@ -394,6 +398,13 @@ def expand_bond_sites_for_new_species(
         Forwarded to :func:`find_bond_sites`.
     bond_types, include_ring_bonds
         Forwarded to :func:`derive_dissociation_templates`.
+    include_dissociation, include_coupling
+        Enable the same reaction families selected by the run config.
+    deduplicate_iso
+        Forwarded to :func:`find_bond_sites`.
+    auto_build_leaf_species
+        Build template products/fragments that are not already registered.
+        When false, templates requiring an unavailable leaf are skipped.
     include_homo_coupling : bool
         Include the homo-coupling template ``new_smiles + new_smiles → W``.
         Default ``True``.
@@ -435,38 +446,65 @@ def expand_bond_sites_for_new_species(
 
     # 3. Derive new templates centred on cs.
     new_tpls: list[BondReactionTemplate] = []
+    pending_template_keys: set[tuple[str, str, str]] = set()
 
     # 3a. Dissociation: cs → X + Y
-    for t in derive_dissociation_templates(
-        cs,
-        bond_types         = bond_types,
-        include_ring_bonds = include_ring_bonds,
-        add_hydrogens      = add_hydrogens,
-    ):
-        key = (t.smiles_a, t.smiles_b, t.smiles_c)
-        if key not in reg["templates"]:
-            reg["templates"].add(key)
-            new_tpls.append(t)
+    if include_dissociation:
+        for t in derive_dissociation_templates(
+            cs,
+            bond_types         = bond_types,
+            include_ring_bonds = include_ring_bonds,
+            add_hydrogens      = add_hydrogens,
+        ):
+            key = (t.smiles_a, t.smiles_b, t.smiles_c)
+            if key not in reg["templates"] and key not in pending_template_keys:
+                pending_template_keys.add(key)
+                new_tpls.append(t)
 
     # 3b. Coupling: cs + Z → W for every known Z (including cs itself).
-    known_smiles = list(reg["species"].keys())  # cs is now in here
-    for z in known_smiles:
-        if z == cs:
-            if not include_homo_coupling:
+    if include_coupling:
+        known_smiles = list(reg["species"].keys())  # cs is now in here
+        for z in known_smiles:
+            if z == cs:
+                if not include_homo_coupling:
+                    continue
+                pair_inputs = [cs]
+                kwargs = dict(include_homo=True, include_hetero=False)
+            else:
+                pair_inputs = [cs, z]
+                kwargs = dict(include_homo=False, include_hetero=True)
+            for t in derive_coupling_templates(pair_inputs, **kwargs):
+                # Only keep templates that involve cs (skip Z+Z entries).
+                if cs not in (t.smiles_a, t.smiles_b):
+                    continue
+                key = (t.smiles_a, t.smiles_b, t.smiles_c)
+                if key not in reg["templates"] and key not in pending_template_keys:
+                    pending_template_keys.add(key)
+                    new_tpls.append(t)
+
+    if not auto_build_leaf_species and new_tpls:
+        available = set(reg["species"])
+        kept: list[BondReactionTemplate] = []
+        for template in new_tpls:
+            required = {template.smiles_a, template.smiles_b, template.smiles_c}
+            missing = sorted(required - available)
+            if missing:
+                _log.warning(
+                    "Skipping runtime bond template %s + %s <-> %s because "
+                    "auto_build_leaf_species is false and species are missing: %s",
+                    template.smiles_a,
+                    template.smiles_b,
+                    template.smiles_c,
+                    missing,
+                )
                 continue
-            pair_inputs = [cs]
-            kwargs = dict(include_homo=True, include_hetero=False)
-        else:
-            pair_inputs = [cs, z]
-            kwargs = dict(include_homo=False, include_hetero=True)
-        for t in derive_coupling_templates(pair_inputs, **kwargs):
-            # Only keep templates that involve cs (skip Z+Z spurious entries).
-            if cs not in (t.smiles_a, t.smiles_b):
-                continue
-            key = (t.smiles_a, t.smiles_b, t.smiles_c)
-            if key not in reg["templates"]:
-                reg["templates"].add(key)
-                new_tpls.append(t)
+            kept.append(template)
+        new_tpls = kept
+
+    for template in new_tpls:
+        reg["templates"].add(
+            (template.smiles_a, template.smiles_b, template.smiles_c)
+        )
 
     if not new_tpls:
         if verbose:
@@ -492,7 +530,7 @@ def expand_bond_sites_for_new_species(
         newly_built.append(cs)
     for t in new_tpls:
         for smi in (t.smiles_a, t.smiles_b, t.smiles_c):
-            if smi not in reg["species"]:
+            if auto_build_leaf_species and smi not in reg["species"]:
                 _ensure_species_known(
                     G, smi, reg,
                     calculator      = calculator,
@@ -594,7 +632,7 @@ def expand_bond_sites_for_new_species(
         G, cumulative_sites, new_tpls,
         max_hops            = bond_max_hops,
         surface_apsp_cutoff = surface_apsp_cutoff,
-        deduplicate_iso     = True,
+        deduplicate_iso     = deduplicate_iso,
         n_shells_pair       = bond_pair_n_shells,
         # Match the config pipeline: never run the ego-size triple prune
         # before calculator stability pruning, or a stable representative can

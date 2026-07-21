@@ -161,6 +161,9 @@ def test_gas_cache_dir_uses_safe_smiles_label(monkeypatch, tmp_path):
             "imaginary_ev": [],
             "geometry": "monatomic",
             "symmetry_number": 1,
+            "symmetry_number_source": "inferred",
+            "point_group": "K_h",
+            "symmetry_tolerance": 0.3,
             "spin": 0,
             "temperature_k": 500.0,
             "pressure_bar": 1.0,
@@ -174,7 +177,7 @@ def test_gas_cache_dir_uses_safe_smiles_label(monkeypatch, tmp_path):
         fake_compute_gas_thermo,
     )
 
-    reactant_mod.build_reactant(
+    reactant = reactant_mod.build_reactant(
         "[C]/[O]",
         calculator=FakeCalc(),
         free_energy_options=SimpleNamespace(enabled=True),
@@ -183,6 +186,9 @@ def test_gas_cache_dir_uses_safe_smiles_label(monkeypatch, tmp_path):
     )
 
     assert captured["cache_dir"].endswith("gas_(C)_(O)")
+    assert reactant.thermo_meta["symmetry_number_source"] == "inferred"
+    assert reactant.thermo_meta["point_group"] == "K_h"
+    assert reactant.thermo_meta["symmetry_tolerance"] == pytest.approx(0.3)
 
 
 def test_relax_false_still_computes_single_point_energy(monkeypatch):

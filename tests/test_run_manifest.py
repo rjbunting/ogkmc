@@ -35,7 +35,16 @@ def test_manifest_records_feed_initial_state_and_normalization(tmp_path):
         path,
         graph=graph,
         adsorbate_sites=[site],
-        feed_reactants=[{"smiles": "[C]=O", "partial_pressure_bar": 1.0}],
+        feed_reactants=[{
+            "smiles": "[C]=O",
+            "partial_pressure_bar": 1.0,
+            "thermochemistry": {
+                "symmetry_number": 1,
+                "symmetry_number_source": "inferred",
+                "point_group": "C*v",
+                "symmetry_tolerance": 0.3,
+            },
+        }],
         temperature_k=500.0,
         random_seed=69,
         structure_kind="surface",
@@ -54,6 +63,12 @@ def test_manifest_records_feed_initial_state_and_normalization(tmp_path):
     assert payload["config"]["content"] == "schema_version: '1'\n"
     assert payload["config"]["resolved"]["kmc"]["temperature_k"] == 500.0
     assert payload["feed_reactants"][0]["species"] == "[C]=O"
+    assert payload["feed_reactants"][0]["thermochemistry"] == {
+        "symmetry_number": 1,
+        "symmetry_number_source": "inferred",
+        "point_group": "C*v",
+        "symmetry_tolerance": 0.3,
+    }
     assert payload["catalyst"]["n_catalyst_atoms"] == 2
     assert payload["catalyst"]["n_surface_atoms"] == 1
     initial = payload["initial_state"]["occupied_surface_states"]

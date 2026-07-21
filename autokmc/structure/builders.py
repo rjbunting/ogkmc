@@ -44,21 +44,43 @@ def _apply_composition(
     seed: int = RANDOM_SEED,
     verbose: bool = True,
 ) -> Atoms:
-    """Randomly substitute atoms to match target composition fractions."""
+    """Randomly assign symbols using constrained largest-remainder counts."""
     result = atoms.copy()
     n_total = len(result)
+    if n_total == 0:
+        return result
     rng = np.random.default_rng(seed=seed)
     indices = rng.permutation(n_total)
     syms = np.array(result.get_chemical_symbols())
 
-    primary = _primary_element(composition)
+    total_fraction = float(sum(composition.values()))
+    if total_fraction <= 0.0:
+        raise ValueError("Composition fractions must sum to a positive value")
+    fractions = {
+        symbol: float(fraction) / total_fraction
+        for symbol, fraction in composition.items()
+    }
+    raw_counts = {
+        symbol: n_total * fraction for symbol, fraction in fractions.items()
+    }
+    counts = {
+        symbol: int(math.floor(raw_count))
+        for symbol, raw_count in raw_counts.items()
+    }
+    remaining = n_total - sum(counts.values())
+    ranked = sorted(
+        fractions,
+        key=lambda symbol: raw_counts[symbol] - counts[symbol],
+        reverse=True,
+    )
+    for symbol in ranked[:remaining]:
+        counts[symbol] += 1
+
     cursor = 0
-    for sym, frac in composition.items():
-        if sym == primary:
-            continue
-        n_sub = int(round(n_total * frac))
-        syms[indices[cursor:cursor + n_sub]] = sym
-        cursor += n_sub
+    for symbol in fractions:
+        count = counts[symbol]
+        syms[indices[cursor:cursor + count]] = symbol
+        cursor += count
 
     result.set_chemical_symbols(syms.tolist())
 

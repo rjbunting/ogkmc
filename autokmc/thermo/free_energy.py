@@ -80,6 +80,10 @@ class FreeEnergyOptions:
         Modes with ``|E_vib| < min_frequency_ev`` are treated as imaginary /
         spurious and dropped from the harmonic partition function.  The
         raw values are still persisted under ``imaginary_ev``.
+    symmetry_tolerance : float
+        Cartesian tolerance in Angstrom passed to pymatgen's molecular
+        point-group analyzer when the gas rotational symmetry number is not
+        supplied explicitly.
     cache_dir : str | None
         Directory where ASE writes the per-displacement ``.json`` cache.
         ``None`` → an ephemeral dir under the OS temp area is used and
@@ -91,7 +95,7 @@ class FreeEnergyOptions:
     vibration_nfree         : int          = 2
     include_ts_vibrations   : bool         = True
     min_frequency_ev        : float        = 0.0015
-    default_symmetry_number : int          = 1
+    symmetry_tolerance      : float        = 0.3
     default_spin            : float        = 0.0
     default_geometry        : str          = "auto"   # "auto" | "linear" | "nonlinear" | "monatomic"
     cache_dir               : str | None   = None
@@ -186,6 +190,53 @@ def _atoms_geometry(atoms: Atoms, default_geometry: str) -> str:
     return "linear"
 
 
+def _infer_rotational_symmetry_number(
+    atoms: Atoms,
+    *,
+    tolerance: float,
+) -> tuple[int, str]:
+    """Infer ``(rotational symmetry number, point group)`` from coordinates.
+
+    Multi-atom molecules are classified with pymatgen's
+    :class:`~pymatgen.symmetry.analyzer.PointGroupAnalyzer`.  A monatomic gas
+    has no rotational contribution, so its symmetry number is one; handling
+    it directly also avoids a pymatgen ``PointGroupAnalyzer`` edge case.
+    """
+    tol = float(tolerance)
+    if not np.isfinite(tol) or tol <= 0.0:
+        raise ValueError("Gas-phase symmetry tolerance must be finite and positive")
+    if len(atoms) == 0:
+        raise ValueError("Cannot infer gas-phase symmetry for an empty structure")
+
+    positions = np.asarray(atoms.get_positions(), dtype=float)
+    if not np.all(np.isfinite(positions)):
+        raise ValueError("Cannot infer gas-phase symmetry from non-finite coordinates")
+    if len(atoms) == 1:
+        return 1, "K_h"
+
+    try:
+        from pymatgen.core import Molecule
+        from pymatgen.symmetry.analyzer import PointGroupAnalyzer
+
+        molecule = Molecule(atoms.get_chemical_symbols(), positions)
+        analyzer = PointGroupAnalyzer(molecule, tolerance=tol)
+        symmetry_number = int(analyzer.get_rotational_symmetry_number())
+        point_group = str(analyzer.sch_symbol)
+    except Exception as exc:
+        raise ValueError(
+            "Could not infer the gas-phase rotational symmetry number from "
+            "the molecular coordinates. Supply reactants[].symmetry_number "
+            "as an explicit override."
+        ) from exc
+
+    if symmetry_number < 1:
+        raise ValueError(
+            "Pymatgen returned an invalid gas-phase rotational symmetry "
+            f"number ({symmetry_number}) for point group {point_group!r}"
+        )
+    return symmetry_number, point_group
+
+
 def _vibrate(
     atoms: Atoms,
     indices: Sequence[int] | None,
@@ -253,9 +304,11 @@ def compute_gas_thermo(
 ) -> dict[str, Any]:
     """Compute gas-phase Gibbs free energy via ASE :class:`IdealGasThermo`.
 
-    The vibrational analysis runs on every atom of *atoms*.  Spin and
-    symmetry default to safe values (σ=1, S=0) but should be overridden
-    via the per-reactant config for diatomics like H₂ (σ=2) or O₂ (S=1).
+    The vibrational analysis runs on every atom of *atoms*.  When
+    ``symmetry_number`` is omitted, the rotational symmetry number is inferred
+    from the final gas-phase coordinates with pymatgen.  An explicit value is
+    retained as an override.  Spin still defaults to S=0 and should be
+    overridden for species such as O₂ (S=1).
 
     The Gibbs free energy is **always** evaluated at the standard-state
     pressure of 1 bar, regardless of the *pressure_bar* argument.  This
@@ -268,7 +321,8 @@ def compute_gas_thermo(
     Returns a dict with keys:
     ``g_corr_ev``, ``g_total_ev``, ``zpe_ev``, ``entropy_ev_per_k``,
     ``frequencies_ev``, ``imaginary_ev``, ``geometry``,
-    ``symmetry_number``, ``spin``, ``temperature_k``, ``pressure_bar``,
+    ``symmetry_number``, ``symmetry_number_source``, ``point_group``,
+    ``symmetry_tolerance``, ``spin``, ``temperature_k``, ``pressure_bar``,
     ``pressure_pa``.
 
     When ``options.enabled`` is ``False`` (or the gas-phase atom count is
@@ -287,6 +341,9 @@ def compute_gas_thermo(
             "imaginary_ev":          [],
             "geometry":              None,
             "symmetry_number":       None,
+            "symmetry_number_source": None,
+            "point_group":           None,
+            "symmetry_tolerance":    None,
             "spin":                  None,
             "temperature_k":         float(temperature_k),
             "pressure_bar":          float(pressure_bar),   # caller's partial pressure (metadata)
@@ -300,8 +357,21 @@ def compute_gas_thermo(
     if calculator is not None:
         snap.calc = None
 
-    sym  = int(symmetry_number if symmetry_number is not None
-               else options.default_symmetry_number)
+    symmetry_tolerance = float(options.symmetry_tolerance)
+    if symmetry_number is None:
+        sym, point_group = _infer_rotational_symmetry_number(
+            snap,
+            tolerance=symmetry_tolerance,
+        )
+        symmetry_number_source = "inferred"
+    else:
+        if isinstance(symmetry_number, bool) or int(symmetry_number) != symmetry_number:
+            raise ValueError("Gas-phase symmetry number must be an integer")
+        sym = int(symmetry_number)
+        if sym < 1:
+            raise ValueError("Gas-phase symmetry number must be at least one")
+        point_group = None
+        symmetry_number_source = "explicit"
     spin_ = float(spin if spin is not None else options.default_spin)
     geom  = geometry or _atoms_geometry(snap, options.default_geometry)
 
@@ -364,6 +434,9 @@ def compute_gas_thermo(
         "imaginary_ev":          list(imag_ev),
         "geometry":              geom,
         "symmetry_number":       sym,
+        "symmetry_number_source": symmetry_number_source,
+        "point_group":           point_group,
+        "symmetry_tolerance":    symmetry_tolerance,
         "spin":                  spin_,
         "temperature_k":         float(temperature_k),
         "pressure_bar":          float(pressure_bar),   # caller's partial pressure (metadata only)

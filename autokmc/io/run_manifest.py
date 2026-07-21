@@ -102,13 +102,15 @@ def start_run_manifest(
     feeds = []
     for reactant in feed_reactants:
         raw = str(reactant.get("smiles", reactant.get("species", "")))
-        feeds.append(
-            {
-                "species": canonical_smiles(raw),
-                "input_smiles": raw,
-                "partial_pressure_bar": float(reactant.get("partial_pressure_bar", 0.0)),
-            }
-        )
+        feed: dict[str, Any] = {
+            "species": canonical_smiles(raw),
+            "input_smiles": raw,
+            "partial_pressure_bar": float(reactant.get("partial_pressure_bar", 0.0)),
+        }
+        thermochemistry = reactant.get("thermochemistry")
+        if isinstance(thermochemistry, Mapping) and thermochemistry:
+            feed["thermochemistry"] = dict(thermochemistry)
+        feeds.append(feed)
     feeds.sort(key=lambda item: item["species"])
     n_catalyst = sum(
         1 for _, data in graph.nodes(data=True)
