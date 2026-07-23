@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import threading
+import warnings
 from concurrent.futures import ThreadPoolExecutor, wait
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -275,15 +276,49 @@ def make_neb_band(
         neb = NEB(images, parallel=False, **neb_kwargs)
 
     if interpolation == "idpp" and _idpp_interpolate is not None:
+        # ASE's public ``NEB.interpolate(method="idpp")`` first builds a
+        # linear path before invoking the low-level IDPP optimiser.  Calling
+        # ``idpp_interpolate`` directly on the initial-state copies above
+        # leaves coincident interior images, so the improved tangent has zero
+        # norm and IDPP can spend all of its steps propagating NaNs.
+        neb.interpolate("linear", mic=True)
+        linear_positions = [
+            np.asarray(image.positions, dtype=float).copy()
+            for image in images
+        ]
+        real_calculators = [image.calc for image in images]
         try:
-            _idpp_interpolate(neb, mic=True)
+            with warnings.catch_warnings():
+                # Numerical warnings during IDPP otherwise do not stop ASE's
+                # optimiser, which can continue through every requested step
+                # with a non-finite band.
+                warnings.simplefilter("error", RuntimeWarning)
+                _idpp_interpolate(
+                    neb,
+                    traj=None,
+                    log=None,
+                    mic=True,
+                )
+            if not all(
+                np.isfinite(np.asarray(image.positions, dtype=float)).all()
+                for image in images
+            ):
+                raise FloatingPointError(
+                    "IDPP interpolation returned non-finite positions"
+                )
         except Exception as exc:
+            for image, positions in zip(images, linear_positions):
+                image.set_positions(positions, apply_constraint=False)
             _log.warning(
                 "IDPP interpolation failed (%s: %s); falling back to linear.",
                 type(exc).__name__,
                 exc,
             )
-            neb.interpolate("linear", mic=True)
+        finally:
+            # ASE restores these after a successful IDPP run, but not if its
+            # optimiser raises before reaching the restoration loop.
+            for image, calculator_for_image in zip(images, real_calculators):
+                image.calc = calculator_for_image
     else:
         neb.interpolate("linear", mic=True)
 

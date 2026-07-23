@@ -149,6 +149,86 @@ def test_neb_parallelizes_images_through_calculator_pool():
     assert tracker.maximum >= 2
 
 
+def test_idpp_starts_from_linear_band_without_shared_artifacts(
+    monkeypatch,
+    tmp_path,
+):
+    observed = {}
+
+    def fake_idpp(neb, traj="idpp.traj", log="idpp.log", mic=False):
+        observed["positions"] = [
+            np.asarray(image.positions, dtype=float).copy()
+            for image in neb.images
+        ]
+        observed["traj"] = traj
+        observed["log"] = log
+        observed["mic"] = mic
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(neb_module, "_idpp_interpolate", fake_idpp)
+    calculator = object()
+    initial = Atoms("H", positions=[[0.0, 0.0, 0.0]])
+    final = Atoms("H", positions=[[3.0, 0.0, 0.0]])
+
+    _, images = neb_module.make_neb_band(
+        initial,
+        final,
+        n_images=2,
+        interpolation="idpp",
+        spring_k=0.1,
+        climb=False,
+        calculator=calculator,
+        frozen_indices=None,
+    )
+
+    observed_x = [positions[0, 0] for positions in observed["positions"]]
+    assert observed_x == pytest.approx([0.0, 1.0, 2.0, 3.0])
+    assert [image.positions[0, 0] for image in images] == pytest.approx(observed_x)
+    assert observed["traj"] is None
+    assert observed["log"] is None
+    assert observed["mic"] is True
+    assert not (tmp_path / "idpp.log").exists()
+    assert not (tmp_path / "idpp.traj").exists()
+
+
+def test_nonfinite_idpp_output_restores_linear_band_and_calculators(monkeypatch):
+    replacement_calculators = []
+
+    def nonfinite_idpp(neb, **_kwargs):
+        for image in neb.images:
+            replacement = object()
+            replacement_calculators.append(replacement)
+            image.calc = replacement
+        for image in neb.images[1:-1]:
+            image.positions[:] = np.nan
+
+    monkeypatch.setattr(neb_module, "_idpp_interpolate", nonfinite_idpp)
+    calculator = object()
+    initial = Atoms("H", positions=[[0.0, 0.0, 0.0]])
+    final = Atoms("H", positions=[[3.0, 0.0, 0.0]])
+
+    _, images = neb_module.make_neb_band(
+        initial,
+        final,
+        n_images=2,
+        interpolation="idpp",
+        spring_k=0.1,
+        climb=False,
+        calculator=calculator,
+        frozen_indices=None,
+    )
+
+    assert [image.positions[0, 0] for image in images] == pytest.approx(
+        [0.0, 1.0, 2.0, 3.0]
+    )
+    assert all(np.isfinite(image.positions).all() for image in images)
+    assert all(image.calc is calculator for image in images)
+    assert all(image.calc is not replacement for image, replacement in zip(
+        images,
+        replacement_calculators,
+    ))
+
+
 def test_parallel_neb_propagates_interior_calculator_exception():
     class SelectivelyFailingCalculator:
         def get_forces(self, atoms):
