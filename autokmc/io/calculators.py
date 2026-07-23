@@ -6,22 +6,55 @@ import copy
 import importlib
 import queue
 import threading
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any
+
+
+_CALCULATOR_IDENTITY_ATTRIBUTE = "_autokmc_calculator_config_identity"
+_CALCULATOR_SCIENTIFIC_IDENTITY_ATTRIBUTE = (
+	"_autokmc_calculator_scientific_identity"
+)
+_CALCULATOR_BATCH_DEPTH: ContextVar[int] = ContextVar(
+	"autokmc_calculator_batch_depth",
+	default=0,
+)
+
+
+@contextmanager
+def calculator_batch_context():
+	"""Mark a worker that is already one member of a calculator-wide batch.
+
+	Expensive kernels use this signal to avoid launching another pool-sized
+	layer of image/displacement workers.  The context propagates explicitly to
+	the shared executor, so independent sites remain parallel while each site
+	uses one calculator at a time.
+	"""
+	token = _CALCULATOR_BATCH_DEPTH.set(_CALCULATOR_BATCH_DEPTH.get() + 1)
+	try:
+		yield
+	finally:
+		_CALCULATOR_BATCH_DEPTH.reset(token)
+
+
+def calculator_batch_active() -> bool:
+	"""Return whether execution is already inside calculator-wide parallelism."""
+	return _CALCULATOR_BATCH_DEPTH.get() > 0
 
 
 @dataclass
 class CalculatorCfg:
 	"""Pluggable ASE calculator description.
 
-	Two equivalent forms are supported:
+	Exactly one of two construction forms is required:
 
 	* ``import_path`` + ``kwargs`` — dotted path to the calculator class.
 	* ``factory`` + ``factory_kwargs`` — dotted path to a callable that
 	  returns a calculator instance.
 
-	``factory`` takes precedence when both are supplied.
+	``import_path`` and ``factory`` are mutually exclusive.
 
 	``copies`` controls how many independent calculator instances are built
 	up front.  The science code acquires these instances from a
@@ -48,9 +81,17 @@ class CalculatorPool:
 		if not calculators:
 			raise CalculatorConfigError("CalculatorPool requires at least one calculator")
 		self.calculators = list(calculators)
-		self.max_workers = int(max_workers or len(self.calculators))
+		self.max_workers = min(
+			len(self.calculators),
+			int(max_workers or len(self.calculators)),
+		)
+		if self.max_workers <= 0:
+			raise CalculatorConfigError("CalculatorPool max_workers must be positive")
 		self._queue: queue.Queue[Any] = queue.Queue()
 		self._batch_lock = threading.Lock()
+		self._executor_lock = threading.Lock()
+		self._executor: ThreadPoolExecutor | None = None
+		self._closed = False
 		for calc in self.calculators:
 			self._queue.put(calc)
 
@@ -60,6 +101,50 @@ class CalculatorPool:
 
 	def __len__(self) -> int:
 		return len(self.calculators)
+
+	@property
+	def executor(self) -> ThreadPoolExecutor:
+		"""Return the pool's lazily created, run-lifetime worker executor."""
+		with self._executor_lock:
+			if self._closed:
+				raise RuntimeError("CalculatorPool has been shut down")
+			if self._executor is None:
+				self._executor = ThreadPoolExecutor(
+					max_workers=self.max_workers,
+					thread_name_prefix="autokmc-calculator",
+				)
+			return self._executor
+
+	def submit(self, function, /, *args, **kwargs) -> Future:
+		"""Schedule work on the shared executor bounded by calculator copies."""
+		return self.executor.submit(function, *args, **kwargs)
+
+	def gather(self, futures: list[Future]) -> list[Any]:
+		"""Wait for a submitted batch, then return results in submission order.
+
+		Waiting for the whole batch before propagating its first exception
+		prevents background workers from continuing to mutate site state after
+		the scientific caller has already unwound.
+		"""
+		wait(futures)
+		return [future.result() for future in futures]
+
+	def shutdown(
+		self,
+		*,
+		wait: bool = True,
+		cancel_futures: bool = False,
+	) -> None:
+		"""Stop the shared executor; calculator instances remain inspectable."""
+		with self._executor_lock:
+			self._closed = True
+			executor = self._executor
+			self._executor = None
+		if executor is not None:
+			executor.shutdown(
+				wait=wait,
+				cancel_futures=cancel_futures,
+			)
 
 	@contextmanager
 	def acquire(self):
@@ -226,11 +311,116 @@ def _resolve_config_value(value: Any):
 	return value
 
 
-def build_calculator(cfg: CalculatorCfg):
-	"""Build a CalculatorPool for the calculator described by *cfg*.
+def _configuration_identity(cfg: CalculatorCfg) -> dict[str, Any] | None:
+	"""Return the scientific constructor/factory declaration for *cfg*."""
+	if cfg.factory:
+		return {
+			"construction": "factory",
+			"factory": str(cfg.factory),
+			"factory_kwargs": copy.deepcopy(dict(cfg.factory_kwargs or {})),
+		}
+	if cfg.import_path:
+		return {
+			"construction": "import",
+			"import_path": str(cfg.import_path),
+			"kwargs": copy.deepcopy(dict(cfg.kwargs or {})),
+		}
+	return None
 
-	Returns ``None`` when neither *import_path* nor *factory* is set.
+
+def _stamp_configuration_identity(calculator: Any, identity: dict[str, Any]) -> None:
+	"""Attach the unresolved scientific config when the object permits it."""
+	try:
+		setattr(calculator, _CALCULATOR_IDENTITY_ATTRIBUTE, identity)
+	except (AttributeError, TypeError):
+		# CalculatorPool is always stamped below, so callers using the standard
+		# construction path retain the declaration even for slot-only backends.
+		pass
+
+
+def configured_calculator_identity(calculator: Any) -> dict[str, Any] | None:
+	"""Return the config declaration stamped by :func:`build_calculator`."""
+	value = getattr(calculator, _CALCULATOR_IDENTITY_ATTRIBUTE, None)
+	if isinstance(value, dict):
+		return value
+	return None
+
+
+def cached_calculator_scientific_identity(
+	calculator: Any,
+) -> dict[str, Any] | None:
+	"""Return the content-verified identity snapshot attached to *calculator*.
+
+	The expensive snapshot is produced lazily by
+	:func:`autokmc.io.calculation_cache.calculator_identity`, so calculator
+	construction remains cheap when the persistent calculation cache is
+	disabled.
 	"""
+	value = getattr(calculator, _CALCULATOR_SCIENTIFIC_IDENTITY_ATTRIBUTE, None)
+	if isinstance(value, dict):
+		return value
+	if isinstance(calculator, CalculatorPool):
+		value = getattr(
+			calculator.primary,
+			_CALCULATOR_SCIENTIFIC_IDENTITY_ATTRIBUTE,
+			None,
+		)
+		if isinstance(value, dict):
+			return value
+	return None
+
+
+def stamp_calculator_scientific_identity(
+	calculator: Any,
+	identity: dict[str, Any],
+) -> None:
+	"""Attach one immutable scientific-identity snapshot to a calculator pool."""
+	targets = (
+		[calculator, *calculator.calculators]
+		if isinstance(calculator, CalculatorPool)
+		else [calculator]
+	)
+	for target in targets:
+		try:
+			setattr(
+				target,
+				_CALCULATOR_SCIENTIFIC_IDENTITY_ATTRIBUTE,
+				identity,
+			)
+		except (AttributeError, TypeError):
+			# Most ASE calculators permit arbitrary attributes.  Slot-only
+			# third-party calculators simply fall back to recomputation.
+			continue
+
+
+def invalidate_calculator_identity(calculator: Any) -> None:
+	"""Discard a cached scientific identity after intentional model mutation.
+
+	A loaded calculator normally represents immutable model weights.  Call this
+	helper before reusing an instance whose parameters or backing artifacts were
+	changed deliberately.
+	"""
+	targets = (
+		[calculator, *calculator.calculators]
+		if isinstance(calculator, CalculatorPool)
+		else [calculator]
+	)
+	for target in targets:
+		try:
+			delattr(target, _CALCULATOR_SCIENTIFIC_IDENTITY_ATTRIBUTE)
+		except (AttributeError, TypeError):
+			continue
+
+
+def build_calculator(cfg: CalculatorCfg) -> CalculatorPool:
+	"""Build a calculator pool from an explicit class or factory declaration."""
+	if not cfg.import_path and not cfg.factory:
+		raise CalculatorConfigError(
+			"calculator must configure exactly one of "
+			"calculator.import_path or calculator.factory"
+		)
+	configuration_identity = _configuration_identity(cfg)
+
 	def _build_one(extra_kwargs: dict | None = None):
 		if cfg.factory:
 			fn = _resolve(cfg.factory)
@@ -238,14 +428,20 @@ def build_calculator(cfg: CalculatorCfg):
 			for key, value in (extra_kwargs or {}).items():
 				_set_dotted(kwargs, key, value)
 			kwargs = _resolve_config_value(kwargs)
-			return fn(**kwargs)
+			calculator = fn(**kwargs)
+			if configuration_identity is not None:
+				_stamp_configuration_identity(calculator, configuration_identity)
+			return calculator
 		if cfg.import_path:
 			cls = _resolve(cfg.import_path)
 			kwargs = copy.deepcopy(cfg.kwargs or {})
 			for key, value in (extra_kwargs or {}).items():
 				_set_dotted(kwargs, key, value)
 			kwargs = _resolve_config_value(kwargs)
-			return cls(**kwargs)
+			calculator = cls(**kwargs)
+			if configuration_identity is not None:
+				_stamp_configuration_identity(calculator, configuration_identity)
+			return calculator
 		return None
 
 	calculators = []
@@ -259,9 +455,14 @@ def build_calculator(cfg: CalculatorCfg):
 		calc = _build_one(extra)
 		if calc is not None:
 			calculators.append(calc)
-	if calculators:
-		return CalculatorPool(calculators, max_workers=cfg.max_workers)
-	return None
+	if not calculators:
+		raise CalculatorConfigError(
+			"calculator configuration did not construct a calculator"
+		)
+	pool = CalculatorPool(calculators, max_workers=cfg.max_workers)
+	if configuration_identity is not None:
+		_stamp_configuration_identity(pool, configuration_identity)
+	return pool
 
 
 def primary_calculator(calculator):
@@ -293,6 +494,12 @@ __all__ = [
 	"acquire_calculator",
 	"acquire_calculators",
 	"build_calculator",
+	"calculator_batch_active",
+	"calculator_batch_context",
+	"cached_calculator_scientific_identity",
+	"configured_calculator_identity",
+	"invalidate_calculator_identity",
 	"primary_calculator",
+	"stamp_calculator_scientific_identity",
 	"calculator_meta",
 ]

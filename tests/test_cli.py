@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import textwrap
+from types import SimpleNamespace
 
 from ase import Atoms
 import networkx as nx
@@ -14,6 +16,7 @@ from autokmc.cli.pipeline import (
     _resolved_partial_pressure_bar,
     run_from_config,
 )
+from autokmc.io.calculators import CalculatorCfg, CalculatorPool
 from autokmc.io.checkpoint import make_checkpoint_state, save_checkpoint
 from autokmc.io.config import (
     BondCfg,
@@ -126,7 +129,7 @@ def test_resume_skips_fresh_structure_and_site_enumeration(tmp_path, monkeypatch
             graph=G,
             adsorbate_sites=[],
             diffusion_sites=[],
-            bond_sites=[],
+            bond_sites=[SimpleNamespace(checkpoint_marker=True)],
             reactants=[reactant],
             history=[],
             reaction_counts={},
@@ -161,6 +164,8 @@ def test_resume_skips_fresh_structure_and_site_enumeration(tmp_path, monkeypatch
         assert _graph.graph["run_id"] == "resume-test"
         assert kwargs["initial_step"] == 4
         assert kwargs["initial_time_s"] == 2.5
+        assert len(kwargs["bond_sites"]) == 1
+        assert kwargs["bond_sites"][0].checkpoint_marker is True
         return {
             "time": 2.5,
             "steps_executed": 0,
@@ -170,6 +175,14 @@ def test_resume_skips_fresh_structure_and_site_enumeration(tmp_path, monkeypatch
         }
 
     monkeypatch.setattr(engine_module, "run_kmc_steps", fake_run)
+    shutdown_calls = []
+    original_shutdown = CalculatorPool.shutdown
+
+    def tracked_shutdown(pool, **kwargs):
+        shutdown_calls.append(pool)
+        return original_shutdown(pool, **kwargs)
+
+    monkeypatch.setattr(CalculatorPool, "shutdown", tracked_shutdown)
     cfg = RunConfig(
         output=OutputCfg(
             dir=str(tmp_path / "out"),
@@ -177,6 +190,7 @@ def test_resume_skips_fresh_structure_and_site_enumeration(tmp_path, monkeypatch
             calculation_cache_enabled=False,
         ),
         reactants=[ReactantCfg(smiles="C", add_hydrogens=False)],
+        calculator=CalculatorCfg(import_path="ase.calculators.emt.EMT"),
         kmc=KMCCfg(n_steps=0),
         free_energy=FreeEnergyCfg(enabled=False),
         checkpoint=CheckpointCfg(resume_from=str(checkpoint)),
@@ -185,3 +199,97 @@ def test_resume_skips_fresh_structure_and_site_enumeration(tmp_path, monkeypatch
     summary = run_from_config(cfg)
 
     assert summary["steps_executed"] == 0
+    assert len(shutdown_calls) == 1
+
+
+def test_calculator_pool_is_shutdown_when_pre_kmc_stage_fails(
+    tmp_path,
+    monkeypatch,
+):
+    import autokmc.cli.pipeline as pipeline_module
+
+    resource = CalculatorPool([object()])
+    shutdown_calls = []
+    original_shutdown = resource.shutdown
+
+    def tracked_shutdown(**kwargs):
+        shutdown_calls.append(kwargs)
+        original_shutdown(**kwargs)
+
+    def fail_structure(*_args, **_kwargs):
+        raise RuntimeError("structure failed")
+
+    monkeypatch.setattr(resource, "shutdown", tracked_shutdown)
+    monkeypatch.setattr(
+        pipeline_module,
+        "prepare_calculator",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            resource=resource,
+            primary=resource.primary,
+        ),
+    )
+    monkeypatch.setattr(pipeline_module, "prepare_structure", fail_structure)
+    cfg = RunConfig(output=OutputCfg(dir=str(tmp_path / "failed-run")))
+
+    with pytest.raises(RuntimeError, match="structure failed"):
+        pipeline_module.run_from_config(cfg)
+
+    assert shutdown_calls == [{}]
+    manifest = json.loads(
+        (tmp_path / "failed-run" / "run_manifest.json").read_text()
+    )
+    assert manifest["lifecycle"]["status"] == "failed"
+    assert manifest["lifecycle"]["termination_stage"] == "stage_2_structure"
+
+
+def test_calculator_shutdown_error_does_not_flip_complete_manifest(
+    tmp_path,
+    monkeypatch,
+    caplog,
+):
+    import autokmc.cli.pipeline as pipeline_module
+    from autokmc.io.run_manifest import finish_run_manifest
+
+    resource = CalculatorPool([object()])
+
+    def fail_shutdown(**_kwargs):
+        raise RuntimeError("executor shutdown failed")
+
+    def finish_pipeline(
+        _cfg,
+        *,
+        identity,
+        **_kwargs,
+    ):
+        finish_run_manifest(
+            identity.manifest_path,
+            final_step=0,
+            final_time_s=0.0,
+            steps_executed=0,
+        )
+        return {"steps_executed": 0}
+
+    monkeypatch.setattr(resource, "shutdown", fail_shutdown)
+    monkeypatch.setattr(
+        pipeline_module,
+        "prepare_calculator",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            resource=resource,
+            primary=resource.primary,
+        ),
+    )
+    monkeypatch.setattr(
+        pipeline_module,
+        "_run_after_calculator_preparation",
+        finish_pipeline,
+    )
+    cfg = RunConfig(output=OutputCfg(dir=str(tmp_path / "complete-run")))
+
+    result = pipeline_module.run_from_config(cfg)
+
+    assert result == {"steps_executed": 0}
+    manifest = json.loads(
+        (tmp_path / "complete-run" / "run_manifest.json").read_text()
+    )
+    assert manifest["lifecycle"]["status"] == "complete"
+    assert "Could not shut down the calculator worker pool" in caplog.text

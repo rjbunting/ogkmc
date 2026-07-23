@@ -11,8 +11,21 @@ from typing import Any
 
 from ase import Atoms
 
+from autokmc.io._files import atomic_output_path
+from autokmc.utils.telemetry import instrument
 
-CHECKPOINT_SCHEMA_VERSION = "2"
+
+CHECKPOINT_SCHEMA_VERSION = "4"
+
+# These graph attributes are pure acceleration structures.  Persisting them can
+# dwarf the scientific state (``surface_apsp`` is potentially quadratic), and
+# every producer already rebuilds them lazily after a cache miss.
+_TRANSIENT_GRAPH_CACHE_KEYS = frozenset({
+	"surface_apsp",
+	"_surface_shells_cache",
+	"_clique_position_index_cache",
+	"_surface_atoms_array_cache",
+})
 
 
 @dataclass
@@ -35,6 +48,10 @@ class CheckpointState:
 	reaction_counts: dict
 	metadata: dict[str, Any]
 	rng_state: dict[str, Any] | None = None
+	# Exact committed prefix of events.jsonl represented by this state.  These
+	# are optional only for checkpoints written before schema version 3.
+	committed_event_count: int | None = None
+	committed_event_offset: int | None = None
 
 
 def _is_hashable(value) -> bool:
@@ -133,7 +150,18 @@ def _clear_calculators_inplace(obj, *, _seen: set[int] | None = None) -> None:
 		if key == "calc":
 			setattr(obj, key, None)
 		else:
-			_clear_calculators_inplace(value, _seen=_seen)
+				_clear_calculators_inplace(value, _seen=_seen)
+
+
+def _graph_without_transient_caches(graph):
+	"""Return a shallow graph shell excluding lazily reconstructible caches."""
+	if not hasattr(graph, "graph") or not isinstance(graph.graph, dict):
+		return graph
+	out = copy.copy(graph)
+	out.graph = dict(graph.graph)
+	for key in _TRANSIENT_GRAPH_CACHE_KEYS:
+		out.graph.pop(key, None)
+	return out
 
 
 def make_checkpoint_state(
@@ -149,41 +177,59 @@ def make_checkpoint_state(
 	history: list | None = None,
 	reaction_counts: dict | None = None,
 	rng_state: dict[str, Any] | None = None,
+	committed_event_count: int | None = None,
+	committed_event_offset: int | None = None,
 	metadata: dict[str, Any] | None = None,
 ) -> CheckpointState:
-	# All state roots must share one memo.  Otherwise a site referenced by the
-	# graph reverse indexes, a diffusion channel, and ``adsorbate_sites`` would
-	# deserialize as three independent objects and incremental KMC updates would
-	# mutate only one of them.
-	memo: dict[int, Any] = {}
+	# Copy one persistent root mapping in a single traversal.  This both keeps a
+	# site shared by graph indexes and channel lists as one object *and* avoids
+	# memoizing the id of a short-lived ``list(...)`` temporary.  CPython may
+	# immediately reuse such an id for the next root, which can otherwise alias
+	# unrelated collections (for example bond_sites and reactants).
+	roots = {
+		"graph": _graph_without_transient_caches(graph),
+		"adsorbate_sites": list(adsorbate_sites or []),
+		"diffusion_sites": list(diffusion_sites or []),
+		"bond_sites": list(bond_sites or []),
+		"reactants": list(reactants or []),
+		"history": list(history or []),
+		"reaction_counts": dict(reaction_counts or {}),
+		"rng_state": rng_state,
+	}
+	stripped = _strip_calculators(roots)
 	return CheckpointState(
 		schema_version=CHECKPOINT_SCHEMA_VERSION,
 		step=int(step),
 		time_s=float(time_s),
-		graph=_strip_calculators(graph, _memo=memo),
-		adsorbate_sites=_strip_calculators(list(adsorbate_sites or []), _memo=memo),
-		diffusion_sites=_strip_calculators(list(diffusion_sites or []), _memo=memo),
-		bond_sites=_strip_calculators(list(bond_sites or []), _memo=memo),
-		reactants=_strip_calculators(list(reactants or []), _memo=memo),
+		graph=stripped["graph"],
+		adsorbate_sites=stripped["adsorbate_sites"],
+		diffusion_sites=stripped["diffusion_sites"],
+		bond_sites=stripped["bond_sites"],
+		reactants=stripped["reactants"],
 		frozen_indices=(None if frozen_indices is None else list(frozen_indices)),
-		history=list(history or []),
-		reaction_counts=dict(reaction_counts or {}),
+		history=stripped["history"],
+		reaction_counts=stripped["reaction_counts"],
 		metadata={
 			"written_at": datetime.now(timezone.utc).isoformat(),
 			**dict(metadata or {}),
 		},
-		rng_state=_strip_calculators(rng_state, _memo=memo),
+		rng_state=stripped["rng_state"],
+		committed_event_count=(
+			None if committed_event_count is None else int(committed_event_count)
+		),
+		committed_event_offset=(
+			None if committed_event_offset is None else int(committed_event_offset)
+		),
 	)
 
 
+@instrument("checkpoint.save")
 def save_checkpoint(path: str | Path, state: CheckpointState | dict) -> Path:
 	"""Write *state* to *path* atomically and return the final path."""
 	path = Path(path)
-	path.parent.mkdir(parents=True, exist_ok=True)
-	tmp = path.with_suffix(path.suffix + ".tmp")
-	with tmp.open("wb") as fp:
-		pickle.dump(state, fp, protocol=pickle.HIGHEST_PROTOCOL)
-	tmp.replace(path)
+	with atomic_output_path(path) as temporary:
+		with temporary.open("wb") as fp:
+			pickle.dump(state, fp, protocol=pickle.HIGHEST_PROTOCOL)
 	return path
 
 
@@ -195,11 +241,20 @@ def load_checkpoint(path: str | Path) -> CheckpointState:
 		state = CheckpointState(**state)
 	if not isinstance(state, CheckpointState):
 		raise TypeError(f"checkpoint {path!s} does not contain a CheckpointState")
-	if state.schema_version == "1":
+	legacy_version = str(state.schema_version)
+	if legacy_version == "1":
 		# Version 1 did not persist the random-number-generator state.  It can
-		# still be resumed, but only version-2 continuations are bitwise
+		# still be resumed, but only later continuations are bitwise
 		# equivalent to an uninterrupted run.
 		state.rng_state = None
+	if legacy_version in {"1", "2"}:
+		# Version 3 records the exact committed events.jsonl prefix.  Legacy
+		# checkpoints fall back to step-based reconciliation on resume.
+		state.committed_event_count = None
+		state.committed_event_offset = None
+	if legacy_version in {"1", "2", "3"}:
+		# Version 4 treats events.jsonl as the canonical event history and omits
+		# reconstructible graph caches from newly-written checkpoints.
 		state.schema_version = CHECKPOINT_SCHEMA_VERSION
 	if state.schema_version != CHECKPOINT_SCHEMA_VERSION:
 		raise ValueError(
@@ -224,8 +279,15 @@ class CheckpointWriter:
 		self.metadata = dict(metadata or {})
 		self.last_path: Path | None = None
 
+	def should_write(self, *, step: int, force: bool = False) -> bool:
+		"""Return whether *step* is a configured checkpoint boundary."""
+		return bool(
+			force
+			or (int(step) > 0 and (int(step) % self.every_n_steps) == 0)
+		)
+
 	def maybe_write(self, *, step: int, force: bool = False, **state_kwargs) -> Path | None:
-		if not force and (int(step) <= 0 or (int(step) % self.every_n_steps) != 0):
+		if not self.should_write(step=step, force=force):
 			return None
 		state = make_checkpoint_state(step=step, metadata=self.metadata, **state_kwargs)
 		self.last_path = save_checkpoint(self.path, state)

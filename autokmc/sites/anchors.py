@@ -112,6 +112,7 @@ from autokmc.core.constants import (
 
 #: Human-readable coordination labels used in verbose / log output.
 COORD_LABELS: dict[int, str] = {1: "top", 2: "bridge", 3: "hollow"}
+ANCHOR_K_MAX_BY_ELEMENT = "_anchor_k_max_by_element"
 
 
 # ---------------------------------------------------------------------------
@@ -655,18 +656,45 @@ def _optimise_position(
 # Graph-side anchor node management
 # ---------------------------------------------------------------------------
 
-def _next_node_id(G: nx.Graph) -> int:
-    """Smallest integer node id strictly greater than all existing ids.
+_NODE_ID_CURSOR = "_autokmc_next_node_id"
 
-    Accepts both Python ``int`` and ``numpy.integer`` ids so callers
-    that produce ids from numpy ranges (``np.arange``) interoperate
-    cleanly with callers using plain ``int``.
+
+def _reserve_node_ids(G: nx.Graph, count: int = 1) -> range:
+    """Reserve a collision-free block of integer node identifiers.
+
+    The cursor is seeded from existing integer ids once, then stored as graph
+    metadata so materialising ``M`` sites no longer performs ``M`` full graph
+    scans.  It survives graph copies and checkpoints and never recycles ids
+    when bookkeeping nodes are removed.
     """
-    if not G.nodes:
-        return 0
-    return int(max(
-        int(n) for n in G.nodes if isinstance(n, (int, np.integer))
-    )) + 1
+    n_ids = int(count)
+    if n_ids < 0:
+        raise ValueError("cannot reserve a negative number of node ids")
+    if n_ids == 0:
+        return range(0, 0)
+
+    cursor = G.graph.get(_NODE_ID_CURSOR)
+    if cursor is None:
+        integer_ids = [
+            int(node)
+            for node in G.nodes
+            if isinstance(node, (int, np.integer))
+        ]
+        cursor = max(integer_ids) + 1 if integer_ids else 0
+    cursor = int(cursor)
+
+    # Accommodate a graph augmented outside the allocator without restoring
+    # the old max-id scan on every call.
+    while any((cursor + offset) in G for offset in range(n_ids)):
+        cursor += 1
+
+    G.graph[_NODE_ID_CURSOR] = cursor + n_ids
+    return range(cursor, cursor + n_ids)
+
+
+def _next_node_id(G: nx.Graph) -> int:
+    """Return one newly reserved integer graph-node identifier."""
+    return _reserve_node_ids(G, 1).start
 
 
 def _remove_anchor_nodes(G: nx.Graph, element: str) -> None:
@@ -731,6 +759,8 @@ def _enumerate_cliques(
     element: str,
     r_cov_ads: float,
     co_factor: float = CO_FACTOR,
+    k_max: int | None = None,
+    hull_tolerance: float = HULL_TOL,
 ) -> dict[int, list[frozenset]]:
     """Return ``{k: [frozenset_of_node_ids, …]}`` for every clique size 1…k_max.
 
@@ -738,7 +768,7 @@ def _enumerate_cliques(
 
     * **Nanoparticles** — the convex hull of the *surface* atoms is used as
       the boundary of the particle.  A clique whose MIC-aware centroid sits
-      strictly inside the hull (signed distance below :data:`HULL_TOL`) is
+      strictly inside the hull (signed distance below *hull_tolerance*) is
       a wrap-around artefact (e.g. an "anchor site" buried at the centre
       of a periodic image of the NP) and is dropped.
     * **Slabs** — a clique whose centroid sits below the lowest surface
@@ -746,11 +776,12 @@ def _enumerate_cliques(
       surface and dropped.  The outward normal is just ``+z`` for the
       orthogonalised slabs that :mod:`autokmc.structure` produces.
     """
+    if k_max is not None and int(k_max) < 1:
+        raise ValueError("k_max must be at least 1 when supplied")
+    clique_limit = None if k_max is None else int(k_max)
     cbg = _build_co_bond_graph(G, r_cov_ads, co_factor)
     if cbg.number_of_nodes() == 0:
         return {1: []}
-
-    k_max = max((len(c) for c in nx.find_cliques(cbg)), default=1)
     cell, cell_inv, pbc, use_mic = _get_cell(G)
 
     # ------------------------------------------------------------------
@@ -781,16 +812,18 @@ def _enumerate_cliques(
         # ── Slab: drop cliques whose centroid is below the surface ────
         # All builders orthogonalise the slab cell (surface ‖ xy plane,
         # outward normal = +z), so a simple z-floor is sufficient and
-        # cheap.  ``HULL_TOL`` is reused as the (negative) Å tolerance
+        # cheap.  ``hull_tolerance`` is reused as the (negative) Å tolerance
         # below the lowest surface atom that we still accept.
         if len(surf_pos):
-            z_floor = float(surf_pos[:, 2].min()) + HULL_TOL
+            z_floor = float(surf_pos[:, 2].min()) + hull_tolerance
 
-    sites: dict[int, list[frozenset]] = {k: [] for k in range(1, k_max + 1)}
+    sites: dict[int, list[frozenset]] = {}
     seen: set[frozenset] = set()
     for clique in nx.enumerate_all_cliques(cbg):
         k = len(clique)
-        if k > k_max:
+        # NetworkX emits cliques in non-decreasing size, so a configured cap
+        # can stop the combinatorial tail before it is generated.
+        if clique_limit is not None and k > clique_limit:
             break
         key = frozenset(clique)
         if key in seen:
@@ -800,12 +833,15 @@ def _enumerate_cliques(
         if hull_eq is not None or z_floor is not None:
             c = _clique_centroid(G, key, cell, cell_inv, pbc, use_mic)
             if hull_eq is not None:
-                if float(np.max(hull_eq[:, :3] @ c + hull_eq[:, 3])) < HULL_TOL:
+                if (
+                    float(np.max(hull_eq[:, :3] @ c + hull_eq[:, 3]))
+                    < hull_tolerance
+                ):
                     continue   # buried inside the NP hull
             elif z_floor is not None and c[2] < z_floor:
                 continue       # buried beneath the slab surface
 
-        sites[k].append(key)
+        sites.setdefault(k, []).append(key)
 
     return {k: v for k, v in sites.items() if v}
 
@@ -909,6 +945,8 @@ def find_anchor_sites(
     repulsion_cutoff: float | None = REPULSION_CUTOFF,
     n_shells: int = N_SHELLS,
     k_max: int | None = None,
+    hull_tolerance: float = HULL_TOL,
+    kabsch_max_mappings: int = KABSCH_MAX_MAPPINGS,
     verbose: bool = False,
 ) -> list[AnchorSite]:
     """Enumerate, classify and geometrically optimise all anchor sites for
@@ -927,10 +965,10 @@ def find_anchor_sites(
     opt_factor : float
         Ideal bond-length scale for geometric optimisation.  Default 0.85.
     repulsion_weight : float
-        Weight on the soft non-bonded repulsion term.  Default 0.1.
+        Weight on the soft non-bonded repulsion term.  Default 0.2.
     repulsion_cutoff : float or None
         Spatial cutoff (Å) on which non-bonded atoms enter the repulsion sum.
-        ``None`` disables the cutoff (slower but exact).  Default 6.0 Å.
+        ``None`` disables the cutoff (slower but exact).  Default 10.0 Å.
     n_shells : int
         Ego-graph depth for iso-class discrimination.  1 distinguishes fcc vs
         hcp hollows on (111); 0 collapses them.  Default 1.
@@ -939,6 +977,14 @@ def find_anchor_sites(
         natural ``k_max`` from the co-bonding graph.  Set explicitly to
         suppress runaway clique enumeration on very dense surfaces (see
         ``todo.MD``).
+    hull_tolerance : float
+        Signed-distance tolerance (Å) for rejecting buried nanoparticle
+        cliques and below-surface slab cliques.  Default
+        :data:`~autokmc.core.constants.HULL_TOL`.
+    kabsch_max_mappings : int
+        Maximum number of graph-isomorphism mappings tested while propagating
+        representative positions to equivalent members.  Default
+        :data:`~autokmc.core.constants.KABSCH_MAX_MAPPINGS`.
     verbose : bool
         Print a per-k summary table.
 
@@ -972,12 +1018,16 @@ def find_anchor_sites(
     _remove_anchor_nodes(G, element)
 
     # ── Step 1: enumerate raw cliques ─────────────────────────────────────
-    sites_by_k = _enumerate_cliques(G, element, r_cov, co_factor)
-    if k_max is not None:
-        # Drop oversized cliques up-front (todo.MD: clique blowup).
-        sites_by_k = {k: v for k, v in sites_by_k.items() if k <= k_max}
-        if not sites_by_k:
-            sites_by_k = {1: []}
+    sites_by_k = _enumerate_cliques(
+        G,
+        element,
+        r_cov,
+        co_factor,
+        k_max=k_max,
+        hull_tolerance=hull_tolerance,
+    )
+    if not sites_by_k:
+        sites_by_k = {1: []}
     n_raw = sum(len(v) for v in sites_by_k.values())
     _log.debug("find_anchor_sites: %r  %d raw cliques  k_max=%d",
                element, n_raw, max(sites_by_k) if sites_by_k else 0)
@@ -1029,6 +1079,7 @@ def find_anchor_sites(
                 R, t = _kabsch_align_ego(
                     G, iso.representative, member, n_shells,
                     cell, cell_inv, pbc, use_mic,
+                    max_mappings=kabsch_max_mappings,
                 )
                 k_m, idx_m = clique_to_loc[member]
                 if R is not None and t is not None:
@@ -1116,6 +1167,9 @@ def find_anchor_sites(
     # ── Persist to G.graph ────────────────────────────────────────────────
     G.graph.setdefault("anchor_sites", {})[element]  = all_sites
     G.graph.setdefault("raw_cliques",  {})[element]  = sites_by_k
+    G.graph.setdefault(ANCHOR_K_MAX_BY_ELEMENT, {})[element] = (
+        None if k_max is None else int(k_max)
+    )
 
     if verbose:
         print(f"  {'k':>3}  {'type':<10}  {'raw':>6}  {'unique':>6}")

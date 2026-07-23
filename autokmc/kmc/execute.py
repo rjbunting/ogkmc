@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import networkx as nx
 
+from autokmc.core.graph_state import (
+    OCCUPIED_BY_CLIQUE,
+    get_occupied_by_clique,
+)
 from autokmc.kmc.state import _affected_surface_cliques, _set_member_occupied
 from autokmc.sites.bond import BondReactionSite
 from autokmc.sites.diffusion import DiffusionSite
@@ -37,7 +41,11 @@ def _member_blocked_by_other(G: nx.Graph, site, member_index: int) -> bool:
         return False
 
     member_ids = frozenset(site.member_node_ids[member_index])
-    occupied_by_clique = G.graph.get("occupied_by_clique")
+    occupied_by_clique = (
+        get_occupied_by_clique(G)
+        if OCCUPIED_BY_CLIQUE in G.graph
+        else None
+    )
     if occupied_by_clique is not None:
         for clique in cliques:
             occupied = occupied_by_clique.get(clique)

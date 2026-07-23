@@ -77,7 +77,7 @@ Public API
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Iterable
+from typing import TYPE_CHECKING, Any, Iterable
 
 import networkx as nx
 from networkx.algorithms import isomorphism
@@ -86,16 +86,14 @@ from autokmc.io.calculators import CalculatorConfigError, acquire_calculator
 from autokmc.core.pbc import full_pbc_for_cell
 from autokmc.sites.adsorbate import (
     AdsorbateSite,
-    _get_surface_apsp,
-    _shortest_path_between_cliques,
 )
+from autokmc.sites.identity import SiteId, member_identifier, site_identifier
 from autokmc.sites.diffusion import _member_clique_union
 from autokmc.sites.stability.adsorption import _surface_bfs_shells
 from autokmc.core.constants import (
     BOND_MAX_HOPS,
     BOND_PAIR_N_SHELLS,
     BOND_PRUNE_BY_TRIPLE,
-    MAX_PAIR_SHELLS,
     NL_MULT_DEFAULT,
     PRUNE_FMAX,
     PRUNE_MAX_STEPS,
@@ -256,6 +254,9 @@ class BondReactionLateral:
     atom_matching_method : str | None = None
     atom_mapping         : list = field(default_factory=list)
     matching_diagnostics : dict = field(default_factory=dict)
+    if TYPE_CHECKING:
+        _fingerprint : tuple = field(init=False, repr=False, compare=False)
+        _rate_cache : dict = field(init=False, repr=False, compare=False)
 
 
 @dataclass
@@ -303,6 +304,22 @@ class BondReactionSite:
     _member_cliques : list[tuple[tuple[frozenset, ...],
                                  tuple[frozenset, ...],
                                  tuple[frozenset, ...]]] = field(default_factory=list)
+    #: Stable KMC identity, assigned lazily once member nodes are available.
+    # Keep this after every pre-existing init field so older positional
+    # constructors continue to bind ``_member_cliques`` correctly.
+    site_id                : str = field(default="", compare=False)
+    # Lazily attached so older checkpoints and manual instances retain the
+    # established ``hasattr``-based initialisation path.
+    if TYPE_CHECKING:
+        _lateral_fp_index : dict[tuple, list[BondReactionLateral]] = field(
+            init=False, repr=False, compare=False,
+        )
+        _member_lc : dict[int, BondReactionLateral] = field(
+            init=False, repr=False, compare=False,
+        )
+        applicable_reactions : list[Any] = field(
+            init=False, repr=False, compare=False,
+        )
 
 
 def rebuild_bond_reverse_indexes(
@@ -557,9 +574,14 @@ def _flatten_sites(
     return out
 
 
-def _placement_key(site: AdsorbateSite, m_idx: int) -> tuple[str, int, int, int]:
+def _placement_key(site: AdsorbateSite, m_idx: int) -> tuple[str, int, int, str]:
     """Canonical sortable key for one (site, m_idx) placement."""
-    return (_canon_smiles(site.reactant), int(site.iso_class), int(m_idx), id(site))
+    return (
+        _canon_smiles(site.reactant),
+        int(site.iso_class),
+        int(m_idx),
+        site_identifier(site),
+    )
 
 
 def _placement_cliques(
@@ -799,10 +821,10 @@ def _prune_one_per_adsorption_triple(
             return 10**12
         return g.number_of_nodes() + g.number_of_edges()
 
-    kept_ids: set[int] = set()
+    kept_ids: set[SiteId] = set()
     for key, candidates in groups.items():
         best = min(candidates, key=_ego_size)
-        kept_ids.add(id(best))
+        kept_ids.add(site_identifier(best))
         if verbose and len(candidates) > 1:
             discarded = [c for c in candidates if c is not best]
             print(
@@ -812,7 +834,7 @@ def _prune_one_per_adsorption_triple(
                 f"{[c.iso_class for c in discarded]}"
             )
 
-    return [brs for brs in bond_sites if id(brs) in kept_ids]
+    return [brs for brs in bond_sites if site_identifier(brs) in kept_ids]
 
 
 # ---------------------------------------------------------------------------
@@ -825,7 +847,6 @@ def find_bond_sites(
     templates: Iterable[BondReactionTemplate],
     *,
     max_hops: int = BOND_MAX_HOPS,
-    surface_apsp_cutoff: int = MAX_PAIR_SHELLS,
     deduplicate_iso: bool = True,
     n_shells_pair: int = BOND_PAIR_N_SHELLS,
     prune_by_triple: bool = BOND_PRUNE_BY_TRIPLE,
@@ -866,10 +887,6 @@ def find_bond_sites(
     max_hops : int
         Maximum surface-graph hop distance (default
         :data:`autokmc.core.constants.BOND_MAX_HOPS`).
-    surface_apsp_cutoff : int
-        Cutoff handed to
-        :func:`autokmc.sites.adsorbate._get_surface_apsp` for the
-        cached APSP table.  Must be ≥ ``max_hops``.
     deduplicate_iso : bool
         Group triples sharing the same ``({iso_a, iso_b}, iso_c)`` into
         one :class:`BondReactionSite`.
@@ -906,13 +923,21 @@ def find_bond_sites(
     for s in sites_list:
         by_smiles.setdefault(_canon_smiles(s.reactant), []).append(s)
 
-    apsp = _get_surface_apsp(
-        G, cutoff=max(int(max_hops), int(surface_apsp_cutoff)),
-    )
-
     out: list[BondReactionSite] = []
 
     gas_species = dict(gas_species or {})
+
+    # Flattening, sorting and indexing placements depend only on the species,
+    # not on the reaction template.  Dynamic growth commonly introduces many
+    # templates sharing the same species, so compute these representations once.
+    flat_by_smiles = {
+        smiles: _flatten_sites(species_sites)
+        for smiles, species_sites in by_smiles.items()
+    }
+    surface_index_by_smiles = {
+        smiles: _surface_node_index_for_placements(flat)
+        for smiles, flat in flat_by_smiles.items()
+    }
 
     for tpl in templates:
         sites_a = by_smiles.get(tpl.smiles_a, [])
@@ -939,12 +964,12 @@ def find_bond_sites(
                 )
             continue
 
-        flat_a = _flatten_sites(sites_a)
-        flat_b = _flatten_sites(sites_b)
-        surface_index_b = _surface_node_index_for_placements(flat_b)
-        flat_c = [] if gas_product else _flatten_sites(sites_c)
+        flat_a = flat_by_smiles.get(tpl.smiles_a, [])
+        flat_b = flat_by_smiles.get(tpl.smiles_b, [])
+        surface_index_b = surface_index_by_smiles.get(tpl.smiles_b, {})
+        flat_c = [] if gas_product else flat_by_smiles.get(tpl.smiles_c, [])
         surface_index_c = (
-            {} if gas_product else _surface_node_index_for_placements(flat_c)
+            {} if gas_product else surface_index_by_smiles.get(tpl.smiles_c, {})
         )
 
         n_considered = 0
@@ -977,9 +1002,6 @@ def find_bond_sites(
                     continue
 
                 n_considered += 1
-
-                if _shortest_path_between_cliques(clq_a, clq_b, apsp) > int(max_hops):
-                    continue
 
                 ab_union = clq_a | clq_b
 
@@ -1054,11 +1076,6 @@ def find_bond_sites(
                     kc = _placement_key(sc, mc)
                     if kc == ka or kc == kb:
                         continue
-                    if _shortest_path_between_cliques(
-                        clq_c, ab_union, apsp,
-                    ) > int(max_hops):
-                        continue
-
                     n_kept += 1
 
                     a_nids = list(sa.member_node_ids[ma])
@@ -1432,7 +1449,7 @@ def prune_unstable_bond_sites(
     cache: dict[frozenset, bool] = {}
 
     def _placement_id(s, m):
-        return (id(s), int(m))
+        return member_identifier(s, m)
 
     def _check_pair(sa, ma, sb, mb, bond_iso) -> bool:
         key = frozenset({_placement_id(sa, ma), _placement_id(sb, mb)})

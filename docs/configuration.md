@@ -8,9 +8,24 @@ Always validate before launching an expensive run:
 
 ```bash
 autokmc validate-config CONFIG.yaml
+autokmc preflight CONFIG.yaml
 ```
 
-The platinum examples in [`example/`](../example/) are the recommended
+Validation rejects empty feeds, invalid or duplicate canonical SMILES,
+unsupported bond types, non-mapping calculator arguments, ambiguous
+`import_path`/`factory` declarations, inconsistent calculator
+copies/workers/devices, and unsafe or overlapping managed output names.
+`preflight` is read-only with respect to configured outputs and additionally
+checks output collisions and active locks, checkpoint compatibility,
+file-backed catalyst readability, calculator imports, and the effective
+worker/device assignment. Use
+`autokmc preflight CONFIG.yaml --check-calculator` to construct the calculator
+in a temporary directory and require finite probe energy and forces.
+
+[`example/all_options.yaml`](../example/all_options.yaml) is a commented,
+valid-as-written input template containing every public option. Competing
+structure and calculator modes are shown as commented alternatives. The
+platinum examples in [`example/`](../example/) are the recommended
 production-style starting points. Although some internal dataclasses retain
 generic legacy defaults, production configurations should set the catalyst,
 calculator, thermochemistry, and convergence settings explicitly.
@@ -27,14 +42,50 @@ calculator, thermochemistry, and convergence settings explicitly.
 | `trajectory_dump_every` | `10` | Write every Nth KMC step; `0` disables it. |
 | `calculation_cache_enabled` | `true` | Enable the ISAAC reaction database. |
 | `calculation_cache_dir` | `calculation_cache` | Database directory below `output.dir`. |
-| `isaac_export_filename` | `isaac_records.json` | Portable ISAAC record-array export. |
-| `log_level` | `INFO` | `CRITICAL`, `ERROR`, `WARNING`, `INFO`, or `DEBUG`. |
+| `isaac_export_enabled` | `false` | Write a portable ISAAC record-array export at finalization. |
+| `isaac_export_filename` | `isaac_records.json` | Export name used when `isaac_export_enabled` is true. |
+| `log_level` | `INFO` | `CRITICAL`, `ERROR`, `WARNING`, `INFO`, or `DEBUG`. INFO prints stage and periodic KMC progress; DEBUG also enables detailed site/network diagnostics. |
+
+## `constants`
+
+This section exposes the scientific and algorithmic defaults shared across
+multiple stages. Values are captured in the resolved configuration and run
+manifest. Controls local to one channel, such as NEB image counts and
+optimization thresholds, remain in that channel's section.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `neighbor_list_multiplier` | `0.90` | Multiplier for ordinary ASE natural-cutoff bonds: $d_{ij} \le f(r_i+r_j)$. |
+| `co_bond_factor` | `0.90` | Covalent-radius factor for simultaneous surface bonding to one adsorbate anchor: $d_{ij} \le f(2r_\mathrm{ads}+r_i+r_j)$. |
+| `anchor_bond_factor` | `0.85` | Target anchor-bond factor: $d_\mathrm{ideal}=f(r_\mathrm{ads}+r_i)$. |
+| `anchor_repulsion_weight` | `0.20` | Weight of the non-bonded $1/r^2$ term used while positioning anchors; zero disables it. |
+| `site_repulsion_cutoff` | `10.0` Å | Radius around the clique centroid included in the repulsion sum; `null` includes all surface atoms. |
+| `adsorbate_contact_factor` | `1.05` | Minimum rigid-body steric-contact factor: $R_\mathrm{min}=f(r_\mathrm{ads}+r_\mathrm{surface})$. |
+| `adsorbate_standoff_factor` | `0.0` | Extra adsorbate lift along the outward surface normal in summed-covalent-radius units. |
+| `adsorbate_rotational_restarts` | `6` | Rigid-body starting orientations tried during placement; one disables multi-start. |
+| `typical_neighbor_distance` | `2.5` Å | Typical metal neighbor distance used to choose automatic anchor isomorphism depth. |
+| `adsorbate_bond_tolerance` | `0.4` Å | Tolerance for matching molecular and surface anchor-pair distances. |
+| `anchor_hull_tolerance` | `-0.2` Å | Signed-distance threshold for rejecting anchor centroids inside nanoparticle hulls. |
+| `raycast_coverage_threshold` | `0.7` | Required exposed ray-disc fraction for slab surface classification; must be in `[0, 1]`. |
+| `raycast_disc_samples` | `10` | Ray-disc sampling resolution per axis. |
+| `kabsch_max_mappings` | `6969` | Maximum graph automorphisms examined during local Kabsch alignment. |
+| `lateral_shells` | `0` | Surface-graph depth for lateral environments; zero requires sharing an anchor surface atom. |
+
+The three covalent-radius factors serve different purposes:
+`neighbor_list_multiplier` defines ordinary graph bonds, `co_bond_factor`
+determines which multi-coordinate anchor cliques can exist, and
+`structure.surface_radius_factor` changes the ray-casting discs used only for
+slab surface classification.
 
 ## `structure`
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `kind` | `surface` | `surface` or `nanoparticle`. |
+| `kind` | `surface` | `surface`, `nanoparticle`, or `file`. |
+| `path` | `null` | Catalyst file for `kind: file`. Relative paths resolve from the configuration file's directory. |
+| `format` | `null` | Optional ASE reader format. `null` lets ASE infer the format from `path`. |
+| `index` | `-1` | Frame selected from a multi-frame catalyst file. ASE indexing is used; `-1` selects the last frame. |
+| `frozen_indices` | `null` | Optional zero-based catalyst atom indices to constrain for `kind: file`. |
 | `composition` | internal default `Cu` | Element/composition accepted by the structure builder. Set `Pt` for the supplied examples. |
 | `crystal_structure` | `fcc` | Crystal structure passed to the builder. |
 | `miller_index` | `[1, 1, 1]` | Three-index surface orientation. |
@@ -43,6 +94,9 @@ calculator, thermochemistry, and convergence settings explicitly.
 | `min_vacuum_size` | `12.0` Å | Minimum vacuum thickness. |
 | `goal_x`, `goal_y` | `12.0` Å | Target lateral dimensions. |
 | `n_freeze_layers` | `2` | Number of bottom layers to constrain. |
+| `surface_side` | `top` | Slab face classified as exposed: `top`, `bottom`, or `both`. |
+| `surface_radius_factor` | `1.0` | Covalent-radius multiplier for slab ray-casting discs. |
+| `nanoparticle_hull_tolerance_factor` | `0.5` | Covalent-radius multiplier for nanoparticle hull-atom classification tolerance. |
 | `fmax` | `0.05` eV/Å | Structure relaxation threshold. |
 | `max_steps` | `1000` | Maximum structure relaxation steps. |
 | `n_atoms` | `null` | Approximate nanoparticle atom count. |
@@ -54,8 +108,35 @@ calculator, thermochemistry, and convergence settings explicitly.
 | `surface_energy_max_steps` | `null` | Optional facet-specific step limit. |
 | `extra_kwargs` | `{}` | Additional builder keyword arguments. |
 
-Positive sizes and force thresholds are required. `n_freeze_layers` may be
-zero. Unconverged structure optimization is an error.
+Positive sizes and force thresholds are required for built structures.
+`n_freeze_layers` may be zero. Unconverged structure optimization is an error.
+
+File-backed structures use any single-frame or multi-frame format supported by
+the installed ASE version:
+
+```yaml
+structure:
+  kind: file
+  path: ./structures/catalyst.extxyz
+  index: -1
+  # format: extxyz
+  frozen_indices: [0, 1, 2, 3]
+```
+
+The selected frame enters the workflow as supplied: AutoKMC neither rebuilds
+nor relaxes a file-backed catalyst. Any calculator serialized with the input
+is detached; the configured calculator is used for subsequent chemistry.
+Provide cell vectors and periodic-boundary metadata appropriate for catalyst
+surface classification. `path` is required for this mode. Explicit
+`frozen_indices` are validated against the selected atom count and become the
+portable frozen mask used by subsequent chemistry, KMC, checkpoints, and
+trajectory output. Omit the field to use the union of
+`atoms.info["frozen_indices"]` and ASE `FixAtoms` constraints from the selected
+frame; other constraint types are not treated as fully frozen atoms. Set it to
+`[]` to override imported metadata with no frozen atoms.
+`autokmc preflight CONFIG.yaml` resolves the source path and parses the selected
+frame before calculator checks, then reports the resolved path, frame index,
+atom count, and frozen count.
 
 ## `reactants`
 
@@ -77,7 +158,7 @@ are surface-generated leaf species and receive zero gas pressure.
 
 ## `calculator`
 
-Exactly one construction style is normally used:
+Exactly one calculator construction style is required:
 
 ```yaml
 calculator:
@@ -102,16 +183,29 @@ calculator:
 | --- | --- | --- |
 | `import_path` | `null` | Dotted calculator class. |
 | `kwargs` | `{}` | Class constructor arguments. |
-| `factory` | `null` | Dotted factory callable; takes precedence over `import_path`. |
+| `factory` | `null` | Dotted factory callable; mutually exclusive with `import_path`. |
 | `factory_kwargs` | `{}` | Factory arguments. |
-| `copies` | `1` | Number of independent calculator instances. |
+| `copies` | `1` | Number of independent calculator instances. Independent site work, NEB images, and vibration displacements share this pool. |
 | `gpu_devices` | `null` | Optional device list assigned across copies. |
 | `gpu_device_arg` | `device` | Constructor/factory argument that receives a device. |
-| `max_workers` | `null` | Maximum parallel calculator tasks. |
+| `max_workers` | `null` | Maximum concurrent calculator tasks; defaults to the number of copies. |
 
-If neither construction path is supplied, the CLI falls back to ASE EMT.
-Production calculations should always configure the intended calculator
-explicitly.
+Every configuration must set exactly one of `calculator.import_path` or
+`calculator.factory`. Omitting both is a validation error. EMT is used only
+when selected explicitly.
+
+`import_path` and `factory` are mutually exclusive. Their corresponding
+argument fields must be mappings, `max_workers` cannot exceed `copies`, and a
+non-empty `gpu_devices` list must contain one unique string per calculator
+copy. The same mapping and callable-declaration checks apply to nested generic
+factory specs inside calculator arguments.
+
+Local files and directories nested anywhere in `kwargs` or `factory_kwargs`
+are identified by their contents for cache and resume compatibility. Remote
+model names cannot be inspected, so AutoKMC retains those aliases literally.
+Use an immutable model revision, commit, or digest rather than a mutable alias
+such as `latest`; otherwise a remote artifact could change without the local
+cache or resume contract being able to detect it.
 
 ## `adsorbate_sites`
 
@@ -120,6 +214,10 @@ explicitly.
 | `prune_stable_only` | `true` | Relax one representative per candidate class and retain stable classes. |
 | `fmax` | `0.05` eV/Å | Pruning relaxation threshold. |
 | `max_steps` | `500` | Pruning step limit. |
+| `anchor_k_max` | `4` | Maximum anchor clique size. Four covers atop, bridge, three-fold, and four-fold sites while bounding dense-graph enumeration; set to `null` for legacy unbounded enumeration. |
+| `n_shells_anchor` | `null` | Anchor-environment graph depth; `null` selects it automatically from molecular reach. |
+| `pair_n_shells` | `1` | Local graph depth used to classify multi-anchor molecular placements. |
+| `max_pair_shells` | `10` | Maximum allowed surface-graph path length between anchors in one placement. |
 
 ## `kmc`
 
@@ -130,7 +228,7 @@ explicitly.
 | `transmission_coefficient` | `1.0` | Non-negative Eyring coefficient. |
 | `fmax` | `0.05` eV/Å | Adsorption endpoint threshold during KMC discovery. |
 | `max_steps` | `200` | Adsorption endpoint step limit. |
-| `log_every` | `1` | Progress cadence; `0` disables step messages. |
+| `log_every` | `100` | Concise KMC progress cadence; `0` disables step messages. |
 | `random_seed` | `69` | Initial random seed. Checkpoint resume restores RNG state. |
 | `lateral_interactions` | `true` | Reclassify local lateral environments after events. |
 
@@ -156,7 +254,6 @@ explicitly.
 | --- | --- | --- |
 | `enabled` | `false` | Enable bond-changing channels. |
 | `bond_max_hops` | `0` | Maximum surface separation for A/B candidates. |
-| `surface_apsp_cutoff` | `10` | Surface all-pairs shortest-path cutoff. |
 | `bond_types` | `["SINGLE", "DOUBLE", "TRIPLE"]` | Allowed RDKit bond types. |
 | `include_ring_bonds` | `false` | Include ring-bond transformations. |
 | `include_homo_coupling` | `true` | Permit A + A coupling templates. |
@@ -193,7 +290,7 @@ explicitly.
 | `symmetry_tolerance` | `0.3` Å | Cartesian tolerance used by pymatgen for molecular point-group and rotational-symmetry inference. |
 | `default_spin` | `0.0` | Gas spin fallback. |
 | `default_geometry` | `auto` | `auto`, `linear`, `nonlinear`, or `monatomic`. |
-| `cache_dir` | `null` | Persistent vibration-cache root; defaults below the run directory. |
+| `cache_dir` | `null` | Persistent vibration-cache root; defaults below the run directory. Completed content-addressed displacement calculations are reused after interruption. |
 
 `free_energy.pressure_bar` is a feed-wide fallback despite its placement in the
 `free_energy` section, and it applies even when `free_energy.enabled` is false.
@@ -219,6 +316,9 @@ scientifically necessary.
 | `every_n_steps` | `1` | Checkpoint cadence. |
 | `resume_from` | `null` | Checkpoint to continue. |
 
-On resume, event and trajectory files are appended, reaction-folder counters
-are restored, cumulative summary state is reconstructed from `events.jsonl`,
-and the saved NumPy or Python RNG state continues the random stream.
+On resume, event and trajectory files are reconciled to the checkpoint before
+they are appended. Trajectory frames beyond the checkpoint's KMC step are
+removed atomically; malformed or non-monotonic committed `kmc_step` metadata is
+rejected. Reaction-folder counters are restored, cumulative summary state is
+reconstructed from `events.jsonl`, and the saved NumPy or Python RNG state
+continues the random stream.

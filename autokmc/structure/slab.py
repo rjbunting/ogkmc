@@ -9,12 +9,15 @@ from typing import Dict, Optional, Tuple
 import numpy as np
 from ase import Atoms
 from ase.build import make_supercell
-from ase.calculators.emt import EMT
 from ase.constraints import FixAtoms
 
-from autokmc.core.constants import RANDOM_SEED
+from autokmc.core.constants import (
+    RANDOM_SEED,
+    RAYCAST_COVERAGE_THRESHOLD,
+    RAYCAST_N_DISC_SAMPLE,
+)
 from autokmc.core.pbc import set_full_pbc_if_cell
-from autokmc.io.calculators import acquire_calculator
+from autokmc.io.calculators import CalculatorConfigError, acquire_calculator
 from autokmc.structure.builders import (
     _apply_composition,
     _build_surface_parent_cell,
@@ -50,6 +53,9 @@ def build_surface(
     orthogonalise: bool = True,
     n_freeze_layers: int = 2,
     composition_seed: int = RANDOM_SEED,
+    surface_radius_factor: float = 1.0,
+    raycast_coverage_threshold: float = RAYCAST_COVERAGE_THRESHOLD,
+    raycast_disc_samples: int = RAYCAST_N_DISC_SAMPLE,
     calculator=None,
     fmax: float = 0.05,
     max_steps: int = 1000,
@@ -68,7 +74,9 @@ def build_surface(
     _validate_crystal_structure(crystal_structure)
 
     if calculator is None:
-        calculator = EMT()
+        raise CalculatorConfigError(
+            "build_surface requires an explicit calculator"
+        )
 
     primary = _primary_element(comp)
     lp = _resolve_lattice_params(
@@ -145,7 +153,13 @@ def build_surface(
         _print_divider()
 
     if n_freeze_layers > 0:
-        fixed_indices = _get_bottom_layer_indices(atoms, n_freeze_layers)
+        fixed_indices = _get_bottom_layer_indices(
+            atoms,
+            n_freeze_layers,
+            surf_radius_factor=surface_radius_factor,
+            coverage_threshold=raycast_coverage_threshold,
+            n_disc_sample=raycast_disc_samples,
+        )
         atoms.set_constraint(FixAtoms(indices=fixed_indices))
         atoms.info["frozen_indices"] = list(fixed_indices)
         if verbose:
@@ -232,7 +246,14 @@ def _orthogonalise_slab(
     return ortho, (n1, n2, m1, m2, int(best_size))
 
 
-def _get_bottom_layer_indices(atoms: Atoms, n_layers: int) -> list:
+def _get_bottom_layer_indices(
+    atoms: Atoms,
+    n_layers: int,
+    *,
+    surf_radius_factor: float = 1.0,
+    coverage_threshold: float = RAYCAST_COVERAGE_THRESHOLD,
+    n_disc_sample: int = RAYCAST_N_DISC_SAMPLE,
+) -> list:
     """Return atom indices belonging to the bottom *n_layers* layers."""
     from autokmc.structure.surface import find_surface_atoms_raycasting
 
@@ -254,7 +275,13 @@ def _get_bottom_layer_indices(atoms: Atoms, n_layers: int) -> list:
             )
             break
 
-        mask, local_indices = find_surface_atoms_raycasting(work, which="bottom")
+        mask, local_indices = find_surface_atoms_raycasting(
+            work,
+            surf_radius_factor=surf_radius_factor,
+            which="bottom",
+            coverage_threshold=coverage_threshold,
+            n_disc_sample=n_disc_sample,
+        )
         if not local_indices.size:
             warnings.warn(
                 f"_get_bottom_layer_indices: ray-casting found no bottom surface atoms at layer {layer + 1}/{n_layers}. Stopping.",

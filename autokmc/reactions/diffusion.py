@@ -44,14 +44,17 @@ Public API
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 from dataclasses import dataclass
-from typing import Iterable
-
 import numpy as np
 import networkx as nx
 
-from autokmc.io.calculators import CalculatorConfigError, CalculatorPool
+from autokmc.io.calculators import (
+    CalculatorConfigError,
+    CalculatorPool,
+    calculator_batch_active,
+    calculator_batch_context,
+)
 from autokmc.sites.diffusion import DiffusionSite, DiffusionLateral
 from autokmc.sites.stability.diffusion import (
     check_diffusion_site_lateral,
@@ -71,6 +74,7 @@ from autokmc.core.constants import (
     NEB_SPRING_K,
     NEB_INTERPOLATION,
     NL_MULT_DEFAULT,
+    LATERAL_SHELLS_DEFAULT,
 )
 from autokmc.utils.logging import get_logger
 
@@ -256,7 +260,7 @@ def _diffusion_energetics_cached(
     cache: dict | None = getattr(lc, "_rate_cache", None)
     if cache is None:
         cache = {}
-        lc._rate_cache = cache  # type: ignore[attr-defined]
+        lc._rate_cache = cache
     hit = cache.get(key)
     if hit is not None:
         return hit
@@ -305,6 +309,148 @@ def _diffusion_energetics_cached(
 # Public API
 # ---------------------------------------------------------------------------
 
+def _replace_cached_member_diffusion(
+    site: DiffusionSite,
+    member_index: int,
+    reaction: DiffusionReaction | None,
+) -> None:
+    reactions = [
+        candidate
+        for candidate in (getattr(site, "applicable_reactions", None) or [])
+        if int(candidate.member_index) != int(member_index)
+    ]
+    if reaction is not None:
+        reactions.append(reaction)
+    reactions.sort(key=lambda candidate: int(candidate.member_index))
+    site.applicable_reactions = reactions
+
+
+def get_applicable_diffusion_for_member(
+    G: nx.Graph,
+    ds: DiffusionSite,
+    member_index: int,
+    calculator,
+    *,
+    temperature: float,
+    transmission_coefficient: float = DEFAULT_TRANSMISSION_COEFFICIENT,
+    frozen_indices: list[int] | None = None,
+    fmax: float = NEB_FMAX,
+    max_steps: int = NEB_MAX_STEPS,
+    n_images: int = NEB_N_IMAGES,
+    climb: bool = NEB_CLIMB,
+    spring_k: float = NEB_SPRING_K,
+    interpolation: str = NEB_INTERPOLATION,
+    nl_mult: float = NL_MULT_DEFAULT,
+    persist_neb_path: bool = False,
+    verbose: bool = False,
+    lateral_interactions: bool = True,
+    lateral_shells: int = LATERAL_SHELLS_DEFAULT,
+    free_energy_options=None,
+    vib_cache_root: str | None = None,
+    calculation_cache_root: str | None = None,
+    update_site_cache: bool = True,
+) -> DiffusionReaction | None:
+    """Scientifically reclassify and evaluate one concrete diffusion member."""
+    if not hasattr(ds, "_member_lc"):
+        ds._member_lc = {}
+    index = int(member_index)
+    reaction: DiffusionReaction | None = None
+    applicable, direction = is_diffusion_applicable(G, ds, index)
+    if not applicable or direction is None:
+        ds._member_lc.pop(index, None)
+    else:
+        try:
+            lc = check_diffusion_site_lateral(
+                G,
+                ds,
+                index,
+                n_shells=lateral_shells,
+                ignore_lateral=not lateral_interactions,
+            )
+        except (ValueError, IndexError) as exc:
+            ds._member_lc.pop(index, None)
+            if verbose:
+                print(
+                    f"  ⚠  diff_iso={ds.iso_class} m={index}: "
+                    f"lateral check skipped ({exc})"
+                )
+        else:
+            if lc.stable is None:
+                try:
+                    check_diffusion_stability(
+                        G,
+                        ds,
+                        index,
+                        lc,
+                        calculator,
+                        frozen_indices=frozen_indices,
+                        fmax=fmax,
+                        max_steps=max_steps,
+                        n_images=n_images,
+                        climb=climb,
+                        spring_k=spring_k,
+                        interpolation=interpolation,
+                        nl_mult=nl_mult,
+                        persist_neb_path=persist_neb_path,
+                        verbose=verbose,
+                        free_energy_options=free_energy_options,
+                        free_energy_temperature_k=float(temperature),
+                        vib_cache_root=vib_cache_root,
+                        calculation_cache_root=calculation_cache_root,
+                    )
+                except DiffusionStabilityError as exc:
+                    reason = f"{type(exc).__name__}: {exc}"
+                    _log.warning(
+                        "diff_iso=%d m=%d lat=%d: %s — "
+                        "marking as invalid (excluded from KMC)",
+                        ds.iso_class,
+                        index,
+                        lc.lateral_class,
+                        reason,
+                    )
+                    if verbose:
+                        print(
+                            f"  ⚠  diff_iso={ds.iso_class} m={index} "
+                            f"lat={lc.lateral_class}: {reason}\n"
+                            "     → marked as invalid "
+                            "(will not be admitted to KMC)"
+                        )
+                    lc.stable = False
+                    lc.invalid_reason = reason
+                except CalculatorConfigError:
+                    raise
+
+            if (
+                lc.stable
+                and lc.energy_a is not None
+                and lc.energy_b is not None
+                and lc.energy_ts is not None
+            ):
+                ds._member_lc[index] = lc
+                delta_e, barrier, rate = _diffusion_energetics_cached(
+                    lc,
+                    direction,
+                    temperature=temperature,
+                    transmission_coefficient=transmission_coefficient,
+                )
+                reaction = DiffusionReaction(
+                    kind="diffusion",
+                    direction=direction,
+                    site=ds,
+                    member_index=index,
+                    lateral_class=lc,
+                    delta_e=delta_e,
+                    barrier=barrier,
+                    rate=rate,
+                )
+            else:
+                ds._member_lc.pop(index, None)
+
+    if update_site_cache:
+        _replace_cached_member_diffusion(ds, index, reaction)
+    return reaction
+
+
 def get_applicable_diffusions(
     G: nx.Graph,
     ds: DiffusionSite,
@@ -323,6 +469,7 @@ def get_applicable_diffusions(
     persist_neb_path: bool = False,
     verbose: bool = False,
     lateral_interactions: bool = True,
+    lateral_shells: int = LATERAL_SHELLS_DEFAULT,
     free_energy_options=None,
     vib_cache_root: str | None = None,
     calculation_cache_root: str | None = None,
@@ -335,97 +482,41 @@ def get_applicable_diffusions(
         When ``False``, third-party occupied adsorbate neighbours are excluded
         from the lateral ego-graph so every member maps to the single bare
         lat0.  Default ``True``.
+    lateral_shells : int
+        Number of surface-neighbour shells included in lateral
+        classification.  Defaults to :data:`LATERAL_SHELLS_DEFAULT`.
     """
-    if not hasattr(ds, "_member_lc"):
-        ds._member_lc = {}  # type: ignore[attr-defined]
-
     reactions: list[DiffusionReaction] = []
 
     for m_idx in range(len(ds.member_node_ids)):
-        applicable, direction = is_diffusion_applicable(G, ds, m_idx)
-        if not applicable or direction is None:
-            # Drop any stale lateral-class cache entry — applicability may
-            # change again later, at which point the lateral environment
-            # will be re-classified from scratch.
-            ds._member_lc.pop(m_idx, None)  # type: ignore[attr-defined]
-            continue
-
-        # 1. Lateral classification (cheap if seen before).
-        try:
-            lc = check_diffusion_site_lateral(
-                G, ds, m_idx,
-                ignore_lateral=not lateral_interactions,
-            )
-        except (ValueError, IndexError) as exc:
-            if verbose:
-                print(
-                    f"  ⚠  diff_iso={ds.iso_class} m={m_idx}: "
-                    f"lateral check skipped ({exc})"
-                )
-            continue
-
-        # 2. NEB / endpoint relaxation (only for new lateral classes).
-        if lc.stable is None:
-            try:
-                check_diffusion_stability(
-                    G, ds, m_idx, lc, calculator,
-                    frozen_indices   = frozen_indices,
-                    fmax             = fmax,
-                    max_steps        = max_steps,
-                    n_images         = n_images,
-                    climb            = climb,
-                    spring_k         = spring_k,
-                    interpolation    = interpolation,
-                    nl_mult          = nl_mult,
-                    persist_neb_path = persist_neb_path,
-                    verbose          = verbose,
-                    free_energy_options       = free_energy_options,
-                    free_energy_temperature_k = float(temperature),
-                    vib_cache_root            = vib_cache_root,
-                    calculation_cache_root    = calculation_cache_root,
-                )
-            except DiffusionStabilityError as exc:
-                reason = f"{type(exc).__name__}: {exc}"
-                _log.warning(
-                    "diff_iso=%d m=%d lat=%d: %s — "
-                    "marking as invalid (excluded from KMC)",
-                    ds.iso_class, m_idx, lc.lateral_class, reason,
-                )
-                if verbose:
-                    print(
-                        f"  ⚠  diff_iso={ds.iso_class} m={m_idx} "
-                        f"lat={lc.lateral_class}: {reason}\n"
-                        f"     → marked as invalid (will not be admitted to KMC)"
-                    )
-                lc.stable         = False
-                lc.invalid_reason = reason
-            except CalculatorConfigError:
-                raise
-
-        if not lc.stable:
-            continue
-        if lc.energy_a is None or lc.energy_b is None or lc.energy_ts is None:
-            continue
-
-        ds._member_lc[m_idx] = lc  # type: ignore[attr-defined]
-
-        delta_e, barrier, rate = _diffusion_energetics_cached(
-            lc, direction,
-            temperature              = temperature,
-            transmission_coefficient = transmission_coefficient,
+        reaction = get_applicable_diffusion_for_member(
+            G,
+            ds,
+            m_idx,
+            calculator,
+            temperature=temperature,
+            transmission_coefficient=transmission_coefficient,
+            frozen_indices=frozen_indices,
+            fmax=fmax,
+            max_steps=max_steps,
+            n_images=n_images,
+            climb=climb,
+            spring_k=spring_k,
+            interpolation=interpolation,
+            nl_mult=nl_mult,
+            persist_neb_path=persist_neb_path,
+            verbose=verbose,
+            lateral_interactions=lateral_interactions,
+            lateral_shells=lateral_shells,
+            free_energy_options=free_energy_options,
+            vib_cache_root=vib_cache_root,
+            calculation_cache_root=calculation_cache_root,
+            update_site_cache=False,
         )
-        reactions.append(DiffusionReaction(
-            kind          = "diffusion",
-            direction     = direction,
-            site          = ds,
-            member_index  = m_idx,
-            lateral_class = lc,
-            delta_e       = delta_e,
-            barrier       = barrier,
-            rate          = rate,
-        ))
+        if reaction is not None:
+            reactions.append(reaction)
 
-    ds.applicable_reactions = reactions  # type: ignore[attr-defined]
+    ds.applicable_reactions = reactions
     return reactions
 
 
@@ -447,6 +538,7 @@ def compute_all_diffusions(
     persist_neb_path: bool = False,
     verbose: bool = False,
     lateral_interactions: bool = True,
+    lateral_shells: int = LATERAL_SHELLS_DEFAULT,
     free_energy_options=None,
     vib_cache_root: str | None = None,
     calculation_cache_root: str | None = None,
@@ -457,31 +549,37 @@ def compute_all_diffusions(
         isinstance(calculator, CalculatorPool)
         and len(calculator) > 1
         and len(diffusion_sites) > 1
+        and not calculator_batch_active()
     ):
         def _one(ds: DiffusionSite) -> list[DiffusionReaction]:
-            return get_applicable_diffusions(
-                G, ds, calculator,
-                temperature              = temperature,
-                transmission_coefficient = transmission_coefficient,
-                frozen_indices           = frozen_indices,
-                fmax                     = fmax,
-                max_steps                = max_steps,
-                n_images                 = n_images,
-                climb                    = climb,
-                spring_k                 = spring_k,
-                interpolation            = interpolation,
-                nl_mult                  = nl_mult,
-                persist_neb_path         = persist_neb_path,
-                verbose                  = verbose,
-                lateral_interactions     = lateral_interactions,
-                free_energy_options      = free_energy_options,
-                vib_cache_root           = vib_cache_root,
-                calculation_cache_root   = calculation_cache_root,
-            )
+            with calculator_batch_context():
+                return get_applicable_diffusions(
+                    G, ds, calculator,
+                    temperature              = temperature,
+                    transmission_coefficient = transmission_coefficient,
+                    frozen_indices           = frozen_indices,
+                    fmax                     = fmax,
+                    max_steps                = max_steps,
+                    n_images                 = n_images,
+                    climb                    = climb,
+                    spring_k                 = spring_k,
+                    interpolation            = interpolation,
+                    nl_mult                  = nl_mult,
+                    persist_neb_path         = persist_neb_path,
+                    verbose                  = verbose,
+                    lateral_interactions     = lateral_interactions,
+                    lateral_shells           = lateral_shells,
+                    free_energy_options      = free_energy_options,
+                    vib_cache_root           = vib_cache_root,
+                    calculation_cache_root   = calculation_cache_root,
+                )
 
-        with ThreadPoolExecutor(max_workers=calculator.max_workers) as ex:
-            for rxns in ex.map(_one, diffusion_sites):
-                all_reactions.extend(rxns)
+        futures = [
+            calculator.submit(copy_context().run, _one, site)
+            for site in diffusion_sites
+        ]
+        for reactions in calculator.gather(futures):
+            all_reactions.extend(reactions)
         return all_reactions
 
     for ds in diffusion_sites:
@@ -500,6 +598,7 @@ def compute_all_diffusions(
             persist_neb_path         = persist_neb_path,
             verbose                  = verbose,
             lateral_interactions     = lateral_interactions,
+            lateral_shells           = lateral_shells,
             free_energy_options      = free_energy_options,
             vib_cache_root           = vib_cache_root,
             calculation_cache_root   = calculation_cache_root,
@@ -527,10 +626,11 @@ def fast_diffusion_for_member(
        adsorbate was toggled), use :func:`get_applicable_diffusions`
        instead so the lateral class is re-evaluated.
 
-       The KMC main loop always uses :func:`get_applicable_diffusions`
-       through :func:`autokmc.kmc.engine._recompute_affected_sites`.
-       This helper is provided for callers that maintain their own
-       invalidation discipline.
+       The KMC main loop uses
+       :func:`get_applicable_diffusion_for_member`, which reclassifies the
+       affected member before consulting stability data.  This helper is
+       provided only for callers that maintain their own invalidation
+       discipline.
     """
     applicable, direction = is_diffusion_applicable(G, ds, member_index)
     if not applicable or direction is None:

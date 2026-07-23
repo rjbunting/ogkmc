@@ -7,7 +7,7 @@ One configuration drives the full workflow:
 ```mermaid
 flowchart TD
     A["Load and validate config"] --> B["Build calculator pool"]
-    B --> C["Build configured slab or nanoparticle"]
+    B --> C["Build or load configured catalyst"]
     C --> D["Tag surface atoms and build graph"]
     D --> E["Build gas reactants"]
     E --> F["Enumerate and prune adsorption sites"]
@@ -19,11 +19,17 @@ flowchart TD
     G -. "reuse/write" .-> K
 ```
 
-The CLI implementation is in `autokmc/cli/pipeline.py`. The main stages are:
+`autokmc/cli/pipeline.py` is a thin coordinator.  The configured workflow is
+implemented by `autokmc/workflow`: `stages.py` prepares the calculator,
+structure, graph, reactants, and adsorption sites; `network.py` constructs the
+optional diffusion/bond network; `runtime.py` resolves cache, channel, restart,
+and output collaborators; and `simulation.py` owns KMC launch and finalization.
+The main stages are:
 
 1. Build an ASE-compatible calculator or calculator pool.
-2. Construct and relax a periodic surface or nanoparticle. The supplied
-   production examples use platinum.
+2. Construct and relax a periodic surface or nanoparticle, or load a selected
+   frame from any ASE-readable catalyst file without rebuilding or relaxing
+   it. The supplied production examples use built platinum structures.
 3. classify surface atoms and build the atom-connectivity graph.
 4. Build gas-phase reactants from SMILES. With `relax_in_gas: false`, AutoKMC
    skips geometry relaxation but still requires a finite single-point energy.
@@ -33,6 +39,14 @@ The CLI implementation is in `autokmc/cli/pipeline.py`. The main stages are:
    on-the-fly network expansion.
 8. Persist cumulative outputs and, separately, post-process the event log.
 
+The internal KMC boundary is one `KMCRunRequest` producing one `KMCRunResult`;
+configured workflows construct the typed `KMCSession` directly.  The public
+`autokmc.kmc.engine.run_kmc_steps` signature remains solely as a compatibility
+adapter.  Session initialization, local recomputation, dynamic network
+expansion, output/checkpoint handling, and canonical RNG restart state live in
+separate KMC modules.  Each result also carries run-scoped counters, gauges,
+and accumulated wall-clock timings.
+
 ## Graph state
 
 The live NetworkX graph contains catalyst atoms, materialized adsorbate atoms,
@@ -40,11 +54,29 @@ and site bookkeeping. Occupancy is attached to concrete adsorbate placements.
 Reverse indexes connect occupied surface cliques to affected adsorption,
 diffusion, and bond-reaction members so the KMC engine can update only the
 local rate neighborhood after an event.
+Each adsorption, diffusion, and bond site has a persisted `site_id`; a concrete
+member is addressed by `(site_id, member_index)`.  These stable in-run handles
+survive checkpoint copying and let dynamic discovery recognise a reconstructed
+site without relying on a Python object address.  Dynamic expansion appends
+only new leaves to the reaction-rate index, retaining all existing reaction
+objects and rates; the segment tree expands geometrically only when its current
+capacity is exhausted.
+Site membership is immutable once a site enters the reaction index.  New
+network discoveries therefore add complete sites rather than appending members
+to an indexed site; a future member-growth feature must replace the site
+atomically or extend the index and invalidate its stable identity together.
+Common graph metadata is accessed through `autokmc/core/graph_state.py`; the
+underlying NetworkX dictionaries remain inspectable for notebooks and
+checkpoint compatibility.
+Site-model cache attributes are declared for static checking but remain lazily
+materialized at runtime.  Keeping them out of dataclass serialization preserves
+older checkpoints and the established `asdict`/equality surface.
 
-Run-local identifiers such as graph node ids, adsorption `iso_class`, and
-`lateral_class` are useful inside one simulation but are not stable scientific
-identifiers across independent runs. Portable database matching therefore
-uses labelled chemical topology rather than those counters.
+Run-local identifiers such as `site_id`, graph node ids, adsorption
+`iso_class`, and `lateral_class` are stable across restart and reconstruction
+within one simulation, but are not portable scientific identifiers across
+independently enumerated structures. Portable database matching therefore uses
+labelled chemical topology and geometry rather than those counters.
 
 ## Reaction channels
 
@@ -90,7 +122,13 @@ When `free_energy.enabled` is true:
 - diffusion and bond endpoints and transition states use their populated free
   energies when available,
 - vibration caches are separated by species, reaction class, iso-class, and
-  lateral class.
+  lateral class, then content-addressed by geometry, displacement settings, and
+  calculator identity,
+- independent finite-difference displacements and NEB images share the
+  configured calculator pool without sharing live calculator objects,
+- broad initialization sweeps parallelize independent sites, while isolated
+  transition-state and thermochemistry work parallelizes images or
+  displacements; the two levels are never nested.
 
 When free-energy fields are absent, the corresponding channel uses electronic
 energies. See [Configuration](configuration.md#free_energy) for the controls.
@@ -101,10 +139,31 @@ Scientific and persistence failures are explicit:
 
 - failed gas, structure, endpoint, or NEB convergence raises or invalidates
   only a reaction class when that invalidity is an expected stability result,
+- on-the-fly species/site/network expansion retries transient runtime failures
+  three times, records each stage under the checkpointed
+  `bond_registry.expansion_failures` diagnostics, and raises after exhaustion;
+  only invalid molecular definitions are permanently excluded,
 - unexpected calculator and thermochemistry exceptions propagate,
 - requested event, trajectory, summary, and checkpoint writes must succeed,
 - JSON output rejects nonfinite numeric values,
-- an inconsistent event history is rejected by strict offline analysis.
+- an inconsistent event history is rejected by strict offline analysis,
+- checkpoint resume rejects scientific-configuration drift and reconciles the
+  event log to the checkpoint's committed count and byte offset before any
+  summary is reconstructed,
+- reaction folders carry an immutable discovery step, and resume moves
+  post-checkpoint discoveries outside the authoritative hierarchy,
+- trajectory resume validates a strictly increasing committed `kmc_step`
+  prefix and atomically removes frames beyond the checkpoint step before
+  append.
+
+File-backed catalysts are parsed during read-only preflight before calculator
+probing. Their resolved source path, selected frame, optional explicit format,
+and frozen-atom selection are retained with the resolved configuration and
+catalyst provenance, so an input-selection mistake is visible before expensive
+chemistry begins. A calculator serialized with the selected frame is detached
+in favor of the configured calculator. Cell and periodic-boundary metadata are
+therefore input responsibilities and must be suitable for surface
+classification.
 
 This prevents a run from silently continuing with `NaN` energetics, incomplete
 provenance, or a checkpoint that was never written.
