@@ -273,12 +273,19 @@ so it is often best to turn them on after the reaction network is behaving:
 ```yaml
 free_energy:
   enabled: true
+  # Default partial pressure for reactants that omit partial_pressure_bar.
   pressure_bar: 1.0
   vibration_displacement: 0.01
   vibration_nfree: 2
   include_ts_vibrations: true
   symmetry_tolerance: 0.3
 ```
+
+`free_energy.pressure_bar` is the feed-wide default partial pressure, including
+when free-energy corrections are disabled. A reactant-level
+`partial_pressure_bar` overrides it. Gas thermochemistry is always evaluated at
+the fixed 1-bar standard state; the resolved partial pressure instead scales
+the adsorption rate as the ideal-gas activity `p / p°`.
 
 Gas-phase rotational symmetry numbers are inferred from the final molecular
 coordinates with pymatgen and recorded with the detected point group in the

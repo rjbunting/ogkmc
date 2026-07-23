@@ -212,6 +212,7 @@ def test_missing_file():
         "kmc:\n  temperature_k: 0\n",
         "free_energy:\n  vibration_nfree: 3\n",
         "free_energy:\n  symmetry_tolerance: 0\n",
+        "free_energy:\n  pressure_bar: -0.1\n",
     ],
 )
 def test_strict_validation_rejects_coercible_types_and_invalid_ranges(tmp_path, fragment):
@@ -222,6 +223,25 @@ def test_strict_validation_rejects_coercible_types_and_invalid_ranges(tmp_path, 
     )
     with pytest.raises(ConfigError):
         load_config(path)
+
+
+def test_zero_default_partial_pressure_is_allowed(tmp_path):
+    pytest.importorskip("yaml")
+    path = _write(
+        tmp_path,
+        """
+schema_version: "1"
+reactants:
+  - smiles: "[O]"
+free_energy:
+  pressure_bar: 0.0
+""",
+    )
+
+    cfg = load_config(path)
+
+    assert cfg.free_energy.pressure_bar == 0.0
+    assert cfg.reactants[0].partial_pressure_bar is None
 
 
 def test_duplicate_canonical_reactants_are_rejected(tmp_path):

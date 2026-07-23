@@ -110,10 +110,12 @@ class ReactantCfg:
     smiles: str
     add_hydrogens: bool = True
     relax_in_gas:  bool = True
-    # ── Thermochemistry (consumed when free_energy.enabled is true) ───────
+    # ── Gas feed and thermochemistry ──────────────────────────────
     #: Partial pressure of the gas-phase reactant in bar.  Multiplies the
     #: adsorption rate so that ΔG / barriers stay at the 1-bar reference.
-    #: Default ``None`` → fall back to ``free_energy.pressure_bar``.
+    #: This applies whether or not free-energy corrections are enabled.
+    #: Default ``None`` → use ``free_energy.pressure_bar`` as the feed-wide
+    #: fallback.
     partial_pressure_bar: float | None = None
     #: Symmetry number σ for IdealGasThermo (e.g. 2 for H₂, 12 for CH₄).
     #: Default ``None`` infers it from the final gas-phase geometry with
@@ -247,20 +249,24 @@ class FreeEnergyCfg:
     When ``enabled=True`` (default) the CLI runs ASE
     :class:`~ase.vibrations.Vibrations` for every gas-phase reactant
     (→ :class:`~ase.thermochemistry.IdealGasThermo` at the simulation
-    *T* and :attr:`pressure_bar`) and for every successful adsorbate
+    *T* and a fixed 1-bar standard state) and for every successful adsorbate
     relaxation in :func:`autokmc.sites.stability.adsorption.check_site_stability`
     (→ :class:`~ase.thermochemistry.HarmonicThermo`, vibrating only the
     reactive species — frozen slab atoms and frozen lateral-shell
     adsorbates contribute nothing).
 
-    Adsorption rates are then multiplied by the reactant's partial
-    pressure (in bar) so the persisted ΔG / barriers stay at the 1-bar
-    reference.
+    :attr:`pressure_bar` is the default reactant partial pressure.  A
+    reactant-specific ``partial_pressure_bar`` overrides it.  Adsorption rates
+    are multiplied by that resolved partial pressure (in bar) so the persisted
+    ΔG / barriers stay at the fixed 1-bar standard-state reference.
 
     When ``enabled=False`` the entire pipeline runs on electronic energy
     only — strict superset of the pre-free-energy schema.
     """
     enabled                 : bool  = True
+    #: Feed-wide partial-pressure fallback for reactants that do not declare
+    #: ``partial_pressure_bar``.  This is not the thermodynamic standard-state
+    #: pressure, which is fixed at 1 bar.
     pressure_bar            : float = 1.0
     vibration_displacement  : float = 0.01
     vibration_nfree         : int   = 2
@@ -499,7 +505,7 @@ def _validate_config(cfg: RunConfig) -> None:
         raise ConfigError(f"bond.atom_matching is unsupported: {cfg.bond.atom_matching!r}")
 
     _require_bool(cfg.free_energy.enabled, "free_energy.enabled")
-    _require_number(cfg.free_energy.pressure_bar, "free_energy.pressure_bar", strictly_positive=True)
+    _require_number(cfg.free_energy.pressure_bar, "free_energy.pressure_bar", minimum=0.0)
     _require_number(cfg.free_energy.vibration_displacement, "free_energy.vibration_displacement", strictly_positive=True)
     _require_int(cfg.free_energy.vibration_nfree, "free_energy.vibration_nfree")
     if cfg.free_energy.vibration_nfree not in {2, 4}:

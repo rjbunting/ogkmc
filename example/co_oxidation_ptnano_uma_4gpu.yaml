@@ -30,7 +30,6 @@ reactants:
   - smiles: "[C]=O"
     add_hydrogens: false
     relax_in_gas: true
-    partial_pressure_bar: 1.0
     geometry: linear
 
   # O2 feed; bond dissociation templates produce O* + O* <=> O2.
@@ -71,6 +70,8 @@ adsorbate_sites:
 # true once the reaction network is behaving as expected.
 free_energy:
   enabled: false
+  # Feed-wide default used when a reactant omits partial_pressure_bar (CO here).
+  # Gas thermochemistry, when enabled, still uses a fixed 1-bar standard state.
   pressure_bar: 1.0
 
 kmc:

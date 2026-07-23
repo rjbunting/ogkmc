@@ -43,3 +43,15 @@ behavior is documented under [`docs/`](docs/index.md).
 Reaction-database fallback matching is topology based and intentionally ignores
 Cartesian geometry. This is a method limitation, not an open bug; see
 [ISAAC Reaction Database](docs/reaction-database.md#deliberate-geometry-limitation).
+
+## TS validation
+
+Transition states should be verified in more ways that they currently are.
+This will be explored further at a later date.
+
+## Speedup
+Can do different methods for batching for the TS searches.
+Must look into parallelisation and the calculators too.
+
+## Stiffness
+Need to develop algorithm to prevent sampling of fast steps.

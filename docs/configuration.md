@@ -66,7 +66,7 @@ zero. Unconverged structure optimization is an error.
 | `smiles` | required | Input SMILES; canonicalized internally. |
 | `add_hydrogens` | `true` | Add implicit hydrogens during molecular construction. |
 | `relax_in_gas` | `true` | Relax gas geometry. If false, a finite single-point energy is still computed. |
-| `partial_pressure_bar` | `null` | Species pressure; falls back to `free_energy.pressure_bar`. Zero prevents gas adsorption. |
+| `partial_pressure_bar` | `null` | Species partial pressure; when omitted, inherits `free_energy.pressure_bar`. Zero prevents gas adsorption. |
 | `symmetry_number` | `null` | Optional ideal-gas symmetry-number override. By default it is inferred from the final gas geometry with pymatgen. |
 | `spin` | `null` | Spin value used by ideal-gas thermochemistry. |
 | `geometry` | `null` | `auto`, `linear`, `nonlinear`, or `monatomic`. |
@@ -185,7 +185,7 @@ explicitly.
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `enabled` | `true` | Enable vibrational/ideal-gas corrections. |
-| `pressure_bar` | `1.0` bar | Default gas pressure and standard-state pressure input. |
+| `pressure_bar` | `1.0` bar | Default partial pressure for every reactant that omits `partial_pressure_bar`; may be zero. |
 | `vibration_displacement` | `0.01` Å | Finite-difference displacement. |
 | `vibration_nfree` | `2` | Must be `2` or `4`. |
 | `include_ts_vibrations` | `true` | Compute transition-state vibrations. |
@@ -194,6 +194,13 @@ explicitly.
 | `default_spin` | `0.0` | Gas spin fallback. |
 | `default_geometry` | `auto` | `auto`, `linear`, `nonlinear`, or `monatomic`. |
 | `cache_dir` | `null` | Persistent vibration-cache root; defaults below the run directory. |
+
+`free_energy.pressure_bar` is a feed-wide fallback despite its placement in the
+`free_energy` section, and it applies even when `free_energy.enabled` is false.
+Each explicit `reactants[].partial_pressure_bar` takes precedence. Gas-phase
+thermochemistry always uses a fixed standard-state pressure of 1 bar; the
+resolved partial pressure is applied separately to adsorption rates through
+the ideal-gas activity `p / p°`.
 
 Free-energy work can dominate runtime. The supplied platinum GPU examples
 disable it intentionally for network-debug runs and can be switched on for

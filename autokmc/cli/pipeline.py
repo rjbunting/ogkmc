@@ -23,7 +23,7 @@ from autokmc.io.calculation_cache import (
     initialise_calculation_database,
     write_isaac_export,
 )
-from autokmc.io.config import RunConfig
+from autokmc.io.config import FreeEnergyCfg, ReactantCfg, RunConfig
 from autokmc.io.persistence import ReactionWriter
 from autokmc.io.summary import ReactionSummary, make_run_meta
 from autokmc.io.run_manifest import finish_run_manifest, start_run_manifest
@@ -92,6 +92,16 @@ def _derive_configured_bond_templates(reactant_configs, reactants, bond_cfg):
         template_keys.add(key)
         unique_templates.append(template)
     return unique_templates
+
+
+def _resolved_partial_pressure_bar(
+    reactant_cfg: ReactantCfg,
+    free_energy_cfg: FreeEnergyCfg,
+) -> float:
+    """Resolve a reactant pressure, falling back to the feed-wide default."""
+    if reactant_cfg.partial_pressure_bar is not None:
+        return float(reactant_cfg.partial_pressure_bar)
+    return float(free_energy_cfg.pressure_bar)
 
 
 # ---------------------------------------------------------------------------
@@ -312,10 +322,7 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
             relax                     = r.relax_in_gas,
             free_energy_options       = free_energy_options if fe_cfg.enabled else None,
             free_energy_temperature_k = cfg.kmc.temperature_k,
-            partial_pressure_bar      = (
-                r.partial_pressure_bar if r.partial_pressure_bar is not None
-                else fe_cfg.pressure_bar
-            ),
+            partial_pressure_bar      = _resolved_partial_pressure_bar(r, fe_cfg),
             symmetry_number           = r.symmetry_number,
             spin                      = r.spin,
             geometry                  = r.geometry,

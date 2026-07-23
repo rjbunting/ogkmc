@@ -11,6 +11,7 @@ import pytest
 from autokmc.cli.main import main as cli_main
 from autokmc.cli.pipeline import (
     _derive_configured_bond_templates,
+    _resolved_partial_pressure_bar,
     run_from_config,
 )
 from autokmc.io.checkpoint import make_checkpoint_state, save_checkpoint
@@ -102,6 +103,16 @@ def test_bond_template_derivation_preserves_per_reactant_hydrogen_policy(monkeyp
     assert calls[1][1]["add_hydrogens"] is True
     assert calls[2][0] == ["C", "O"]
     assert calls[2][1]["include_dissociation"] is False
+
+
+def test_reactant_partial_pressure_uses_feed_default_unless_overridden():
+    free_energy = FreeEnergyCfg(pressure_bar=0.4)
+
+    inherited = ReactantCfg(smiles="[C]=O")
+    overridden = ReactantCfg(smiles="O=O", partial_pressure_bar=0.2)
+
+    assert _resolved_partial_pressure_bar(inherited, free_energy) == pytest.approx(0.4)
+    assert _resolved_partial_pressure_bar(overridden, free_energy) == pytest.approx(0.2)
 
 
 def test_resume_skips_fresh_structure_and_site_enumeration(tmp_path, monkeypatch):

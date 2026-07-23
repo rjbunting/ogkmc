@@ -27,10 +27,6 @@
 \affiliation[SLAC]
 {SUNCAT Center for Interface Science and Catalysis, SLAC National Accelerator Laboratory, Menlo Park, California 94025, United States}
 
-\author{Joel B. Varley}
-\affiliation[LLNL]
-{Quantum Simulations Group, Materials Science Division, Lawrence Livermore National Laboratory, Livermore, California 94550, United States}
-
 \author{Kirsten T. Winther}
 \affiliation[SLAC]
 {SUNCAT Center for Interface Science and Catalysis, SLAC National Accelerator Laboratory, Menlo Park, California 94025, United States}
@@ -38,6 +34,10 @@
 \author{Michal Bajdich}
 \affiliation[SLAC]
 {SUNCAT Center for Interface Science and Catalysis, SLAC National Accelerator Laboratory, Menlo Park, California 94025, United States}
+
+\author{Joel B. Varley}
+\affiliation[LLNL]
+{Quantum Simulations Group, Materials Science Division, Lawrence Livermore National Laboratory, Livermore, California 94550, United States}
 
 \author{Tuan Anh Pham}
 \email{pham16@llnl.gov}
@@ -59,23 +59,25 @@ Yippeeeee
 %\section{Introduction}
 
 Kinetic modeling seeks to describe the reactivity and selectivity a catalyst has toward the conversion of reactants to products.
-The desired outcome is to theoretically predict these key catalyst properties accurately to find new active and selective catalysts.
+The desired outcome is to theoretically predict these key catalyst properties accurately to either optimize conditions or to find new active and selective catalysts.
 There are a variety of methods employed to achieve this.
 The simplest method is to use volcano plots, where the adsorption energies of key intermediates are calculated and fitted to a Bell–Evans–Polanyi principle relationship.
 This can be combined with linear scaling, giving an optimal adsorption energy for a key intermediate to have the most activity toward a certain product.
 With this, no explicit kinetic rate information of elementary reactions on the surface are calculated.
-Beyond this method is micro-kinetic modeling, where the kinetic rates of key elementary steps on the surface are considered.
+This has been shown to be effective for both heterogeneous catalysis and homogeneous catalysis.
+Beyond this method is micro-kinetic modeling, where the kinetic rates of elementary reaction steps on the surface are considered.
 A steady state is assumed, where the gradient of the concentration of all surface species (the rate) equals 0.
-However, reactions are surface specific and not site specific, causing a reduction in information.
+However, reactions are surface specific and not site specific, causing a reduction in information, with everything considered within a mean-field approximation.
 Despite this, surface species concentrations and the surface specific rates of elementary reactions can still be discerned.
 For atomic level information of surface reactions, kinetic Monte Carlo offers that resolution, where surface site occupation by species, and subsequent reactions between surface species, are considered.
-This allows the reaction to explicitly take place, going beyond surface concentrations.
+These elementary steps are discretely modeled as stochastic events.
+This allows the reaction to explicitly take place, going beyond just surface concentrations.
 
 The key issue with kinetic modeling is that foreknowledge of the reaction mechanism is required.
-Another strategy is to consider an exhaustive amount of reaction pathways, ensuring the dominant reaction pathway is safely captured.
+An alternative strategy is to consider an exhaustive amount of reaction pathways, ensuring the dominant reaction pathway is safely captured.
 The major implication of this is that if new mechanisms are the dominant pathway for new classes of catalysts, the reactivity would be underestimated.
 A new method that builds the reaction network lazily, when new reactions on the surface become possible, would radically transform kinetic modeling.
-Some methods, such as with adaptive KMC, have attempted to extend KMC as an on the fly method.
+There has been some development to try to achieve this, such as with adaptive KMC, to extend KMC as an on the fly method.
 Here, a method is developed that considers possible graph evolutions as reaction classes.
 With this method, denoted as online graph kinetic Monte Carlo (OGKMC), reaction products, reactivity, selectivity, and the dominant reaction pathway can be found, with only a catalyst structure, reactants, and reaction conditions as inputs.
 %\section{Results and Discussion}
@@ -88,8 +90,17 @@ OGKMC builds the catalyst and reactant structures as graphs.
 The atoms are nodes and bonds are edges.
 The nodes store the element, cartesian coordinates, classification, and an occupation flag.
 Bonding is classified based on the overlapping elemental covalent radii between two atoms.
-In this scenario, edges are built between these nodes.
+In this scenario, edges are built between these nodes that are sufficiently close enough to each other.
 As KMC should be performed from states that are local minima, this bonding is classified for structurally minimized structures.
+The first step is building the catalyst structure and performing a structural optimization with a potential.
+This could be with classical or electronic structure based methods.
+After optimization, the bonding is set.
+This produces the base graph with nodes and edges.
+After this, the reactive part of the catalyst must be designated.
+Designating a reactive part of the catalyst enables the complexity of new bonding being formed to be simplified.
+This is intuitive: subsurface atoms do not directly bond to reactants; reactions take place almost always at the surface.
+In our implementation, any atomic structure can be input, with support for both 2D surfaces and 3D catalysts.
+Classification of the surface is through ray casting for 2D surfaces and through generation of a convex hull for 3D catalysts.
 
 %fig.1a -> graph description
 %fig.1b -> edge cut off
@@ -99,26 +110,33 @@ As KMC should be performed from states that are local minima, this bonding is cl
 %fig.1f -> graph example of different surface sites.
 %fig.1g -> CO adsorbate example
 
-The first step is building the catalyst structure and optimizing it with a potential.
-This could be with classical or electronic structure based methods.
-Bonding between atoms are set based on the covalent radii.
-This produces the base graph with nodes and edges.
-After this, the reactive part of the catalyst must be designated.
-Designating a reactive part of the catalyst enables the complexity of new bonding being formed to be simplified.
-This is also intuitive; subsurface atoms do not directly bond to reactants, with reactions taking place almost always at the surface.
-In our implementation, any structure can be input, with support for both 2D surfaces and 3D catalysts; classification is by ray casting for 2D surfaces and through a convex hull for 3D catalysts.
-
-With the surface defined, possible bonding points need to also be considered.
-Bonding points on the surface are found based on all the geometrically possible coordinations the surface atoms, of covalent radius j + k, have with an adsorbate atom with covalent radius i.
+With the surface defined, possible bonding to the surface can be considered.
+Possible bonding to the surface is found based on all the geometrically possible coordinations the surface atoms, of varying covalent radii (j + k), have with an adsorbate atom with covalent radius (i).
 Each element, with a unique covalent radius, will have different geometrically possible surface coordinations.
-These possible coordinations are found by building edges between all nodes that fulfill the distance criteria of 2i + j + k.
-With these edges built between all atoms, finding the possible sites is possible by finding all the cliques within the graph.
-A 1-fold clique would be a site that coordinates with a single surface atom (top site); and a 3 or 4-fold clique would be a site that coordinates with three or four surface atoms (hollow site).
+For a set of surface atoms $S={1,\ldots,N}$, where surface atom $j$ has position $\mathbf{x}_j$ and covalent radius $r_j$.
+This set is from a KD-tree which accelerates the neighbor construction to only viable candidate pairs.
+For an adsorbate atom $A$ with covalent radius $r_A$, an edge is placed between surface atoms $j$ and $k$ when $d_{jk}\leq 2r_A+r_j+r_k$, where $d_{jk}$ is the distance between the two surface atoms.
+This determines whether a single adsorbate atom can geometrically bond to both surface atoms simultaneously.
+With these edges built between all nodes, finding the possible sites is achievable by finding all the cliques within the graph.
+A 1-fold clique would be a site that coordinates with a single surface atom (top site); a 2-fold clique is a site that coordinates with two surface atoms (bridge site); and a 3 or 4-fold clique would be a site that coordinates with three or four surface atoms (hollow site).
 With efficient modern algorithms for finding cliques in a graph, all geometrically possible sites for an atom of a certain element can be found quickly with minimal compute.
-This removes the need for a brute force sampling of the potential energy surface to find possible sites.
-These geometrically possible sites are classed as anchors - named "anchors" as they are the fixed positions for finding adsorbate sites.
+For each of the cliques a node is added to the graph, and then connected to the nodes that make up the clique.
 
-%%%Talk about isomorphs of the anchors%%%%
+All surface sites can then be classified into unique sites.
+This is done by building a sub-graph with a certain number of hops from the clique.
+These sub-graphs are then compared to get a list of isomorphs.
+The number of hops should be set based on the locality of the chemistry of the surface.
+More hops considers longer ranged interactions.
+Using the generic FCC(111) surface as an example, there 4 unique surface sites: top, bridge, FCC hollow, and HCP hollow.
+For this surface, if 0 hops are selected, the two hollow sites have the same subgraph, and therefore be classified as the same.
+If 1 hop is selected, all 4 unique sites are then found; enough neighborhood information is available to distinguish the two sites.
+The number of hops is more important for when higher index or irregular surfaces are considered.
+Finding these isomorphs is important to reduce workload.
+With the classification of isomorphs, only one calculation is required for each isomorph, or more tractably, for each unique site.
+These unique sites are classed as anchors.
+They are named "anchors" as they are the fixed positions for finding adsorbate sites.
+
+Upon initialization, all reactants
 
 For adsorbates, they are first optimized with a potential and then structurally optimized.
 Again, nodes and edges represent atoms and bonds as before, with edges classified with the same covalent radii as before.
