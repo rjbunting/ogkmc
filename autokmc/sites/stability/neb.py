@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import threading
+from concurrent.futures import ThreadPoolExecutor, wait
 from contextlib import contextmanager
 from dataclasses import dataclass
 from importlib import import_module
@@ -107,6 +108,7 @@ class _PooledNEBCalculator:
         self._cell: np.ndarray | None = None
         self._numbers: np.ndarray | None = None
         self._energy: float | None = None
+        self._forces: np.ndarray | None = None
 
     def _matches(self, atoms: Atoms) -> bool:
         return bool(
@@ -119,17 +121,25 @@ class _PooledNEBCalculator:
             and np.array_equal(self._numbers, np.asarray(atoms.numbers))
         )
 
-    def _remember(self, atoms: Atoms, energy: float) -> None:
+    def _remember(
+        self,
+        atoms: Atoms,
+        energy: float,
+        forces: np.ndarray | None = None,
+    ) -> None:
         self._positions = np.asarray(atoms.positions, dtype=float).copy()
         self._cell = np.asarray(atoms.cell.array, dtype=float).copy()
         self._numbers = np.asarray(atoms.numbers, dtype=int).copy()
         self._energy = float(energy)
+        self._forces = None if forces is None else np.asarray(forces, dtype=float).copy()
 
     def get_forces(self, atoms: Atoms) -> np.ndarray:
+        if self._matches(atoms) and self._forces is not None:
+            return self._forces.copy()
         with self._scheduler.acquire() as calculator:
             forces = np.asarray(calculator.get_forces(atoms), dtype=float).copy()
             energy = float(calculator.get_potential_energy(atoms))
-        self._remember(atoms, energy)
+        self._remember(atoms, energy, forces)
         return forces
 
     def get_potential_energy(
@@ -148,6 +158,60 @@ class _PooledNEBCalculator:
             )
         self._remember(atoms, energy)
         return energy
+
+
+class _ExceptionSafeParallelNEB(NEB):
+    """NEB with concurrent image evaluation and synchronous error propagation.
+
+    ASE's local ``parallel=True`` backend uses raw ``threading.Thread`` objects.
+    Exceptions raised by those threads do not reach ``get_forces()``, which can
+    leave uninitialised force/energy entries and let an optimiser continue with
+    a corrupt band.  This facade pre-evaluates every interior image with futures,
+    observes all results, and then asks ASE to assemble the band serially from
+    the calculator caches.
+    """
+
+    def __init__(self, *args, image_max_workers: int, **kwargs):
+        self._image_max_workers = max(1, int(image_max_workers))
+        super().__init__(*args, parallel=False, **kwargs)
+        # Preserve the public indication that image evaluations are concurrent.
+        # ``get_forces`` temporarily disables ASE's unsafe raw-thread branch.
+        self.parallel = True
+
+    def _prefetch_interior_forces(self) -> None:
+        interior_images = self.images[1:-1]
+        if not interior_images:
+            return
+
+        with ThreadPoolExecutor(
+            max_workers=min(self._image_max_workers, len(interior_images)),
+            thread_name_prefix="autokmc-neb-image",
+        ) as executor:
+            futures = [
+                executor.submit(image.get_forces)
+                for image in interior_images
+            ]
+            wait(futures)
+
+            first_failure: tuple[BaseException, Any] | None = None
+            for future in futures:
+                try:
+                    future.result()
+                except BaseException as exc:
+                    if first_failure is None:
+                        first_failure = (exc, exc.__traceback__)
+
+        if first_failure is not None:
+            error, traceback = first_failure
+            raise error.with_traceback(traceback)
+
+    def get_forces(self):
+        self._prefetch_interior_forces()
+        self.parallel = False
+        try:
+            return super().get_forces()
+        finally:
+            self.parallel = True
 
 
 def neb_optimizer_logfile(verbose: bool) -> str:
@@ -195,14 +259,20 @@ def make_neb_band(
         for image in images:
             image.calc = calculator
 
-    neb = NEB(
-        images,
-        k=float(spring_k),
-        climb=bool(climb),
-        method="improvedtangent",
-        parallel=parallel_images,
-        allow_shared_calculator=not parallel_images,
-    )
+    neb_kwargs = {
+        "k": float(spring_k),
+        "climb": bool(climb),
+        "method": "improvedtangent",
+        "allow_shared_calculator": not parallel_images,
+    }
+    if parallel_images:
+        neb = _ExceptionSafeParallelNEB(
+            images,
+            image_max_workers=scheduler.max_workers,
+            **neb_kwargs,
+        )
+    else:
+        neb = NEB(images, parallel=False, **neb_kwargs)
 
     if interpolation == "idpp" and _idpp_interpolate is not None:
         try:

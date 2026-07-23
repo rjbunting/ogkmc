@@ -748,7 +748,6 @@ def test_geometry_refinement_retries_until_required_connectivity(monkeypatch):
         reactant,
         n_restarts=1,
         try_flip=False,
-        max_connectivity_attempts=3,
         max_iter=1,
     )
 

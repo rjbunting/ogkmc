@@ -1209,6 +1209,12 @@ def check_diffusion_stability(
                 include_properties=cached.get("_cache_match") != "electronic",
             ):
                 electronic_only = cached.get("_cache_match") == "electronic"
+                if electronic_only and thermochemistry_requested:
+                    # ``apply_cached_states`` marks the electronic states
+                    # stable.  Clear that marker until the requested
+                    # thermochemistry has completed so every failure between
+                    # cache hydration and vibration completion is retryable.
+                    lateral_class.stable = None
                 if verbose:
                     print(
                         f"  [cache] diffusion iso={diffusion_site.iso_class} "
@@ -1268,6 +1274,7 @@ def check_diffusion_stability(
             temperature_k=free_energy_temperature_k,
             vib_cache_root=vib_cache_root,
         )
+        lateral_class.stable = True
         assert calculation_cache_root is not None
         assert cache_key is not None
         assert cache_graph is not None
@@ -1403,15 +1410,6 @@ def check_diffusion_stability(
         n_interior = neb_result.n_interior,
     )
 
-    # ── 6. Mark stable ────────────────────────────────────────────────────
-    lateral_class.stable     = True
-    if verbose:
-        print(
-            f"  [NEB] converged=True steps={neb_result.optimizer_steps}  "
-            f"E_ts={E_ts:.4f} eV  "
-            f"image={k_ts}/{neb_result.n_interior}  ✓ stable"
-        )
-
     _apply_diffusion_thermochemistry(
         lateral_class,
         diffusion_site,
@@ -1429,6 +1427,14 @@ def check_diffusion_stability(
         temperature_k=free_energy_temperature_k,
         vib_cache_root=vib_cache_root,
     )
+    # ── 6. Mark stable only after all requested thermochemistry succeeds ──
+    lateral_class.stable = True
+    if verbose:
+        print(
+            f"  [NEB] converged=True steps={neb_result.optimizer_steps}  "
+            f"E_ts={E_ts:.4f} eV  "
+            f"image={k_ts}/{neb_result.n_interior}  ✓ stable"
+        )
 
     _log.debug(
         "check_diffusion_stability: diff_iso=%d member=%d lat=%d  "

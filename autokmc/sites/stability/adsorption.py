@@ -1201,6 +1201,12 @@ def check_site_stability(
                 include_properties=cached.get("_cache_match") != "electronic",
             ):
                 electronic_only = cached.get("_cache_match") == "electronic"
+                if electronic_only and thermochemistry_requested:
+                    # ``apply_cached_states`` marks the electronic states
+                    # stable.  Clear that marker until the requested
+                    # thermochemistry has completed so every failure between
+                    # cache hydration and vibration completion is retryable.
+                    lateral_class.stable = None
                 if verbose:
                     print(
                         f"  [cache] adsorption iso={adsorbate_site.iso_class} "
@@ -1260,6 +1266,7 @@ def check_site_stability(
             temperature_k=free_energy_temperature_k,
             vib_cache_root=vib_cache_root,
         )
+        lateral_class.stable = True
         assert calculation_cache_root is not None
         assert cache_key is not None
         assert cache_graph is not None
@@ -1401,7 +1408,6 @@ def check_site_stability(
     # reactions/iso{N}_lat{M}/{occupied,unoccupied}.extxyz.
     lateral_class.atoms_occupied    = atoms_occ
     lateral_class.atoms_unoccupied  = atoms_unocc
-    lateral_class.stable            = True
 
     _apply_adsorption_thermochemistry(
         lateral_class,
@@ -1418,6 +1424,7 @@ def check_site_stability(
         temperature_k=free_energy_temperature_k,
         vib_cache_root=vib_cache_root,
     )
+    lateral_class.stable = True
 
     _log.debug(
         "check_site_stability: iso_class=%d member=%d lateral_class=%d "

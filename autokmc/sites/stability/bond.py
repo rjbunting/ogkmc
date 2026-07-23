@@ -1846,6 +1846,12 @@ def check_bond_site_stability(
                 include_properties=cached.get("_cache_match") != "electronic",
             ):
                 electronic_only = cached.get("_cache_match") == "electronic"
+                if electronic_only and thermochemistry_requested:
+                    # ``apply_cached_states`` marks the electronic states
+                    # stable.  Clear that marker until the requested
+                    # thermochemistry has completed so every failure between
+                    # cache hydration and vibration completion is retryable.
+                    lc.stable = None
                 _stamp_gas_product_runtime_state(lc, brs)
                 if verbose:
                     print(
@@ -1907,6 +1913,7 @@ def check_bond_site_stability(
             temperature_k=free_energy_temperature_k,
             vib_cache_root=vib_cache_root,
         )
+        lc.stable = True
         assert calculation_cache_root is not None
         assert cache_key is not None
         assert cache_graph is not None

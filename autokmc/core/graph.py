@@ -52,7 +52,7 @@ from ase import Atoms
 from ase.data import covalent_radii as ASE_COVALENT_RADII
 from ase.neighborlist import NeighborList, natural_cutoffs
 
-from autokmc.core.constants import NL_MULT_DEFAULT
+from autokmc.core.constants import NEIGHBORLIST_SKIN, NL_MULT_DEFAULT
 from autokmc.core.pbc import graph_pbc_for_atoms
 from autokmc.utils.logging import get_logger
 
@@ -128,7 +128,12 @@ def build_graph(
     atoms.set_pbc(graph_pbc)
 
     cutoffs = natural_cutoffs(atoms, mult=nl_mult)
-    nl = NeighborList(cutoffs, self_interaction=False, bothways=True)
+    nl = NeighborList(
+        cutoffs,
+        skin=NEIGHBORLIST_SKIN,
+        self_interaction=False,
+        bothways=True,
+    )
     nl.update(atoms)
 
     G = nx.Graph()

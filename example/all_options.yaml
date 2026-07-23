@@ -315,8 +315,11 @@ calculator:
   #   name_or_path: uma-s-1p2
   #   task_name: oc20
   #   device: cuda
+  #   # FAIR-Chem multi-GPU inference is internal to one calculator:
+  #   # workers: 4
 
   # Number of independent calculator instances in the shared pool.
+  # Keep this at 1 when a calculator factory manages its own workers.
   copies: 1
 
   # Optional unique device strings, exactly one per copy. null performs no
@@ -329,6 +332,7 @@ calculator:
 
   # Maximum concurrent calculator tasks; null defaults to copies and an
   # explicit value must be between 1 and copies.
+  # Keep this at 1 when a calculator factory manages its own workers.
   max_workers: 1
 
 

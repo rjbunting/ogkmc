@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -65,6 +66,65 @@ def test_calculator_pool_reuses_bounded_executor_and_shuts_down_cleanly():
         calc.submit(abs, -3)
 
 
+def test_calculator_pool_rejects_nonpositive_worker_limit():
+    with pytest.raises(CalculatorConfigError, match="must be positive"):
+        CalculatorPool([object()], max_workers=0)
+    with pytest.raises(CalculatorConfigError, match="must be positive"):
+        CalculatorPool([object()], max_workers=-1)
+
+
+def test_calculator_pool_rejects_duplicate_instances():
+    calculator = object()
+    with pytest.raises(
+        CalculatorConfigError,
+        match="independent calculator instances",
+    ):
+        CalculatorPool([calculator, calculator])
+
+
+def test_calculator_pool_enforces_worker_limit_across_independent_executors():
+    pool = CalculatorPool(
+        [object(), object(), object(), object()],
+        max_workers=2,
+    )
+    lock = threading.Lock()
+    two_active = threading.Event()
+    release = threading.Event()
+    active = 0
+    peak = 0
+
+    def use_calculator():
+        nonlocal active, peak
+        with pool.acquire():
+            with lock:
+                active += 1
+                peak = max(peak, active)
+                if active == 2:
+                    two_active.set()
+            assert release.wait(timeout=1.0)
+            with lock:
+                active -= 1
+
+    with (
+        ThreadPoolExecutor(max_workers=2) as first,
+        ThreadPoolExecutor(max_workers=2) as second,
+    ):
+        futures = [
+            first.submit(use_calculator),
+            first.submit(use_calculator),
+            second.submit(use_calculator),
+            second.submit(use_calculator),
+        ]
+        assert two_active.wait(timeout=1.0)
+        with lock:
+            assert active == 2
+        release.set()
+        for future in futures:
+            future.result(timeout=1.0)
+
+    assert peak == 2
+
+
 def test_calculator_pool_gather_drains_batch_before_propagating_error():
     pool = CalculatorPool([object(), object()])
     started = threading.Event()
@@ -111,6 +171,62 @@ def test_acquire_many_requires_enough_independent_calculators():
     with pytest.raises(CalculatorConfigError, match="3 independent"):
         with calc.acquire_many(3, purpose="test batch"):
             pass
+
+
+def test_acquire_many_cannot_exceed_worker_limit():
+    pool = CalculatorPool([object(), object(), object()], max_workers=2)
+    with pytest.raises(CalculatorConfigError, match="allows only 2 worker"):
+        with pool.acquire_many(3, purpose="test batch"):
+            pass
+
+
+def test_acquire_many_reserves_batch_atomically():
+    pool = CalculatorPool(
+        [object(), object(), object(), object()],
+        max_workers=2,
+    )
+    first_entered = threading.Event()
+    release_first = threading.Event()
+    second_entered = threading.Event()
+
+    def first_batch():
+        with pool.acquire_many(2):
+            first_entered.set()
+            assert release_first.wait(timeout=1.0)
+
+    def second_batch():
+        assert first_entered.wait(timeout=1.0)
+        with pool.acquire_many(2):
+            second_entered.set()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(first_batch)
+        second = executor.submit(second_batch)
+        assert first_entered.wait(timeout=1.0)
+        assert second_entered.wait(timeout=0.05) is False
+        release_first.set()
+        first.result(timeout=1.0)
+        second.result(timeout=1.0)
+
+    assert second_entered.is_set()
+
+
+def test_nested_acquisition_fails_instead_of_deadlocking_when_pool_is_full():
+    pool = CalculatorPool([object(), object()], max_workers=1)
+    with pool.acquire():
+        with pytest.raises(CalculatorConfigError, match="nested request"):
+            with pool.acquire(purpose="nested test"):
+                pass
+
+    with pool.acquire() as calculator:
+        assert calculator in pool.calculators
+
+
+def test_nested_acquisition_succeeds_when_capacity_is_immediately_available():
+    pool = CalculatorPool([object(), object()], max_workers=2)
+    with pool.acquire() as first:
+        with pool.acquire() as second:
+            assert first is not second
 
 
 def test_build_calculator_pool_with_nested_factory_and_dotted_gpu_arg():

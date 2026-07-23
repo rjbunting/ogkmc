@@ -149,6 +149,53 @@ def test_neb_parallelizes_images_through_calculator_pool():
     assert tracker.maximum >= 2
 
 
+def test_parallel_neb_propagates_interior_calculator_exception():
+    class SelectivelyFailingCalculator:
+        def get_forces(self, atoms):
+            x_position = float(atoms.positions[0, 0])
+            if np.isclose(x_position, 0.5):
+                raise RuntimeError("intentional interior-image failure")
+            return -np.asarray(atoms.positions, dtype=float)
+
+        def get_potential_energy(self, atoms, force_consistent=False):
+            del force_consistent
+            positions = np.asarray(atoms.positions, dtype=float)
+            return 0.5 * float(np.einsum("ij,ij->", positions, positions))
+
+    pool = CalculatorPool(
+        [SelectivelyFailingCalculator(), SelectivelyFailingCalculator()],
+        max_workers=2,
+    )
+    initial = Atoms("H", positions=[[0.0, 0.0, 0.0]])
+    final = Atoms("H", positions=[[1.0, 0.0, 0.0]])
+
+    try:
+        with pytest.raises(
+            RuntimeError,
+            match="intentional interior-image failure",
+        ):
+            neb_module.run_neb(
+                initial,
+                final,
+                calculator=pool,
+                purpose="failing parallel NEB",
+                n_images=3,
+                interpolation="linear",
+                spring_k=0.1,
+                climb=False,
+                frozen_indices=None,
+                fmax=0.05,
+                max_steps=2,
+                verbose=False,
+                not_converged_error=RuntimeError,
+            )
+
+        with pool.acquire_many(2, purpose="failure recovery check") as calculators:
+            assert len(calculators) == 2
+    finally:
+        pool.shutdown()
+
+
 def test_neb_uses_one_concrete_calculator_inside_outer_batch(monkeypatch):
     images = [_image(0.0), _image(0.5), _image(1.5), _image(0.2)]
     calculators = [object(), object()]
@@ -445,7 +492,79 @@ def test_adsorption_thermochemistry_reuses_cached_electronic_states(
     assert thermo_calls == [700.0, 700.0]
     assert lateral.g_occupied == pytest.approx(-1.3)
     assert lateral.stale_thermochemistry is None
+    assert lateral.stable is True
     assert len(writes) == 1
+
+
+def test_adsorption_thermochemistry_failure_keeps_cached_state_retryable(
+    monkeypatch,
+):
+    import autokmc.thermo.free_energy as free_energy_module
+
+    graph = nx.Graph()
+    graph.add_node(1)
+    site = SimpleNamespace(
+        member_node_ids=[[1]],
+        iso_class=4,
+        reactant="[H]",
+    )
+    lateral = SimpleNamespace(
+        n_shells=1,
+        lateral_class=2,
+        ego_graph=nx.Graph(),
+    )
+    record = _electronic_record(
+        {
+            "occupied": (Atoms("H2"), -2.0),
+            "unoccupied": (Atoms("H"), -1.0),
+        }
+    )
+
+    def _build(*_args, include_self, **_kwargs):
+        if include_self:
+            return Atoms("H2"), 1, 0, 1
+        return Atoms("H"), 1, 0, 0
+
+    def _fail_thermochemistry(*_args, **_kwargs):
+        raise RuntimeError("calculator worker failed")
+
+    monkeypatch.setattr(adsorption_module, "_build_stability_atoms", _build)
+    monkeypatch.setattr(
+        adsorption_module,
+        "normalise_reaction_graph",
+        lambda *_args, **_kwargs: nx.Graph(),
+    )
+    monkeypatch.setattr(
+        adsorption_module,
+        "calculator_identity",
+        lambda _calculator: {"class": "test.Calculator"},
+    )
+    monkeypatch.setattr(
+        adsorption_module,
+        "load_calculation_record",
+        lambda *_args, **_kwargs: record,
+    )
+    monkeypatch.setattr(
+        free_energy_module,
+        "compute_harmonic_thermo",
+        _fail_thermochemistry,
+    )
+
+    with pytest.raises(RuntimeError, match="calculator worker failed"):
+        adsorption_module.check_site_stability(
+            graph,
+            site,
+            0,
+            lateral,
+            object(),
+            calculation_cache_root="/tmp/test-cache",
+            free_energy_options=_thermochemistry_options(),
+            free_energy_temperature_k=700.0,
+        )
+
+    assert lateral.stable is None
+    assert lateral.energy_occupied == pytest.approx(-2.0)
+    assert lateral.energy_unoccupied == pytest.approx(-1.0)
 
 
 def test_diffusion_thermochemistry_reuses_cached_endpoints_and_neb(
@@ -538,7 +657,88 @@ def test_diffusion_thermochemistry_reuses_cached_endpoints_and_neb(
     assert thermo_calls == [650.0, 650.0, 650.0]
     assert lateral.g_ts == pytest.approx(-0.35)
     assert lateral.stale_thermochemistry is None
+    assert lateral.stable is True
     assert len(writes) == 1
+
+
+def test_diffusion_thermochemistry_failure_keeps_cached_state_retryable(
+    monkeypatch,
+):
+    import autokmc.thermo.free_energy as free_energy_module
+
+    graph = nx.Graph()
+    graph.add_nodes_from((1, 2))
+    endpoint_a = SimpleNamespace()
+    endpoint_b = SimpleNamespace()
+    site = SimpleNamespace(
+        member_node_ids=[([1], [2])],
+        members=[(endpoint_a, 0, endpoint_b, 0)],
+        iso_class=5,
+        reactant="[H]",
+    )
+    lateral = SimpleNamespace(
+        n_shells=1,
+        lateral_class=3,
+        ego_graph=nx.Graph(),
+    )
+    record = _electronic_record(
+        {
+            "state_a": (Atoms("H2"), -2.0),
+            "state_b": (Atoms("H2"), -1.8),
+            "transition": (Atoms("H2"), -1.0),
+        }
+    )
+
+    def _fail_thermochemistry(*_args, **_kwargs):
+        raise RuntimeError("calculator worker failed")
+
+    monkeypatch.setattr(
+        diffusion_module,
+        "_member_clique_union",
+        lambda *_args: frozenset({1}),
+    )
+    monkeypatch.setattr(
+        diffusion_module,
+        "_build_diffusion_atoms",
+        lambda *_args, **_kwargs: (Atoms("H2"), 1, 0, [1], [1]),
+    )
+    monkeypatch.setattr(
+        diffusion_module,
+        "normalise_reaction_graph",
+        lambda *_args, **_kwargs: nx.Graph(),
+    )
+    monkeypatch.setattr(
+        diffusion_module,
+        "calculator_identity",
+        lambda _calculator: {"class": "test.Calculator"},
+    )
+    monkeypatch.setattr(
+        diffusion_module,
+        "load_calculation_record",
+        lambda *_args, **_kwargs: record,
+    )
+    monkeypatch.setattr(
+        free_energy_module,
+        "compute_harmonic_thermo",
+        _fail_thermochemistry,
+    )
+
+    with pytest.raises(RuntimeError, match="calculator worker failed"):
+        diffusion_module.check_diffusion_stability(
+            graph,
+            site,
+            0,
+            lateral,
+            object(),
+            calculation_cache_root="/tmp/test-cache",
+            free_energy_options=_thermochemistry_options(),
+            free_energy_temperature_k=650.0,
+        )
+
+    assert lateral.stable is None
+    assert lateral.energy_a == pytest.approx(-2.0)
+    assert lateral.energy_b == pytest.approx(-1.8)
+    assert lateral.energy_ts == pytest.approx(-1.0)
 
 
 def test_bond_thermochemistry_reuses_cached_endpoints_and_neb(
@@ -651,4 +851,104 @@ def test_bond_thermochemistry_reuses_cached_endpoints_and_neb(
     assert thermo_calls == [600.0, 600.0, 600.0]
     assert lateral.g_ab == pytest.approx(-2.4)
     assert lateral.stale_thermochemistry is None
+    assert lateral.stable is True
     assert len(writes) == 1
+
+
+def test_bond_thermochemistry_failure_keeps_cached_state_retryable(
+    monkeypatch,
+):
+    import autokmc.thermo.free_energy as free_energy_module
+
+    graph = nx.Graph()
+    graph.add_nodes_from((1, 2, 3))
+    endpoint_a = SimpleNamespace(member_node_ids=[[1]])
+    endpoint_b = SimpleNamespace(member_node_ids=[[2]])
+    endpoint_c = SimpleNamespace(member_node_ids=[[3]])
+    site = SimpleNamespace(
+        member_node_ids=[([1], [2], [3])],
+        members=[(endpoint_a, 0, endpoint_b, 0, endpoint_c, 0)],
+        iso_class=6,
+        template=SimpleNamespace(
+            smiles_a="[H]",
+            smiles_b="[H]",
+            smiles_c="[H][H]",
+        ),
+        gas_product=False,
+        gas_lift_height=6.0,
+    )
+    lateral = SimpleNamespace(
+        n_shells=1,
+        lateral_class=4,
+        ego_graph=nx.Graph(),
+    )
+    record = _electronic_record(
+        {
+            "state_ab": (Atoms("H3"), -3.0),
+            "state_c": (Atoms("H3"), -3.5),
+            "transition": (Atoms("H3"), -2.0),
+        }
+    )
+
+    def _fail_thermochemistry(*_args, **_kwargs):
+        raise RuntimeError("calculator worker failed")
+
+    monkeypatch.setattr(
+        bond_module,
+        "_member_clique_union",
+        lambda *_args: frozenset({1}),
+    )
+    monkeypatch.setattr(
+        bond_module,
+        "_build_bond_atoms",
+        lambda *_args, **_kwargs: (
+            Atoms("H3"),
+            1,
+            0,
+            [1, 2],
+            [1, 2],
+            {},
+        ),
+    )
+    monkeypatch.setattr(
+        bond_module,
+        "_ordered_endpoint_nodes",
+        lambda _graph, node_ids: list(node_ids),
+    )
+    monkeypatch.setattr(
+        bond_module,
+        "normalise_reaction_graph",
+        lambda *_args, **_kwargs: nx.Graph(),
+    )
+    monkeypatch.setattr(
+        bond_module,
+        "calculator_identity",
+        lambda _calculator: {"class": "test.Calculator"},
+    )
+    monkeypatch.setattr(
+        bond_module,
+        "load_calculation_record",
+        lambda *_args, **_kwargs: record,
+    )
+    monkeypatch.setattr(
+        free_energy_module,
+        "compute_harmonic_thermo",
+        _fail_thermochemistry,
+    )
+
+    with pytest.raises(RuntimeError, match="calculator worker failed"):
+        bond_module.check_bond_site_stability(
+            graph,
+            site,
+            0,
+            lateral,
+            object(),
+            calculation_cache_root="/tmp/test-cache",
+            free_energy_options=_thermochemistry_options(),
+            free_energy_temperature_k=600.0,
+        )
+
+    assert lateral.stable is None
+    assert lateral.energy_ab == pytest.approx(-3.0)
+    assert lateral.energy_c == pytest.approx(-3.5)
+    assert lateral.energy_ts == pytest.approx(-2.0)

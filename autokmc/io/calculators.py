@@ -75,20 +75,37 @@ class CalculatorConfigError(ValueError):
 
 
 class CalculatorPool:
-	"""Small thread-safe pool of independent ASE calculator instances."""
+	"""Thread-safe pool with a pool-wide limit on active calculator leases."""
 
 	def __init__(self, calculators: list[Any], *, max_workers: int | None = None):
 		if not calculators:
 			raise CalculatorConfigError("CalculatorPool requires at least one calculator")
+		seen_calculators: dict[int, int] = {}
+		for index, calculator in enumerate(calculators):
+			identity = id(calculator)
+			if identity in seen_calculators:
+				raise CalculatorConfigError(
+					"CalculatorPool requires independent calculator instances; "
+					f"entries {seen_calculators[identity]} and {index} refer to "
+					"the same object"
+				)
+			seen_calculators[identity] = index
 		self.calculators = list(calculators)
+		requested_workers = (
+			len(self.calculators)
+			if max_workers is None
+			else int(max_workers)
+		)
+		if requested_workers <= 0:
+			raise CalculatorConfigError("CalculatorPool max_workers must be positive")
 		self.max_workers = min(
 			len(self.calculators),
-			int(max_workers or len(self.calculators)),
+			requested_workers,
 		)
-		if self.max_workers <= 0:
-			raise CalculatorConfigError("CalculatorPool max_workers must be positive")
 		self._queue: queue.Queue[Any] = queue.Queue()
-		self._batch_lock = threading.Lock()
+		self._permit_condition = threading.Condition()
+		self._available_permits = self.max_workers
+		self._thread_permits = threading.local()
 		self._executor_lock = threading.Lock()
 		self._executor: ThreadPoolExecutor | None = None
 		self._closed = False
@@ -116,7 +133,7 @@ class CalculatorPool:
 			return self._executor
 
 	def submit(self, function, /, *args, **kwargs) -> Future:
-		"""Schedule work on the shared executor bounded by calculator copies."""
+		"""Schedule work on the shared executor bounded by ``max_workers``."""
 		return self.executor.submit(function, *args, **kwargs)
 
 	def gather(self, futures: list[Future]) -> list[Any]:
@@ -146,13 +163,72 @@ class CalculatorPool:
 				cancel_futures=cancel_futures,
 			)
 
+	def _reserve_permits(
+		self,
+		count: int,
+		*,
+		purpose: str | None = None,
+	) -> None:
+		"""Atomically reserve calculator-task capacity.
+
+		A thread that already owns permits must never wait for more: another
+		nested owner could be doing the same, leaving every participant blocked
+		while collectively holding all capacity.  Immediate nested reservations
+		remain supported when enough capacity is free.
+		"""
+		label = f" for {purpose}" if purpose else ""
+		if count > self.max_workers:
+			raise CalculatorConfigError(
+				f"{count} simultaneous calculator(s){label} requested, but "
+				f"the pool allows only {self.max_workers} worker(s). Increase "
+				"`calculator.max_workers` or reduce the simultaneous request."
+			)
+		with self._permit_condition:
+			held = int(getattr(self._thread_permits, "count", 0))
+			if held and self._available_permits < count:
+				raise CalculatorConfigError(
+					f"nested request for {count} calculator(s){label} would "
+					f"block while this thread already holds {held}. Release "
+					"the current calculator lease before requesting more, or "
+					"increase `calculator.max_workers`."
+				)
+			while self._available_permits < count:
+				self._permit_condition.wait()
+			self._available_permits -= count
+			self._thread_permits.count = held + count
+
+	def _release_permits(self, count: int) -> None:
+		with self._permit_condition:
+			held = int(getattr(self._thread_permits, "count", 0))
+			if held < count:
+				raise RuntimeError(
+					"CalculatorPool permit accounting became inconsistent"
+				)
+			self._thread_permits.count = held - count
+			self._available_permits += count
+			self._permit_condition.notify_all()
+
+	def _take_calculator(self) -> Any:
+		try:
+			return self._queue.get_nowait()
+		except queue.Empty as exc:  # pragma: no cover - internal invariant
+			raise RuntimeError(
+				"CalculatorPool permit and calculator inventories diverged"
+			) from exc
+
 	@contextmanager
-	def acquire(self):
-		calc = self._queue.get()
+	def acquire(self, *, purpose: str | None = None):
+		self._reserve_permits(1, purpose=purpose)
+		try:
+			calc = self._take_calculator()
+		except BaseException:
+			self._release_permits(1)
+			raise
 		try:
 			yield calc
 		finally:
 			self._queue.put(calc)
+			self._release_permits(1)
 
 	@contextmanager
 	def acquire_many(self, count: int, *, purpose: str | None = None):
@@ -171,22 +247,23 @@ class CalculatorPool:
 				"`calculator.copies` or reduce the number of simultaneous "
 				"images/calculations."
 			)
+		self._reserve_permits(n, purpose=purpose)
 		acquired: list[Any] = []
 		try:
-			with self._batch_lock:
-				for _ in range(n):
-					acquired.append(self._queue.get())
+			for _ in range(n):
+				acquired.append(self._take_calculator())
 			yield acquired
 		finally:
 			for calc in acquired:
 				self._queue.put(calc)
+			self._release_permits(n)
 
 
 @contextmanager
 def acquire_calculator(calculator, *, purpose: str | None = None):
 	"""Yield one concrete calculator from either a pool or a legacy instance."""
 	if isinstance(calculator, CalculatorPool):
-		with calculator.acquire() as calc:
+		with calculator.acquire(purpose=purpose) as calc:
 			yield calc
 	else:
 		yield calculator

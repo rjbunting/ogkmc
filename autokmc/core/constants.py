@@ -42,6 +42,11 @@ RANDOM_SEED: int = 69
 #: same answer everywhere.
 NL_MULT_DEFAULT: float = 0.90
 
+#: Per-atom skin (Å) passed explicitly to ASE ``NeighborList``.  Keeping this
+#: value centralized prevents direct distance checks from drifting if ASE
+#: changes its constructor default.
+NEIGHBORLIST_SKIN: float = 0.30
+
 #: Co-bonding cutoff scale used by
 #: :func:`autokmc.sites.anchors._build_co_bond_graph`: two surface atoms can
 #: simultaneously bind a single adsorbate when their separation is at most

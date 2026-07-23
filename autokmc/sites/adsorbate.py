@@ -78,7 +78,6 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import networkx as nx
-from ase.neighborlist import NeighborList, natural_cutoffs
 from networkx.algorithms import isomorphism
 
 from autokmc.core.pbc import (
@@ -119,6 +118,7 @@ from autokmc.core.constants import (
     CONTACT_FACTOR,
     STANDOFF_FACTOR,
     N_ADSORBATE_RESTARTS as N_RESTARTS,
+    NEIGHBORLIST_SKIN,
     NL_MULT_DEFAULT,
     PRUNE_FMAX,
     PRUNE_MAX_STEPS,
@@ -1354,6 +1354,165 @@ def _adsorbate_edges_from_graph(
     return edges
 
 
+@dataclass(frozen=True)
+class _GeometryConnectivityContext:
+    """Precomputed invariant data for rigid-pose connectivity checks."""
+
+    slab_positions: np.ndarray
+    slab_cutoffs: np.ndarray
+    adsorbate_cutoffs: np.ndarray
+    node_to_slab_index: dict[int, int]
+    intramolecular_edges: frozenset[frozenset]
+    cell: np.ndarray
+    pbc: np.ndarray
+
+    @property
+    def n_slab(self) -> int:
+        return int(len(self.slab_positions))
+
+
+def _prepare_geometry_connectivity_context(
+    G: nx.Graph,
+    reactant,
+    *,
+    nl_mult: float,
+) -> _GeometryConnectivityContext:
+    """Build the invariant half of the ASE-neighbour-list connectivity test."""
+    from ase.data import atomic_numbers as _AN, covalent_radii as _RC
+
+    slab_nodes = sorted(
+        (
+            int(node)
+            for node, data in G.nodes(data=True)
+            if data.get("type") in ("bulk", "surface")
+        ),
+        key=lambda node: G.nodes[node].get("index", node),
+    )
+    slab_positions = np.asarray(
+        [G.nodes[node]["position"] for node in slab_nodes],
+        dtype=float,
+    ).reshape((-1, 3))
+    slab_cutoffs = np.asarray(
+        [
+            float(nl_mult) * float(_RC[_AN[G.nodes[node]["element"]]])
+            + NEIGHBORLIST_SKIN
+            for node in slab_nodes
+        ],
+        dtype=float,
+    )
+    adsorbate_cutoffs = np.asarray(
+        [
+            float(nl_mult) * float(_RC[_AN[symbol]])
+            + NEIGHBORLIST_SKIN
+            for symbol in reactant.atoms.get_chemical_symbols()
+        ],
+        dtype=float,
+    )
+    n_slab = len(slab_nodes)
+    intramolecular_edges = frozenset(
+        frozenset((n_slab + int(u), n_slab + int(v)))
+        for u, v in (
+            reactant.graph.edges()
+            if reactant.graph is not None
+            else ()
+        )
+    )
+    cell = np.asarray(G.graph.get("cell", np.zeros((3, 3))), dtype=float)
+    return _GeometryConnectivityContext(
+        slab_positions=slab_positions,
+        slab_cutoffs=slab_cutoffs,
+        adsorbate_cutoffs=adsorbate_cutoffs,
+        node_to_slab_index={
+            int(node): index for index, node in enumerate(slab_nodes)
+        },
+        intramolecular_edges=intramolecular_edges,
+        cell=cell,
+        # Match ``_build_pruning_atoms`` / ``build_graph`` exactly: a real
+        # material cell is treated as periodic along every lattice vector.
+        pbc=full_pbc_for_cell(cell),
+    )
+
+
+def _intended_geometry_edges(
+    context: _GeometryConnectivityContext,
+    ms: AdsorbateSite,
+) -> set[frozenset]:
+    """Return intended intramolecular plus surface-anchor edges."""
+    intended = set(context.intramolecular_edges)
+    for adsorbate_index, clique in enumerate(ms.atom_cliques):
+        if clique is None:
+            continue
+        adsorbate_node = context.n_slab + int(adsorbate_index)
+        for surface_node in clique:
+            slab_index = context.node_to_slab_index.get(int(surface_node))
+            if slab_index is not None:
+                intended.add(frozenset((adsorbate_node, slab_index)))
+    return intended
+
+
+def _actual_geometry_edges(
+    context: _GeometryConnectivityContext,
+    positions: np.ndarray,
+) -> set[frozenset]:
+    """Vectorised equivalent of ASE ``NeighborList`` adsorbate edges."""
+    positions = np.asarray(positions, dtype=float).reshape((-1, 3))
+    n_adsorbate = len(positions)
+    actual: set[frozenset] = set()
+
+    if context.n_slab and n_adsorbate:
+        displacements = (
+            context.slab_positions[None, :, :] - positions[:, None, :]
+        )
+        if context.pbc.any():
+            displacements = minimum_image_vectors(
+                displacements,
+                context.cell,
+                context.pbc,
+            )
+        distances = np.linalg.norm(displacements, axis=2)
+        thresholds = (
+            context.adsorbate_cutoffs[:, None]
+            + context.slab_cutoffs[None, :]
+        )
+        for adsorbate_index, slab_index in np.argwhere(
+            distances < thresholds
+        ):
+            actual.add(
+                frozenset(
+                    (
+                        context.n_slab + int(adsorbate_index),
+                        int(slab_index),
+                    )
+                )
+            )
+
+    if n_adsorbate > 1:
+        pair_displacements = positions[None, :, :] - positions[:, None, :]
+        if context.pbc.any():
+            pair_displacements = minimum_image_vectors(
+                pair_displacements,
+                context.cell,
+                context.pbc,
+            )
+        pair_distances = np.linalg.norm(pair_displacements, axis=2)
+        pair_thresholds = (
+            context.adsorbate_cutoffs[:, None]
+            + context.adsorbate_cutoffs[None, :]
+        )
+        for first in range(n_adsorbate):
+            for second in range(first + 1, n_adsorbate):
+                if pair_distances[first, second] < pair_thresholds[first, second]:
+                    actual.add(
+                        frozenset(
+                            (
+                                context.n_slab + first,
+                                context.n_slab + second,
+                            )
+                        )
+                    )
+    return actual
+
+
 def _geometry_connectivity_mismatch(
     G: nx.Graph,
     ms: AdsorbateSite,
@@ -1361,40 +1520,24 @@ def _geometry_connectivity_mismatch(
     positions: np.ndarray,
     *,
     nl_mult: float = NL_MULT_DEFAULT,
+    _context: _GeometryConnectivityContext | None = None,
 ) -> tuple[set[frozenset], set[frozenset]] | None:
     """Return ``(missing, extra)`` if a calc-free geometry has wrong bonds.
 
-    This uses the same ASE neighbour-list criterion as ``build_graph`` but
-    retains only bonds touching an adsorbate.  It runs on the rigid-body
-    geometry before any ML/DFT relaxation.  ``None`` means the geometry already
-    satisfies the required adsorbate intramolecular and adsorbate-surface
-    connectivity.
+    The calculation is exactly equivalent to the ASE ``NeighborList`` cutoff
+    used by :func:`autokmc.core.graph.build_graph`, including its 0.3 Å
+    per-atom skin, but evaluates only adsorbate-touching pairs using vectorised
+    minimum-image distances.  Rigid refinement can therefore reuse one
+    precomputed slab/cutoff context instead of rebuilding a complete
+    ``Atoms`` and neighbour list after every orientation.
     """
-    original = np.asarray(ms.positions, dtype=float).copy()
-    try:
-        ms.positions = np.asarray(positions, dtype=float)
-        atoms_init, n_slab, _n_ads, node_to_ase = _build_pruning_atoms(
-            G,
-            ms,
-            list(reactant.atoms.get_chemical_symbols()),
-        )
-    finally:
-        ms.positions = original
-
-    intended_edges = _intended_adsorbate_edges(ms, reactant, n_slab, node_to_ase)
-    cutoffs = natural_cutoffs(atoms_init, mult=float(nl_mult))
-    neighbours = NeighborList(
-        cutoffs,
-        self_interaction=False,
-        bothways=True,
+    context = _context or _prepare_geometry_connectivity_context(
+        G,
+        reactant,
+        nl_mult=float(nl_mult),
     )
-    neighbours.update(atoms_init)
-    actual_edges: set[frozenset] = set()
-    for atom_index in range(int(n_slab), len(atoms_init)):
-        for neighbour_index in neighbours.get_neighbors(atom_index)[0]:
-            actual_edges.add(
-                frozenset((int(atom_index), int(neighbour_index)))
-            )
+    intended_edges = _intended_geometry_edges(context, ms)
+    actual_edges = _actual_geometry_edges(context, positions)
     missing = intended_edges - actual_edges
     extra = actual_edges - intended_edges
     if missing or extra:
@@ -2336,16 +2479,48 @@ def find_adsorbate_sites(
 # Rigid-body refinement
 # ---------------------------------------------------------------------------
 
+def _skew_matrix(vector: np.ndarray) -> np.ndarray:
+    """Return the matrix whose product with ``x`` is ``vector × x``."""
+    x, y, z = np.asarray(vector, dtype=float)
+    return np.array(
+        [[0.0, -z, y], [z, 0.0, -x], [-y, x, 0.0]],
+        dtype=float,
+    )
+
+
 def _rotation_from_axis_angle(rotvec: np.ndarray) -> np.ndarray:
     """3×3 rotation matrix from a Rodrigues axis-angle vector."""
+    rotvec = np.asarray(rotvec, dtype=float)
     theta = float(np.linalg.norm(rotvec))
-    if theta < 1e-12:
-        return np.eye(3)
-    axis = rotvec / theta
-    K = np.array([[0.0, -axis[2], axis[1]],
-                  [axis[2], 0.0, -axis[0]],
-                  [-axis[1], axis[0], 0.0]])
-    return np.eye(3) + np.sin(theta) * K + (1.0 - np.cos(theta)) * (K @ K)
+    skew = _skew_matrix(rotvec)
+    if theta < 1e-6:
+        theta2 = theta * theta
+        return (
+            np.eye(3)
+            + (1.0 - theta2 / 6.0) * skew
+            + (0.5 - theta2 / 24.0) * (skew @ skew)
+        )
+    return (
+        np.eye(3)
+        + (np.sin(theta) / theta) * skew
+        + ((1.0 - np.cos(theta)) / (theta * theta)) * (skew @ skew)
+    )
+
+
+def _rotation_right_jacobian(rotvec: np.ndarray) -> np.ndarray:
+    """Right Jacobian of the SO(3) exponential map for an axis-angle vector."""
+    rotvec = np.asarray(rotvec, dtype=float)
+    theta = float(np.linalg.norm(rotvec))
+    skew = _skew_matrix(rotvec)
+    if theta < 1e-6:
+        # Stable series through O(theta²).
+        return np.eye(3) - 0.5 * skew + (skew @ skew) / 6.0
+    theta2 = theta * theta
+    return (
+        np.eye(3)
+        - ((1.0 - np.cos(theta)) / theta2) * skew
+        + ((theta - np.sin(theta)) / (theta2 * theta)) * (skew @ skew)
+    )
 
 
 def _surface_atoms_array(
@@ -2397,7 +2572,7 @@ def optimise_adsorbate_site_positions(
     standoff_factor: float = STANDOFF_FACTOR,
     n_restarts: int = N_RESTARTS,
     try_flip: bool = True,
-    max_connectivity_attempts: int = 10,
+    max_connectivity_attempts: int = 3,
     max_iter: int = 100,
     n_shells_pair: int = N_SHELLS_DEFAULT,
     nl_mult: float = NL_MULT_DEFAULT,
@@ -2413,6 +2588,10 @@ def optimise_adsorbate_site_positions(
         E(R,t) = restraint_weight × Σ_{bonded i}  ‖p_i − p*_i‖²
                + repulsion_weight × Σ_{adsorbate a, surface s}
                                        max(0, R_min − d_as)²
+               + connectivity_weight × (
+                   Σ_required max(0, d_as − R_graph)²
+                   + Σ_forbidden max(0, R_graph − d_as)²
+                 )
 
     where ``p*_i`` is the clique centroid lifted by
     ``standoff_factor × (r_cov_a + ⟨r_cov_s⟩)`` along the local outward
@@ -2421,7 +2600,9 @@ def optimise_adsorbate_site_positions(
     Multi-start: ``n_restarts`` rotational kicks about the local outward
     normal.  When ``try_flip=True`` (default) each kick is also tried with
     a 180° in-plane flip (essential for adsorbates with unbonded atoms that
-    must point away from the surface).
+    must point away from the surface).  Failed connectivity rounds warm-start
+    each orientation from its previous optimum.  The rigid-body objective
+    supplies an analytical six-coordinate Jacobian to L-BFGS-B.
 
     After refining the representative, Kabsch ego-alignment propagates the
     new geometry to every other member via
@@ -2447,7 +2628,7 @@ def optimise_adsorbate_site_positions(
         Maximum number of connectivity-validity refinement rounds per
         iso-class.  The calculator-free geometry is accepted only once its
         graph has exactly the required intramolecular and surface-anchor
-        connectivity.  Default 10.
+        connectivity.  Default 3.
     max_iter : int
         L-BFGS-B iteration cap per restart.  Default 100.
     n_shells_pair : int
@@ -2515,6 +2696,11 @@ def optimise_adsorbate_site_positions(
     elements = {i: reactant.graph.nodes[i]["element"] for i in range(n_atoms)}
     site_idx = _clique_position_index(G, list(elements.values()))
     cell, cell_inv, pbc, use_mic = _get_cell(G)
+    connectivity_context = _prepare_geometry_connectivity_context(
+        G,
+        reactant,
+        nl_mult=float(nl_mult),
+    )
     surface_spatial_index = _build_anchor_spatial_index(
         [(frozenset(), p) for p in surf_pos],
         cell,
@@ -2599,54 +2785,201 @@ def optimise_adsorbate_site_positions(
         else:
             R_flip = None
 
+        required_surface_mask = np.zeros(
+            (n_atoms, connectivity_context.n_slab),
+            dtype=bool,
+        )
+        for atom_index, clique in enumerate(ms.atom_cliques):
+            if clique is None:
+                continue
+            for surface_node in clique:
+                slab_index = connectivity_context.node_to_slab_index.get(
+                    int(surface_node)
+                )
+                if slab_index is not None:
+                    required_surface_mask[atom_index, slab_index] = True
+        connectivity_thresholds = (
+            connectivity_context.adsorbate_cutoffs[:, None]
+            + connectivity_context.slab_cutoffs[None, :]
+        )
+        # A narrow buffer keeps optimized poses away from the strict
+        # neighbour-list boundary without materially changing their geometry.
+        connectivity_margin = 0.02
+        connectivity_weight = max(
+            10.0,
+            float(restraint_weight),
+            float(repulsion_weight),
+        )
+
         def _make_pose(R_base):
             def _pose(x):
-                return q_centred @ (R_base @ _rotation_from_axis_angle(x[3:])).T \
-                       + (cur_centroid + x[:3])
+                return (
+                    q_centred
+                    @ (
+                        R_base
+                        @ _rotation_from_axis_angle(
+                            np.asarray(x[3:], dtype=float)
+                        )
+                    ).T
+                    + (cur_centroid + np.asarray(x[:3], dtype=float))
+                )
             return _pose
 
-        def _make_energy(pose_fn, restraint_scale: float, repulsion_scale: float):
-            def _energy(x):
-                p = pose_fn(x)
-                E = 0.0
-                if bonded_idx:
-                    disp = p[bonded_idx] - target_arr
-                    E += (
-                        restraint_weight
-                        * float(restraint_scale)
-                        * float(np.einsum("ij,ij->", disp, disp))
+        def _make_energy_and_jac(
+            R_base,
+            restraint_scale: float,
+            repulsion_scale: float,
+            connectivity_scale: float,
+        ):
+            """Return cached scalar objective and analytical Jacobian."""
+            cache: dict[str, np.ndarray | float | None] = {
+                "x": None,
+                "energy": None,
+                "gradient": None,
+            }
+
+            def _evaluate(x):
+                x = np.asarray(x, dtype=float)
+                cached_x = cache["x"]
+                if (
+                    isinstance(cached_x, np.ndarray)
+                    and np.array_equal(x, cached_x)
+                ):
+                    return float(cache["energy"]), np.asarray(cache["gradient"])
+
+                rotvec = x[3:]
+                rotation = R_base @ _rotation_from_axis_angle(rotvec)
+                p = (
+                    q_centred @ rotation.T
+                    + (cur_centroid + x[:3])
+                )
+                right_jacobian = _rotation_right_jacobian(rotvec)
+                rotation_jacobian = np.empty((n_atoms, 3, 3), dtype=float)
+                for atom_index, reference_position in enumerate(q_centred):
+                    rotation_jacobian[atom_index] = (
+                        -rotation
+                        @ _skew_matrix(reference_position)
+                        @ right_jacobian
                     )
+
+                energy = 0.0
+                gradient_positions = np.zeros_like(p)
+                if bonded_idx:
+                    displacement = p[bonded_idx] - target_arr
+                    weight = float(restraint_weight) * float(restraint_scale)
+                    energy += weight * float(
+                        np.einsum("ij,ij->", displacement, displacement)
+                    )
+                    gradient_positions[bonded_idx] += 2.0 * weight * displacement
+
                 if free_pos.size:
                     # Vectorised pairwise (adsorbate, free-surface) repulsion.
-                    # ``dv`` has shape (n_atoms, n_surf, 3); MIC-wrapping is
-                    # applied once on the whole tensor instead of per-atom
-                    # (the previous implementation looped on ``ai`` in
-                    # Python, which dominated the L-BFGS-B objective cost).
                     dv = free_pos[None, :, :] - p[:, None, :]
                     if use_mic and cell_inv is not None:
                         dv = minimum_image_vectors(dv, cell, pbc)
-                    d2    = np.einsum("ijk,ijk->ij", dv, dv)
-                    R_min = contact_factor * (
+                    d2 = np.einsum("ijk,ijk->ij", dv, dv)
+                    distance = np.sqrt(d2 + 1e-12)
+                    minimum_distance = contact_factor * (
                         ads_rcov[:, None] + free_r[None, :]
                     )
-                    delta = R_min - np.sqrt(d2 + 1e-12)
-                    pos_c = np.maximum(delta, 0.0)
-                    pos_c = np.where(repulsion_pair_mask, pos_c, 0.0)
-                    E += (
-                        repulsion_weight
-                        * float(repulsion_scale)
-                        * float(np.einsum("ij,ij->", pos_c, pos_c))
+                    overlap = np.maximum(minimum_distance - distance, 0.0)
+                    overlap = np.where(repulsion_pair_mask, overlap, 0.0)
+                    weight = float(repulsion_weight) * float(repulsion_scale)
+                    energy += weight * float(
+                        np.einsum("ij,ij->", overlap, overlap)
                     )
-                return E
-            return _energy
+                    coefficient = 2.0 * weight * overlap / distance
+                    gradient_positions += np.einsum(
+                        "ij,ijk->ik",
+                        coefficient,
+                        dv,
+                    )
 
-        E0 = _make_energy(_make_pose(R0), 1.0, 1.0)(np.zeros(6))
+                if connectivity_context.n_slab:
+                    dv = (
+                        connectivity_context.slab_positions[None, :, :]
+                        - p[:, None, :]
+                    )
+                    if connectivity_context.pbc.any():
+                        dv = minimum_image_vectors(
+                            dv,
+                            connectivity_context.cell,
+                            connectivity_context.pbc,
+                        )
+                    d2 = np.einsum("ijk,ijk->ij", dv, dv)
+                    distance = np.sqrt(d2 + 1e-12)
+                    required_excess = np.where(
+                        required_surface_mask,
+                        np.maximum(
+                            distance
+                            - (connectivity_thresholds - connectivity_margin),
+                            0.0,
+                        ),
+                        0.0,
+                    )
+                    forbidden_overlap = np.where(
+                        ~required_surface_mask,
+                        np.maximum(
+                            (connectivity_thresholds + connectivity_margin)
+                            - distance,
+                            0.0,
+                        ),
+                        0.0,
+                    )
+                    weight = connectivity_weight * float(connectivity_scale)
+                    energy += weight * float(
+                        np.einsum(
+                            "ij,ij->",
+                            required_excess,
+                            required_excess,
+                        )
+                        + np.einsum(
+                            "ij,ij->",
+                            forbidden_overlap,
+                            forbidden_overlap,
+                        )
+                    )
+                    coefficient = (
+                        2.0
+                        * weight
+                        * (forbidden_overlap - required_excess)
+                        / distance
+                    )
+                    gradient_positions += np.einsum(
+                        "ij,ijk->ik",
+                        coefficient,
+                        dv,
+                    )
+
+                gradient = np.empty(6, dtype=float)
+                gradient[:3] = gradient_positions.sum(axis=0)
+                gradient[3:] = np.einsum(
+                    "ni,nij->j",
+                    gradient_positions,
+                    rotation_jacobian,
+                )
+                cache["x"] = x.copy()
+                cache["energy"] = float(energy)
+                cache["gradient"] = gradient.copy()
+                return float(energy), gradient
+
+            def _energy(x):
+                return _evaluate(x)[0]
+
+            def _jacobian(x):
+                return _evaluate(x)[1]
+
+            return _energy, _jacobian
+
+        energy0, _jacobian0 = _make_energy_and_jac(R0, 1.0, 1.0, 1.0)
+        E0 = energy0(np.zeros(6))
         if _geometry_connectivity_mismatch(
             G,
             ms,
             reactant,
             cur_pos,
             nl_mult=nl_mult,
+            _context=connectivity_context,
         ) is None:
             return cur_pos.copy(), E0, E0, -1, 0
 
@@ -2665,32 +2998,49 @@ def optimise_adsorbate_site_positions(
         best_mismatch: tuple[set[frozenset], set[frozenset]] | None = None
         last_exc: Exception | None = None
         attempts = max(1, int(max_connectivity_attempts))
+        start_vectors = [np.zeros(6, dtype=float) for _ in bases]
         for attempt in range(attempts):
             restraint_scale = 1.0 + float(attempt)
             repulsion_scale = 1.0 + 0.25 * float(attempt)
+            connectivity_scale = 1.0 + float(attempt)
             connected: list[tuple[float, np.ndarray, int]] = []
             for k, R_base in enumerate(bases):
                 pose_k = _make_pose(R_base)
-                energy_k = _make_energy(
-                    pose_k,
+                energy_k, jacobian_k = _make_energy_and_jac(
+                    R_base,
                     restraint_scale,
                     repulsion_scale,
+                    connectivity_scale,
                 )
                 try:
                     res = minimize(
                         energy_k,
-                        np.zeros(6),
+                        start_vectors[k],
                         method="L-BFGS-B",
+                        jac=jacobian_k,
                         options={"maxiter": max_iter, "ftol": 1e-7},
                     )
+                    result_vector = np.asarray(res.x, dtype=float)
+                    if result_vector.shape != (6,) or not np.isfinite(
+                        result_vector
+                    ).all():
+                        raise ValueError(
+                            "optimizer returned a non-finite rigid-body pose"
+                        )
                     E_k = float(res.fun)
-                    p_k = pose_k(res.x)
+                    if not np.isfinite(E_k):
+                        raise ValueError(
+                            "optimizer returned a non-finite objective"
+                        )
+                    start_vectors[k] = result_vector.copy()
+                    p_k = pose_k(result_vector)
                     mismatch = _geometry_connectivity_mismatch(
                         G,
                         ms,
                         reactant,
                         p_k,
                         nl_mult=nl_mult,
+                        _context=connectivity_context,
                     )
                 except Exception as exc:
                     last_exc = exc

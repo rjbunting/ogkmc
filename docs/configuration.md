@@ -175,8 +175,9 @@ calculator:
     name_or_path: uma-s-1p2
     task_name: oc20
     device: cuda
-  copies: 4
-  max_workers: 4
+    workers: 4
+  copies: 1
+  max_workers: 1
 ```
 
 | Key | Default | Meaning |
@@ -189,6 +190,15 @@ calculator:
 | `gpu_devices` | `null` | Optional device list assigned across copies. |
 | `gpu_device_arg` | `device` | Constructor/factory argument that receives a device. |
 | `max_workers` | `null` | Maximum concurrent calculator tasks; defaults to the number of copies. |
+
+These settings expose two distinct levels of concurrency. `copies` and
+`max_workers` create independent calculator objects and schedule concurrent
+AutoKMC tasks. Calculator-specific factory arguments control any parallelism
+inside one calculator. In particular, FAIR-Chem UMA multi-GPU inference uses
+`factory_kwargs.workers`; keep `copies: 1` and `max_workers: 1` so FAIR-Chem
+can place its workers across the visible GPUs. Multiple AutoKMC threads given
+the same `device: cuda` value remain in one Python process and do not acquire
+distinct GPU assignments from the launcher.
 
 Every configuration must set exactly one of `calculator.import_path` or
 `calculator.factory`. Omitting both is a validation error. EMT is used only

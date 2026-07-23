@@ -245,12 +245,18 @@ calculator:
     name_or_path: uma-s-1p2
     task_name: oc20
     device: cuda
-  copies: 4
-  max_workers: 4
+    workers: 4
+  copies: 1
+  max_workers: 1
 ```
 
 `copies` creates a calculator pool. This is useful for independent relaxation
 or NEB tasks when the calculator and hardware can support parallel work.
+For FAIR-Chem UMA multi-GPU inference, keep a single AutoKMC calculator copy
+and pass the GPU count as `factory_kwargs.workers`. FAIR-Chem then owns GPU
+placement for that predictor. AutoKMC's `copies` and `max_workers` control
+concurrent AutoKMC calculator tasks; they do not assign its threads to separate
+GPUs.
 
 ### Diffusion
 

@@ -144,6 +144,29 @@ def test_all_options_template_lists_every_shared_constant():
     assert cfg.adsorbate_sites.max_pair_shells == 10
 
 
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "co_oxidation_pt111_uma_4gpu.yaml",
+        "co_oxidation_ptnano_uma_4gpu.yaml",
+    ],
+)
+def test_uma_four_gpu_examples_delegate_parallelism_to_fairchem(filename):
+    pytest.importorskip("yaml")
+    path = Path(__file__).parents[1] / "example" / filename
+
+    cfg = load_config(path)
+
+    assert cfg.calculator.factory == (
+        "fairchem.core.FAIRChemCalculator.from_model_checkpoint"
+    )
+    assert cfg.calculator.factory_kwargs["device"] == "cuda"
+    assert cfg.calculator.factory_kwargs["workers"] == 4
+    assert cfg.calculator.copies == 1
+    assert cfg.calculator.max_workers == 1
+    assert cfg.calculator.gpu_devices is None
+
+
 def test_load_toml_ok(tmp_path):
     body = """\
     schema_version = "1"
