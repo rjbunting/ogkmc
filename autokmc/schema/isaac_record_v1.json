@@ -1,0 +1,1762 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ISAAC AI-Ready Scientific Record v1.05",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "isaac_record_version",
+    "record_id",
+    "record_type",
+    "record_domain",
+    "source_type",
+    "timestamps"
+  ],
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "record_type": {
+            "const": "evidence"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "descriptors"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "record_domain": {
+            "const": "performance"
+          },
+          "context": {
+            "type": "object",
+            "required": [
+              "electrochemistry"
+            ]
+          }
+        },
+        "required": [
+          "record_domain",
+          "context"
+        ]
+      },
+      "then": {
+        "properties": {
+          "context": {
+            "properties": {
+              "electrochemistry": {
+                "required": [
+                  "control_mode"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "context": {
+            "properties": {
+              "electrochemistry": {
+                "properties": {
+                  "control_mode": {
+                    "const": "galvanostatic"
+                  }
+                },
+                "required": [
+                  "control_mode"
+                ]
+              }
+            },
+            "required": [
+              "electrochemistry"
+            ]
+          }
+        },
+        "required": [
+          "context"
+        ]
+      },
+      "then": {
+        "properties": {
+          "context": {
+            "properties": {
+              "electrochemistry": {
+                "required": [
+                  "current_setpoint_mA_cm2"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "context": {
+            "properties": {
+              "electrochemistry": {
+                "properties": {
+                  "control_mode": {
+                    "const": "potentiostatic"
+                  }
+                },
+                "required": [
+                  "control_mode"
+                ]
+              }
+            },
+            "required": [
+              "electrochemistry"
+            ]
+          }
+        },
+        "required": [
+          "context"
+        ]
+      },
+      "then": {
+        "properties": {
+          "context": {
+            "properties": {
+              "electrochemistry": {
+                "required": [
+                  "potential_setpoint_V"
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "properties": {
+    "isaac_record_version": {
+      "type": "string",
+      "const": "1.05"
+    },
+    "record_id": {
+      "type": "string",
+      "pattern": "^[0-9A-Z]{26}$",
+      "description": "ULID identifier for the record."
+    },
+    "record_type": {
+      "type": "string",
+      "enum": [
+        "evidence",
+        "intent",
+        "synthesis"
+      ],
+      "description": "Fundamental nature of the record."
+    },
+    "record_domain": {
+      "type": "string",
+      "enum": [
+        "characterization",
+        "performance",
+        "simulation",
+        "theory",
+        "derived"
+      ],
+      "description": "Scientific domain of the record content."
+    },
+    "source_type": {
+      "type": "string",
+      "enum": [
+        "facility",
+        "laboratory",
+        "computation",
+        "literature",
+        "database",
+        "industrial"
+      ],
+      "description": "Origin of the data acquisition."
+    },
+    "timestamps": {
+      "type": "object",
+      "required": [
+        "created_utc"
+      ],
+      "properties": {
+        "created_utc": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "acquired_start_utc": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "acquired_end_utc": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "last_updated_utc": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "revision_note": {
+          "type": "string",
+          "description": "Why the record was last revised."
+        },
+        "split_operation": {
+          "type": "string",
+          "description": "Provenance note when this record was produced by splitting a multi-condition source record."
+        },
+        "derived_from_record_id": {
+          "type": "string",
+          "description": "DEPRECATED: use links[] with rel=derived_from. Retained for 215 legacy records pending the links repair migration."
+        }
+      },
+      "additionalProperties": false
+    },
+    "sample": {
+      "type": "object",
+      "required": [
+        "material",
+        "sample_form"
+      ],
+      "properties": {
+        "material": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "formula": {
+              "type": "string"
+            },
+            "notes": {
+              "type": "string"
+            },
+            "provenance": {
+              "type": "string"
+            },
+            "identifiers": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "scheme": {
+                    "type": "string",
+                    "description": "e.g. 'internal', 'CAS', 'pubchem'"
+                  },
+                  "value": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "scheme",
+                  "value"
+                ]
+              },
+              "description": "Stable identifiers for cross-referencing."
+            }
+          }
+        },
+        "sample_form": {
+          "type": "string"
+        },
+        "electrode_type": {
+          "type": "string",
+          "description": "Type of electrode or substrate configuration (e.g., GDE, RDE, RRDE, foil, MEA)."
+        },
+        "composition": {
+          "type": "object",
+          "description": "Open by design: per-material composition entries (at%, loadings, layer thicknesses). Keys should be self-describing with units in the name (e.g. loading_nmol_Ni_mm2, Cu_at_fraction)."
+        },
+        "geometry": {
+          "type": "object",
+          "description": "Open by design: geometric descriptors. geometric_area_cm2 is the canonical electrode-area key.",
+          "properties": {
+            "geometric_area_cm2": {
+              "type": "number",
+              "description": "Geometric (projected) electrode area."
+            }
+          }
+        },
+        "library": {
+          "type": "object",
+          "description": "High-throughput library membership: locates this sample on a composition-spread plate. Required context for HTE records (e.g. scanning droplet cell screening).",
+          "properties": {
+            "plate_id": {
+              "type": "string",
+              "description": "Library/plate identifier (e.g. '20140213_NiFeCoCe_9931')."
+            },
+            "sample_no": {
+              "type": "integer",
+              "description": "Sample number within the plate."
+            },
+            "position_x_mm": {
+              "type": "number"
+            },
+            "position_y_mm": {
+              "type": "number"
+            }
+          }
+        },
+        "sample_id": {
+          "type": "string",
+          "description": "Stable identifier of the PHYSICAL sample/electrode. Two records share a sample_id if and only if they measured the same physical object \u2014 this is the basis that gives same_sample_as links their meaning. Format free (lab convention), but must be stable across all records of that object. Decided 2026-06-12."
+        }
+      },
+      "additionalProperties": false
+    },
+    "system": {
+      "type": "object",
+      "required": [
+        "domain",
+        "technique"
+      ],
+      "properties": {
+        "domain": {
+          "type": "string",
+          "enum": [
+            "experimental",
+            "computational"
+          ]
+        },
+        "technique": {
+          "type": "string",
+          "enum": [
+            "XAS",
+            "HERFD-XAS",
+            "XES",
+            "RIXS",
+            "XPS",
+            "XRF",
+            "XRD",
+            "SAXS",
+            "WAXS",
+            "PDF",
+            "neutron_reflectometry",
+            "neutron_diffraction",
+            "SANS",
+            "cyclic_voltammetry",
+            "chronoamperometry",
+            "chronopotentiometry",
+            "EIS",
+            "linear_sweep_voltammetry",
+            "TEM",
+            "SEM",
+            "AFM",
+            "STM",
+            "DFT",
+            "ab_initio_MD",
+            "classical_MD",
+            "kinetic_monte_carlo",
+            "microkinetic_modeling",
+            "machine_learning_potential",
+            "GC",
+            "HPLC",
+            "ICP_MS",
+            "ICP_OES",
+            "NMR",
+            "mass_spectrometry",
+            "FTIR",
+            "Raman",
+            "UV_Vis"
+          ],
+          "description": "Primary technique or computational method used to produce this record."
+        },
+        "facility": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "facility_name": {
+              "type": "string"
+            },
+            "organization": {
+              "type": "string"
+            },
+            "laboratory": {
+              "type": "string"
+            },
+            "cluster": {
+              "type": "string",
+              "description": "Compute cluster for in_silico work."
+            },
+            "notes": {
+              "type": "string"
+            },
+            "beamline": {
+              "type": "string",
+              "description": "Beamline identifier (e.g. ID26, 4-2)."
+            },
+            "endstation": {
+              "type": "string"
+            },
+            "site": {
+              "type": "string",
+              "description": "Synchrotron/lab site (e.g. ESRF, SSRL)."
+            }
+          }
+        },
+        "instrument": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "instrument_name": {
+              "type": "string"
+            },
+            "instrument_type": {
+              "type": "string"
+            },
+            "vendor_or_project": {
+              "type": "string"
+            },
+            "notes": {
+              "type": "string"
+            }
+          }
+        },
+        "configuration": {
+          "type": "object",
+          "description": "THE designated open extension namespace: instrument/station/beamline-specific configuration that does not generalize across facilities (slits, pass energies, GC columns, channel IDs, logbook fields...). Anything that DOES generalize belongs in a schema field \u2014 request one."
+        }
+      },
+      "additionalProperties": false
+    },
+    "context": {
+      "type": "object",
+      "required": [
+        "environment",
+        "temperature_K"
+      ],
+      "properties": {
+        "environment": {
+          "type": "string",
+          "enum": [
+            "operando",
+            "in_situ",
+            "ex_situ",
+            "in_silico"
+          ]
+        },
+        "temperature_K": {
+          "type": "number"
+        },
+        "electrochemistry": {
+          "type": "object",
+          "properties": {
+            "reaction": {
+              "type": "string",
+              "enum": [
+                "CO2RR",
+                "CORR",
+                "OER",
+                "HER",
+                "ORR",
+                "NRR",
+                "N2RR",
+                "AOR",
+                "FOR",
+                "water_splitting",
+                "surface_oxidation",
+                "stripping_voltammetry",
+                "None",
+                "NO3RR",
+                "urea_synthesis"
+              ]
+            },
+            "cell_type": {
+              "type": "string",
+              "enum": [
+                "flow_cell",
+                "microfluidic_flow_cell",
+                "h_cell",
+                "beaker_cell",
+                "gde_cell",
+                "mea_cell",
+                "zero_gap_cell",
+                "coin_cell",
+                "three_electrode",
+                "scanning_droplet_cell"
+              ]
+            },
+            "control_mode": {
+              "type": "string",
+              "enum": [
+                "potentiostatic",
+                "galvanostatic",
+                "potentiodynamic",
+                "open_circuit",
+                "mixed"
+              ]
+            },
+            "potential_setpoint_V": {
+              "type": "number",
+              "description": "PRIMARY, immutable: the as-commanded potential on the scale declared by potential_scale, exactly as measured/reported. Never overwritten by conversion \u2014 the RHE projection lives in potential_vs_RHE."
+            },
+            "current_setpoint_mA_cm2": {
+              "type": "number"
+            },
+            "potential_scale": {
+              "type": "string",
+              "enum": [
+                "RHE",
+                "SHE",
+                "Ag/AgCl",
+                "SCE",
+                "Hg/HgO",
+                "Hg/HgSO4"
+              ]
+            },
+            "scan_rate_mV_s": {
+              "type": "number"
+            },
+            "ir_compensation": {
+              "type": "object",
+              "properties": {
+                "method": {
+                  "type": "string",
+                  "enum": [
+                    "none",
+                    "automatic",
+                    "manual",
+                    "post_hoc",
+                    "EIS_based"
+                  ]
+                },
+                "percent": {
+                  "type": "number"
+                },
+                "cell_resistance_ohm": {
+                  "type": "number",
+                  "description": "Uncompensated resistance used for correction (promoted: 119 records already carried it ad hoc)."
+                },
+                "applied_to_reported_potential": {
+                  "type": "boolean",
+                  "description": "Whether potential_setpoint_V already includes the correction."
+                },
+                "notes": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            },
+            "electrolyte": {
+              "type": "object",
+              "required": [
+                "name",
+                "concentration_M"
+              ],
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "concentration_M": {
+                  "type": "number"
+                },
+                "notes": {
+                  "type": "string"
+                },
+                "co_reactant": {
+                  "type": "object",
+                  "description": "Co-fed reactant in the electrolyte (e.g. nitrate for urea co-electrosynthesis). Open for concentration extras.",
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "concentration_M": {
+                      "type": "number"
+                    },
+                    "notes": {
+                      "type": "string"
+                    }
+                  }
+                }
+              },
+              "additionalProperties": false
+            },
+            "pH": {
+              "type": "number"
+            },
+            "pH_basis": {
+              "type": "string",
+              "enum": [
+                "measured",
+                "nominal",
+                "buffered_assumed"
+              ]
+            },
+            "reference_electrode": {
+              "type": "object",
+              "required": [
+                "type"
+              ],
+              "additionalProperties": false,
+              "description": "Structured specification of the physical reference electrode the PRIMARY potentials were measured against. Required when potential_scale names a physical electrode. Supersedes the free-text system.configuration.reference_electrode.",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "Ag/AgCl",
+                    "SCE",
+                    "Hg/HgO",
+                    "Hg/HgSO4",
+                    "RHE",
+                    "SHE",
+                    "pseudo_reference",
+                    "other"
+                  ]
+                },
+                "filling_solution": {
+                  "type": "string",
+                  "description": "The INTERNAL solution inside the reference electrode body (e.g. '3.0 M KCl') \u2014 NOT the cell electrolyte (which lives in context.electrochemistry.electrolyte). The filling sets the reference potential via the Cl- activity at the Ag/AgCl wire: sat. KCl -> 0.197 V, 3 M -> 0.210 V, 1 M -> 0.235 V vs SHE. Vendor naming 'Ag/AgCl (3 M KCl)' refers to this filling."
+                },
+                "offset_V_vs_SHE": {
+                  "type": "number",
+                  "description": "E0 of this reference vs SHE. Ag/AgCl 3.0M KCl: 0.210; 1.0M KCl: 0.235; sat.: 0.197."
+                },
+                "offset_basis": {
+                  "type": "string",
+                  "enum": [
+                    "tabulated",
+                    "vendor_spec",
+                    "calibrated",
+                    "reported_by_source",
+                    "assumed"
+                  ]
+                },
+                "model": {
+                  "type": "string",
+                  "description": "Vendor/model, e.g. 'Gaskatel HydroFlex'."
+                }
+              }
+            },
+            "potential_vs_RHE": {
+              "type": "object",
+              "required": [
+                "rhe_basis"
+              ],
+              "additionalProperties": false,
+              "description": "DERIVED canonical query axis: the operating potential in V vs RHE (setpoint for potentiostatic, steady-state measured potential for galvanostatic). NEVER the primary \u2014 primaries (potential_setpoint_V, descriptors, channels) are immutable on their as-measured scale. value_V may be null ONLY with an explicit not_* rhe_basis, so records can never silently fall off the potential axis.",
+              "properties": {
+                "value_V": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "rhe_basis": {
+                  "type": "string",
+                  "enum": [
+                    "measured_direct",
+                    "derived_calibrated",
+                    "reported_as_RHE",
+                    "derived_nominal",
+                    "in_silico_setpoint",
+                    "not_convertible_no_pH",
+                    "not_convertible_no_reference_offset",
+                    "not_reported",
+                    "not_applicable"
+                  ],
+                  "description": "Trust tier of value_V. measured_direct: physical RHE reference. derived_calibrated: converted with a calibrated offset. reported_as_RHE: source stated RHE, conversion unrecoverable. derived_nominal: converted with tabulated/assumed offset + nominal pH. not_*: value_V is null, reason explicit. not_applicable = a half-cell RHE projection does not exist for this device (full 2-electrode electrolyzer); value_V is null."
+                },
+                "uncertainty_V": {
+                  "type": "number",
+                  "description": "Estimated uncertainty of value_V (offset ambiguity + pH basis), in V."
+                },
+                "ir_corrected": {
+                  "type": "string",
+                  "enum": [
+                    "yes",
+                    "no",
+                    "unknown"
+                  ],
+                  "description": "Whether value_V includes iR correction. May differ from the primary."
+                },
+                "conversion": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "description": "Frozen provenance. Inputs are snapshotted (pH_used, offset) so later context edits cannot silently invalidate the derivation.",
+                  "properties": {
+                    "input_path": {
+                      "type": "string",
+                      "description": "Path of the converted PRIMARY, e.g. 'context.electrochemistry.potential_setpoint_V' or 'descriptors:steady_state_potential'."
+                    },
+                    "from_scale": {
+                      "type": "string"
+                    },
+                    "formula": {
+                      "type": "string",
+                      "description": "e.g. 'E_RHE = E_meas + offset_V_vs_SHE + 0.0591*pH'. Verbatim source formula when reported_by_source."
+                    },
+                    "offset_V_vs_SHE_used": {
+                      "type": "number"
+                    },
+                    "offset_basis_used": {
+                      "type": "string",
+                      "enum": [
+                        "tabulated",
+                        "vendor_spec",
+                        "calibrated",
+                        "reported_by_source",
+                        "assumed"
+                      ]
+                    },
+                    "pH_used": {
+                      "type": "number"
+                    },
+                    "pH_basis_used": {
+                      "type": "string",
+                      "enum": [
+                        "measured",
+                        "nominal",
+                        "buffered_assumed"
+                      ]
+                    },
+                    "converted_by": {
+                      "type": "string"
+                    },
+                    "converted_utc": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "rhe_conversion_offset_V": {
+                      "type": "number",
+                      "description": "Single additive calibrated conversion constant: E_RHE = E_measured + rhe_conversion_offset_V. Bundles the reference-electrode offset AND the Nernst pH term, calibrated against a master reference (accounts for individual electrode drift). When present, use it instead of the offset+pH route and set rhe_basis=derived_calibrated. Origin: Caltech HTE per-session calibration values (2026-06-12)."
+                    }
+                  }
+                }
+              },
+              "allOf": [
+                {
+                  "if": {
+                    "properties": {
+                      "rhe_basis": {
+                        "const": "derived_nominal"
+                      }
+                    }
+                  },
+                  "then": {
+                    "required": [
+                      "value_V",
+                      "conversion"
+                    ],
+                    "properties": {
+                      "conversion": {
+                        "required": [
+                          "offset_V_vs_SHE_used",
+                          "pH_used",
+                          "formula"
+                        ]
+                      }
+                    }
+                  }
+                },
+                {
+                  "if": {
+                    "properties": {
+                      "rhe_basis": {
+                        "const": "derived_calibrated"
+                      }
+                    }
+                  },
+                  "then": {
+                    "required": [
+                      "value_V",
+                      "conversion"
+                    ],
+                    "properties": {
+                      "conversion": {
+                        "required": [
+                          "rhe_conversion_offset_V",
+                          "formula"
+                        ]
+                      }
+                    }
+                  }
+                },
+                {
+                  "if": {
+                    "properties": {
+                      "rhe_basis": {
+                        "enum": [
+                          "not_convertible_no_pH",
+                          "not_convertible_no_reference_offset",
+                          "not_reported",
+                          "not_applicable"
+                        ]
+                      }
+                    }
+                  },
+                  "then": {
+                    "properties": {
+                      "value_V": {
+                        "type": "null"
+                      }
+                    }
+                  }
+                }
+              ]
+            },
+            "membrane": {
+              "type": "string",
+              "description": "Membrane/separator, e.g. Nafion_117, Selemion_AEM."
+            },
+            "anolyte": {
+              "type": "object",
+              "description": "Anolyte specification when different from catholyte. Same shape as electrolyte; open for composition extras (e.g. nitrate_concentration_ppm_N).",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "concentration_M": {
+                  "type": "number"
+                },
+                "notes": {
+                  "type": "string"
+                }
+              }
+            },
+            "pH_notes": {
+              "type": "string"
+            },
+            "reaction_notes": {
+              "type": "string",
+              "description": "Nuance the reaction enum cannot express."
+            },
+            "notes": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        "transport": {
+          "type": "object",
+          "properties": {
+            "flow_mode": {
+              "type": "string",
+              "enum": [
+                "stagnant",
+                "flowing_liquid",
+                "bubbling_gas",
+                "gas_diffusion",
+                "rotating_disk"
+              ]
+            },
+            "rotation_speed_rpm": {
+              "type": "number"
+            },
+            "feed": {
+              "type": "object",
+              "required": [
+                "phase",
+                "composition"
+              ],
+              "properties": {
+                "phase": {
+                  "type": "string",
+                  "enum": [
+                    "gas",
+                    "liquid"
+                  ]
+                },
+                "composition": {
+                  "type": "string"
+                },
+                "flow_rate": {
+                  "type": "number"
+                },
+                "flow_rate_unit": {
+                  "type": "string"
+                },
+                "partial_pressures": {
+                  "type": "object"
+                },
+                "CO_percent": {
+                  "type": "number",
+                  "description": "CO fraction of the feed in percent (operando feed-variation studies)."
+                },
+                "pressure_bar": {
+                  "type": "number"
+                },
+                "notes": {
+                  "type": "string"
+                }
+              },
+              "description": "Feed must be an object with phase and composition. Do not use a bare string.",
+              "additionalProperties": false
+            },
+            "flow_mode_notes": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        "thermodynamics": {
+          "type": "object",
+          "properties": {
+            "pressure_Pa": {
+              "type": "number"
+            },
+            "atmosphere": {
+              "type": "string"
+            }
+          }
+        },
+        "simulation_assumptions": {
+          "type": "object",
+          "properties": {
+            "solvation_model": {
+              "type": "string",
+              "enum": [
+                "none",
+                "implicit",
+                "explicit"
+              ]
+            }
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "measurement": {
+      "type": "object",
+      "required": [
+        "series",
+        "qc"
+      ],
+      "properties": {
+        "processing": {
+          "type": "object",
+          "description": "Processing chain. Canonical fields: steps[] (controlled vocabulary) + recipe_link. NOTE: block intentionally not locked yet \u2014 CatHub ingestion metadata (cathub_*) relocation pending; do not add new ad-hoc keys.",
+          "properties": {
+            "steps": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Ordered processing steps from the measurement.processing.steps vocabulary."
+            },
+            "recipe_link": {
+              "type": "object",
+              "properties": {
+                "rel": {
+                  "type": "string"
+                },
+                "target": {
+                  "type": "string"
+                }
+              }
+            },
+            "type": {
+              "type": "string",
+              "description": "DEPRECATED compound descriptor \u2014 use steps[]."
+            }
+          }
+        },
+        "series": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "series_id",
+              "independent_variables",
+              "channels"
+            ],
+            "properties": {
+              "series_id": {
+                "type": "string"
+              },
+              "independent_variables": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "name",
+                    "unit"
+                  ],
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "unit": {
+                      "type": "string"
+                    },
+                    "values": {
+                      "type": "array",
+                      "items": {
+                        "type": "number"
+                      }
+                    },
+                    "notes": {
+                      "type": "string"
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              },
+              "channels": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "name",
+                    "unit",
+                    "role"
+                  ],
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "unit": {
+                      "type": "string"
+                    },
+                    "role": {
+                      "type": "string",
+                      "enum": [
+                        "primary_signal",
+                        "measured_response",
+                        "simulated_observable",
+                        "derived_signal",
+                        "auxiliary_signal",
+                        "control_readback",
+                        "quality_monitor"
+                      ]
+                    },
+                    "values": {
+                      "type": "array",
+                      "items": {
+                        "type": "number"
+                      }
+                    },
+                    "notes": {
+                      "type": "string"
+                    },
+                    "string_values": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      },
+                      "description": "Categorical channel values when the channel is non-numeric."
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              },
+              "conditions": {
+                "type": "object",
+                "description": "Operating conditions specific to this series when they differ from context (e.g. per-series control_mode in multi-step protocols)."
+              },
+              "data_source": {
+                "type": "string",
+                "description": "e.g. 'digitized_from_published_figure'."
+              },
+              "source_figure_ref": {
+                "type": "string"
+              },
+              "source_figure_refs": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "notes": {
+                "type": "string"
+              },
+              "conditions_inherited_from": {
+                "type": "string",
+                "description": "Provenance: series/record whose conditions this series inherits (record-split bookkeeping)."
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "qc": {
+          "type": "object",
+          "required": [
+            "status"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "status": {
+              "type": "string",
+              "enum": [
+                "valid",
+                "compromised",
+                "failed",
+                "pending"
+              ],
+              "description": "pending = intent records awaiting execution."
+            },
+            "evidence": {
+              "type": "string",
+              "description": "REQUIRED in practice when status != valid: what is compromised/failed and why. \"N/A\" defeats the purpose."
+            },
+            "assumptions": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Documented judgment calls made during record creation."
+            },
+            "notes": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "links": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "rel",
+          "target",
+          "basis"
+        ],
+        "properties": {
+          "rel": {
+            "type": "string",
+            "enum": [
+              "derived_from",
+              "intended_comparison_target",
+              "calibration_of",
+              "same_sample_as",
+              "replica_of",
+              "follows",
+              "validates",
+              "invalidates"
+            ]
+          },
+          "target": {
+            "type": "string",
+            "pattern": "^[0-9A-Z]{26}$"
+          },
+          "basis": {
+            "type": "string",
+            "enum": [
+              "same_absorber_edge",
+              "matched_operating_conditions",
+              "matched_computational_method",
+              "shared_reference_state",
+              "same_workflow_version",
+              "identical_geometry",
+              "analysis_pipeline_output",
+              "replicate_preparation",
+              "same_sample_id",
+              "shared_analysis_method",
+              "shared_material_batch",
+              "unspecified"
+            ]
+          },
+          "notes": {
+            "type": "string",
+            "description": "Human-readable link justification."
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "assets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "asset_id",
+          "content_role",
+          "uri",
+          "sha256"
+        ],
+        "properties": {
+          "asset_id": {
+            "type": "string"
+          },
+          "content_role": {
+            "type": "string",
+            "enum": [
+              "raw_data",
+              "raw_data_pointer",
+              "reduction_product",
+              "input_structure",
+              "workflow_recipe",
+              "processing_script",
+              "calibration_reference",
+              "auxiliary_reference",
+              "documentation",
+              "metadata_snapshot",
+              "supplementary_image",
+              "other"
+            ]
+          },
+          "uri": {
+            "type": "string"
+          },
+          "sha256": {
+            "type": "string"
+          },
+          "media_type": {
+            "type": "string"
+          },
+          "notes": {
+            "type": "string"
+          },
+          "citation": {
+            "type": "object",
+            "description": "Bibliographic metadata for literature-derived assets (authors, title, journal, year, volume, pages, doi)."
+          },
+          "caption_verbatim": {
+            "type": "string",
+            "description": "Verbatim figure caption from the source publication."
+          },
+          "caption_highlights": {
+            "type": "object",
+            "description": "Structured caption analysis (axes, series, error bars...)."
+          },
+          "paper_conclusions_about_figure": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "figure_label": {
+            "type": "string"
+          },
+          "page": {
+            "type": [
+              "number",
+              "string"
+            ]
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "descriptors": {
+      "type": "object",
+      "required": [
+        "outputs"
+      ],
+      "properties": {
+        "outputs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "label",
+              "generated_utc",
+              "generated_by",
+              "descriptors"
+            ],
+            "properties": {
+              "label": {
+                "type": "string"
+              },
+              "generated_utc": {
+                "type": "string",
+                "format": "date-time",
+                "description": "ISO 8601 timestamp of when the descriptors were generated. Placeholder strings are not allowed."
+              },
+              "generated_by": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "agent": {
+                    "type": "string",
+                    "description": "Tool/pipeline/person that generated these descriptors."
+                  },
+                  "version": {
+                    "type": "string"
+                  },
+                  "author": {
+                    "type": "string"
+                  },
+                  "notes": {
+                    "type": "string"
+                  }
+                }
+              },
+              "descriptors": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "name",
+                    "kind",
+                    "source",
+                    "value",
+                    "uncertainty"
+                  ],
+                  "properties": {
+                    "name": {
+                      "type": "string",
+                      "pattern": "^(?!(.*_magnitude($|\\..*))|(.*_ratio\\..*)|(.*_normalized.*)|(^current_fraction\\..*)|(.*\\.partial_sum_.*)$)[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z0-9_]+)*$",
+                      "description": "Descriptor name. Standard form: <class> or <class>.<product> or <class>.<product>.<context>. Rejects known anti-patterns: '_magnitude' suffix (use negative values in canonical name), '_ratio'/'_normalized' (derive downstream), 'current_fraction.*' (mechanism-attribution derivative), '*.partial_sum_*'. See Controlled-Vocabulary wiki for canonical class list."
+                    },
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "absolute",
+                        "differential",
+                        "categorical",
+                        "similarity",
+                        "model",
+                        "theoretical_metric"
+                      ]
+                    },
+                    "source": {
+                      "type": "string",
+                      "enum": [
+                        "auto",
+                        "manual",
+                        "imported"
+                      ]
+                    },
+                    "value": {
+                      "not": {
+                        "type": "null"
+                      },
+                      "description": "The asserted value. Must not be null \u2014 a descriptor without a value is not a scientific claim."
+                    },
+                    "unit": {
+                      "type": "string"
+                    },
+                    "uncertainty": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "description": "Uncertainty of the value. Prefer sigma+unit; basis documents provenance (reported, digitization, assumed). Do NOT encode \"not reported\" as sigma:0 \u2014 state it in basis.",
+                      "properties": {
+                        "sigma": {
+                          "type": [
+                            "number",
+                            "null"
+                          ],
+                          "description": "Standard deviation. null = not reported (prefer basis: not_reported)."
+                        },
+                        "unit": {
+                          "type": "string"
+                        },
+                        "confidence": {
+                          "type": "number",
+                          "description": "Confidence level for interval-type uncertainty (e.g. 0.95)."
+                        },
+                        "basis": {
+                          "type": "string",
+                          "description": "Provenance: 'reported', 'digitization_estimate', 'assumed', 'not_reported'."
+                        },
+                        "notes": {
+                          "type": "string"
+                        },
+                        "bounds": {
+                          "type": "array",
+                          "items": {
+                            "type": "number"
+                          },
+                          "minItems": 2,
+                          "maxItems": 2,
+                          "description": "[lower, upper] interval bounds (alternative to sigma)."
+                        }
+                      }
+                    },
+                    "at": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "description": "Operating point within a series. Sample identity, operating potential, electrolyte, and cell type all live in their canonical slots \u2014 never as 'at' keys.",
+                      "properties": {
+                        "temperature_K": {
+                          "type": "number"
+                        },
+                        "time_s": {
+                          "type": "number"
+                        },
+                        "pressure_bar": {
+                          "type": "number"
+                        },
+                        "feed_CO_partial_pressure_bar": {
+                          "type": "number"
+                        },
+                        "CO_partial_pressure_bar": {
+                          "type": "number"
+                        },
+                        "glyoxal_concentration_mM": {
+                          "type": "number"
+                        }
+                      }
+                    },
+                    "definition": {
+                      "type": "string"
+                    },
+                    "relative_to": {
+                      "description": "For differential descriptors, the reference state this is measured against. Either a string label ('IrO2', 'pure_Cu') or a structured object referencing another ISAAC record.",
+                      "oneOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "operation": {
+                              "type": "string"
+                            },
+                            "record_id": {
+                              "type": "string"
+                            },
+                            "reference_label": {
+                              "type": "string"
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              },
+              "source_figure_ref": {
+                "type": "string",
+                "description": "Single source figure (prefer source_figure_refs)."
+              },
+              "source_figure_refs": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Source figures these descriptors were derived from."
+              },
+              "note": {
+                "type": "string"
+              },
+              "method": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "computation": {
+      "type": "object",
+      "properties": {
+        "method": {
+          "type": "object",
+          "description": "Declared theory level: method family, functional, code details.",
+          "properties": {
+            "family": {
+              "type": "string",
+              "enum": [
+                "DFT",
+                "DFT_U",
+                "hybrid_DFT",
+                "AIMD",
+                "classical_MD",
+                "CHE",
+                "microkinetic",
+                "machine_learning",
+                "semi_empirical"
+              ],
+              "description": "Method family."
+            },
+            "functional_class": {
+              "type": "string",
+              "enum": [
+                "LDA",
+                "GGA",
+                "meta_GGA",
+                "hybrid",
+                "double_hybrid",
+                "RPA"
+              ],
+              "description": "Density functional class."
+            },
+            "functional_name": {
+              "type": "string",
+              "description": "Specific functional (e.g., PBE, RPBE, BEEF-vdW, HSE06)."
+            },
+            "basis_type": {
+              "type": "string",
+              "enum": [
+                "planewave",
+                "LCAO",
+                "real_space",
+                "mixed"
+              ],
+              "description": "Basis set type."
+            },
+            "pseudopotential": {
+              "type": "string",
+              "description": "Pseudopotential type (e.g., PAW, ultrasoft, norm_conserving, GBRV, SG15)."
+            },
+            "cutoff_eV": {
+              "type": "number",
+              "description": "Planewave kinetic energy cutoff in eV."
+            },
+            "spin_treatment": {
+              "type": "string",
+              "enum": [
+                "none",
+                "collinear",
+                "noncollinear",
+                "SOC"
+              ],
+              "description": "Spin polarization treatment."
+            },
+            "dispersion": {
+              "type": "string",
+              "enum": [
+                "none",
+                "D2",
+                "D3",
+                "D3BJ",
+                "TS",
+                "MBD",
+                "dDsC",
+                "vdW_DF",
+                "vdW_DF2",
+                "rVV10"
+              ],
+              "description": "Dispersion correction method."
+            },
+            "relativistic": {
+              "type": "string",
+              "enum": [
+                "none",
+                "scalar",
+                "full"
+              ],
+              "description": "Relativistic treatment."
+            },
+            "convergence": {
+              "type": "object",
+              "properties": {
+                "energy_eV": {
+                  "type": "number"
+                },
+                "force_eV_per_A": {
+                  "type": "number"
+                },
+                "stress_kbar": {
+                  "type": "number"
+                }
+              }
+            },
+            "kpoints": {
+              "type": "string",
+              "description": "Brillouin zone sampling (e.g., '3x3x1 Monkhorst-Pack', 'Gamma-only')."
+            },
+            "smearing": {
+              "type": "object",
+              "properties": {
+                "method": {
+                  "type": "string",
+                  "enum": [
+                    "Gaussian",
+                    "Methfessel-Paxton",
+                    "Fermi-Dirac",
+                    "tetrahedron",
+                    "cold"
+                  ],
+                  "description": "Electronic smearing method."
+                },
+                "width_eV": {
+                  "type": "number"
+                }
+              }
+            },
+            "code": {
+              "type": "string",
+              "description": "Simulation code name (e.g. 'VASP', 'Quantum ESPRESSO', 'JDFTx', 'CP2K', 'GPAW')."
+            },
+            "code_version": {
+              "type": "string",
+              "description": "Code version string (e.g. '6.5.1')."
+            },
+            "notes": {
+              "type": "string"
+            },
+            "core_hole_treatment": {
+              "type": "string",
+              "description": "Core-hole treatment for spectral simulation (e.g. 'ICORELEVEL=1', 'FCH', 'XCH', 'none')."
+            }
+          },
+          "additionalProperties": false
+        },
+        "slab_model": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Surface slab declaration.",
+          "properties": {
+            "surface_facet": {
+              "type": "string"
+            },
+            "layers": {
+              "type": [
+                "number",
+                "string"
+              ]
+            },
+            "fixed_layers": {
+              "type": "string"
+            },
+            "supercell": {
+              "type": "string"
+            },
+            "vacuum_A": {
+              "type": "number"
+            },
+            "lattice_constant_A": {
+              "type": "number"
+            },
+            "adsorbate_coverage": {
+              "type": "string"
+            },
+            "notes": {
+              "type": "string"
+            },
+            "dipole_correction": {
+              "type": [
+                "boolean",
+                "string"
+              ]
+            }
+          }
+        },
+        "potential_method": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Electrochemical potential treatment declaration.",
+          "properties": {
+            "type": {
+              "type": "string",
+              "description": "'CHE', 'constant_potential', 'vacuum', 'none'"
+            },
+            "solvent_model": {
+              "type": "string",
+              "description": "e.g. 'VASPsol', 'implicit_PCM'"
+            },
+            "dielectric_constant": {
+              "type": "number"
+            },
+            "notes": {
+              "type": "string"
+            },
+            "SHE_work_function_eV": {
+              "type": "number",
+              "description": "Work function of SHE used for the absolute potential scale (typically 4.4-4.6 eV)."
+            },
+            "target_potential_V_SHE": {
+              "type": "number",
+              "description": "Target electrode potential for constant-potential (GC-DFT) calculations."
+            }
+          }
+        },
+        "output_quantity": {
+          "type": "string",
+          "description": "Declared primary output class (e.g. 'adsorption_energy', 'activation_barrier', 'simulated_spectrum')."
+        },
+        "transition_state": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Transition-state search declaration.",
+          "properties": {
+            "method": {
+              "type": "string",
+              "description": "e.g. 'CI-NEB', 'dimer'"
+            },
+            "images": {
+              "type": "number"
+            },
+            "n_electrons_transferred": {
+              "type": "number"
+            },
+            "reaction": {
+              "type": "string",
+              "description": "Elementary step, e.g. CO* + CO* -> OCCO*"
+            },
+            "notes": {
+              "type": "string"
+            }
+          }
+        },
+        "energy_reference": {
+          "type": "string",
+          "description": "Energy reference convention (e.g. 'RHE via CHE', 'gas-phase H2/H2O')."
+        },
+        "notes": {
+          "type": "string",
+          "description": "Free-text declaration notes (hypothesis context, calculation intent)."
+        },
+        "corrections_applied": {
+          "type": "object",
+          "description": "Energy corrections declared applied (booleans): dispersion, entropy, ZPE, PCET, solvation, ..."
+        }
+      },
+      "description": "METHOD DECLARATION ONLY (ADR per computation verdict, 2026-06-13): computation declares HOW \u2014 never numerical results. Scalar results are descriptors (kind=theoretical_metric); simulated spectra/curves are measurement.series with role=simulated_observable; structures/INCARs/raw totals are assets (interim: JSON-strings in system.configuration).",
+      "additionalProperties": false
+    },
+    "attribution": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "WHO: uploader, owner, analyst, curator. uploaded_by is SERVER-STAMPED from the authenticated identity at ingestion \u2014 client-supplied values are overwritten (tamper-proof attribution). Per-output analysis attribution lives in descriptors.outputs[].generated_by; this block is record-level. Decided by D. Sokaras 2026-06-15.",
+      "properties": {
+        "uploaded_by": {
+          "type": "string",
+          "description": "Authenticated identity that submitted this record. Set by the server; any client value is overwritten."
+        },
+        "contributors": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "role"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "role": {
+                "type": "string",
+                "enum": [
+                  "data_owner",
+                  "performed_measurement",
+                  "performed_analysis",
+                  "curated_record"
+                ]
+              },
+              "affiliation": {
+                "type": "string"
+              },
+              "orcid": {
+                "type": "string",
+                "pattern": "^\\d{4}-\\d{4}-\\d{4}-\\d{3}[0-9X]$"
+              },
+              "email": {
+                "type": "string"
+              },
+              "notes": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "tags": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 64,
+        "pattern": "^\\S(.*\\S)?$"
+      },
+      "description": "Free-form, user-assigned grouping labels. A record may carry SEVERAL (it can belong to a broad archive AND a specific campaign). This is how a user groups an arbitrary SET of records at any granularity (campaign, material system, study) without a rigid hierarchy \u2014 finer groupings are just more specific tags. Recommended convention: lowercase, hyphenated, scoped, e.g. 'jcap-hte', 'nifecoce-oer-screen', 'caltech-2014'. The physical HTE hierarchy (plate/spot) stays in sample.library.{plate_id,sample_no}. A non-empty tags array satisfies the NO_LINKS grouping nudge."
+    }
+  }
+}

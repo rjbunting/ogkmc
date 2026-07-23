@@ -186,7 +186,7 @@ KABSCH_MAX_MAPPINGS: int = 6969
 
 #: Schema version stamped onto every reaction event and summary JSON document
 #: written by :mod:`autokmc.io.persistence`.  Bump on any breaking schema change.
-PERSISTENCE_SCHEMA_VERSION: str = "1"
+PERSISTENCE_SCHEMA_VERSION: str = "2"
 
 #: Default config-file schema version expected by :mod:`autokmc.io.config`.
 CONFIG_SCHEMA_VERSION: str = "1"
@@ -215,7 +215,10 @@ LATERAL_SHELLS_DEFAULT: int = 0
 #: Default basenames written by :func:`autokmc.cli.pipeline.run_from_config`.
 REACTIONS_FILENAME:   str = "events.jsonl"
 SUMMARY_FILENAME:     str = "summary.json"
+RUN_MANIFEST_FILENAME: str = "run_manifest.json"
 TRAJECTORY_FILENAME:  str = "kmc.extxyz"
+CALCULATION_CACHE_DIR:       str = "calculation_cache"
+ISAAC_EXPORT_FILENAME:       str = "isaac_records.json"
 REACTIONS_DIR:        str = "reactions"
 DEFAULT_OUTPUT_DIR:   str = "autokmc_run"
 
@@ -314,6 +317,26 @@ BOND_PRUNE_WITH_CALCULATOR: bool = True
 #: :func:`autokmc.sites.bond.find_bond_sites` for triple iso-class
 #: deduplication / pruning.
 BOND_PAIR_N_SHELLS: int = N_SHELLS_DEFAULT
+
+#: Bond-reaction NEB interpolation default.  Bond-forming/breaking paths are
+#: more sensitive to the initial band than diffusion hops, so use IDPP by
+#: default while leaving the generic/diffusion default unchanged.
+BOND_NEB_INTERPOLATION: str = "idpp"
+
+#: Atom-correspondence strategy for bond-reaction NEB endpoints.
+#: ``"auto"`` tries a small candidate set and keeps the lowest-displacement
+#: path; ``"hungarian"`` solves the global same-element assignment problem;
+#: ``"greedy"`` preserves the pre-existing nearest-neighbour behaviour; and
+#: ``"reactant_index"`` keeps C's reactant atom order when chemically valid.
+BOND_ATOM_MATCHING: str = "auto"
+
+#: Maximum number of same-element assignment candidates considered by
+#: ``BOND_ATOM_MATCHING == "auto"`` before the best pre-NEB path is chosen.
+BOND_MATCHING_TRIALS: int = 8
+
+#: Default lift height (Å) used when the C endpoint of ``A + B ⇌ C`` is a
+#: gas-phase product rather than a materialised surface placement.
+BOND_GAS_LIFT_HEIGHT: float = 6.0
 
 #: Folder-name format for bond reaction folders persisted by
 #: :class:`autokmc.io.persistence.ReactionWriter` (when enabled).

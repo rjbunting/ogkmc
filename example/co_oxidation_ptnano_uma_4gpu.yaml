@@ -1,0 +1,125 @@
+# autokmc - CO oxidation on Pt nanoparticle with FAIR-Chem UMA on 4 GPUs
+# Run with:    autokmc run example/co_oxidation_ptnano_uma_4gpu.yaml
+schema_version: "1"
+
+output:
+  dir: ./runs/co_oxidation_ptnano_uma_4gpu
+  trajectory_dump_every: 10
+  log_level: INFO
+
+checkpoint:
+  enabled: true
+  path: ./runs/co_oxidation_ptnano_uma_4gpu/checkpoint.pkl
+  every_n_steps: 10
+  # To restart a stopped run, set:
+  # resume_from: ./runs/co_oxidation_ptnano_uma_4gpu/checkpoint.pkl
+
+structure:
+  kind: nanoparticle
+  composition: Pt
+  crystal_structure: fcc
+  lattice_constant: 3.9242
+  # Approximate number of atoms in the Wulff-construction nanoparticle.
+  n_atoms: 600
+  # Leave null to calculate Pt surface energies for the Wulff construction
+  # with the configured UMA calculator.
+  surface_energies: null
+
+reactants:
+  # CO feed.
+  - smiles: "[C]=O"
+    add_hydrogens: false
+    relax_in_gas: true
+    geometry: linear
+
+  # O2 feed; bond dissociation templates produce O* + O* <=> O2.
+  - smiles: "O=O"
+    add_hydrogens: false
+    relax_in_gas: true
+    partial_pressure_bar: 0.2
+    geometry: linear
+    spin: 1.0
+
+# O* is auto-built as a zero-pressure leaf species from O2 dissociation
+# templates. Once O* is formed on the surface, the KMC bond-expansion hook
+# expands O and derives later reactions such as CO* + O* <=> CO2.
+
+# FAIR-Chem UMA setup. FAIR-Chem uses task_name="oc20" for heterogeneous
+# catalysis. The first run needs fairchem-core installed and Hugging Face access
+# to facebook/UMA, either through huggingface-cli login or HF_TOKEN.
+#
+# This builds four independent FAIRChemCalculator instances for AutoKMC's
+# CalculatorPool. Keep device as "cuda" here: FairChem rejects "cuda:0" style
+# ordinal strings, so GPU visibility/placement should be handled by the job
+# launcher environment.
+calculator:
+  factory: fairchem.core.FAIRChemCalculator.from_model_checkpoint
+  factory_kwargs:
+    name_or_path: uma-s-1p2
+    task_name: oc20
+    device: cuda
+  copies: 4
+  max_workers: 4
+
+adsorbate_sites:
+  prune_stable_only: true
+  fmax: 0.05
+  max_steps: 500
+
+# Disable vibrational corrections for this long GPU debug run. Set enabled:
+# true once the reaction network is behaving as expected.
+free_energy:
+  enabled: false
+  # Feed-wide default used when a reactant omits partial_pressure_bar (CO here).
+  # Gas thermochemistry, when enabled, still uses a fixed 1-bar standard state.
+  pressure_bar: 1.0
+
+kmc:
+  temperature_k: 300.0
+  n_steps: 10000000
+  transmission_coefficient: 1.0
+  fmax: 0.05
+  max_steps: 1000
+  log_every: 10
+  random_seed: 69
+  lateral_interactions: true
+
+diffusion:
+  enabled: true
+  max_hops: 0
+  n_shells_pair: 1
+  prune_by_adsorption_pair: true
+  fmax: 0.05
+  max_steps: 1000
+  n_images: 8
+  climb: true
+  spring_k: 0.1
+  interpolation: idpp
+  persist_neb_path: true
+
+bond:
+  enabled: true
+  bond_max_hops: 0
+  bond_types: ["SINGLE", "DOUBLE", "TRIPLE"]
+  include_ring_bonds: false
+  include_dissociation: true
+  include_coupling: true
+  include_homo_coupling: true
+  deduplicate_iso: true
+  auto_build_leaf_species: true
+
+  pair_n_shells: 1
+  prune_by_triple: true
+  prune_with_calculator: true
+  prune_fmax: 0.05
+  prune_max_steps: 1000
+
+  neb_fmax: 0.05
+  neb_max_steps: 1000
+  neb_n_images: 8
+  neb_climb: true
+  neb_spring_k: 0.1
+  neb_interpolation: idpp
+  atom_matching: auto
+  matching_trials: 8
+  persist_neb_path: true

@@ -127,7 +127,11 @@ def _build_gas_energy_lookup(
     if reactants is None:
         return {}
     if isinstance(reactants, dict):
-        return {str(k): float(v) for k, v in reactants.items()}
+        out = {str(k): float(v) for k, v in reactants.items()}
+        invalid = {key: value for key, value in out.items() if not np.isfinite(value)}
+        if invalid:
+            raise ValueError(f"gas-phase energies must be finite; invalid values: {invalid}")
+        return out
     if isinstance(reactants, Reactant):
         reactants = [reactants]
     out: dict[str, float] = {}
@@ -137,7 +141,13 @@ def _build_gas_energy_lookup(
                 f"reactants must be Reactant / iterable of Reactant / "
                 f"dict[smiles, energy] — got {type(r).__name__}"
             )
-        out[r.smiles] = float(r.energy)
+        energy = float(r.energy)
+        if not np.isfinite(energy):
+            raise ValueError(
+                f"reactant {r.smiles!r} has no finite gas-phase energy; "
+                "configure a working calculator"
+            )
+        out[r.smiles] = energy
     return out
 
 
@@ -159,8 +169,12 @@ def _build_gas_g_lookup(
         if not isinstance(r, Reactant):
             continue
         g = getattr(r, "gibbs_energy", float("nan"))
-        if isinstance(g, float) and not np.isnan(g):
-            out[r.smiles] = float(g)
+        try:
+            value = float(g)
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(value):
+            out[r.smiles] = value
     return out
 
 
@@ -176,7 +190,12 @@ def _build_partial_pressure_lookup(
     for r in reactants:
         if not isinstance(r, Reactant):
             continue
-        out[r.smiles] = float(getattr(r, "partial_pressure_bar", 1.0))
+        pressure = float(getattr(r, "partial_pressure_bar", 1.0))
+        if not np.isfinite(pressure) or pressure < 0.0:
+            raise ValueError(
+                f"reactant {r.smiles!r} has invalid partial pressure {pressure!r} bar"
+            )
+        out[r.smiles] = pressure
     return out
 
 
@@ -259,6 +278,10 @@ def _energetics_cached(
     direction additionally multiplied by *pressure_bar* so that the
     persisted ΔG / barriers stay at the 1 bar standard state.
     """
+    if not np.isfinite(float(e_gas)):
+        raise ValueError(f"gas-phase energy must be finite, got {e_gas!r}")
+    if not np.isfinite(float(pressure_bar)) or float(pressure_bar) < 0.0:
+        raise ValueError(f"partial pressure must be finite and >= 0, got {pressure_bar!r}")
     use_g = (
         g_gas is not None
         and getattr(lc, "g_occupied",   None) is not None
@@ -290,6 +313,10 @@ def _energetics_cached(
         e_unocc_used = float(lc.energy_unoccupied)  # type: ignore[arg-type]
         e_gas_used   = float(e_gas)
 
+    state_values = (e_occ_used, e_unocc_used, e_gas_used)
+    if not all(np.isfinite(value) for value in state_values):
+        raise ValueError(f"reaction energies must be finite, got {state_values!r}")
+
     if occupied:                       # desorption
         delta_e = e_unocc_used + e_gas_used - e_occ_used
     else:                              # adsorption
@@ -302,6 +329,11 @@ def _energetics_cached(
     # persisted barrier remains at the 1 bar reference.
     if not occupied:
         rate *= max(0.0, float(pressure_bar))
+    if not all(np.isfinite(value) for value in (delta_e, barrier, rate)):
+        raise ValueError(
+            f"adsorption energetics produced non-finite values: "
+            f"delta={delta_e!r}, barrier={barrier!r}, rate={rate!r}"
+        )
 
     out = (float(delta_e), float(barrier), rate)
     cache[key] = out
@@ -365,6 +397,7 @@ def get_applicable_reactions(
     partial_pressures: dict[str, float] | None = None,
     free_energy_options=None,
     vib_cache_root: str | None = None,
+    calculation_cache_root: str | None = None,
 ) -> list[AdsorptionReaction]:
     """Enumerate all applicable adsorption / desorption events for one site.
 
@@ -440,6 +473,7 @@ def get_applicable_reactions(
                     free_energy_options       = free_energy_options,
                     free_energy_temperature_k = float(temperature),
                     vib_cache_root            = vib_cache_root,
+                    calculation_cache_root    = calculation_cache_root,
                 )
             except SiteStabilityError as exc:
                 lc.stable = False
@@ -498,6 +532,7 @@ def compute_all_reactions(
     partial_pressures: dict[str, float] | None = None,
     free_energy_options=None,
     vib_cache_root: str | None = None,
+    calculation_cache_root: str | None = None,
 ) -> list[AdsorptionReaction]:
     """Compute applicable reactions for every site and return the flat list."""
     gas_energies = _build_gas_energy_lookup(reactants)
@@ -522,6 +557,7 @@ def compute_all_reactions(
                 partial_pressures        = partial_pressures,
                 free_energy_options      = free_energy_options,
                 vib_cache_root           = vib_cache_root,
+                calculation_cache_root   = calculation_cache_root,
             )
 
         with ThreadPoolExecutor(max_workers=calculator.max_workers) as ex:
@@ -543,6 +579,7 @@ def compute_all_reactions(
             partial_pressures        = partial_pressures,
             free_energy_options      = free_energy_options,
             vib_cache_root           = vib_cache_root,
+            calculation_cache_root   = calculation_cache_root,
         )
         all_reactions.extend(rxns)
     return all_reactions

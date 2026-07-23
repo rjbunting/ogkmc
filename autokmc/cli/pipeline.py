@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import logging
+import json
+import uuid
+from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -16,9 +19,14 @@ from autokmc.io.calculators import (
     primary_calculator,
 )
 from autokmc.io.checkpoint import CheckpointWriter, load_checkpoint
-from autokmc.io.config import RunConfig
+from autokmc.io.calculation_cache import (
+    initialise_calculation_database,
+    write_isaac_export,
+)
+from autokmc.io.config import FreeEnergyCfg, ReactantCfg, RunConfig
 from autokmc.io.persistence import ReactionWriter
 from autokmc.io.summary import ReactionSummary, make_run_meta
+from autokmc.io.run_manifest import finish_run_manifest, start_run_manifest
 from autokmc.io.trajectory import TrajectoryWriter
 from autokmc.utils.logging import get_logger
 
@@ -51,6 +59,51 @@ def _summarise_adsorbate_sites(sites: list) -> tuple[int, int]:
     return len(sites), sum(len(getattr(site, "member_node_ids", ())) for site in sites)
 
 
+def _derive_configured_bond_templates(reactant_configs, reactants, bond_cfg):
+    """Derive templates while preserving each reactant's hydrogen policy."""
+    from autokmc.reactions.templates import derive_bond_templates
+
+    reactant_smiles = [reactant.smiles for reactant in reactants]
+    templates = []
+    if bond_cfg.include_dissociation:
+        for reactant_cfg, reactant in zip(reactant_configs, reactants):
+            templates.extend(derive_bond_templates(
+                [reactant.smiles],
+                include_dissociation  = True,
+                include_coupling      = False,
+                bond_types            = tuple(bond_cfg.bond_types),
+                include_ring_bonds    = bond_cfg.include_ring_bonds,
+                add_hydrogens         = reactant_cfg.add_hydrogens,
+            ))
+    if bond_cfg.include_coupling:
+        templates.extend(derive_bond_templates(
+            reactant_smiles,
+            include_dissociation  = False,
+            include_coupling      = True,
+            include_homo_coupling = bond_cfg.include_homo_coupling,
+        ))
+
+    template_keys: set[tuple[str, str, str]] = set()
+    unique_templates = []
+    for template in templates:
+        key = (template.smiles_a, template.smiles_b, template.smiles_c)
+        if key in template_keys:
+            continue
+        template_keys.add(key)
+        unique_templates.append(template)
+    return unique_templates
+
+
+def _resolved_partial_pressure_bar(
+    reactant_cfg: ReactantCfg,
+    free_energy_cfg: FreeEnergyCfg,
+) -> float:
+    """Resolve a reactant pressure, falling back to the feed-wide default."""
+    if reactant_cfg.partial_pressure_bar is not None:
+        return float(reactant_cfg.partial_pressure_bar)
+    return float(free_energy_cfg.pressure_bar)
+
+
 # ---------------------------------------------------------------------------
 # Pipeline driver
 # ---------------------------------------------------------------------------
@@ -68,7 +121,6 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
     from autokmc.species.reactant import build_reactant
     from autokmc.sites.adsorbate import find_adsorbate_sites
     from autokmc.sites.diffusion import find_diffusion_sites
-    from autokmc.reactions.templates import derive_bond_templates
     from autokmc.sites.bond import (
         find_bond_sites,
         prune_unstable_bond_sites,
@@ -80,6 +132,36 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
 
     out_dir = Path(cfg.output.dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = out_dir / cfg.output.run_manifest_filename
+    resume_state = (
+        load_checkpoint(cfg.checkpoint.resume_from)
+        if cfg.checkpoint.resume_from else None
+    )
+    manifest_run_id: str | None = None
+    if cfg.checkpoint.resume_from and manifest_path.is_file():
+        try:
+            manifest_run_id = str(
+                json.loads(manifest_path.read_text(encoding="utf-8")).get("run_id")
+                or ""
+            )
+        except (OSError, json.JSONDecodeError, TypeError):
+            manifest_run_id = None
+    checkpoint_run_id = (
+        None if resume_state is None else resume_state.metadata.get("run_id")
+    )
+    if (
+        manifest_run_id and checkpoint_run_id is not None
+        and manifest_run_id != str(checkpoint_run_id)
+    ):
+        raise ValueError(
+            "checkpoint run_id does not match the output run manifest: "
+            f"{checkpoint_run_id!r} != {manifest_run_id!r}"
+        )
+    run_id = manifest_run_id or (
+        str(checkpoint_run_id) if checkpoint_run_id is not None else None
+    )
+    if not run_id:
+        run_id = str(uuid.uuid4())
 
     log_level = getattr(logging, str(cfg.output.log_level).upper(), logging.INFO)
     logging.basicConfig(level=log_level, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -101,9 +183,14 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
 
     # 2. Structure
     s = cfg.structure
-    _stage(f"Stage 2/7: building {s.kind} structure", verbose=verbose_run)
+    if resume_state is None:
+        _stage(f"Stage 2/7: building {s.kind} structure", verbose=verbose_run)
+    else:
+        _stage("Stage 2/7: restoring structure and graph from checkpoint", verbose=verbose_run)
     with acquire_calculator(calc_resource, purpose="structure construction") as calc:
-        if s.kind == "surface":
+        if resume_state is not None:
+            atoms = None
+        elif s.kind == "surface":
             atoms = build_surface(
                 composition       = s.composition,
                 crystal_structure = s.crystal_structure,
@@ -140,10 +227,15 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
             )
         else:
             raise ValueError(f"unknown structure.kind={s.kind!r} (expected surface|nanoparticle)")
-        atoms.calc = None
+        if atoms is not None:
+            atoms.calc = None
 
-    frozen_indices = list(atoms.info.get("frozen_indices", []) or []) or None
-    if verbose_run:
+    frozen_indices = (
+        resume_state.frozen_indices
+        if resume_state is not None
+        else list(atoms.info.get("frozen_indices", []) or []) or None
+    )
+    if verbose_run and atoms is not None:
         cell = atoms.get_cell()
         print(
             f"[autokmc]   structure built successfully: {len(atoms)} atoms, "
@@ -160,10 +252,16 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
             print("[autokmc]   frozen region: no fixed atoms")
 
     # 3. Surface tagging + graph
-    _stage("Stage 3/7: classifying surface atoms and building graph", verbose=verbose_run)
-    surface_result = find_surface_atoms(atoms, tag_atoms=True)
-    G = build_graph(atoms)
-    if verbose_run:
+    if resume_state is None:
+        _stage("Stage 3/7: classifying surface atoms and building graph", verbose=verbose_run)
+        surface_result = find_surface_atoms(atoms, tag_atoms=True)
+        G = build_graph(atoms)
+    else:
+        G = resume_state.graph
+        surface_result = None
+    G.graph["run_id"] = run_id
+    G.graph["frozen_indices"] = list(frozen_indices or [])
+    if verbose_run and surface_result is not None and atoms is not None:
         n_surface = len(surface_result.indices)
         print(
             f"[autokmc]   surface classification successful: "
@@ -173,6 +271,11 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
         print(
             f"[autokmc]   graph ready: {G.number_of_nodes()} node(s), "
             f"{G.number_of_edges()} edge(s)"
+        )
+    elif verbose_run:
+        print(
+            f"[autokmc]   checkpoint graph restored: {G.number_of_nodes()} "
+            f"node(s), {G.number_of_edges()} edge(s)"
         )
 
     # 3b. Free-energy options + persistent vibration cache root.
@@ -185,7 +288,7 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
         vibration_nfree         = fe_cfg.vibration_nfree,
         include_ts_vibrations   = fe_cfg.include_ts_vibrations,
         min_frequency_ev        = fe_cfg.min_frequency_ev,
-        default_symmetry_number = fe_cfg.default_symmetry_number,
+        symmetry_tolerance      = fe_cfg.symmetry_tolerance,
         default_spin            = fe_cfg.default_spin,
         default_geometry        = fe_cfg.default_geometry,
         cache_dir               = fe_cfg.cache_dir,
@@ -194,23 +297,32 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
         fe_cfg.cache_dir if fe_cfg.cache_dir
         else str(out_dir / "vib_cache")
     )
+    calculation_cache_root: str | None = (
+        str(out_dir / cfg.output.calculation_cache_dir)
+        if cfg.output.calculation_cache_enabled
+        else None
+    )
+    if calculation_cache_root is not None:
+        initialise_calculation_database(calculation_cache_root, run_id=run_id)
 
     # 4. Reactants
-    _stage("Stage 4/7: building gas-phase reactants", verbose=verbose_run)
-    reactants_built = []
-    for r in cfg.reactants:
+    if resume_state is None:
+        _stage("Stage 4/7: building gas-phase reactants", verbose=verbose_run)
+    reactants_built = (
+        [] if resume_state is None else list(resume_state.reactants)
+    )
+    reactant_configs = cfg.reactants if resume_state is None else []
+    for r in reactant_configs:
         if verbose_run:
             print(f"[autokmc]   reactant {r.smiles!r}: building 3D structure")
         rx = build_reactant(
             r.smiles,
             add_hydrogens             = r.add_hydrogens,
-            calculator                = calc_resource if r.relax_in_gas else None,
+            calculator                = calc_resource,
+            relax                     = r.relax_in_gas,
             free_energy_options       = free_energy_options if fe_cfg.enabled else None,
             free_energy_temperature_k = cfg.kmc.temperature_k,
-            partial_pressure_bar      = (
-                r.partial_pressure_bar if r.partial_pressure_bar is not None
-                else fe_cfg.pressure_bar
-            ),
+            partial_pressure_bar      = _resolved_partial_pressure_bar(r, fe_cfg),
             symmetry_number           = r.symmetry_number,
             spin                      = r.spin,
             geometry                  = r.geometry,
@@ -226,12 +338,15 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
 
     if not reactants_built:
         raise ValueError("config.reactants is empty — supply at least one SMILES.")
-
     # 5. Adsorbate sites for every reactant
-    _stage("Stage 5/7: enumerating and pruning adsorbate sites", verbose=verbose_run)
+    if resume_state is None:
+        _stage("Stage 5/7: enumerating and pruning adsorbate sites", verbose=verbose_run)
     asc = cfg.adsorbate_sites
-    all_sites: list = []
-    for rx in reactants_built:
+    all_sites: list = (
+        [] if resume_state is None else list(resume_state.adsorbate_sites)
+    )
+    reactants_to_enumerate = reactants_built if resume_state is None else []
+    for rx in reactants_to_enumerate:
         if verbose_run:
             if asc.prune_stable_only and calc_resource is not None:
                 print(
@@ -272,43 +387,36 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
 
     # 6. Persistence hooks
     _stage("Stage 6/7: preparing persistence and optional reaction channels", verbose=verbose_run)
+    is_resume = bool(cfg.checkpoint.resume_from)
     reaction_writer = ReactionWriter(
         out_dir,
         reactions_filename = cfg.output.reactions_filename,
         calculator_meta    = calculator_meta(cfg.calculator),
+        append             = is_resume,
+        run_id             = run_id,
     )
     trajectory_writer = TrajectoryWriter(
         out_dir / cfg.output.trajectory_filename,
         dump_every = cfg.output.trajectory_dump_every,
+        append = is_resume,
     )
-    summary_collector = ReactionSummary(
-        reactant_smiles={rx.smiles for rx in reactants_built},
-    )
+    summary_collector = ReactionSummary()
     checkpoint_writer = None
     if cfg.checkpoint.enabled:
         checkpoint_path = cfg.checkpoint.path or str(out_dir / "checkpoint.pkl")
         checkpoint_writer = CheckpointWriter(
             checkpoint_path,
             every_n_steps=cfg.checkpoint.every_n_steps,
-            metadata={"config_path": config_path},
+            metadata={"config_path": config_path, "run_id": run_id},
         )
 
     # 6b. Diffusion (NEB) sites — flat list across all SMILES
-    diffusion_sites_flat: list = []
+    diffusion_sites_flat: list = (
+        [] if resume_state is None else list(resume_state.diffusion_sites)
+    )
     diffusion_kwargs: dict | None = None
     d = cfg.diffusion
     if d.enabled:
-        if verbose_run:
-            print("[autokmc]   diffusion enabled: enumerating hop permutations")
-        diff_by_smiles = find_diffusion_sites(
-            G, all_sites,
-            max_hops                 = d.max_hops,
-            n_shells_pair            = d.n_shells_pair,
-            prune_by_adsorption_pair = d.prune_by_adsorption_pair,
-            verbose                  = verbose_run,
-        )
-        for smiles, ds_list in diff_by_smiles.items():
-            diffusion_sites_flat.extend(ds_list)
         diffusion_kwargs = dict(
             fmax             = d.fmax,
             max_steps        = d.max_steps,
@@ -318,13 +426,25 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
             interpolation    = d.interpolation,
             persist_neb_path = d.persist_neb_path,
         )
-        if verbose_run:
-            print(
-                f"[autokmc] Diffusion enabled: "
-                f"{sum(len(v) for v in diff_by_smiles.values())} "
-                f"DiffusionSite iso-class(es) across "
-                f"{len(diff_by_smiles)} SMILES."
+        if resume_state is None:
+            if verbose_run:
+                print("[autokmc]   diffusion enabled: enumerating hop permutations")
+            diff_by_smiles = find_diffusion_sites(
+                G, all_sites,
+                max_hops                 = d.max_hops,
+                n_shells_pair            = d.n_shells_pair,
+                prune_by_adsorption_pair = d.prune_by_adsorption_pair,
+                verbose                  = verbose_run,
             )
+            for _smiles, ds_list in diff_by_smiles.items():
+                diffusion_sites_flat.extend(ds_list)
+            if verbose_run:
+                print(
+                    f"[autokmc] Diffusion enabled: "
+                    f"{sum(len(v) for v in diff_by_smiles.values())} "
+                    f"DiffusionSite iso-class(es) across "
+                    f"{len(diff_by_smiles)} SMILES."
+                )
 
     # 6c. Bond-changing reactions (A + B ⇌ C).  When enabled, derive
     # templates from the user-supplied reactant SMILES, build sites for
@@ -332,16 +452,14 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
     # iso-classes on the live graph, and bootstrap the on-the-fly growth
     # registry so future coupling events can introduce new species.
     b = cfg.bond
-    bond_sites: list = []
-    if b.enabled:
+    bond_sites: list = (
+        [] if resume_state is None else list(resume_state.bond_sites)
+    )
+    if b.enabled and resume_state is None:
         reactant_smiles = [rx.smiles for rx in reactants_built]
-        templates = derive_bond_templates(
-            reactant_smiles,
-            include_dissociation  = b.include_dissociation,
-            include_coupling      = b.include_coupling,
-            bond_types            = tuple(b.bond_types),
-            include_ring_bonds    = b.include_ring_bonds,
-            include_homo_coupling = b.include_homo_coupling,
+        # Hydrogen materialisation is a per-reactant choice.
+        templates = _derive_configured_bond_templates(
+            cfg.reactants, reactants_built, b,
         )
         if verbose_run:
             print(
@@ -437,6 +555,7 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
                 n_shells_pair       = b.pair_n_shells,
                 prune_by_triple     = False,   # always defer to after Stage 1
                 gas_species         = reactant_by_smi,
+                gas_lift_height     = b.gas_lift_height,
                 verbose             = verbose_run,
             )
 
@@ -507,6 +626,8 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
             climb            = b.neb_climb,
             spring_k         = b.neb_spring_k,
             interpolation    = b.neb_interpolation,
+            atom_matching    = b.atom_matching,
+            matching_trials  = b.matching_trials,
             persist_neb_path = b.persist_neb_path,
         )
         bond_growth_kwargs = dict(
@@ -525,6 +646,12 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
             bond_types                  = tuple(b.bond_types),
             include_ring_bonds          = b.include_ring_bonds,
             include_homo_coupling       = b.include_homo_coupling,
+            include_dissociation        = b.include_dissociation,
+            include_coupling            = b.include_coupling,
+            deduplicate_iso             = b.deduplicate_iso,
+            auto_build_leaf_species     = b.auto_build_leaf_species,
+            add_hydrogens               = False,
+            gas_lift_height             = b.gas_lift_height,
             diffusion_max_hops          = d.max_hops,
             diffusion_n_shells_pair     = d.n_shells_pair,
             diffusion_prune_by_ads_pair = d.prune_by_adsorption_pair,
@@ -532,8 +659,13 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
 
     initial_step = 0
     initial_time_s = 0.0
+    initial_history: list = []
+    initial_reaction_counts: dict[str, int] = {}
+    initial_rng_state: dict | None = None
     if cfg.checkpoint.resume_from:
-        state = load_checkpoint(cfg.checkpoint.resume_from)
+        if resume_state is None:  # defensive; resume_from guarantees this above
+            raise RuntimeError("checkpoint resume state was not loaded")
+        state = resume_state
         G = state.graph
         reactants_built = list(state.reactants)
         all_sites = list(state.adsorbate_sites)
@@ -543,16 +675,12 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
         frozen_indices = state.frozen_indices
         initial_step = int(state.step)
         initial_time_s = float(state.time_s)
-        summary_collector = ReactionSummary(
-            reactant_smiles={rx.smiles for rx in reactants_built},
-        )
-        reaction_writer.close()
-        reaction_writer = ReactionWriter(
-            out_dir,
-            reactions_filename = cfg.output.reactions_filename,
-            calculator_meta    = calculator_meta(cfg.calculator),
-            append             = True,
-        )
+        initial_history = list(state.history)
+        initial_reaction_counts = dict(state.reaction_counts)
+        initial_rng_state = getattr(state, "rng_state", None)
+        G.graph["run_id"] = run_id
+        G.graph["frozen_indices"] = list(frozen_indices or [])
+        summary_collector = ReactionSummary.from_events(reaction_writer.jsonl_path)
         if verbose_run:
             print(
                 f"[autokmc] Resuming from checkpoint {cfg.checkpoint.resume_from}: "
@@ -562,6 +690,31 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
     # 7. KMC
     _stage("Stage 7/7: starting KMC simulation", verbose=verbose_run)
     k = cfg.kmc
+    start_run_manifest(
+        manifest_path,
+        graph=G,
+        adsorbate_sites=kmc_initial_sites,
+        feed_reactants=[
+            {
+                "smiles": reactant.smiles,
+                "partial_pressure_bar": reactant.partial_pressure_bar,
+                "thermochemistry": dict(reactant.thermo_meta),
+            }
+            for reactant in reactants_built
+            if canonical_smiles(reactant.smiles)
+            in {canonical_smiles(item.smiles) for item in cfg.reactants}
+        ],
+        temperature_k=k.temperature_k,
+        random_seed=k.random_seed,
+        structure_kind=cfg.structure.kind,
+        composition=cfg.structure.composition,
+        config_path=config_path,
+        events_filename=cfg.output.reactions_filename,
+        initial_step=initial_step,
+        initial_time_s=initial_time_s,
+        run_id=run_id,
+        resolved_config=asdict(cfg),
+    )
     summary = run_kmc_steps(
         G, kmc_initial_sites, calc_resource,
         reactants                = reactants_built,
@@ -582,12 +735,16 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
         bond_growth_kwargs       = bond_growth_kwargs,
         free_energy_options      = free_energy_options if fe_cfg.enabled else None,
         vib_cache_root           = vib_cache_root,
+        calculation_cache_root   = calculation_cache_root,
         reaction_writer          = reaction_writer,
         trajectory_writer        = trajectory_writer,
         summary_collector        = summary_collector,
         checkpoint_writer        = checkpoint_writer,
         initial_step             = initial_step,
         initial_time_s           = initial_time_s,
+        initial_history          = initial_history,
+        initial_reaction_counts  = initial_reaction_counts,
+        initial_rng_state        = initial_rng_state,
     )
 
     finished_at = datetime.now(timezone.utc)
@@ -608,11 +765,26 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
         run_meta        = run_meta,
         final_occupancy = summary.get("final_occupancy"),
     )
+    isaac_export_path = write_isaac_export(
+        calculation_cache_root,
+        out_dir / cfg.output.isaac_export_filename,
+    )
     reaction_writer.close()
+    finish_run_manifest(
+        manifest_path,
+        final_step=initial_step + int(summary.get("steps_executed", 0) or 0),
+        final_time_s=float(summary.get("time", initial_time_s) or initial_time_s),
+        steps_executed=int(summary.get("steps_executed", 0) or 0),
+    )
 
     summary["outputs"] = {
         "events":        str(reaction_writer.jsonl_path),
         "summary":       str(summary_path),
+        "run_manifest":  str(manifest_path),
+        "calculation_cache": calculation_cache_root,
+        "isaac_records": (
+            str(isaac_export_path) if isaac_export_path is not None else None
+        ),
         "trajectory": (
             str(trajectory_writer.output_path)
             if trajectory_writer.enabled else None

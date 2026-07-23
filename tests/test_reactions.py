@@ -9,11 +9,13 @@ import pytest
 
 from autokmc.reactions import AdsorptionReaction, BondReaction, DiffusionReaction
 from autokmc.reactions.adsorption import fast_reaction_for_member
+from autokmc.reactions.adsorption import _energetics_cached
 from autokmc.reactions.bond import _bond_energetics_cached, is_bond_applicable
 from autokmc.reactions.diffusion import (
     _diffusion_energetics_cached,
     is_diffusion_applicable,
 )
+from autokmc.sites.bond import BondReactionLateral
 
 
 def _site(smiles: str, iso: int, node_id: int, clique: frozenset[int]):
@@ -101,6 +103,38 @@ def test_bond_energetics_rejects_unknown_direction():
 
     with pytest.raises(ValueError, match="unknown bond direction"):
         _bond_energetics_cached(lc, "merge-ish", temperature=500.0)
+
+
+def test_nonfinite_adsorption_energetics_are_rejected():
+    lc = SimpleNamespace(energy_occupied=float("nan"), energy_unoccupied=0.0)
+
+    with pytest.raises(ValueError, match="must be finite"):
+        _energetics_cached(lc, 0.0, False, temperature=500.0)
+
+
+def test_bond_rate_uses_free_energies_when_available():
+    electronic = BondReactionLateral(
+        lateral_class=0, energy_ab=0.0, energy_c=1.0, energy_ts=2.0,
+    )
+    free = BondReactionLateral(
+        lateral_class=0,
+        energy_ab=0.0,
+        energy_c=1.0,
+        energy_ts=2.0,
+        g_ab=0.0,
+        g_c=0.2,
+        g_ts=0.3,
+    )
+
+    electronic_result = _bond_energetics_cached(
+        electronic, "couple", temperature=500.0,
+    )
+    free_result = _bond_energetics_cached(free, "couple", temperature=500.0)
+
+    assert electronic_result[0] == pytest.approx(1.0)
+    assert free_result[0] == pytest.approx(0.2)
+    assert free_result[1] == pytest.approx(0.3)
+    assert free_result[2] > electronic_result[2]
 
 
 def test_bond_applicability_rejects_ab_exact_clique_collision():

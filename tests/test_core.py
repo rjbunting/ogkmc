@@ -34,6 +34,16 @@ def test_build_graph_rejects_wrong_surface_array_length(tiny_atoms):
         build_graph(tiny_atoms)
 
 
+def test_build_graph_does_not_mutate_input_pbc(tiny_atoms):
+    tiny_atoms.set_pbc([True, True, False])
+    tiny_atoms.set_array("surface", np.array([0, 1, 2, 2], dtype=np.int8))
+
+    graph = build_graph(tiny_atoms)
+
+    assert tuple(tiny_atoms.pbc) == (True, True, False)
+    assert tuple(graph.graph["pbc"]) == (True, True, True)
+
+
 def test_graph_state_create_and_invalidate_helpers():
     G = nx.Graph()
 

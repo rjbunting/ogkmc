@@ -49,11 +49,12 @@ layout::
 For the **AB endpoint** the reacting block holds A's atoms (ordered by
 ``reactant_index``) followed by B's atoms (ordered by ``reactant_index``)
 at A's and B's graph positions respectively.  For the **C endpoint** the
-reacting block holds C's atoms in an order obtained by greedy
-element-aware nearest-neighbour matching against the AB ordering, so that
-each k-th atom in the AB reacting block corresponds physically to the
-k-th atom in the C reacting block.  This pairing is what enables ASE's
-NEB interpolators to draw a smooth A+B → C path.
+reacting block holds C's atoms in an order chosen by the configured
+same-element matching strategy.  The default ``auto`` mode tries the legacy
+greedy order, a global Hungarian assignment using minimum-image distances,
+reactant-index order when chemically valid, and bounded same-element swap
+trials, then keeps the lowest-displacement pre-NEB path.  This pairing is
+what enables ASE's NEB interpolators to draw a smooth A+B → C path.
 
 Public API
 ----------
@@ -74,7 +75,9 @@ Public API
 
 from __future__ import annotations
 
+import itertools
 import os
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -86,7 +89,18 @@ from ase.constraints import FixAtoms
 from ase.optimize import BFGS
 
 from autokmc.io.calculators import acquire_calculator
-from autokmc.core.pbc import full_pbc_for_cell
+from autokmc.io.calculation_cache import (
+    apply_cached_states,
+    calculation_cache_key,
+    calculator_identity,
+    load_calculation_record,
+    make_calculation_record,
+    state_payload,
+    write_calculation_record,
+)
+from autokmc.io.reaction_graph import normalise_reaction_graph
+from autokmc.species.smiles import smiles_to_dirname
+from autokmc.core.pbc import full_pbc_for_cell, minimum_image_vectors
 from autokmc.sites.stability.adsorption import (
     SurfaceConnectivityError,
     AdsorbateDissociationError,
@@ -107,7 +121,9 @@ from autokmc.core.constants import (
     NEB_MAX_STEPS,
     NEB_CLIMB,
     NEB_SPRING_K,
-    NEB_INTERPOLATION,
+    BOND_NEB_INTERPOLATION,
+    BOND_ATOM_MATCHING,
+    BOND_MATCHING_TRIALS,
 )
 from autokmc.utils.logging import get_logger
 
@@ -450,6 +466,117 @@ def _ordered_endpoint_nodes(G: nx.Graph, endpoint_ids) -> list[int]:
     )
 
 
+@dataclass
+class _MappingCandidate:
+    """One atom-index correspondence candidate for a bond NEB endpoint."""
+
+    method: str
+    c_node_order: list[int]
+    distances: list[float]
+    total_distance: float
+    total_distance_sq: float
+    rms_distance: float
+    max_distance: float
+    score: float
+
+    def to_dict(self, G: nx.Graph) -> dict:
+        return {
+            "method": self.method,
+            "c_node_order": list(self.c_node_order),
+            "c_reactant_indices": [
+                int(G.nodes[n].get("reactant_index", -1))
+                for n in self.c_node_order
+            ],
+            "distances_ang": list(self.distances),
+            "total_distance_ang": float(self.total_distance),
+            "total_distance_sq_ang2": float(self.total_distance_sq),
+            "rms_distance_ang": float(self.rms_distance),
+            "max_distance_ang": float(self.max_distance),
+            "score": float(self.score),
+        }
+
+
+def _linear_sum_assignment(cost: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Small wrapper around scipy with a brute-force fallback for tiny groups."""
+    try:
+        from scipy.optimize import linear_sum_assignment
+    except Exception:  # pragma: no cover - scipy is a declared dependency.
+        n_rows, n_cols = cost.shape
+        if n_rows != n_cols or n_rows > 8:
+            raise
+        best_perm = None
+        best_cost = float("inf")
+        for perm in itertools.permutations(range(n_cols)):
+            total = float(sum(cost[i, j] for i, j in enumerate(perm)))
+            if total < best_cost:
+                best_cost = total
+                best_perm = perm
+        if best_perm is None:
+            raise ValueError("no finite assignment available")
+        return np.arange(n_rows, dtype=int), np.asarray(best_perm, dtype=int)
+    return linear_sum_assignment(cost)
+
+
+def _validate_c_order_symbols(
+    G: nx.Graph,
+    ab_symbols: list[str],
+    c_order: list[int],
+    *,
+    method: str,
+) -> None:
+    if len(c_order) != len(ab_symbols):
+        raise ValueError(
+            f"Bond NEB {method} pairing: |C|={len(c_order)} differs from "
+            f"|A|+|B|={len(ab_symbols)}."
+        )
+    c_symbols = [str(G.nodes[n]["element"]) for n in c_order]
+    if c_symbols != list(ab_symbols):
+        raise ValueError(
+            f"Bond NEB {method} pairing produced element pattern "
+            f"{c_symbols!r}, expected {list(ab_symbols)!r}."
+        )
+
+
+def _mapping_candidate(
+    G: nx.Graph,
+    ab_symbols: list[str],
+    ab_positions: list[np.ndarray],
+    c_order: list[int],
+    *,
+    method: str,
+    cell,
+    pbc,
+) -> _MappingCandidate:
+    """Score a C-node order against the relaxed AB reacting-block positions."""
+    c_order = [int(n) for n in c_order]
+    _validate_c_order_symbols(G, ab_symbols, c_order, method=method)
+
+    ab_pos = np.asarray(ab_positions, dtype=float)
+    c_pos = np.asarray(
+        [np.asarray(G.nodes[n]["position"], dtype=float) for n in c_order],
+        dtype=float,
+    )
+    disp = minimum_image_vectors(c_pos - ab_pos, cell, pbc)
+    distances_arr = np.linalg.norm(disp, axis=1)
+    total_sq = float(np.sum(distances_arr ** 2))
+    rms = float(np.sqrt(total_sq / max(1, len(distances_arr))))
+    max_d = float(distances_arr.max()) if len(distances_arr) else 0.0
+    total = float(distances_arr.sum())
+    # Keep the global-distance objective dominant, but add a modest max-jump
+    # term so auto mode can prefer smoother paths over one very long crossing.
+    score = float(total_sq + 0.5 * max_d * max_d)
+    return _MappingCandidate(
+        method=method,
+        c_node_order=c_order,
+        distances=[float(x) for x in distances_arr],
+        total_distance=total,
+        total_distance_sq=total_sq,
+        rms_distance=rms,
+        max_distance=max_d,
+        score=score,
+    )
+
+
 def _greedy_pair_c_to_ab(
     G: nx.Graph,
     ab_symbols: list[str],
@@ -500,6 +627,285 @@ def _greedy_pair_c_to_ab(
                 best_idx = i
         ordered.append(candidates.pop(best_idx))
     return ordered
+
+
+def _hungarian_pair_c_to_ab(
+    G: nx.Graph,
+    ab_symbols: list[str],
+    ab_positions: list[np.ndarray],
+    c_nodes: list[int],
+    *,
+    cell=None,
+    pbc=None,
+) -> list[int]:
+    """Return the same-element assignment minimizing total MIC distance."""
+    if len(c_nodes) != len(ab_symbols):
+        raise ValueError(
+            f"Bond NEB Hungarian pairing: |C|={len(c_nodes)} differs from "
+            f"|A|+|B|={len(ab_symbols)}."
+        )
+
+    cell = np.asarray(G.graph.get("cell", np.eye(3)) if cell is None else cell, dtype=float)
+    pbc = full_pbc_for_cell(cell) if pbc is None else np.asarray(pbc, dtype=bool)
+
+    c_by_elem: dict[str, list[int]] = {}
+    for nid in c_nodes:
+        c_by_elem.setdefault(str(G.nodes[nid]["element"]), []).append(int(nid))
+
+    ordered: list[int | None] = [None] * len(ab_symbols)
+    ab_pos = np.asarray(ab_positions, dtype=float)
+    for sym in sorted(set(ab_symbols)):
+        ab_idx = [i for i, s in enumerate(ab_symbols) if s == sym]
+        candidates = c_by_elem.get(sym, [])
+        if len(candidates) != len(ab_idx):
+            raise ValueError(
+                f"Bond NEB Hungarian pairing: element {sym!r} count mismatch "
+                f"between AB ({len(ab_idx)}) and C ({len(candidates)})."
+            )
+        c_pos = np.asarray(
+            [np.asarray(G.nodes[n]["position"], dtype=float) for n in candidates],
+            dtype=float,
+        )
+        disp = minimum_image_vectors(
+            c_pos[None, :, :] - ab_pos[ab_idx, None, :],
+            cell,
+            pbc,
+        )
+        cost = np.sum(disp ** 2, axis=2)
+        rows, cols = _linear_sum_assignment(cost)
+        for row, col in zip(rows, cols):
+            ordered[ab_idx[int(row)]] = candidates[int(col)]
+
+    if any(n is None for n in ordered):
+        raise ValueError("Bond NEB Hungarian pairing left atoms unassigned.")
+    return [int(n) for n in ordered if n is not None]
+
+
+def _candidate_orders_from_swaps(
+    base_order: list[int],
+    ab_symbols: list[str],
+    *,
+    limit: int,
+) -> list[tuple[str, list[int]]]:
+    """Generate bounded same-element swap trials around a base assignment."""
+    out: list[tuple[str, list[int]]] = []
+    if limit <= 0:
+        return out
+    for sym in sorted(set(ab_symbols)):
+        idx = [i for i, s in enumerate(ab_symbols) if s == sym]
+        for i, j in itertools.combinations(idx, 2):
+            swapped = list(base_order)
+            swapped[i], swapped[j] = swapped[j], swapped[i]
+            out.append((f"same_element_swap:{sym}:{i}-{j}", swapped))
+            if len(out) >= limit:
+                return out
+    return out
+
+
+def _kabsch_rotation(P: np.ndarray, Q: np.ndarray) -> np.ndarray:
+    """Return row-vector rotation R minimizing ``||P @ R - Q||``."""
+    if len(P) == 0:
+        return np.eye(3)
+    H = np.asarray(P, dtype=float).T @ np.asarray(Q, dtype=float)
+    U, _S, Vt = np.linalg.svd(H)
+    R = Vt.T @ U.T
+    if np.linalg.det(R) < 0.0:
+        Vt[-1, :] *= -1.0
+        R = Vt.T @ U.T
+    return R
+
+
+def _assign_indices_by_element(
+    source_symbols: list[str],
+    source_positions: np.ndarray,
+    target_symbols: list[str],
+    target_positions: np.ndarray,
+) -> list[int]:
+    """Order source indices so each target slot gets the nearest same element."""
+    if sorted(source_symbols) != sorted(target_symbols):
+        raise ValueError(
+            "assignment requires matching element multisets: "
+            f"source={source_symbols!r}, target={target_symbols!r}"
+        )
+    ordered: list[int | None] = [None] * len(target_symbols)
+    source_symbols = [str(s) for s in source_symbols]
+    target_symbols = [str(s) for s in target_symbols]
+    for sym in sorted(set(target_symbols)):
+        src_idx = [i for i, s in enumerate(source_symbols) if s == sym]
+        tgt_idx = [i for i, s in enumerate(target_symbols) if s == sym]
+        cost = np.sum(
+            (
+                source_positions[src_idx][None, :, :]
+                - target_positions[tgt_idx][:, None, :]
+            ) ** 2,
+            axis=2,
+        )
+        rows, cols = _linear_sum_assignment(cost)
+        for row, col in zip(rows, cols):
+            ordered[tgt_idx[int(row)]] = src_idx[int(col)]
+    if any(i is None for i in ordered):
+        raise ValueError("element assignment left atoms unassigned")
+    return [int(i) for i in ordered if i is not None]
+
+
+def _align_gas_product_to_target(
+    gas_symbols: list[str],
+    gas_positions: np.ndarray,
+    target_symbols: list[str],
+    target_positions_centered: np.ndarray,
+    *,
+    max_iter: int = 3,
+) -> tuple[np.ndarray, list[int], dict]:
+    """Return gas positions assigned/oriented to best match target positions."""
+    gas_positions = np.asarray(gas_positions, dtype=float)
+    gas_centered = gas_positions - gas_positions.mean(axis=0)
+    target_centered = np.asarray(target_positions_centered, dtype=float)
+
+    order = _assign_indices_by_element(
+        gas_symbols, gas_centered, target_symbols, target_centered,
+    )
+    rotated_all = gas_centered.copy()
+    for _ in range(max(1, int(max_iter))):
+        P = gas_centered[order]
+        R = _kabsch_rotation(P, target_centered)
+        rotated_all = gas_centered @ R
+        new_order = _assign_indices_by_element(
+            gas_symbols, rotated_all, target_symbols, target_centered,
+        )
+        if new_order == order:
+            break
+        order = new_order
+
+    ordered = rotated_all[order]
+    d = np.linalg.norm(ordered - target_centered, axis=1)
+    diag = {
+        "gas_atom_order": list(order),
+        "gas_symbols_ordered": [gas_symbols[i] for i in order],
+        "alignment_rms_ang": float(np.sqrt(np.mean(d ** 2))) if len(d) else 0.0,
+        "alignment_max_ang": float(d.max()) if len(d) else 0.0,
+    }
+    return ordered, order, diag
+
+
+def _select_c_to_ab_mapping(
+    G: nx.Graph,
+    ab_symbols: list[str],
+    ab_positions: list[np.ndarray],
+    c_nodes: list[int],
+    *,
+    atom_matching: str,
+    matching_trials: int,
+) -> tuple[list[int], dict]:
+    """Select the smoothest C->AB atom correspondence before endpoint C NEB.
+
+    ``auto`` gathers a small set of chemically legal same-element mappings:
+    reactant-index order (when valid), the legacy greedy result, the global
+    Hungarian result, and bounded same-element swap trials around the
+    Hungarian mapping.  The candidate with the lowest pre-NEB displacement
+    score is kept.
+    """
+    method = str(atom_matching or BOND_ATOM_MATCHING).strip().lower()
+    if method == "nearest":
+        method = "greedy"
+    if method not in {"auto", "hungarian", "greedy", "reactant_index", "symmetry_trials"}:
+        raise ValueError(
+            "bond atom_matching must be one of 'auto', 'hungarian', "
+            "'greedy', 'reactant_index', or 'symmetry_trials', got "
+            f"{atom_matching!r}."
+        )
+
+    c_present = [int(n) for n in c_nodes if n in G]
+    if len(c_present) != len(ab_symbols):
+        raise ValueError(
+            f"Bond NEB pairing: |C|={len(c_present)} differs from "
+            f"|A|+|B|={len(ab_symbols)}."
+        )
+    if sorted(str(G.nodes[n]["element"]) for n in c_present) != sorted(ab_symbols):
+        raise ValueError(
+            "Bond NEB pairing: element multisets must match across endpoints."
+        )
+
+    cell = np.asarray(G.graph.get("cell", np.eye(3)), dtype=float)
+    pbc = full_pbc_for_cell(cell)
+    raw_orders: list[tuple[str, list[int]]] = []
+
+    if method in {"auto", "reactant_index"}:
+        try:
+            _validate_c_order_symbols(G, ab_symbols, c_present, method="reactant_index")
+            raw_orders.append(("reactant_index", list(c_present)))
+        except ValueError:
+            if method == "reactant_index":
+                raise
+
+    if method in {"auto", "greedy", "symmetry_trials"}:
+        raw_orders.append((
+            "greedy",
+            _greedy_pair_c_to_ab(G, ab_symbols, ab_positions, c_present),
+        ))
+
+    if method in {"auto", "hungarian", "symmetry_trials"}:
+        hungarian = _hungarian_pair_c_to_ab(
+            G, ab_symbols, ab_positions, c_present, cell=cell, pbc=pbc,
+        )
+        raw_orders.append(("hungarian", hungarian))
+        trial_budget = max(0, int(matching_trials) - len(raw_orders))
+        if method in {"auto", "symmetry_trials"} and trial_budget > 0:
+            raw_orders.extend(
+                _candidate_orders_from_swaps(
+                    hungarian, ab_symbols, limit=trial_budget,
+                )
+            )
+
+    # Deduplicate orders while preserving the method labels that produced them.
+    seen: set[tuple[int, ...]] = set()
+    candidates: list[_MappingCandidate] = []
+    for name, order in raw_orders:
+        key = tuple(int(n) for n in order)
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            candidates.append(_mapping_candidate(
+                G,
+                ab_symbols,
+                ab_positions,
+                list(order),
+                method=name,
+                cell=cell,
+                pbc=pbc,
+            ))
+        except ValueError:
+            if method not in {"auto", "symmetry_trials"}:
+                raise
+            continue
+
+    if not candidates:
+        raise ValueError("Bond NEB pairing: no valid atom-mapping candidates.")
+
+    if method == "hungarian":
+        selected = next(c for c in candidates if c.method == "hungarian")
+    elif method == "greedy":
+        selected = next(c for c in candidates if c.method == "greedy")
+    elif method == "reactant_index":
+        selected = next(c for c in candidates if c.method == "reactant_index")
+    else:
+        selected = min(
+            candidates,
+            key=lambda c: (c.score, c.total_distance_sq, c.max_distance),
+        )
+
+    diagnostics = {
+        "requested_method": method,
+        "selected_method": selected.method,
+        "n_candidates": len(candidates),
+        "selected": selected.to_dict(G),
+        "candidates": [c.to_dict(G) for c in sorted(
+            candidates,
+            key=lambda c: (c.score, c.total_distance_sq, c.max_distance),
+        )],
+    }
+    return list(selected.c_node_order), diagnostics
+
 
 
 def _build_bond_atoms(
@@ -662,8 +1068,8 @@ def _gas_product_neb_endpoint(
     gas_reactant,
     G: nx.Graph,
     lift_height: float,
-) -> Atoms:
-    """Return a same-size NEB endpoint with C(gas) lifted above A+B."""
+) -> tuple[Atoms, dict]:
+    """Return a same-size NEB endpoint with aligned C(gas) lifted above A+B."""
     if gas_reactant is None or getattr(gas_reactant, "atoms", None) is None:
         raise ValueError("gas-product bond reaction requires a gas Reactant for C")
 
@@ -676,29 +1082,48 @@ def _gas_product_neb_endpoint(
             f"C(gas) symbols={gas_symbols} do not match A+B symbols={target_symbols}"
         )
 
-    gas_pos = np.asarray(gas_atoms.get_positions(), dtype=float)
-    gas_centered = gas_pos - gas_pos.mean(axis=0)
-    available: dict[str, list[int]] = {}
-    for idx, sym in enumerate(gas_symbols):
-        available.setdefault(sym, []).append(idx)
-
-    ordered_gas_positions: list[np.ndarray] = []
-    for sym in target_symbols:
-        bucket = available.get(sym)
-        if not bucket:
-            raise ValueError(
-                f"gas-product endpoint cannot match required symbol {sym!r}"
-            )
-        ordered_gas_positions.append(gas_centered[bucket.pop(0)])
-
     ab_positions = np.asarray(atoms_ab.get_positions(), dtype=float)
     react_slice = slice(n_slab + n_lat, n_slab + n_lat + n_react)
-    centroid = ab_positions[react_slice].mean(axis=0)
-    lifted_center = centroid + np.array([0.0, 0.0, float(lift_height)])
-    lifted_positions = np.asarray(
-        [p + lifted_center for p in ordered_gas_positions],
-        dtype=float,
+    target_positions = ab_positions[react_slice]
+    centroid = target_positions.mean(axis=0)
+    target_centered = target_positions - centroid
+
+    gas_pos = np.asarray(gas_atoms.get_positions(), dtype=float)
+    gas_aligned_centered, gas_order, align_diag = _align_gas_product_to_target(
+        gas_symbols,
+        gas_pos,
+        target_symbols,
+        target_centered,
     )
+
+    requested_lift = float(lift_height)
+    min_lift = min(requested_lift, max(4.0, 0.75 * requested_lift))
+    lift_candidates = sorted(
+        {requested_lift, 0.875 * requested_lift, min_lift},
+        reverse=True,
+    )
+    lift_scores: list[dict] = []
+    best_payload: tuple[float, np.ndarray, dict] | None = None
+    for h in lift_candidates:
+        lifted_center = centroid + np.array([0.0, 0.0, float(h)])
+        lifted_positions = np.asarray(
+            [p + lifted_center for p in gas_aligned_centered],
+            dtype=float,
+        )
+        d = np.linalg.norm(lifted_positions - target_positions, axis=1)
+        score = float(np.sum(d ** 2) + 0.5 * float(d.max()) ** 2)
+        payload = {
+            "lift_height_ang": float(h),
+            "rms_distance_ang": float(np.sqrt(np.mean(d ** 2))) if len(d) else 0.0,
+            "max_distance_ang": float(d.max()) if len(d) else 0.0,
+            "score": score,
+        }
+        lift_scores.append(payload)
+        if best_payload is None or score < best_payload[2]["score"]:
+            best_payload = (float(h), lifted_positions, payload)
+
+    assert best_payload is not None
+    selected_lift, lifted_positions, selected_lift_diag = best_payload
 
     atoms_c = atoms_ab.copy()
     pos = atoms_c.get_positions()
@@ -708,7 +1133,20 @@ def _gas_product_neb_endpoint(
     symbols = list(atoms_c.get_chemical_symbols())
     symbols[react_slice] = target_symbols
     atoms_c.set_chemical_symbols(symbols)
-    return atoms_c
+
+    diagnostics = {
+        "requested_method": "gas_product_kabsch",
+        "selected_method": "gas_product_kabsch",
+        "gas_atom_order": list(gas_order),
+        "gas_reactant_indices": list(gas_order),
+        "target_symbols": list(target_symbols),
+        "requested_lift_height_ang": requested_lift,
+        "selected_lift_height_ang": selected_lift,
+        "alignment": align_diag,
+        "selected": selected_lift_diag,
+        "lift_candidates": lift_scores,
+    }
+    return atoms_c, diagnostics
 
 
 # ---------------------------------------------------------------------------
@@ -959,10 +1397,16 @@ def check_bond_site_stability(
     n_images: int = NEB_N_IMAGES,
     climb: bool = NEB_CLIMB,
     spring_k: float = NEB_SPRING_K,
-    interpolation: str = NEB_INTERPOLATION,
+    interpolation: str = BOND_NEB_INTERPOLATION,
+    atom_matching: str = BOND_ATOM_MATCHING,
+    matching_trials: int = BOND_MATCHING_TRIALS,
     nl_mult: float = NL_MULT_DEFAULT,
     persist_neb_path: bool = False,
     verbose: bool = False,
+    calculation_cache_root: str | None = None,
+    free_energy_options=None,
+    free_energy_temperature_k: float | None = None,
+    vib_cache_root: str | None = None,
 ) -> tuple[float, float, float]:
     """Relax both endpoints and the CI-NEB band; return ``(E_ab, E_c, E_ts)``.
 
@@ -971,11 +1415,12 @@ def check_bond_site_stability(
     1. Build the AB endpoint (slab + lateral neighbours + A's atoms +
        B's atoms at their graph positions); relax with LBFGS; verify
        both A's and B's intended surface coordination survive.
-    2. Greedily pair C's atoms to the AB reacting block by element +
-       nearest-position, then build the C endpoint with C's atoms
-       overwriting the reacting-block positions inherited from the
-       relaxed AB slab+lat.  Relax; verify C's intended surface
-       coordination survives.
+    2. Pair C's atoms to the AB reacting block using the configured
+       same-element matching strategy (``auto`` defaults to a Hungarian/MIC
+       assignment plus bounded swap trials), then build the C endpoint with
+       C's atoms overwriting the reacting-block positions inherited from the
+       relaxed AB slab+lat.  Relax; verify C's intended surface coordination
+       survives.
     3. Run a CI-NEB band of ``n_images`` interior images between the
        two relaxed endpoints with the requested *interpolation* and
        *spring_k*.  All images share one acquired calculator via ASE's
@@ -1042,6 +1487,35 @@ def check_bond_site_stability(
     self_a = frozenset(int(n) for n in a_node_ids if n in G)
     self_b = frozenset(int(n) for n in b_node_ids if n in G)
     self_c = frozenset(int(n) for n in c_node_ids if n in G)
+    cache_kind = "bond"
+    cache_key: str | None = None
+    cache_graph: nx.Graph | None = None
+    cache_parameters = {
+        "fmax": float(fmax),
+        "max_steps": int(max_steps),
+        "n_images": int(n_images),
+        "climb": bool(climb),
+        "spring_k": float(spring_k),
+        "interpolation": str(interpolation),
+        "atom_matching": str(atom_matching),
+        "matching_trials": int(matching_trials),
+        "nl_mult": float(nl_mult),
+        "n_shells": int(lc.n_shells),
+        "persist_neb_path": bool(persist_neb_path),
+        "gas_product": bool(gas_product),
+        "gas_lift_height": float(getattr(brs, "gas_lift_height", 6.0)),
+        "calculator": calculator_identity(calculator),
+    }
+    if free_energy_options is not None:
+        cache_parameters["free_energy"] = {
+            "vibration_displacement": float(free_energy_options.vibration_displacement),
+            "vibration_nfree": int(free_energy_options.vibration_nfree),
+            "include_ts_vibrations": bool(free_energy_options.include_ts_vibrations),
+            "min_frequency_ev": float(free_energy_options.min_frequency_ev),
+            "symmetry_tolerance": float(free_energy_options.symmetry_tolerance),
+            "default_spin": float(free_energy_options.default_spin),
+            "default_geometry": str(free_energy_options.default_geometry),
+        }
 
     # ── 1. AB endpoint ──────────────────────────────────────────────────
     (atoms_ab_init, n_slab, n_lat, react_idx,
@@ -1055,6 +1529,72 @@ def check_bond_site_stability(
     b_ordered = _ordered_endpoint_nodes(G, b_node_ids)
     n_a = len(a_ordered)
     n_b = len(b_ordered)
+
+    if calculation_cache_root is not None:
+        try:
+            cache_graph = normalise_reaction_graph(lc.ego_graph)
+            cache_graph.graph["n_shells"] = int(lc.n_shells)
+            tpl = getattr(brs, "template", None)
+            cache_identity = {
+                "kind": cache_kind,
+                "smiles_a": getattr(tpl, "smiles_a", ""),
+                "smiles_b": getattr(tpl, "smiles_b", ""),
+                "smiles_c": getattr(tpl, "smiles_c", ""),
+                "iso_class": int(brs.iso_class),
+                "lateral_class": int(lc.lateral_class),
+            }
+            cache_inputs = {
+                "state_ab_initial": atoms_ab_init,
+                "a_node_ids": list(a_node_ids),
+                "b_node_ids": list(b_node_ids),
+                "c_node_ids": list(c_node_ids),
+                "gas_energy_ev": (
+                    getattr(getattr(brs, "gas_reactant", None), "energy", None)
+                    if gas_product else None
+                ),
+            }
+            cache_key = calculation_cache_key(
+                kind=cache_kind,
+                identity=cache_identity,
+                parameters=cache_parameters,
+                inputs=cache_inputs,
+            )
+            cached = load_calculation_record(
+                calculation_cache_root,
+                cache_kind,
+                cache_key,
+                reaction_graph=cache_graph,
+                operation=cache_identity,
+                parameters=cache_parameters,
+            )
+            if cached is not None and apply_cached_states(
+                lc,
+                cached,
+                {
+                    "state_ab": ("energy_ab", "atoms_ab"),
+                    "state_c": ("energy_c", "atoms_c"),
+                    "transition": ("energy_ts", "atoms_ts"),
+                },
+            ):
+                if verbose:
+                    print(
+                        f"  [cache] bond_iso={brs.iso_class} "
+                        f"lat={lc.lateral_class}: loaded endpoint/NEB "
+                        "calculation"
+                    )
+                return (
+                    float(lc.energy_ab),
+                    float(lc.energy_c),
+                    float(lc.energy_ts),
+                )
+        except Exception as exc:
+            _log.debug(
+                "check_bond_site_stability: calculation cache lookup failed "
+                "(bond_iso=%d lat=%d): %s",
+                brs.iso_class,
+                lc.lateral_class,
+                exc,
+            )
 
     if verbose:
         print(
@@ -1117,7 +1657,7 @@ def check_bond_site_stability(
             atoms_empty_opt.set_pbc(atoms_empty_init.get_pbc())
             atoms_empty_opt.calc = None
         E_c = E_empty + float(gas_energy)
-        atoms_c_opt = _gas_product_neb_endpoint(
+        atoms_c_opt, gas_mapping_diag = _gas_product_neb_endpoint(
             atoms_empty=atoms_empty_opt,
             atoms_ab=atoms_ab_opt,
             n_slab=n_slab,
@@ -1128,6 +1668,9 @@ def check_bond_site_stability(
             G=G,
             lift_height=float(getattr(brs, "gas_lift_height", 6.0)),
         )
+        lc.atom_matching_method = gas_mapping_diag["selected_method"]
+        lc.atom_mapping = list(gas_mapping_diag.get("gas_atom_order", []))
+        lc.matching_diagnostics = gas_mapping_diag
         lc.gas_product = True
         lc.gas_pressure_bar = float(
             getattr(gas_reactant, "partial_pressure_bar", 0.0) or 0.0
@@ -1137,23 +1680,41 @@ def check_bond_site_stability(
                 f"  [endpoint C(gas)] E_empty={E_empty:.4f} eV  "
                 f"E_gas={float(gas_energy):.4f} eV  "
                 f"E_c={E_c:.4f} eV  "
-                f"NEB final molecule lifted {float(getattr(brs, 'gas_lift_height', 6.0)):.2f} Å"
+                f"NEB final molecule lifted "
+                f"{gas_mapping_diag['selected_lift_height_ang']:.2f} Å"
             )
     else:
-        # Greedily pair C's atoms to the AB reacting block (element + nearest
-        # position) so atom k aligns across endpoints for the NEB.
-        # BUG-B2 FIX: use the *relaxed* AB reacting-block positions from
-        # atoms_ab_opt rather than the unrelaxed graph positions stored on G.
-        # After AB relaxation A and B can move substantially from their initial
-        # placements; matching C against relaxed positions gives a physically
-        # meaningful atom correspondence and a smoother NEB initial path.
+        # Pair C's atoms to the AB reacting block so atom k aligns across
+        # endpoints for the NEB.  Use relaxed AB positions rather than the
+        # unrelaxed graph positions: after AB relaxation A and B can move
+        # substantially, and the correspondence should minimize the actual
+        # endpoint displacement.
         ab_symbols       = [G.nodes[n]["element"] for n in react_nodes_ab]
         _relaxed_ab_pos  = atoms_ab_opt.get_positions()
         ab_positions     = [
             _relaxed_ab_pos[n_slab + n_lat + k] for k in range(n_react)
         ]
         c_present    = [int(n) for n in c_node_ids if n in G]
-        c_node_order = _greedy_pair_c_to_ab(G, ab_symbols, ab_positions, c_present)
+        c_node_order, mapping_diag = _select_c_to_ab_mapping(
+            G,
+            ab_symbols,
+            ab_positions,
+            c_present,
+            atom_matching=atom_matching,
+            matching_trials=matching_trials,
+        )
+        lc.atom_matching_method = mapping_diag["selected_method"]
+        lc.atom_mapping = list(c_node_order)
+        lc.matching_diagnostics = mapping_diag
+        if verbose:
+            sel = mapping_diag["selected"]
+            print(
+                f"  [matching] requested={mapping_diag['requested_method']}  "
+                f"selected={mapping_diag['selected_method']}  "
+                f"candidates={mapping_diag['n_candidates']}  "
+                f"rms={sel['rms_distance_ang']:.3f} Å  "
+                f"max={sel['max_distance_ang']:.3f} Å"
+            )
 
         (atoms_c_init, _, _, _, react_nodes_c, _) = _build_bond_atoms(
             G, lc, list(a_node_ids), list(b_node_ids), list(c_node_ids),
@@ -1257,6 +1818,81 @@ def check_bond_site_stability(
         n_interior = len(interior),
     )
 
+    if (
+        free_energy_options is not None
+        and getattr(free_energy_options, "enabled", False)
+        and free_energy_temperature_k is not None
+    ):
+        from pathlib import Path as _Path
+        from autokmc.thermo.free_energy import compute_harmonic_thermo
+
+        tpl = brs.template
+        process = smiles_to_dirname(
+            f"{tpl.smiles_a}+{tpl.smiles_b}~{tpl.smiles_c}"
+        )
+        cache_root = _Path(vib_cache_root) if vib_cache_root is not None else None
+        per_lat_dir = (
+            cache_root / f"bond_{process}" /
+            f"bond_iso{brs.iso_class}_lat{lc.lateral_class}"
+            if cache_root is not None else None
+        )
+        vib_indices = list(range(n_slab + n_lat, n_slab + n_lat + n_react))
+
+        def _harm(atoms, label, energy_ev):
+            return compute_harmonic_thermo(
+                atoms,
+                vib_indices,
+                energy_ev=float(energy_ev),
+                temperature_k=float(free_energy_temperature_k),
+                calculator=calculator,
+                options=free_energy_options,
+                cache_dir=str(per_lat_dir) if per_lat_dir is not None else None,
+                label=label,
+                drop_imaginary=True,
+            )
+
+        ab_thermo = _harm(atoms_ab_opt, "state_ab", E_ab)
+        if gas_product:
+            gas_reactant = brs.gas_reactant
+            gas_g = float(getattr(gas_reactant, "gibbs_energy", float("nan")))
+            gas_e = float(getattr(gas_reactant, "energy", float("nan")))
+            if not np.isfinite(gas_g) or not np.isfinite(gas_e):
+                raise ValueError(
+                    f"gas product {tpl.smiles_c!r} lacks finite free-energy data"
+                )
+            c_thermo = {
+                "g_corr_ev": gas_g - gas_e,
+                "g_total_ev": float(E_c) + gas_g - gas_e,
+                "zpe_ev": float(getattr(gas_reactant, "zpe", 0.0)),
+                "entropy_ev_per_k": float(getattr(gas_reactant, "entropy", 0.0)),
+                "frequencies_ev": list(getattr(gas_reactant, "frequencies_ev", []) or []),
+                "imaginary_ev": list(getattr(gas_reactant, "imaginary_ev", []) or []),
+            }
+        else:
+            c_thermo = _harm(atoms_c_opt, "state_c", E_c)
+
+        if getattr(free_energy_options, "include_ts_vibrations", True):
+            ts_thermo = _harm(atoms_ts, "ts", E_ts)
+        else:
+            average = 0.5 * (ab_thermo["g_corr_ev"] + c_thermo["g_corr_ev"])
+            ts_thermo = {
+                "g_corr_ev": float(average),
+                "g_total_ev": float(E_ts) + float(average),
+                "zpe_ev": None,
+                "entropy_ev_per_k": None,
+                "frequencies_ev": [],
+                "imaginary_ev": [],
+            }
+
+        for suffix, thermo in (("ab", ab_thermo), ("c", c_thermo), ("ts", ts_thermo)):
+            setattr(lc, f"g_correction_{suffix}", thermo["g_corr_ev"])
+            setattr(lc, f"g_{suffix}", thermo["g_total_ev"])
+            setattr(lc, f"zpe_{suffix}", thermo["zpe_ev"])
+            setattr(lc, f"entropy_{suffix}", thermo["entropy_ev_per_k"])
+            setattr(lc, f"frequencies_{suffix}_ev", list(thermo["frequencies_ev"]))
+            setattr(lc, f"imaginary_{suffix}_ev", list(thermo["imaginary_ev"]))
+            setattr(lc, f"vib_indices_{suffix}", list(vib_indices))
+
     lc.stable = True
     if verbose:
         print(
@@ -1270,6 +1906,100 @@ def check_bond_site_stability(
         brs.iso_class, member_index, lc.lateral_class,
         E_ab, E_c, E_ts, E_ts - E_ab, E_ts - E_c,
     )
+    if calculation_cache_root is not None and cache_key is not None:
+        tpl = getattr(brs, "template", None)
+        props_ab = {
+            name: getattr(lc, name, None)
+            for name in (
+                "g_correction_ab",
+                "g_ab",
+                "zpe_ab",
+                "entropy_ab",
+                "frequencies_ab_ev",
+                "imaginary_ab_ev",
+            )
+        }
+        props_c = {
+            name: getattr(lc, name, None)
+            for name in (
+                "g_correction_c",
+                "g_c",
+                "zpe_c",
+                "entropy_c",
+                "frequencies_c_ev",
+                "imaginary_c_ev",
+            )
+        }
+        props_ts = {
+            name: getattr(lc, name, None)
+            for name in (
+                "g_correction_ts",
+                "g_ts",
+                "zpe_ts",
+                "entropy_ts",
+                "frequencies_ts_ev",
+                "imaginary_ts_ev",
+            )
+        }
+        neb = None
+        if getattr(lc, "atoms_neb_path", None):
+            neb = {
+                "energies_ev": list(getattr(lc, "neb_path_energies", []) or []),
+                "path_atoms": list(getattr(lc, "atoms_neb_path", []) or []),
+            }
+        record = make_calculation_record(
+            kind=cache_kind,
+            cache_key=cache_key,
+            operation={
+                "label": (
+                    f"bond:{getattr(tpl, 'smiles_a', '')}+"
+                    f"{getattr(tpl, 'smiles_b', '')}->"
+                    f"{getattr(tpl, 'smiles_c', '')}"
+                ),
+                "reaction": (
+                    f"{getattr(tpl, 'smiles_a', '')}* + "
+                    f"{getattr(tpl, 'smiles_b', '')}* -> "
+                    f"{getattr(tpl, 'smiles_c', '')}*"
+                ),
+                "smiles_a": getattr(tpl, "smiles_a", ""),
+                "smiles_b": getattr(tpl, "smiles_b", ""),
+                "smiles_c": getattr(tpl, "smiles_c", ""),
+                "iso_class": int(brs.iso_class),
+                "lateral_class": int(lc.lateral_class),
+                "gas_product": bool(gas_product),
+            },
+            parameters=cache_parameters,
+            inputs={
+                "iso_class": int(brs.iso_class),
+                "lateral_class": int(lc.lateral_class),
+                "gas_product": bool(gas_product),
+            },
+            states={
+                "state_ab": state_payload(
+                    atoms_ab_opt, energy_ev=E_ab, properties=props_ab,
+                ),
+                "state_c": state_payload(
+                    atoms_c_opt, energy_ev=E_c, properties=props_c,
+                ),
+                "transition": state_payload(
+                    atoms_ts, energy_ev=E_ts, properties=props_ts,
+                ),
+            },
+            reaction_graph=cache_graph,
+            neb=neb,
+            lateral_attributes={
+                "atom_matching_method": getattr(lc, "atom_matching_method", None),
+                "atom_mapping": list(getattr(lc, "atom_mapping", []) or []),
+                "matching_diagnostics": dict(
+                    getattr(lc, "matching_diagnostics", {}) or {}
+                ),
+                "gas_product": getattr(lc, "gas_product", None),
+                "gas_pressure_bar": getattr(lc, "gas_pressure_bar", None),
+            },
+        )
+        write_calculation_record(
+            calculation_cache_root, cache_kind, cache_key, record,
+        )
     return E_ab, E_c, E_ts
 
 

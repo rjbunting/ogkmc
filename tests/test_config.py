@@ -57,6 +57,7 @@ def test_load_yaml_ok(tmp_path):
     assert cfg.calculator.import_path == "ase.calculators.emt.EMT"
     assert cfg.kmc.n_steps == 10
     assert cfg.diffusion.enabled is False
+    assert cfg.free_energy.symmetry_tolerance == pytest.approx(0.3)
 
 
 def test_load_toml_ok(tmp_path):
@@ -134,6 +135,9 @@ def test_load_new_checkpoint_and_parallel_fields(tmp_path):
 schema_version: "1"
 output:
   dir: ./out
+  calculation_cache_enabled: true
+  calculation_cache_dir: calc_cache
+  isaac_export_filename: isaac_upload.json
 reactants:
   - smiles: "[C-]#[O+]"
     add_hydrogens: false
@@ -160,6 +164,32 @@ structure:
     assert cfg.checkpoint.enabled is True
     assert cfg.checkpoint.every_n_steps == 5
     assert cfg.structure.surface_energy_facets == ((1, 1, 1), (1, 0, 0))
+    assert cfg.output.calculation_cache_enabled is True
+    assert cfg.output.calculation_cache_dir == "calc_cache"
+    assert cfg.output.isaac_export_filename == "isaac_upload.json"
+    assert cfg.output.run_manifest_filename == "run_manifest.json"
+
+
+def test_load_bond_matching_fields(tmp_path):
+    pytest.importorskip("yaml")
+    p = _write(tmp_path, """
+schema_version: "1"
+reactants:
+  - smiles: "[OH]"
+    add_hydrogens: false
+bond:
+  enabled: true
+  neb_interpolation: idpp
+  atom_matching: hungarian
+  matching_trials: 12
+  gas_lift_height: 4.5
+""")
+    cfg = load_config(p)
+    assert cfg.bond.enabled is True
+    assert cfg.bond.neb_interpolation == "idpp"
+    assert cfg.bond.atom_matching == "hungarian"
+    assert cfg.bond.matching_trials == 12
+    assert cfg.bond.gas_lift_height == 4.5
 
 
 def test_unknown_extension(tmp_path):
@@ -172,3 +202,59 @@ def test_unknown_extension(tmp_path):
 def test_missing_file():
     with pytest.raises(FileNotFoundError):
         load_config("does/not/exist.yaml")
+
+
+@pytest.mark.parametrize(
+    "fragment",
+    [
+        "diffusion:\n  enabled: 'false'\n",
+        "bond:\n  neb_climb: 'true'\n",
+        "kmc:\n  temperature_k: 0\n",
+        "free_energy:\n  vibration_nfree: 3\n",
+        "free_energy:\n  symmetry_tolerance: 0\n",
+        "free_energy:\n  pressure_bar: -0.1\n",
+    ],
+)
+def test_strict_validation_rejects_coercible_types_and_invalid_ranges(tmp_path, fragment):
+    pytest.importorskip("yaml")
+    path = _write(
+        tmp_path,
+        "schema_version: '1'\nreactants:\n  - smiles: '[O]'\n" + fragment,
+    )
+    with pytest.raises(ConfigError):
+        load_config(path)
+
+
+def test_zero_default_partial_pressure_is_allowed(tmp_path):
+    pytest.importorskip("yaml")
+    path = _write(
+        tmp_path,
+        """
+schema_version: "1"
+reactants:
+  - smiles: "[O]"
+free_energy:
+  pressure_bar: 0.0
+""",
+    )
+
+    cfg = load_config(path)
+
+    assert cfg.free_energy.pressure_bar == 0.0
+    assert cfg.reactants[0].partial_pressure_bar is None
+
+
+def test_duplicate_canonical_reactants_are_rejected(tmp_path):
+    pytest.importorskip("yaml")
+    path = _write(
+        tmp_path,
+        """
+schema_version: "1"
+reactants:
+  - smiles: "C(O)"
+  - smiles: "OC"
+""",
+    )
+
+    with pytest.raises(ConfigError, match="duplicates reactants\\[0\\]"):
+        load_config(path)

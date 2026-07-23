@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import math
+import os
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -48,11 +50,12 @@ def _reaction_relative_dir(kind: str, iso: int, lat: int, smiles: str = "") -> s
 	return f"{REACTIONS_DIR}/{sub}/{species}/{_kind_folder_name(sub, iso, lat)}"
 
 
-def _stats(values: list[float]) -> dict[str, float]:
+def _stats(values: list[float]) -> dict[str, float | None]:
 	if not values:
-		return {"mean": float("nan"), "std": float("nan"),
-				"min": float("nan"), "max": float("nan")}
+		return {"mean": None, "std": None, "min": None, "max": None}
 	arr = np.asarray(values, dtype=float)
+	if not np.all(np.isfinite(arr)):
+		raise ValueError("summary statistics contain non-finite values")
 	return {
 		"mean": float(arr.mean()),
 		"std": float(arr.std(ddof=0)),
@@ -66,16 +69,58 @@ class ReactionSummary:
 
 	__slots__ = (
 		"_buckets", "_total_by_kind", "_n", "_first_step", "_last_step",
-		"_reactant_smiles",
 	)
 
-	def __init__(self, reactant_smiles: set[str] | None = None):
+	def __init__(self):
 		self._buckets: dict[tuple, dict[str, list[float]]] = {}
 		self._total_by_kind: dict[str, int] = {}
 		self._n: int = 0
 		self._first_step: dict[tuple, int] = {}
 		self._last_step: dict[tuple, int] = {}
-		self._reactant_smiles: frozenset[str] = frozenset(reactant_smiles or [])
+
+	@classmethod
+	def from_events(cls, path: str | Path) -> "ReactionSummary":
+		"""Reconstruct cumulative summary state from an append-only event log."""
+		out = cls()
+		path = Path(path)
+		if not path.is_file():
+			return out
+		with path.open("r", encoding="utf-8") as handle:
+			for line_number, line in enumerate(handle, start=1):
+				if not line.strip():
+					continue
+				try:
+					event = json.loads(line)
+					out.add_event(event)
+				except (ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
+					raise ValueError(
+						f"cannot resume summary from invalid event line {line_number}: {exc}"
+					) from exc
+		return out
+
+	def add_event(self, event: dict[str, Any]) -> None:
+		"""Add one serialized event, preserving the rate's actual energy basis."""
+		key = (
+			str(event["kind"]),
+			str(event.get("reactant_smiles", "")),
+			int(event["iso_class"]),
+			int(event["lateral_class"]),
+		)
+		values = {
+			"rate": event["rate_hz"],
+			"delta_e": event.get("rate_delta_ev", event.get("delta_e_ev")),
+			"barrier": event.get("rate_barrier_ev", event.get("barrier_ev")),
+		}
+		if any(value is None or not math.isfinite(float(value)) for value in values.values()):
+			raise ValueError("event contains non-finite rate energetics")
+		bucket = self._buckets.setdefault(key, {"rate": [], "delta_e": [], "barrier": []})
+		for name, value in values.items():
+			bucket[name].append(float(value))
+		step = int(event["step"])
+		self._total_by_kind[key[0]] = self._total_by_kind.get(key[0], 0) + 1
+		self._n += 1
+		self._first_step.setdefault(key, step)
+		self._last_step[key] = step
 
 	def add(self, reaction, *, step: int) -> None:
 		smiles = _reaction_smiles(reaction)
@@ -85,73 +130,21 @@ class ReactionSummary:
 			int(reaction.site.iso_class),
 			int(reaction.lateral_class.lateral_class),
 		)
+		values = {
+			"rate": float(reaction.rate),
+			"delta_e": float(reaction.delta_e),
+			"barrier": float(reaction.barrier),
+		}
+		if not all(math.isfinite(value) for value in values.values()):
+			raise ValueError("reaction contains non-finite rate energetics")
 		b = self._buckets.setdefault(key, {"rate": [], "delta_e": [], "barrier": []})
-		b["rate"].append(float(reaction.rate))
-		b["delta_e"].append(float(reaction.delta_e))
-		b["barrier"].append(float(reaction.barrier))
+		for name, value in values.items():
+			b[name].append(value)
 
 		self._total_by_kind[key[0]] = self._total_by_kind.get(key[0], 0) + 1
 		self._n += 1
 		self._first_step.setdefault(key, int(step))
 		self._last_step[key] = int(step)
-
-	def _production_summary(self, run_meta: dict[str, Any] | None) -> dict[str, Any]:
-		kmc_time: float | None = None
-		if run_meta:
-			t = run_meta.get("total_time_s")
-			if t is not None and float(t) > 0:
-				kmc_time = float(t)
-
-		steps_executed: int | None = None
-		if run_meta:
-			se = run_meta.get("steps_executed")
-			if se is not None:
-				steps_executed = int(se)
-
-		product_map: dict[str, list[dict[str, Any]]] = {}
-		for key, b in self._buckets.items():
-			kind, smiles, iso, lat = key
-			if kind != "desorption":
-				continue
-			if self._reactant_smiles and smiles in self._reactant_smiles:
-				continue
-			product_map.setdefault(smiles, []).append({
-				"iso_class": iso,
-				"lateral_class": lat,
-				"count": len(b["rate"]),
-				"first_step": self._first_step[key],
-				"last_step": self._last_step[key],
-			})
-
-		by_species: dict[str, Any] = {}
-		total_count = 0
-		for smiles in sorted(product_map):
-			breakdowns = sorted(product_map[smiles], key=lambda d: (d["iso_class"], d["lateral_class"]))
-			count = sum(d["count"] for d in breakdowns)
-			total_count += count
-			by_species[smiles] = {
-				"desorption_count": count,
-				"production_rate_hz": count / kmc_time if kmc_time is not None else None,
-				"events_per_step": count / steps_executed if steps_executed and steps_executed > 0 else None,
-				"iso_breakdown": breakdowns,
-			}
-
-		note = (
-			"Desorption events of species not in the user-supplied reactants list "
-			"(partial_pressure_bar=0 species created on-the-fly by bond coupling)."
-			if self._reactant_smiles else
-			"Desorption events of all species (no reactant set configured)."
-		)
-		return {
-			"note": note,
-			"kmc_time_s": kmc_time,
-			"steps_executed": steps_executed,
-			"reactant_smiles": sorted(self._reactant_smiles),
-			"product_species": sorted(by_species),
-			"by_species": by_species,
-			"total_product_desorptions": total_count,
-			"total_production_rate_hz": total_count / kmc_time if kmc_time is not None else None,
-		}
 
 	def to_dict(
 		self,
@@ -186,7 +179,6 @@ class ReactionSummary:
 				"unique_reaction_types": len(self._buckets),
 			},
 			"by_reaction_type": by_type,
-			"production_summary": self._production_summary(run_meta),
 			"final_occupancy": {str(k): int(v) for k, v in (final_occupancy or {}).items()},
 		}
 
@@ -200,8 +192,20 @@ class ReactionSummary:
 		path = Path(path)
 		path.parent.mkdir(parents=True, exist_ok=True)
 		payload = self.to_dict(run_meta=run_meta, final_occupancy=final_occupancy)
-		with path.open("w", encoding="utf-8") as fp:
-			json.dump(payload, fp, indent=2)
+		fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+		try:
+			with os.fdopen(fd, "w", encoding="utf-8") as fp:
+				json.dump(payload, fp, indent=2, allow_nan=False)
+				fp.write("\n")
+				fp.flush()
+				os.fsync(fp.fileno())
+			os.replace(temporary, path)
+		except Exception:
+			try:
+				os.unlink(temporary)
+			except FileNotFoundError:
+				pass
+			raise
 		return path
 
 	@property

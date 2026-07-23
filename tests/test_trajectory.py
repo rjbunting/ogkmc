@@ -39,3 +39,17 @@ def test_trajectory_writer_disabled(tmp_path, tiny_atoms):
     assert w.maybe_write(tiny_atoms, step=10) is False
     w.close()
     assert not p.exists()
+
+
+def test_trajectory_writer_append_preserves_existing_frames(tmp_path, tiny_atoms):
+    path = tmp_path / "kmc.extxyz"
+    first = TrajectoryWriter(path, dump_every=1)
+    first.maybe_write(tiny_atoms, step=0)
+    first.close()
+
+    resumed = TrajectoryWriter(path, dump_every=1, append=True)
+    resumed.maybe_write(tiny_atoms, step=1)
+    resumed.close()
+
+    frames = ase_read(path, index=":")
+    assert [frame.info["kmc_step"] for frame in frames] == [0, 1]

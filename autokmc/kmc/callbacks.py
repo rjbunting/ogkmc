@@ -39,4 +39,8 @@ class SummaryCollectorLike(Protocol):
     def add(self, reaction, *, step: int) -> None: ...
 
 
-__all__ = ["ReactionWriterLike", "TrajectoryWriterLike", "SummaryCollectorLike"]
+__all__ = [
+    "ReactionWriterLike",
+    "TrajectoryWriterLike",
+    "SummaryCollectorLike",
+]

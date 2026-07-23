@@ -269,6 +269,10 @@ def _diffusion_energetics_cached(
         e_a  = float(lc.energy_a)   # type: ignore[arg-type]
         e_b  = float(lc.energy_b)   # type: ignore[arg-type]
         e_ts = float(lc.energy_ts)  # type: ignore[arg-type]
+    if not all(np.isfinite(value) for value in (e_a, e_b, e_ts)):
+        raise ValueError(
+            f"diffusion energies must be finite, got {(e_a, e_b, e_ts)!r}"
+        )
 
     # Raise the effective TS so it is at least EA_MIN above the higher
     # endpoint.  Deriving both barriers from the same e_ts_eff preserves
@@ -285,6 +289,8 @@ def _diffusion_energetics_cached(
             de     = e_a - e_b
             ea_kmc = max(EA_MIN, e_ts_eff - e_b)   # safety floor
         rate = float(prefactor * np.exp(-ea_kmc / kT))
+        if not all(np.isfinite(value) for value in (de, ea_kmc, rate)):
+            raise ValueError("diffusion energetics produced non-finite values")
         return float(de), float(ea_kmc), rate
 
     out_fwd = _make("a_to_b")
@@ -319,6 +325,7 @@ def get_applicable_diffusions(
     lateral_interactions: bool = True,
     free_energy_options=None,
     vib_cache_root: str | None = None,
+    calculation_cache_root: str | None = None,
 ) -> list[DiffusionReaction]:
     """Enumerate all currently-applicable hop events for one DiffusionSite.
 
@@ -375,6 +382,7 @@ def get_applicable_diffusions(
                     free_energy_options       = free_energy_options,
                     free_energy_temperature_k = float(temperature),
                     vib_cache_root            = vib_cache_root,
+                    calculation_cache_root    = calculation_cache_root,
                 )
             except DiffusionStabilityError as exc:
                 reason = f"{type(exc).__name__}: {exc}"
@@ -393,26 +401,6 @@ def get_applicable_diffusions(
                 lc.invalid_reason = reason
             except CalculatorConfigError:
                 raise
-            except Exception as exc:
-                # Catch-all for unexpected errors (calculator failures, NumPy
-                # broadcast errors, etc.) that are not DiffusionStabilityError
-                # subtypes.  Without this, lc.stable stays None and the same
-                # expensive check is retried every KMC step.
-                reason = f"{type(exc).__name__}: {exc}"
-                _log.error(
-                    "diff_iso=%d m=%d lat=%d: unexpected error during "
-                    "check_diffusion_stability — marking as invalid: %s",
-                    ds.iso_class, m_idx, lc.lateral_class, reason,
-                    exc_info=True,
-                )
-                if verbose:
-                    print(
-                        f"  ✗  diff_iso={ds.iso_class} m={m_idx} "
-                        f"lat={lc.lateral_class}: unexpected error: {reason}\n"
-                        f"     → marked as invalid (will not be admitted to KMC)"
-                    )
-                lc.stable         = False
-                lc.invalid_reason = reason
 
         if not lc.stable:
             continue
@@ -461,6 +449,7 @@ def compute_all_diffusions(
     lateral_interactions: bool = True,
     free_energy_options=None,
     vib_cache_root: str | None = None,
+    calculation_cache_root: str | None = None,
 ) -> list[DiffusionReaction]:
     """Compute applicable hops for every DiffusionSite; return the flat list."""
     all_reactions: list[DiffusionReaction] = []
@@ -487,6 +476,7 @@ def compute_all_diffusions(
                 lateral_interactions     = lateral_interactions,
                 free_energy_options      = free_energy_options,
                 vib_cache_root           = vib_cache_root,
+                calculation_cache_root   = calculation_cache_root,
             )
 
         with ThreadPoolExecutor(max_workers=calculator.max_workers) as ex:
@@ -512,6 +502,7 @@ def compute_all_diffusions(
             lateral_interactions     = lateral_interactions,
             free_energy_options      = free_energy_options,
             vib_cache_root           = vib_cache_root,
+            calculation_cache_root   = calculation_cache_root,
         )
         all_reactions.extend(rxns)
     return all_reactions

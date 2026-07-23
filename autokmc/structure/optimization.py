@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import copy
 import os
-import warnings
 from typing import Dict, Optional, Tuple
 
 from ase import Atoms
@@ -59,6 +58,11 @@ def optimise_bulk(
         ecf = ExpCellFilter(bulk_atoms)
         opt = LBFGS(ecf, logfile=os.devnull)  # type: ignore[arg-type]
         opt.run(fmax=fmax)
+
+        if not opt.converged():
+            raise RuntimeError(
+                f"bulk lattice relaxation did not converge at fmax={fmax} eV/Å"
+            )
 
         lp_out = _extract_lp(bulk_atoms, crystal_structure)
 
@@ -120,12 +124,9 @@ def optimise_structure(
         )
 
     if not opt.converged():
-        warnings.warn(
+        raise RuntimeError(
             f"optimise_structure did not converge within {steps} steps "
-            f"(fmax={fmax} eV/Å). The returned structure may not be at a "
-            "local minimum.",
-            RuntimeWarning,
-            stacklevel=2,
+            f"(fmax={fmax} eV/Å)"
         )
 
     return result

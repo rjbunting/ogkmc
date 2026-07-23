@@ -161,6 +161,9 @@ def test_gas_cache_dir_uses_safe_smiles_label(monkeypatch, tmp_path):
             "imaginary_ev": [],
             "geometry": "monatomic",
             "symmetry_number": 1,
+            "symmetry_number_source": "inferred",
+            "point_group": "K_h",
+            "symmetry_tolerance": 0.3,
             "spin": 0,
             "temperature_k": 500.0,
             "pressure_bar": 1.0,
@@ -174,7 +177,7 @@ def test_gas_cache_dir_uses_safe_smiles_label(monkeypatch, tmp_path):
         fake_compute_gas_thermo,
     )
 
-    reactant_mod.build_reactant(
+    reactant = reactant_mod.build_reactant(
         "[C]/[O]",
         calculator=FakeCalc(),
         free_energy_options=SimpleNamespace(enabled=True),
@@ -183,3 +186,30 @@ def test_gas_cache_dir_uses_safe_smiles_label(monkeypatch, tmp_path):
     )
 
     assert captured["cache_dir"].endswith("gas_(C)_(O)")
+    assert reactant.thermo_meta["symmetry_number_source"] == "inferred"
+    assert reactant.thermo_meta["point_group"] == "K_h"
+    assert reactant.thermo_meta["symmetry_tolerance"] == pytest.approx(0.3)
+
+
+def test_relax_false_still_computes_single_point_energy(monkeypatch):
+    import autokmc.species.reactant as reactant_mod
+
+    atoms = reactant_mod._smiles_to_atoms("[O]")
+    atoms.arrays["surface"] = [2]
+
+    class FakeCalc:
+        pass
+
+    monkeypatch.setattr(reactant_mod, "_smiles_to_atoms", lambda *_a, **_k: atoms)
+    monkeypatch.setattr(
+        reactant_mod,
+        "_optimise",
+        lambda *_a, **_k: pytest.fail("relaxation should be skipped"),
+    )
+    monkeypatch.setattr(atoms, "get_potential_energy", lambda: -1.25)
+
+    reactant = reactant_mod.build_reactant(
+        "[O]", calculator=FakeCalc(), relax=False,
+    )
+
+    assert reactant.energy == pytest.approx(-1.25)

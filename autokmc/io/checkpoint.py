@@ -12,7 +12,7 @@ from typing import Any
 from ase import Atoms
 
 
-CHECKPOINT_SCHEMA_VERSION = "1"
+CHECKPOINT_SCHEMA_VERSION = "2"
 
 
 @dataclass
@@ -34,6 +34,7 @@ class CheckpointState:
 	history: list
 	reaction_counts: dict
 	metadata: dict[str, Any]
+	rng_state: dict[str, Any] | None = None
 
 
 def _is_hashable(value) -> bool:
@@ -94,18 +95,45 @@ def _strip_calculators(obj, *, _memo: dict[int, Any] | None = None):
 			out.add(item)
 		return out
 	try:
-		out = copy.deepcopy(obj)
+		# Give ``deepcopy`` the same memo used by the container branches.  This
+		# is essential for NetworkX graphs: their graph metadata and reverse
+		# indexes contain the same site objects that are also stored in the
+		# top-level checkpoint lists.
+		out = copy.deepcopy(obj, _memo)
 	except Exception:
 		return obj
 	_memo[oid] = out
-	d = getattr(out, "__dict__", None)
-	if isinstance(d, dict):
-		for key, val in list(d.items()):
-			if key == "calc":
-				setattr(out, key, None)
-			else:
-				setattr(out, key, _strip_calculators(val, _memo=_memo))
+	_clear_calculators_inplace(out)
 	return out
+
+
+def _clear_calculators_inplace(obj, *, _seen: set[int] | None = None) -> None:
+	"""Remove calculator attributes without copying an already-copied graph."""
+	if _seen is None:
+		_seen = set()
+	identity = id(obj)
+	if identity in _seen:
+		return
+	_seen.add(identity)
+	if isinstance(obj, Atoms):
+		obj.calc = None
+		return
+	if isinstance(obj, dict):
+		for value in obj.values():
+			_clear_calculators_inplace(value, _seen=_seen)
+		return
+	if isinstance(obj, (list, tuple, set)):
+		for value in obj:
+			_clear_calculators_inplace(value, _seen=_seen)
+		return
+	d = getattr(obj, "__dict__", None)
+	if not isinstance(d, dict):
+		return
+	for key, value in list(d.items()):
+		if key == "calc":
+			setattr(obj, key, None)
+		else:
+			_clear_calculators_inplace(value, _seen=_seen)
 
 
 def make_checkpoint_state(
@@ -120,17 +148,23 @@ def make_checkpoint_state(
 	frozen_indices: list[int] | None = None,
 	history: list | None = None,
 	reaction_counts: dict | None = None,
+	rng_state: dict[str, Any] | None = None,
 	metadata: dict[str, Any] | None = None,
 ) -> CheckpointState:
+	# All state roots must share one memo.  Otherwise a site referenced by the
+	# graph reverse indexes, a diffusion channel, and ``adsorbate_sites`` would
+	# deserialize as three independent objects and incremental KMC updates would
+	# mutate only one of them.
+	memo: dict[int, Any] = {}
 	return CheckpointState(
 		schema_version=CHECKPOINT_SCHEMA_VERSION,
 		step=int(step),
 		time_s=float(time_s),
-		graph=_strip_calculators(graph),
-		adsorbate_sites=_strip_calculators(list(adsorbate_sites or [])),
-		diffusion_sites=_strip_calculators(list(diffusion_sites or [])),
-		bond_sites=_strip_calculators(list(bond_sites or [])),
-		reactants=_strip_calculators(list(reactants or [])),
+		graph=_strip_calculators(graph, _memo=memo),
+		adsorbate_sites=_strip_calculators(list(adsorbate_sites or []), _memo=memo),
+		diffusion_sites=_strip_calculators(list(diffusion_sites or []), _memo=memo),
+		bond_sites=_strip_calculators(list(bond_sites or []), _memo=memo),
+		reactants=_strip_calculators(list(reactants or []), _memo=memo),
 		frozen_indices=(None if frozen_indices is None else list(frozen_indices)),
 		history=list(history or []),
 		reaction_counts=dict(reaction_counts or {}),
@@ -138,6 +172,7 @@ def make_checkpoint_state(
 			"written_at": datetime.now(timezone.utc).isoformat(),
 			**dict(metadata or {}),
 		},
+		rng_state=_strip_calculators(rng_state, _memo=memo),
 	)
 
 
@@ -160,6 +195,12 @@ def load_checkpoint(path: str | Path) -> CheckpointState:
 		state = CheckpointState(**state)
 	if not isinstance(state, CheckpointState):
 		raise TypeError(f"checkpoint {path!s} does not contain a CheckpointState")
+	if state.schema_version == "1":
+		# Version 1 did not persist the random-number-generator state.  It can
+		# still be resumed, but only version-2 continuations are bitwise
+		# equivalent to an uninterrupted run.
+		state.rng_state = None
+		state.schema_version = CHECKPOINT_SCHEMA_VERSION
 	if state.schema_version != CHECKPOINT_SCHEMA_VERSION:
 		raise ValueError(
 			f"checkpoint schema_version={state.schema_version!r} does not match "

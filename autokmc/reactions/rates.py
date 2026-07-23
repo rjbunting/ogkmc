@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 from scipy import constants
 
 #: Boltzmann constant in eV / K.
@@ -22,8 +24,17 @@ def _eyring_prefactor(
     transmission_coefficient: float = DEFAULT_TRANSMISSION_COEFFICIENT,
 ) -> tuple[float, float]:
     """Return ``(prefactor, kT)`` for the Eyring rate equation."""
-    kT = KB_EV * float(temperature)
-    prefactor = float(transmission_coefficient) * kT / H_EV_S
+    temperature = float(temperature)
+    transmission_coefficient = float(transmission_coefficient)
+    if not math.isfinite(temperature) or temperature <= 0.0:
+        raise ValueError(f"temperature must be finite and > 0 K, got {temperature!r}")
+    if not math.isfinite(transmission_coefficient) or transmission_coefficient < 0.0:
+        raise ValueError(
+            "transmission_coefficient must be finite and >= 0, got "
+            f"{transmission_coefficient!r}"
+        )
+    kT = KB_EV * temperature
+    prefactor = transmission_coefficient * kT / H_EV_S
     return float(prefactor), float(kT)
 
 
