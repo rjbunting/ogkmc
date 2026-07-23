@@ -8,12 +8,9 @@ from typing import Dict, Iterable, Mapping, Optional, Tuple
 import numpy as np
 from ase import Atoms
 from ase.build import surface as ase_surface
-from ase.calculators.emt import EMT
-from ase.optimize import LBFGS
-
 from autokmc.core.constants import RANDOM_SEED
 from autokmc.core.pbc import set_full_pbc_if_cell
-from autokmc.io.calculators import acquire_calculator
+from autokmc.io.calculators import CalculatorConfigError, acquire_calculator
 from autokmc.structure.builders import (
     _apply_composition,
     _build_primitive_cell,
@@ -82,7 +79,9 @@ def calculate_surface_energies(
     _validate_crystal_structure(crystal_structure)
     primary = _primary_element(comp)
     if calculator is None:
-        calculator = EMT()
+        raise CalculatorConfigError(
+            "calculate_surface_energies requires an explicit calculator"
+        )
 
     lp = _resolve_lattice_params(
         primary, crystal_structure, lattice_constant, calculator,
@@ -161,7 +160,9 @@ def build_nanoparticle(
     _validate_crystal_structure(crystal_structure)
 
     if calculator is None:
-        calculator = EMT()
+        raise CalculatorConfigError(
+            "build_nanoparticle requires an explicit calculator"
+        )
 
     primary = _primary_element(comp)
     lp = _resolve_lattice_params(

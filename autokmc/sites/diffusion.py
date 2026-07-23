@@ -55,22 +55,20 @@ Public API
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Iterable
+from typing import TYPE_CHECKING, Any, Iterable
 
 import networkx as nx
 from networkx.algorithms import isomorphism
 
 from autokmc.sites.adsorbate import (
     AdsorbateSite,
-    _get_surface_apsp,
-    _shortest_path_between_cliques,
 )
+from autokmc.sites.identity import SiteId, site_identifier
 from autokmc.sites.stability.adsorption import _surface_bfs_shells
 from autokmc.core.constants import (
     DIFFUSION_MAX_HOPS,
     DIFFUSION_PRUNE_BY_ADS_PAIR,
     N_SHELLS_DEFAULT,
-    MAX_PAIR_SHELLS,
 )
 from autokmc.utils.logging import get_logger
 
@@ -162,6 +160,9 @@ class DiffusionLateral:
     vib_indices_a    : list = field(default_factory=list)
     vib_indices_b    : list = field(default_factory=list)
     vib_indices_ts   : list = field(default_factory=list)
+    if TYPE_CHECKING:
+        _fingerprint : tuple = field(init=False, repr=False, compare=False)
+        _rate_cache : dict = field(init=False, repr=False, compare=False)
 
 
 @dataclass
@@ -204,6 +205,20 @@ class DiffusionSite:
     ego_graph             : Any = None
     n_shells_pair_settled : int = 0
     lateral_classes       : list[DiffusionLateral] = field(default_factory=list)
+    #: Stable KMC identity, assigned lazily once member nodes are available.
+    site_id                : str = field(default="", compare=False)
+    # Lazily attached so older checkpoints and manual instances retain the
+    # established ``hasattr``-based initialisation path.
+    if TYPE_CHECKING:
+        _lateral_fp_index : dict[tuple, list[DiffusionLateral]] = field(
+            init=False, repr=False, compare=False,
+        )
+        _member_lc : dict[int, DiffusionLateral] = field(
+            init=False, repr=False, compare=False,
+        )
+        applicable_reactions : list[Any] = field(
+            init=False, repr=False, compare=False,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -468,10 +483,10 @@ def _prune_one_per_adsorption_pair(
             return 0
         return g.number_of_nodes() + g.number_of_edges()
 
-    kept_ids: set[int] = set()
+    kept_ids: set[SiteId] = set()
     for pair_key, candidates in groups.items():
         best = min(candidates, key=_ego_size)
-        kept_ids.add(id(best))
+        kept_ids.add(site_identifier(best))
         if verbose and len(candidates) > 1:
             discarded = [c for c in candidates if c is not best]
             print(
@@ -482,7 +497,7 @@ def _prune_one_per_adsorption_pair(
             )
 
     # Preserve original insertion order of surviving sites.
-    return [ds for ds in diffusion_sites if id(ds) in kept_ids]
+    return [ds for ds in diffusion_sites if site_identifier(ds) in kept_ids]
 
 
 # ---------------------------------------------------------------------------
@@ -495,7 +510,6 @@ def find_diffusion_sites(
     *,
     max_hops: int = DIFFUSION_MAX_HOPS,
     n_shells_pair: int = N_SHELLS_DEFAULT,
-    surface_apsp_cutoff: int = MAX_PAIR_SHELLS,
     prune_by_adsorption_pair: bool = DIFFUSION_PRUNE_BY_ADS_PAIR,
     verbose: bool = False,
 ) -> dict[str, list[DiffusionSite]]:
@@ -517,9 +531,6 @@ def find_diffusion_sites(
         :data:`~autokmc.core.constants.DIFFUSION_MAX_HOPS` (= 1).
     n_shells_pair : int
         Surface-only BFS depth used for iso-class deduplication.
-    surface_apsp_cutoff : int
-        Cutoff handed to :func:`autokmc.sites.adsorbate._get_surface_apsp`
-        for the cached APSP table.  Must be ≥ ``max_hops``.
     prune_by_adsorption_pair : bool
         When ``True`` (default), for every unordered pair of adsorption
         iso-classes keep only the single :class:`DiffusionSite` whose
@@ -540,10 +551,6 @@ def find_diffusion_sites(
     sites_by_smiles: dict[str, list[AdsorbateSite]] = {}
     for s in adsorbate_sites:
         sites_by_smiles.setdefault(s.reactant, []).append(s)
-
-    apsp = _get_surface_apsp(
-        G, cutoff=max(int(max_hops), int(surface_apsp_cutoff)),
-    )
 
     out: dict[str, list[DiffusionSite]] = {}
 
@@ -581,11 +588,7 @@ def find_diffusion_sites(
                 site_b, m_b, clq_b = flat[j]
                 n_pairs_considered += 1
 
-                # Reject pairs whose cliques are too far apart, or that
-                # share *all* their surface atoms (same physical site).
-                hop = _shortest_path_between_cliques(clq_a, clq_b, apsp)
-                if hop > int(max_hops):
-                    continue
+                # The bounded shell lookup already enforces the hop limit.
                 if clq_a == clq_b:
                     continue
 

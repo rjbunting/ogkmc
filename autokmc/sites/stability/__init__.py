@@ -24,6 +24,10 @@ _EXPORTS = {
     "BondTransitionStateInvalidError": "autokmc.sites.stability.bond",
     "check_bond_site_lateral": "autokmc.sites.stability.bond",
     "check_bond_site_stability": "autokmc.sites.stability.bond",
+    "NEBRunResult": "autokmc.sites.stability.neb",
+    "make_neb_band": "autokmc.sites.stability.neb",
+    "neb_optimizer_logfile": "autokmc.sites.stability.neb",
+    "run_neb": "autokmc.sites.stability.neb",
 }
 
 __all__ = [
@@ -45,6 +49,10 @@ __all__ = [
     "BondTransitionStateInvalidError",
     "check_bond_site_lateral",
     "check_bond_site_stability",
+    "NEBRunResult",
+    "make_neb_band",
+    "neb_optimizer_logfile",
+    "run_neb",
 ]
 
 

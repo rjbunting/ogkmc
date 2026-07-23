@@ -60,14 +60,19 @@ Public API
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 from dataclasses import dataclass
 from typing import Iterable
 
 import numpy as np
 import networkx as nx
 
-from autokmc.io.calculators import CalculatorConfigError, CalculatorPool
+from autokmc.io.calculators import (
+    CalculatorConfigError,
+    CalculatorPool,
+    calculator_batch_active,
+    calculator_batch_context,
+)
 from autokmc.sites.bond import BondReactionSite, BondReactionLateral
 from autokmc.reactions.rates import EA_MIN, DEFAULT_TRANSMISSION_COEFFICIENT, _eyring_prefactor
 from autokmc.sites.stability.bond import (
@@ -85,6 +90,7 @@ from autokmc.core.constants import (
     BOND_ATOM_MATCHING,
     BOND_MATCHING_TRIALS,
     NL_MULT_DEFAULT,
+    LATERAL_SHELLS_DEFAULT,
 )
 from autokmc.utils.logging import get_logger
 
@@ -301,7 +307,7 @@ def _bond_energetics_cached(
     cache: dict | None = getattr(lc, "_rate_cache", None)
     if cache is None:
         cache = {}
-        lc._rate_cache = cache  # type: ignore[attr-defined]
+        lc._rate_cache = cache
     hit = cache.get(key)
     if hit is not None:
         return hit
@@ -346,6 +352,152 @@ def _bond_energetics_cached(
 # Public API
 # ---------------------------------------------------------------------------
 
+def _replace_cached_member_bond_reaction(
+    site: BondReactionSite,
+    member_index: int,
+    reaction: BondReaction | None,
+) -> None:
+    reactions = [
+        candidate
+        for candidate in (getattr(site, "applicable_reactions", None) or [])
+        if int(candidate.member_index) != int(member_index)
+    ]
+    if reaction is not None:
+        reactions.append(reaction)
+    reactions.sort(key=lambda candidate: int(candidate.member_index))
+    site.applicable_reactions = reactions
+
+
+def get_applicable_bond_reaction_for_member(
+    G: nx.Graph,
+    brs: BondReactionSite,
+    member_index: int,
+    calculator=None,
+    *,
+    temperature: float,
+    transmission_coefficient: float = DEFAULT_TRANSMISSION_COEFFICIENT,
+    frozen_indices: list[int] | None = None,
+    fmax: float = NEB_FMAX,
+    max_steps: int = NEB_MAX_STEPS,
+    n_images: int = NEB_N_IMAGES,
+    climb: bool = NEB_CLIMB,
+    spring_k: float = NEB_SPRING_K,
+    interpolation: str = BOND_NEB_INTERPOLATION,
+    atom_matching: str = BOND_ATOM_MATCHING,
+    matching_trials: int = BOND_MATCHING_TRIALS,
+    nl_mult: float = NL_MULT_DEFAULT,
+    persist_neb_path: bool = False,
+    lateral_interactions: bool = True,
+    lateral_shells: int = LATERAL_SHELLS_DEFAULT,
+    verbose: bool = False,
+    calculation_cache_root: str | None = None,
+    free_energy_options=None,
+    vib_cache_root: str | None = None,
+    update_site_cache: bool = True,
+) -> BondReaction | None:
+    """Scientifically reclassify and evaluate one concrete bond member."""
+    if not hasattr(brs, "_member_lc"):
+        brs._member_lc = {}
+    index = int(member_index)
+    reaction: BondReaction | None = None
+    applicable, direction = is_bond_applicable(G, brs, index)
+    if not applicable or direction is None:
+        brs._member_lc.pop(index, None)
+    else:
+        try:
+            lc = check_bond_site_lateral(
+                G,
+                brs,
+                index,
+                n_shells=lateral_shells,
+                ignore_lateral=not lateral_interactions,
+            )
+        except (ValueError, IndexError) as exc:
+            brs._member_lc.pop(index, None)
+            if verbose:
+                print(
+                    f"  ⚠  bond_iso={brs.iso_class} m={index}: "
+                    f"lateral check skipped ({exc})"
+                )
+        else:
+            if lc.stable is None and calculator is not None:
+                try:
+                    check_bond_site_stability(
+                        G,
+                        brs,
+                        index,
+                        lc,
+                        calculator,
+                        frozen_indices=frozen_indices,
+                        fmax=fmax,
+                        max_steps=max_steps,
+                        n_images=n_images,
+                        climb=climb,
+                        spring_k=spring_k,
+                        interpolation=interpolation,
+                        atom_matching=atom_matching,
+                        matching_trials=matching_trials,
+                        nl_mult=nl_mult,
+                        persist_neb_path=persist_neb_path,
+                        verbose=verbose,
+                        calculation_cache_root=calculation_cache_root,
+                        free_energy_options=free_energy_options,
+                        free_energy_temperature_k=float(temperature),
+                        vib_cache_root=vib_cache_root,
+                    )
+                except BondStabilityError as exc:
+                    reason = f"{type(exc).__name__}: {exc}"
+                    _log.warning(
+                        "bond_iso=%d m=%d lat=%d: %s — "
+                        "marking as invalid (excluded from KMC)",
+                        brs.iso_class,
+                        index,
+                        lc.lateral_class,
+                        reason,
+                    )
+                    if verbose:
+                        print(
+                            f"  ⚠  bond_iso={brs.iso_class} m={index} "
+                            f"lat={lc.lateral_class}: {reason}\n"
+                            "     → marked as invalid "
+                            "(will not be admitted to KMC)"
+                        )
+                    lc.stable = False
+                    lc.invalid_reason = reason
+                except CalculatorConfigError:
+                    raise
+
+            if (
+                lc.stable
+                and lc.energy_ab is not None
+                and lc.energy_c is not None
+                and lc.energy_ts is not None
+            ):
+                brs._member_lc[index] = lc
+                delta_e, barrier, rate = _bond_energetics_cached(
+                    lc,
+                    direction,
+                    temperature=temperature,
+                    transmission_coefficient=transmission_coefficient,
+                )
+                reaction = BondReaction(
+                    kind="bond",
+                    direction=direction,
+                    site=brs,
+                    member_index=index,
+                    lateral_class=lc,
+                    delta_e=delta_e,
+                    barrier=barrier,
+                    rate=rate,
+                )
+            else:
+                brs._member_lc.pop(index, None)
+
+    if update_site_cache:
+        _replace_cached_member_bond_reaction(brs, index, reaction)
+    return reaction
+
+
 def get_applicable_bond_reactions(
     G: nx.Graph,
     brs: BondReactionSite,
@@ -365,6 +517,7 @@ def get_applicable_bond_reactions(
     nl_mult: float = NL_MULT_DEFAULT,
     persist_neb_path: bool = False,
     lateral_interactions: bool = True,
+    lateral_shells: int = LATERAL_SHELLS_DEFAULT,
     verbose: bool = False,
     calculation_cache_root: str | None = None,
     free_energy_options=None,
@@ -377,101 +530,43 @@ def get_applicable_bond_reactions(
     :class:`BondReactionLateral` and triggers a CI-NEB stability run the
     first time a new lateral class is seen.  When *calculator* is None
     the NEB step is skipped and members whose lateral class has not yet
-    been populated with energies are silently skipped.
+    been populated with energies are silently skipped.  ``lateral_shells``
+    controls how many surface-neighbour shells are included in that
+    classification.
     """
-    if not hasattr(brs, "_member_lc"):
-        brs._member_lc = {}  # type: ignore[attr-defined]
-
     reactions: list[BondReaction] = []
 
     for m_idx in range(len(brs.member_node_ids)):
-        applicable, direction = is_bond_applicable(G, brs, m_idx)
-        if not applicable or direction is None:
-            brs._member_lc.pop(m_idx, None)  # type: ignore[attr-defined]
-            continue
-
-        # 1. Lateral classification (cheap if seen before).
-        try:
-            lc = check_bond_site_lateral(
-                G, brs, m_idx,
-                ignore_lateral=not lateral_interactions,
-            )
-        except (ValueError, IndexError) as exc:
-            if verbose:
-                print(
-                    f"  ⚠  bond_iso={brs.iso_class} m={m_idx}: "
-                    f"lateral check skipped ({exc})"
-                )
-            continue
-
-        # 2. NEB / endpoint relaxation (only for new lateral classes).
-        if lc.stable is None:
-            if calculator is None:
-                # Defer — caller didn't supply a calculator, so we cannot
-                # populate energies.  Skip silently as documented.
-                continue
-            try:
-                check_bond_site_stability(
-                    G, brs, m_idx, lc, calculator,
-                    frozen_indices   = frozen_indices,
-                    fmax             = fmax,
-                    max_steps        = max_steps,
-                    n_images         = n_images,
-                    climb            = climb,
-                    spring_k         = spring_k,
-                    interpolation    = interpolation,
-                    atom_matching    = atom_matching,
-                    matching_trials  = matching_trials,
-                    nl_mult          = nl_mult,
-                    persist_neb_path = persist_neb_path,
-                    verbose          = verbose,
-                    calculation_cache_root = calculation_cache_root,
-                    free_energy_options       = free_energy_options,
-                    free_energy_temperature_k = float(temperature),
-                    vib_cache_root            = vib_cache_root,
-                )
-            except BondStabilityError as exc:
-                reason = f"{type(exc).__name__}: {exc}"
-                _log.warning(
-                    "bond_iso=%d m=%d lat=%d: %s — "
-                    "marking as invalid (excluded from KMC)",
-                    brs.iso_class, m_idx, lc.lateral_class, reason,
-                )
-                if verbose:
-                    print(
-                        f"  ⚠  bond_iso={brs.iso_class} m={m_idx} "
-                        f"lat={lc.lateral_class}: {reason}\n"
-                        f"     → marked as invalid (will not be admitted to KMC)"
-                    )
-                lc.stable         = False
-                lc.invalid_reason = reason
-            except CalculatorConfigError:
-                raise
-
-        if not lc.stable:
-            continue
-        if lc.energy_ab is None or lc.energy_c is None or lc.energy_ts is None:
-            continue
-
-        brs._member_lc[m_idx] = lc  # type: ignore[attr-defined]
-
-        delta_e, barrier, rate = _bond_energetics_cached(
-            lc, direction,
-            temperature              = temperature,
-            transmission_coefficient = transmission_coefficient,
+        reaction = get_applicable_bond_reaction_for_member(
+            G,
+            brs,
+            m_idx,
+            calculator,
+            temperature=temperature,
+            transmission_coefficient=transmission_coefficient,
+            frozen_indices=frozen_indices,
+            fmax=fmax,
+            max_steps=max_steps,
+            n_images=n_images,
+            climb=climb,
+            spring_k=spring_k,
+            interpolation=interpolation,
+            atom_matching=atom_matching,
+            matching_trials=matching_trials,
+            nl_mult=nl_mult,
+            persist_neb_path=persist_neb_path,
+            lateral_interactions=lateral_interactions,
+            lateral_shells=lateral_shells,
+            verbose=verbose,
+            calculation_cache_root=calculation_cache_root,
+            free_energy_options=free_energy_options,
+            vib_cache_root=vib_cache_root,
+            update_site_cache=False,
         )
-        reactions.append(BondReaction(
-            kind          = "bond",
-            direction     = direction,
-            site          = brs,
-            member_index  = m_idx,
-            lateral_class = lc,
-            delta_e       = delta_e,
-            barrier       = barrier,
-            rate          = rate,
-        ))
+        if reaction is not None:
+            reactions.append(reaction)
 
-    brs.applicable_reactions = reactions  # type: ignore[attr-defined]
+    brs.applicable_reactions = reactions
     return reactions
 
 
@@ -494,6 +589,7 @@ def compute_all_bond_reactions(
     nl_mult: float = NL_MULT_DEFAULT,
     persist_neb_path: bool = False,
     lateral_interactions: bool = True,
+    lateral_shells: int = LATERAL_SHELLS_DEFAULT,
     verbose: bool = False,
     calculation_cache_root: str | None = None,
     free_energy_options=None,
@@ -506,33 +602,39 @@ def compute_all_bond_reactions(
         isinstance(calculator, CalculatorPool)
         and len(calculator) > 1
         and len(sites) > 1
+        and not calculator_batch_active()
     ):
         def _one(brs: BondReactionSite) -> list[BondReaction]:
-            return get_applicable_bond_reactions(
-                G, brs, calculator,
-                temperature              = temperature,
-                transmission_coefficient = transmission_coefficient,
-                frozen_indices           = frozen_indices,
-                fmax                     = fmax,
-                max_steps                = max_steps,
-                n_images                 = n_images,
-                climb                    = climb,
-                spring_k                 = spring_k,
-                interpolation            = interpolation,
-                atom_matching            = atom_matching,
-                matching_trials          = matching_trials,
-                nl_mult                  = nl_mult,
-                persist_neb_path         = persist_neb_path,
-                lateral_interactions     = lateral_interactions,
-                verbose                  = verbose,
-                calculation_cache_root   = calculation_cache_root,
-                free_energy_options      = free_energy_options,
-                vib_cache_root           = vib_cache_root,
-            )
+            with calculator_batch_context():
+                return get_applicable_bond_reactions(
+                    G, brs, calculator,
+                    temperature              = temperature,
+                    transmission_coefficient = transmission_coefficient,
+                    frozen_indices           = frozen_indices,
+                    fmax                     = fmax,
+                    max_steps                = max_steps,
+                    n_images                 = n_images,
+                    climb                    = climb,
+                    spring_k                 = spring_k,
+                    interpolation            = interpolation,
+                    atom_matching            = atom_matching,
+                    matching_trials          = matching_trials,
+                    nl_mult                  = nl_mult,
+                    persist_neb_path         = persist_neb_path,
+                    lateral_interactions     = lateral_interactions,
+                    lateral_shells           = lateral_shells,
+                    verbose                  = verbose,
+                    calculation_cache_root   = calculation_cache_root,
+                    free_energy_options      = free_energy_options,
+                    vib_cache_root           = vib_cache_root,
+                )
 
-        with ThreadPoolExecutor(max_workers=calculator.max_workers) as ex:
-            for rxns in ex.map(_one, sites):
-                out.extend(rxns)
+        futures = [
+            calculator.submit(copy_context().run, _one, site)
+            for site in sites
+        ]
+        for reactions in calculator.gather(futures):
+            out.extend(reactions)
         return out
 
     for brs in sites:
@@ -552,6 +654,7 @@ def compute_all_bond_reactions(
             nl_mult                  = nl_mult,
             persist_neb_path         = persist_neb_path,
             lateral_interactions     = lateral_interactions,
+            lateral_shells           = lateral_shells,
             verbose                  = verbose,
             calculation_cache_root   = calculation_cache_root,
             free_energy_options      = free_energy_options,
@@ -604,6 +707,7 @@ def fast_bond_reaction_for_member(
 __all__ = [
     "BondReaction",
     "is_bond_applicable",
+    "get_applicable_bond_reaction_for_member",
     "get_applicable_bond_reactions",
     "compute_all_bond_reactions",
     "fast_bond_reaction_for_member",

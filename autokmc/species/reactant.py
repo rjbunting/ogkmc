@@ -64,8 +64,19 @@ _log = get_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Public dataclass
+# Public errors and dataclass
 # ---------------------------------------------------------------------------
+
+class ReactantDefinitionError(ValueError):
+    """The supplied molecular definition cannot produce a reactant.
+
+    This exception is reserved for deterministic input/chemistry failures,
+    such as an invalid SMILES string or a molecule for which RDKit cannot
+    construct a 3-D conformer.  Calculator, optimisation, I/O, and runtime
+    failures deliberately use other exception types so callers can retry
+    them without permanently classifying the species as invalid.
+    """
+
 
 @dataclass
 class Reactant:
@@ -142,7 +153,12 @@ class Reactant:
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _smiles_to_atoms(smiles: str, *, add_hydrogens: bool = True) -> Atoms:
+def _smiles_to_atoms(
+    smiles: str,
+    *,
+    add_hydrogens: bool = True,
+    random_seed: int = RANDOM_SEED,
+) -> Atoms:
     """Convert a SMILES string to a 3-D :class:`~ase.Atoms` object.
 
     Uses RDKit ETKDGv3 for conformer embedding followed by MMFF94 force-field
@@ -157,6 +173,9 @@ def _smiles_to_atoms(smiles: str, *, add_hydrogens: bool = True) -> Atoms:
         (i.e. those with a non-zero implicit-H count); explicit-H atoms
         and atoms with closed valences (``[O]``, ``[Au]``, …) are left
         untouched.  Pass ``add_hydrogens=False`` to skip this entirely.
+    random_seed : int
+        Seed used by both the ETKDGv3 embedder and its random-coordinate
+        fallback.  Default :data:`~autokmc.core.constants.RANDOM_SEED`.
 
     Returns
     -------
@@ -175,7 +194,9 @@ def _smiles_to_atoms(smiles: str, *, add_hydrogens: bool = True) -> Atoms:
 
     mol = Chem.MolFromSmiles(smiles)
     if mol is None:
-        raise ValueError(f"RDKit could not parse SMILES: {smiles!r}")
+        raise ReactantDefinitionError(
+            f"RDKit could not parse SMILES: {smiles!r}"
+        )
 
     if add_hydrogens:
         # Only add Hs to atoms that *want* them — i.e. those with a
@@ -204,14 +225,14 @@ def _smiles_to_atoms(smiles: str, *, add_hydrogens: bool = True) -> Atoms:
             mol = Chem.AddHs(mol, onlyOnAtoms=only_explicit)
 
     params = AllChem.ETKDGv3()
-    params.randomSeed = RANDOM_SEED
+    params.randomSeed = int(random_seed)
     result = AllChem.EmbedMolecule(mol, params)
     if result == -1:
         fallback = AllChem.EmbedParameters()
-        fallback.randomSeed = RANDOM_SEED
+        fallback.randomSeed = int(random_seed)
         fallback.useRandomCoords = True
         if AllChem.EmbedMolecule(mol, fallback) == -1:
-            raise ValueError(
+            raise ReactantDefinitionError(
                 f"RDKit could not embed a 3D conformer for SMILES: {smiles!r}. "
                 "Both ETKDGv3 and the random fallback embedder failed. "
                 "Try a different SMILES representation or simplify the molecule."
@@ -415,6 +436,7 @@ def build_reactant(
     fmax: float = 0.05,
     steps: int = 500,
     nl_mult: float = NL_MULT_DEFAULT,
+    random_seed: int = RANDOM_SEED,
     hull_tol: float = 0.1,
     free_energy_options=None,
     free_energy_temperature_k: float | None = None,
@@ -446,6 +468,9 @@ def build_reactant(
     nl_mult : float
         Neighbour-list multiplier passed to :func:`~autokmc.core.graph.build_graph`.
         Default ``NL_MULT_DEFAULT`` (currently 0.90).
+    random_seed : int
+        Seed used for RDKit conformer embedding.  Default
+        :data:`~autokmc.core.constants.RANDOM_SEED`.
     hull_tol : float
         Tolerance passed to :func:`find_anchor_atoms`.  Default 0.1 Å.
 
@@ -469,7 +494,11 @@ def build_reactant(
     [[1, 2]]
     """
     # 1. SMILES → 3-D geometry
-    atoms = _smiles_to_atoms(smiles, add_hydrogens=add_hydrogens)
+    atoms = _smiles_to_atoms(
+        smiles,
+        add_hydrogens=add_hydrogens,
+        random_seed=random_seed,
+    )
 
     # 2. Optional ASE relaxation + energy
     energy = float("nan")

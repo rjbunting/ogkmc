@@ -63,10 +63,10 @@ def test_smiles_to_atoms_fallback_embedding_is_deterministic_and_checked(monkeyp
     monkeypatch.setitem(sys.modules, "rdkit.Chem.AllChem", all_chem)
 
     with pytest.raises(ValueError, match="random fallback embedder failed"):
-        _smiles_to_atoms("[C]")
+        _smiles_to_atoms("[C]", random_seed=12345)
 
     assert len(calls) == 2
-    assert calls[0].randomSeed == calls[1].randomSeed
+    assert calls[0].randomSeed == calls[1].randomSeed == 12345
     assert calls[1].useRandomCoords is True
 
 
@@ -200,7 +200,13 @@ def test_relax_false_still_computes_single_point_energy(monkeypatch):
     class FakeCalc:
         pass
 
-    monkeypatch.setattr(reactant_mod, "_smiles_to_atoms", lambda *_a, **_k: atoms)
+    captured = {}
+
+    def fake_smiles_to_atoms(*_args, **kwargs):
+        captured.update(kwargs)
+        return atoms
+
+    monkeypatch.setattr(reactant_mod, "_smiles_to_atoms", fake_smiles_to_atoms)
     monkeypatch.setattr(
         reactant_mod,
         "_optimise",
@@ -209,7 +215,11 @@ def test_relax_false_still_computes_single_point_energy(monkeypatch):
     monkeypatch.setattr(atoms, "get_potential_energy", lambda: -1.25)
 
     reactant = reactant_mod.build_reactant(
-        "[O]", calculator=FakeCalc(), relax=False,
+        "[O]",
+        calculator=FakeCalc(),
+        relax=False,
+        random_seed=31415,
     )
 
     assert reactant.energy == pytest.approx(-1.25)
+    assert captured["random_seed"] == 31415

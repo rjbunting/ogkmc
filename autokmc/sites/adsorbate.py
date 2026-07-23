@@ -74,10 +74,11 @@ from __future__ import annotations
 import warnings
 from dataclasses import dataclass, field
 from itertools import combinations, product
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import networkx as nx
+from ase.neighborlist import NeighborList, natural_cutoffs
 from networkx.algorithms import isomorphism
 
 from autokmc.core.pbc import (
@@ -87,13 +88,14 @@ from autokmc.core.pbc import (
 )
 from autokmc.io.calculators import CalculatorConfigError, acquire_calculator
 from autokmc.sites.anchors import (
+    ANCHOR_K_MAX_BY_ELEMENT,
     find_anchor_sites,
     _build_ego_graph,
     _effective_pbc,
     _kabsch_align_ego,
     _get_cell,
     _kabsch,
-    _next_node_id,
+    _reserve_node_ids,
 )
 from autokmc.utils.logging import get_logger
 
@@ -120,6 +122,8 @@ from autokmc.core.constants import (
     NL_MULT_DEFAULT,
     PRUNE_FMAX,
     PRUNE_MAX_STEPS,
+    HULL_TOL,
+    KABSCH_MAX_MAPPINGS,
 )
 
 
@@ -206,6 +210,12 @@ class AdsorbateSiteLateral:
     #: Atom indices in ``atoms_occupied`` that were displaced (for audit).
     vib_indices_occupied      : list = field(default_factory=list)
     vib_indices_unoccupied    : list = field(default_factory=list)
+    # Runtime indexes/caches used by lateral classification and rate building.
+    # They remain lazily attached so old checkpoints retain their exact state,
+    # but are explicit to type checkers and readers.
+    if TYPE_CHECKING:
+        _fingerprint : tuple = field(init=False, repr=False, compare=False)
+        _rate_cache : dict = field(init=False, repr=False, compare=False)
 
 
 @dataclass
@@ -268,6 +278,31 @@ class AdsorbateSite:
     #: (populated on demand by
     #: :func:`autokmc.sites.stability.adsorption.check_adsorbate_site_lateral`).
     lateral_classes : list[AdsorbateSiteLateral]   = field(default_factory=list)
+    #: Stable KMC identity.  Empty values from older checkpoints are upgraded
+    #: lazily by :func:`autokmc.sites.identity.site_identifier` after graph
+    #: materialisation has supplied the member-node signature.
+    site_id         : str                          = field(default="", compare=False)
+    # Mutable runtime state populated by graph materialisation, lateral
+    # classification, and reaction construction.  ``Any`` avoids importing
+    # reaction models back into the site layer.
+    # These remain lazily attached at runtime because ``hasattr`` is the
+    # compatibility signal used by older checkpoints and manually-built site
+    # objects.  Type checkers still see the fields explicitly, while the false
+    # runtime branch keeps them out of dataclass serialisation.
+    if TYPE_CHECKING:
+        _member_cliques : list[tuple[frozenset, ...]] = field(
+            init=False, repr=False, compare=False,
+        )
+        _n_occupied : int = field(init=False, repr=False, compare=False)
+        _lateral_fp_index : dict[tuple, list[AdsorbateSiteLateral]] = field(
+            init=False, repr=False, compare=False,
+        )
+        _member_lc : dict[int, AdsorbateSiteLateral] = field(
+            init=False, repr=False, compare=False,
+        )
+        applicable_reactions : list[Any] = field(
+            init=False, repr=False, compare=False,
+        )
 
     # ------------------------------------------------------------------
     # Occupancy helpers
@@ -739,17 +774,33 @@ def _ensure_anchor_sites(
     co_factor: float = CO_FACTOR,
     opt_factor: float = OPT_FACTOR,
     repulsion_weight: float = REPULSION_WEIGHT,
+    repulsion_cutoff: float | None = REPULSION_CUTOFF,
     n_shells: int = N_SHELLS_DEFAULT,
+    anchor_k_max: int | None = None,
+    hull_tolerance: float = HULL_TOL,
+    kabsch_max_mappings: int = KABSCH_MAX_MAPPINGS,
     verbose: bool = False,
 ) -> None:
     """Lazily run :func:`~autokmc.sites.anchors.find_anchor_sites` if needed."""
-    if element not in G.graph.get("anchor_sites", {}):
+    cap_by_element = G.graph.get(ANCHOR_K_MAX_BY_ELEMENT, {})
+    needs_enumeration = element not in G.graph.get("anchor_sites", {})
+    if not needs_enumeration and anchor_k_max is not None:
+        if element in cap_by_element:
+            needs_enumeration = cap_by_element[element] != anchor_k_max
+        else:
+            # Anchors restored from an older graph have no cap provenance.
+            needs_enumeration = True
+    if needs_enumeration:
         find_anchor_sites(
             G, element,
             co_factor=co_factor,
             opt_factor=opt_factor,
             repulsion_weight=repulsion_weight,
+            repulsion_cutoff=repulsion_cutoff,
             n_shells=n_shells,
+            k_max=anchor_k_max,
+            hull_tolerance=hull_tolerance,
+            kabsch_max_mappings=kabsch_max_mappings,
             verbose=verbose,
         )
 
@@ -898,8 +949,8 @@ def rebuild_adsorbate_reverse_indexes(G: nx.Graph) -> None:
     sites_by_smiles = G.graph.get("adsorbate_sites", {}) or {}
     for sites in sites_by_smiles.values():
         for ms in sites:
-            ms._member_cliques = []  # type: ignore[attr-defined]
-            ms._n_occupied = 0  # type: ignore[attr-defined]
+            ms._member_cliques = []
+            ms._n_occupied = 0
             for m_idx, node_ids in enumerate(ms.member_node_ids):
                 cliques: list = []
                 member_occupied = False
@@ -919,9 +970,9 @@ def rebuild_adsorbate_reverse_indexes(G: nx.Graph) -> None:
                         surface_node_to_members.setdefault(
                             int(surf_id), [],
                         ).append((ms, m_idx))
-                ms._member_cliques.append(tuple(cliques))  # type: ignore[attr-defined]
+                ms._member_cliques.append(tuple(cliques))
                 if member_occupied:
-                    ms._n_occupied += 1  # type: ignore[attr-defined]
+                    ms._n_occupied += 1
                     n_occupied += 1
 
     G.graph["clique_to_members"] = clique_to_members
@@ -1066,9 +1117,9 @@ def _materialise_adsorbate_nodes(
                 positions, atom_cliques, cell, pbc,
             )
 
-            # Allocate a contiguous block of new node ids.
-            base     = _next_node_id(G)
-            node_ids = [base + i for i in range(len(react_sym))]
+            # Allocate a contiguous block without rescanning every graph node
+            # for every member.
+            node_ids = list(_reserve_node_ids(G, len(react_sym)))
 
             # Add one node per reactant atom.
             for i, nid in enumerate(node_ids):
@@ -1313,13 +1364,12 @@ def _geometry_connectivity_mismatch(
 ) -> tuple[set[frozenset], set[frozenset]] | None:
     """Return ``(missing, extra)`` if a calc-free geometry has wrong bonds.
 
-    This uses the same canonical ``build_graph`` comparison as the later
-    calculator stability pruning, but runs on the rigid-body geometry before
-    any ML/DFT relaxation.  ``None`` means the geometry already satisfies the
-    required adsorbate intramolecular and adsorbate-surface connectivity.
+    This uses the same ASE neighbour-list criterion as ``build_graph`` but
+    retains only bonds touching an adsorbate.  It runs on the rigid-body
+    geometry before any ML/DFT relaxation.  ``None`` means the geometry already
+    satisfies the required adsorbate intramolecular and adsorbate-surface
+    connectivity.
     """
-    from autokmc.core.graph import build_graph
-
     original = np.asarray(ms.positions, dtype=float).copy()
     try:
         ms.positions = np.asarray(positions, dtype=float)
@@ -1332,8 +1382,19 @@ def _geometry_connectivity_mismatch(
         ms.positions = original
 
     intended_edges = _intended_adsorbate_edges(ms, reactant, n_slab, node_to_ase)
-    G_geometry = build_graph(atoms_init, nl_mult=nl_mult)
-    actual_edges = _adsorbate_edges_from_graph(G_geometry, n_slab)
+    cutoffs = natural_cutoffs(atoms_init, mult=float(nl_mult))
+    neighbours = NeighborList(
+        cutoffs,
+        self_interaction=False,
+        bothways=True,
+    )
+    neighbours.update(atoms_init)
+    actual_edges: set[frozenset] = set()
+    for atom_index in range(int(n_slab), len(atoms_init)):
+        for neighbour_index in neighbours.get_neighbors(atom_index)[0]:
+            actual_edges.add(
+                frozenset((int(atom_index), int(neighbour_index)))
+            )
     missing = intended_edges - actual_edges
     extra = actual_edges - intended_edges
     if missing or extra:
@@ -1367,6 +1428,7 @@ def prune_unstable_adsorbate_sites(
     fmax: float = PRUNE_FMAX,
     max_steps: int = PRUNE_MAX_STEPS,
     nl_mult: float = NL_MULT_DEFAULT,
+    kabsch_max_mappings: int = KABSCH_MAX_MAPPINGS,
     verbose: bool = False,
 ) -> list[AdsorbateSite]:
     """Remove iso-classes whose representative placement is unstable under ML relaxation.
@@ -1432,6 +1494,10 @@ def prune_unstable_adsorbate_sites(
         :func:`autokmc.core.graph.build_graph` for the connectivity comparison.
         Default :data:`~autokmc.core.constants.NL_MULT_DEFAULT` — matches the
         cutoff used everywhere else in the package.
+    kabsch_max_mappings : int
+        Maximum number of graph-isomorphism mappings tested when propagating
+        a relaxed representative to equivalent members.  Default
+        :data:`~autokmc.core.constants.KABSCH_MAX_MAPPINGS`.
     verbose : bool
         Print per-iso-class outcomes (stable ✓ / pruned ✗) to stdout.
 
@@ -1616,6 +1682,7 @@ def prune_unstable_adsorbate_sites(
                         G,
                         rep_seed, mem_seed, frame_depth,
                         cell_arr, cell_inv_arr, pbc_arr, use_mic_arr,
+                        max_mappings=kabsch_max_mappings,
                     )
                     if R is None or t is None:
                         continue
@@ -1746,15 +1813,24 @@ def find_adsorbate_sites(
     bond_tolerance: float = BOND_TOLERANCE,
     n_shells_anchor: int | None = None,
     n_shells_pair: int = N_SHELLS_DEFAULT,
+    anchor_k_max: int | None = None,
     co_factor: float = CO_FACTOR,
     opt_factor: float = OPT_FACTOR,
     repulsion_weight: float = REPULSION_WEIGHT,
+    repulsion_cutoff: float | None = REPULSION_CUTOFF,
+    contact_factor: float = CONTACT_FACTOR,
+    standoff_factor: float = STANDOFF_FACTOR,
+    n_restarts: int = N_RESTARTS,
+    nn_distance: float = NN_DISTANCE,
     include_partial: bool = True,
     require_anchors: bool = True,
     auto_grow_shells: bool = True,
     max_shell_retries: int = 3,
     require_surface_connected: bool = True,
     max_pair_shells: int = MAX_PAIR_SHELLS,
+    hull_tolerance: float = HULL_TOL,
+    kabsch_max_mappings: int = KABSCH_MAX_MAPPINGS,
+    nl_mult: float = NL_MULT_DEFAULT,
     # ── Stability pruning ──────────────────────────────────────────────────
     prune_stable_only: bool = True,
     calculator=None,
@@ -1791,9 +1867,27 @@ def find_adsorbate_sites(
     n_shells_pair : int
         Minimum ego-graph depth for iso-class discrimination of adsorbate
         placements.  Default 1.
-    co_factor, opt_factor, repulsion_weight :
+    anchor_k_max : int or None
+        Optional hard cap on the coordination size enumerated for each
+        surface anchor element.  ``None`` preserves natural enumeration.
+    co_factor, opt_factor, repulsion_weight, repulsion_cutoff :
         Forwarded to :func:`~autokmc.sites.anchors.find_anchor_sites` if
         anchor sites have not yet been computed for an element.
+        *repulsion_cutoff* is also used by the rigid-body refinement.
+    contact_factor : float
+        Minimum adsorbate–surface contact scale used by rigid-body
+        refinement.  Default
+        :data:`~autokmc.core.constants.CONTACT_FACTOR`.
+    standoff_factor : float
+        Bonded-anchor standoff scale used by rigid-body refinement.  Default
+        :data:`~autokmc.core.constants.STANDOFF_FACTOR`.
+    n_restarts : int
+        Number of rotational restarts used by rigid-body refinement.  Default
+        :data:`~autokmc.core.constants.N_ADSORBATE_RESTARTS`.
+    nn_distance : float
+        Typical surface nearest-neighbour distance (Å) used to choose
+        *n_shells_anchor* when it is ``None``.  Default
+        :data:`~autokmc.core.constants.NN_DISTANCE`.
     include_partial : bool
         Enumerate all non-empty anchor subsets (including singletons).
         Set to ``False`` to try only the full-anchor subset.  Default True.
@@ -1809,6 +1903,18 @@ def find_adsorbate_sites(
         surface edges within *max_pair_shells* hops.  Default True.
     max_pair_shells : int
         Hard cap on the per-placement connectivity check.  Default 10.
+    hull_tolerance : float
+        Signed-distance tolerance (Å) forwarded to anchor-site enumeration
+        when filtering buried cliques.  Default
+        :data:`~autokmc.core.constants.HULL_TOL`.
+    kabsch_max_mappings : int
+        Maximum graph-isomorphism mappings tested during each Kabsch
+        propagation.  Default
+        :data:`~autokmc.core.constants.KABSCH_MAX_MAPPINGS`.
+    nl_mult : float
+        Neighbour-list cutoff multiplier used by calculator-free and
+        post-relaxation connectivity checks.  Default
+        :data:`~autokmc.core.constants.NL_MULT_DEFAULT`.
     prune_stable_only : bool
         If ``True`` (default), run an ML-potential relaxation on the
         representative geometry of every iso-class after enumeration and
@@ -1838,6 +1944,8 @@ def find_adsorbate_sites(
         One entry per iso-class.  Also stored at
         ``G.graph["adsorbate_sites"][reactant.smiles]``.
     """
+    if anchor_k_max is not None and int(anchor_k_max) < 1:
+        raise ValueError("anchor_k_max must be at least 1 when supplied")
     n_atoms = len(reactant.atoms)
     if n_atoms < 1:
         raise ValueError(
@@ -1871,7 +1979,10 @@ def find_adsorbate_sites(
             reach = float(max(D[i, j] for i in anchors for j in anchors if i < j))
         else:
             reach = float(D[anchors[0]].max())
-        n_shells_eff = _suggested_n_shells(reach)
+        n_shells_eff = _suggested_n_shells(
+            reach,
+            nn_distance=nn_distance,
+        )
     else:
         n_shells_eff = int(n_shells_anchor)
 
@@ -1918,7 +2029,11 @@ def find_adsorbate_sites(
                 co_factor=co_factor,
                 opt_factor=opt_factor,
                 repulsion_weight=repulsion_weight,
+                repulsion_cutoff=repulsion_cutoff,
                 n_shells=depth,
+                anchor_k_max=anchor_k_max,
+                hull_tolerance=hull_tolerance,
+                kabsch_max_mappings=kabsch_max_mappings,
                 verbose=verbose,
             )
 
@@ -2158,7 +2273,17 @@ def find_adsorbate_sites(
                         "  ──────────────────────────────────────────────────────"
                     )
                 adsorbate_sites = optimise_adsorbate_site_positions(
-                    G, reactant.smiles, reactant, verbose=verbose,
+                    G,
+                    reactant.smiles,
+                    reactant,
+                    repulsion_cutoff=repulsion_cutoff,
+                    contact_factor=contact_factor,
+                    standoff_factor=standoff_factor,
+                    n_restarts=n_restarts,
+                    n_shells_pair=n_shells_pair,
+                    nl_mult=nl_mult,
+                    kabsch_max_mappings=kabsch_max_mappings,
+                    verbose=verbose,
                 )
                 G.graph.setdefault("adsorbate_sites", {})[reactant.smiles] = adsorbate_sites
             elif verbose:
@@ -2180,6 +2305,8 @@ def find_adsorbate_sites(
                 frozen_indices = frozen_indices,
                 fmax           = prune_fmax,
                 max_steps      = prune_max_steps,
+                nl_mult        = nl_mult,
+                kabsch_max_mappings=kabsch_max_mappings,
                 verbose        = verbose,
             )
             # prune_unstable_adsorbate_sites already updates G.graph; keep
@@ -2273,6 +2400,8 @@ def optimise_adsorbate_site_positions(
     max_connectivity_attempts: int = 10,
     max_iter: int = 100,
     n_shells_pair: int = N_SHELLS_DEFAULT,
+    nl_mult: float = NL_MULT_DEFAULT,
+    kabsch_max_mappings: int = KABSCH_MAX_MAPPINGS,
     verbose: bool = False,
 ) -> list[AdsorbateSite]:
     """Rigid-body refinement of every :attr:`AdsorbateSite.positions` for
@@ -2330,6 +2459,14 @@ def optimise_adsorbate_site_positions(
         ``max(n_shells_pair, ms.n_shells_settled)`` so that members whose
         bonded cliques span more hops than this kwarg are still aligned
         through an ego large enough to contain every clique pair.
+    nl_mult : float
+        Neighbour-list cutoff multiplier used to validate the refined
+        adsorbate connectivity.  Default
+        :data:`~autokmc.core.constants.NL_MULT_DEFAULT`.
+    kabsch_max_mappings : int
+        Maximum graph-isomorphism mappings tested while propagating the
+        refined representative to equivalent members.  Default
+        :data:`~autokmc.core.constants.KABSCH_MAX_MAPPINGS`.
     verbose : bool
 
     Returns
@@ -2509,7 +2646,7 @@ def optimise_adsorbate_site_positions(
             ms,
             reactant,
             cur_pos,
-            nl_mult=NL_MULT_DEFAULT,
+            nl_mult=nl_mult,
         ) is None:
             return cur_pos.copy(), E0, E0, -1, 0
 
@@ -2553,7 +2690,7 @@ def optimise_adsorbate_site_positions(
                         ms,
                         reactant,
                         p_k,
-                        nl_mult=NL_MULT_DEFAULT,
+                        nl_mult=nl_mult,
                     )
                 except Exception as exc:
                     last_exc = exc
@@ -2647,6 +2784,7 @@ def optimise_adsorbate_site_positions(
                         G,
                         rep_seed, mem_seed, depth,
                         cell_arr, cell_inv_arr, pbc_arr, use_mic_arr,
+                        max_mappings=kabsch_max_mappings,
                     )
                     if R is None or t is None:
                         continue

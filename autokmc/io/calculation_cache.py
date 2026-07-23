@@ -15,11 +15,15 @@ import math
 from collections import Counter
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from functools import reduce
+from functools import lru_cache, reduce
 from importlib.resources import files as resource_files
 import os
 import sqlite3
 import tempfile
+import threading
+import uuid
+import warnings
+from dataclasses import dataclass
 from importlib import metadata as importlib_metadata
 from pathlib import Path
 from typing import Any, Iterator, Mapping
@@ -31,7 +35,14 @@ from ase.constraints import FixAtoms
 from ase.io import read as ase_read
 from ase.io import write as ase_write
 
-from autokmc.io.calculators import primary_calculator
+from autokmc.io._files import atomic_output_path, write_json_atomic
+from autokmc.io.calculators import (
+    cached_calculator_scientific_identity,
+    configured_calculator_identity,
+    invalidate_calculator_identity,
+    primary_calculator,
+    stamp_calculator_scientific_identity,
+)
 from autokmc.io.reaction_graph import (
     normalise_reaction_graph,
     reaction_graph_from_payload,
@@ -39,17 +50,87 @@ from autokmc.io.reaction_graph import (
     reaction_graph_payload,
     reaction_graphs_isomorphic,
 )
+from autokmc.utils.telemetry import increment, instrument
 from autokmc.utils.logging import get_logger
 
 
 _log = get_logger(__name__)
 
 ISAAC_RECORD_VERSION = "1.05"
-REACTION_DATABASE_SCHEMA = "autokmc-reaction-database-v1"
+REACTION_DATABASE_SCHEMA = "autokmc-reaction-database-v2"
 _RECORD_FILENAME = "isaac_record.json"
 _GRAPH_FILENAME = "reaction_graph.json"
 _INDEX_FILENAME = "index.sqlite3"
 _DATABASE_MANIFEST_FILENAME = "database_manifest.json"
+_GEOMETRY_FINGERPRINT_SCHEMA = "autokmc-local-geometry-v2"
+_SCIENTIFIC_INPUT_FINGERPRINT_SCHEMA = "autokmc-scientific-input-v2"
+_INPUT_FRAME_FINGERPRINT_SCHEMA = "autokmc-input-coordinate-frame-v2"
+
+# These values identify an enumeration in one AutoKMC run, not a scientific
+# calculation.  Keep this allowlist deliberately narrow: every other input is
+# part of the portable scientific identity by default.
+_RUN_LOCAL_INPUT_FIELDS = frozenset(
+    {
+        "a_node_ids",
+        "b_node_ids",
+        "c_node_ids",
+        "iso_class",
+        "lateral_class",
+        "member_node_ids",
+        "node_ids",
+        "run_id",
+        "site_id",
+    }
+)
+
+# These fields are still represented in the scientific identity, but are
+# canonicalized from ``operation`` so records that mirror them into ``inputs``
+# match callers that provide them only as operation metadata.
+_SEMANTIC_INPUT_FIELDS = (
+    "reactant_smiles",
+    "smiles_a",
+    "smiles_b",
+    "smiles_c",
+)
+
+_MODEL_IDENTITY_FIELDS = frozenset(
+    {
+        "checkpoint",
+        "checkpoint_path",
+        "model_checkpoint",
+        "model",
+        "model_file",
+        "model_id",
+        "model_name",
+        "model_path",
+        "name_or_path",
+        "param_file",
+        "parameter_file",
+        "potential",
+        "potential_file",
+        "task_name",
+        "weights",
+        "weights_path",
+    }
+)
+_DEVICE_PARAMETER_FIELDS = frozenset(
+    {"device", "devices", "gpu", "gpu_device", "gpu_devices"}
+)
+_RUN_DEPENDENT_LATERAL_ATTRIBUTES = frozenset({"gas_pressure_bar"})
+_THERMOCHEMISTRY_PARAMETER_FIELDS = frozenset(
+    {"free_energy", "free_energy_enabled", "temperature_k"}
+)
+_THERMOCHEMISTRY_INPUT_FIELDS = frozenset(
+    {
+        "gas_entropy_ev_per_k",
+        "gas_frequencies_ev",
+        "gas_gibbs_energy_ev",
+        "gas_imaginary_ev",
+        "gas_zpe_ev",
+    }
+)
+_PROCESS_LOCAL_IDENTITY = uuid.uuid4().hex
+_CALCULATOR_IDENTITY_LOCK = threading.RLock()
 
 _STATE_FILENAMES: dict[str, dict[str, str]] = {
     "adsorption": {
@@ -226,33 +307,682 @@ def atoms_to_json(atoms: Atoms) -> dict[str, Any]:
         "cell_A": np.asarray(atoms.cell.array, dtype=float).round(10).tolist(),
         "pbc": [bool(value) for value in atoms.pbc],
         "fixed_indices": sorted(set(fixed)),
+        "atom_arrays": _scientific_atom_arrays(atoms),
+        "constraints": _constraint_identity(atoms),
+        "info": _jsonable(dict(atoms.info)),
     }
 
 
-def calculator_identity(calculator: Any) -> dict[str, Any]:
-    """Return a stable calculator/method declaration for compatibility checks."""
-    concrete = primary_calculator(calculator)
-    identity: dict[str, Any] = {
-        "class": f"{concrete.__class__.__module__}.{concrete.__class__.__qualname__}",
+def _model_directory_identity(path: Path) -> dict[str, Any]:
+    """Content-hash a directory-valued model artifact recursively."""
+    entries: list[dict[str, Any]] = []
+    total_size = 0
+    for candidate in sorted(path.rglob("*"), key=lambda item: item.as_posix()):
+        if not candidate.is_file():
+            continue
+        size = int(candidate.stat().st_size)
+        total_size += size
+        entries.append(
+            {
+                "path": candidate.relative_to(path).as_posix(),
+                "sha256": _sha256_file(candidate),
+                "size_bytes": size,
+            }
+        )
+    return {
+        "artifact_kind": "directory",
+        "artifact_sha256": _hash_json(entries),
+        "n_files": len(entries),
+        "size_bytes": total_size,
     }
-    parameters = getattr(concrete, "parameters", None)
-    if parameters:
+
+
+def _process_local_object_identity(value: Any) -> dict[str, Any]:
+    """Return an identity that can never match an object from another process."""
+    return {
+        "python_type": f"{value.__class__.__module__}.{value.__class__.__qualname__}",
+        "identity_scope": "process-local",
+        "process_nonce": _PROCESS_LOCAL_IDENTITY,
+        "object_id": id(value),
+    }
+
+
+def _model_identity_value(
+    value: Any,
+    *,
+    artifact_cache: dict[str, dict[str, Any]] | None = None,
+) -> Any:
+    """Turn a model identifier or checkpoint path into portable identity data."""
+    if isinstance(value, (str, os.PathLike)):
+        candidate = Path(value).expanduser()
         try:
-            parameter_items = dict(parameters).items()
-        except (TypeError, ValueError):
-            parameter_items = ()
-        method_parameters = {
-            str(key): value
-            for key, value in parameter_items
-            if str(key).lower() not in {"device", "devices", "gpu", "gpu_devices"}
+            if candidate.is_file():
+                resolved = candidate.resolve()
+                cache_key = f"file:{resolved}"
+                if artifact_cache is not None and cache_key in artifact_cache:
+                    return artifact_cache[cache_key]
+                identity = {
+                    "artifact_kind": "file",
+                    "artifact_sha256": _sha256_file(resolved),
+                    "size_bytes": int(resolved.stat().st_size),
+                }
+                if artifact_cache is not None:
+                    artifact_cache[cache_key] = identity
+                return identity
+            if candidate.is_dir():
+                resolved = candidate.resolve()
+                cache_key = f"directory:{resolved}"
+                if artifact_cache is not None and cache_key in artifact_cache:
+                    return artifact_cache[cache_key]
+                identity = _model_directory_identity(resolved)
+                if artifact_cache is not None:
+                    artifact_cache[cache_key] = identity
+                return identity
+        except OSError:
+            # A logical remote model name remains a useful stable identifier.
+            pass
+    converted = _jsonable(value)
+    if (
+        isinstance(converted, Mapping)
+        and set(converted) == {"python_type"}
+    ):
+        # Object identity is intentionally process-local.  Persisting only the
+        # Python class would allow two opaque learned-model instances to share
+        # a cache entry even though their weights cannot be inspected.
+        return _process_local_object_identity(value)
+    return converted
+
+
+def _calculator_parameter_identity(
+    value: Any,
+    *,
+    field_name: str = "",
+    artifact_cache: dict[str, dict[str, Any]] | None = None,
+) -> Any:
+    """Normalise calculator parameters and content-hash local artifacts.
+
+    Every resolvable path is hashed recursively, including backend-specific
+    parameter/config names.  Unknown objects are process-local so opaque model
+    instances cannot collapse to a shared class-only identity.
+    """
+    if isinstance(value, Mapping):
+        return {
+            str(key): _calculator_parameter_identity(
+                item,
+                field_name=str(key),
+                artifact_cache=artifact_cache,
+            )
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+            if str(key).lower() not in _DEVICE_PARAMETER_FIELDS
         }
-        if method_parameters:
-            identity["parameters"] = _jsonable(method_parameters)
-    for name in ("model_name", "name_or_path", "checkpoint", "task_name"):
-        value = getattr(concrete, name, None)
+    if isinstance(value, (list, tuple)):
+        return [
+            _calculator_parameter_identity(
+                item,
+                field_name=field_name,
+                artifact_cache=artifact_cache,
+            )
+            for item in value
+        ]
+    if isinstance(value, (set, frozenset)):
+        converted = [
+            _calculator_parameter_identity(
+                item,
+                field_name=field_name,
+                artifact_cache=artifact_cache,
+            )
+            for item in value
+        ]
+        return sorted(converted, key=_canonical_json)
+    return _model_identity_value(value, artifact_cache=artifact_cache)
+
+
+@lru_cache(maxsize=1)
+def _installed_package_distributions() -> Mapping[str, list[str]]:
+    """Return the import-package to distribution mapping without noisy metadata."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        return importlib_metadata.packages_distributions()
+
+
+def _configured_entry_point_versions(
+    configured: Mapping[str, Any],
+) -> dict[str, str]:
+    """Resolve installed versions for every configured factory/import spec."""
+    entry_points: set[str] = set()
+
+    def _collect(value: Any) -> None:
+        if isinstance(value, Mapping):
+            for key, item in value.items():
+                if (
+                    str(key) in {"factory", "import_path"}
+                    and isinstance(item, str)
+                    and item
+                ):
+                    entry_points.add(item)
+                _collect(item)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                _collect(item)
+
+    _collect(configured)
+    module_roots = {
+        entry_point.partition(":")[0].partition(".")[0]
+        for entry_point in entry_points
+    }
+    try:
+        distributions = _installed_package_distributions()
+    except Exception:  # pragma: no cover - platform metadata failure
+        distributions = {}
+    versions: dict[str, str] = {}
+    for module_root in sorted(module_roots):
+        names = distributions.get(module_root, ()) or (module_root,)
+        for name in sorted(set(names)):
+            try:
+                versions[str(name)] = importlib_metadata.version(name)
+            except importlib_metadata.PackageNotFoundError:
+                continue
+    return versions
+
+
+def calculator_identity(
+    calculator: Any,
+    *,
+    refresh: bool = False,
+) -> dict[str, Any]:
+    """Return a stable calculator/method declaration for compatibility checks.
+
+    Device-placement parameters are intentionally excluded.  Model and
+    checkpoint files are represented by their content digest rather than by a
+    machine-local path, so copied identical artifacts match.  The verified
+    identity is snapshotted on the loaded calculator/pool after the first call;
+    this avoids rereading large model artifacts for every site calculation.
+
+    A loaded calculator is assumed to keep immutable scientific parameters.
+    Call with ``refresh=True`` (or call
+    :func:`invalidate_calculator_identity`) after intentionally mutating a
+    calculator or replacing an artifact that the same live instance consumes.
+    """
+    if refresh:
+        invalidate_calculator_identity(calculator)
+    cached = cached_calculator_scientific_identity(calculator)
+    if cached is not None:
+        return copy.deepcopy(cached)
+
+    with _CALCULATOR_IDENTITY_LOCK:
+        cached = cached_calculator_scientific_identity(calculator)
+        if cached is not None:
+            return copy.deepcopy(cached)
+
+        configured = configured_calculator_identity(calculator)
+        concrete = primary_calculator(calculator)
+        artifact_cache: dict[str, dict[str, Any]] = {}
+        identity: dict[str, Any] = {
+            "class": (
+                f"{concrete.__class__.__module__}."
+                f"{concrete.__class__.__qualname__}"
+            ),
+        }
+        entry_point_versions: dict[str, str] = {}
+        if configured:
+            identity["configured"] = _calculator_parameter_identity(
+                configured,
+                artifact_cache=artifact_cache,
+            )
+            entry_point_versions = _configured_entry_point_versions(configured)
+            if entry_point_versions:
+                identity["entry_point_distributions"] = entry_point_versions
+        has_live_scientific_identity = False
+        parameters = getattr(concrete, "parameters", None)
+        if parameters:
+            try:
+                parameter_mapping = dict(parameters)
+            except (TypeError, ValueError):
+                parameter_mapping = {}
+            method_parameters = {
+                str(key): value
+                for key, value in parameter_mapping.items()
+                if str(key).lower() not in _DEVICE_PARAMETER_FIELDS
+            }
+            if method_parameters:
+                identity["parameters"] = _calculator_parameter_identity(
+                    method_parameters,
+                    artifact_cache=artifact_cache,
+                )
+                has_live_scientific_identity = True
+        for name in sorted(_MODEL_IDENTITY_FIELDS):
+            value = getattr(concrete, name, None)
+            if value not in (None, ""):
+                identity[name] = _calculator_parameter_identity(
+                    value,
+                    field_name=name,
+                    artifact_cache=artifact_cache,
+                )
+                has_live_scientific_identity = True
+        if not has_live_scientific_identity and (
+            not configured or not entry_point_versions
+        ):
+            # An unversioned construction recipe plus a class name cannot
+            # prove that an opaque factory returned the same scientific
+            # calculator.
+            identity["opaque_instance"] = _process_local_object_identity(concrete)
+        identity["method_digest_sha256"] = _hash_json(identity)
+        stamp_calculator_scientific_identity(calculator, identity)
+        return copy.deepcopy(identity)
+
+
+def _fixed_atom_indices(atoms: Atoms) -> set[int]:
+    fixed: set[int] = set()
+    for constraint in getattr(atoms, "constraints", ()) or ():
+        if isinstance(constraint, FixAtoms):
+            fixed.update(int(index) for index in constraint.get_indices())
+    return fixed
+
+
+def _constraint_identity(atoms: Atoms) -> list[Any]:
+    """Return deterministic declarations for all attached constraints."""
+    constraints: list[Any] = []
+    for constraint in getattr(atoms, "constraints", ()) or ():
+        if hasattr(constraint, "todict"):
+            try:
+                constraints.append(_jsonable(constraint.todict()))
+                continue
+            except Exception:
+                pass
+        constraints.append(
+            {
+                "python_type": (
+                    f"{constraint.__class__.__module__}."
+                    f"{constraint.__class__.__qualname__}"
+                )
+            }
+        )
+    return constraints
+
+
+def _scientific_atom_arrays(atoms: Atoms) -> dict[str, Any]:
+    """Capture per-atom state that may alter a calculator result."""
+    arrays: dict[str, Any] = {
+        # ASE treats absent versions of these arrays as all-zero declarations;
+        # canonicalize both representations to the same scientific state.
+        "initial_charges": _jsonable(atoms.get_initial_charges()),
+        "initial_magmoms": _jsonable(atoms.get_initial_magnetic_moments()),
+        "tags": _jsonable(atoms.get_tags()),
+    }
+    builtins = {
+        "numbers",
+        "positions",
+        "initial_charges",
+        "initial_magmoms",
+        "tags",
+    }
+    for name, value in sorted(atoms.arrays.items()):
+        if name not in builtins:
+            arrays[str(name)] = _jsonable(value)
+    return arrays
+
+
+def _atoms_geometry_signature(atoms: Atoms) -> dict[str, Any]:
+    """Describe local geometry independent of origin, wrapping, and atom order."""
+    fixed = _fixed_atom_indices(atoms)
+    arrays = _scientific_atom_arrays(atoms)
+    atom_attributes = [
+        {
+            "symbol": symbol,
+            "fixed": index in fixed,
+            "arrays": {
+                name: values[index]
+                for name, values in arrays.items()
+            },
+        }
+        for index, symbol in enumerate(atoms.get_chemical_symbols())
+    ]
+    labels = [
+        _canonical_json(attributes)
+        for attributes in atom_attributes
+    ]
+    use_mic = bool(np.any(atoms.pbc))
+    try:
+        distances = np.asarray(atoms.get_all_distances(mic=use_mic), dtype=float)
+    except (RuntimeError, ValueError):
+        # Invalid periodic cells should not make cache persistence fail.  Their
+        # Cartesian geometry still yields a conservative, non-portable match.
+        distances = np.asarray(atoms.get_all_distances(mic=False), dtype=float)
+
+    pairs = sorted(
+        (
+            min(labels[left], labels[right]),
+            max(labels[left], labels[right]),
+            round(float(distances[left, right]), 6),
+        )
+        for left in range(len(atoms))
+        for right in range(left + 1, len(atoms))
+    )
+    atom_environments = sorted(
+        (
+            labels[index],
+            sorted(
+                (labels[other], round(float(distances[index, other]), 6))
+                for other in range(len(atoms))
+                if other != index
+            ),
+        )
+        for index in range(len(atoms))
+    )
+    cell = np.asarray(atoms.cell.array, dtype=float)
+    # A @ A.T retains every lattice-vector length and mutual angle while being
+    # invariant to rigid rotation in Cartesian space.  Singular values alone
+    # are insufficient because distinct Gram matrices can share a spectrum.
+    cell_metric = np.asarray(cell @ cell.T, dtype=float).round(8).tolist()
+    return {
+        "labels": sorted(labels),
+        "atom_environments": atom_environments,
+        "pair_distances_A": pairs,
+        "pbc": [bool(value) for value in atoms.pbc],
+        "cell_metric_A2": cell_metric,
+        "info": _jsonable(dict(atoms.info)),
+    }
+
+
+def _cached_geometry_signature(
+    atoms: Atoms,
+    cache: dict[int, dict[str, Any]] | None,
+) -> dict[str, Any]:
+    if cache is None:
+        return _atoms_geometry_signature(atoms)
+    object_id = id(atoms)
+    signature = cache.get(object_id)
+    if signature is None:
+        signature = _atoms_geometry_signature(atoms)
+        cache[object_id] = signature
+    return signature
+
+
+def _geometry_structures(
+    value: Any,
+    *,
+    path: str = "inputs",
+    geometry_cache: dict[int, dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    if isinstance(value, Atoms):
+        return [
+            {
+                "path": path,
+                "geometry": _cached_geometry_signature(value, geometry_cache),
+            }
+        ]
+    if isinstance(value, Mapping):
+        structures: list[dict[str, Any]] = []
+        for key, item in sorted(value.items(), key=lambda pair: str(pair[0])):
+            structures.extend(
+                _geometry_structures(
+                    item,
+                    path=f"{path}.{key}",
+                    geometry_cache=geometry_cache,
+                )
+            )
+        return structures
+    if isinstance(value, (list, tuple)):
+        structures = []
+        for index, item in enumerate(value):
+            structures.extend(
+                _geometry_structures(
+                    item,
+                    path=f"{path}[{index}]",
+                    geometry_cache=geometry_cache,
+                )
+            )
+        return structures
+    return []
+
+
+def _input_frame_structures(
+    value: Any,
+    *,
+    path: str = "inputs",
+) -> list[dict[str, Any]]:
+    """Return exact input coordinates used to guard structure hydration.
+
+    Unlike :func:`_geometry_structures`, this representation deliberately
+    retains origin, cell orientation, periodic image, and atom ordering.  A
+    cached relaxed structure can only be returned unchanged when those frame
+    details match the query.
+    """
+    if isinstance(value, Atoms):
+        return [{"path": path, "coordinates": atoms_to_json(value)}]
+    if isinstance(value, Mapping):
+        structures: list[dict[str, Any]] = []
+        for key, item in sorted(value.items(), key=lambda pair: str(pair[0])):
+            structures.extend(_input_frame_structures(item, path=f"{path}.{key}"))
+        return structures
+    if isinstance(value, (list, tuple)):
+        structures = []
+        for index, item in enumerate(value):
+            structures.extend(_input_frame_structures(item, path=f"{path}[{index}]"))
+        return structures
+    return []
+
+
+def _normalise_scientific_input(
+    value: Any,
+    *,
+    geometry_cache: dict[int, dict[str, Any]] | None = None,
+    excluded_fields: frozenset[str] = frozenset(),
+) -> Any:
+    """Replace structures with invariant geometry and retain other inputs."""
+    if isinstance(value, Atoms):
+        return {
+            "atoms_geometry": _cached_geometry_signature(value, geometry_cache),
+        }
+    if isinstance(value, Mapping):
+        return {
+            str(key): _normalise_scientific_input(
+                item,
+                geometry_cache=geometry_cache,
+                excluded_fields=excluded_fields,
+            )
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+            if (
+                str(key).lower() not in _RUN_LOCAL_INPUT_FIELDS
+                and str(key).lower() not in excluded_fields
+            )
+        }
+    if isinstance(value, (list, tuple)):
+        return [
+            _normalise_scientific_input(
+                item,
+                geometry_cache=geometry_cache,
+                excluded_fields=excluded_fields,
+            )
+            for item in value
+        ]
+    if isinstance(value, (set, frozenset)):
+        converted = [
+            _normalise_scientific_input(
+                item,
+                geometry_cache=geometry_cache,
+                excluded_fields=excluded_fields,
+            )
+            for item in value
+        ]
+        return sorted(converted, key=lambda item: json.dumps(item, sort_keys=True))
+    return _jsonable(value)
+
+
+def _scientific_input_payload(
+    inputs: Mapping[str, Any],
+    *,
+    operation: Mapping[str, Any] | None,
+    geometry_cache: dict[int, dict[str, Any]] | None = None,
+    excluded_fields: frozenset[str] = frozenset(),
+) -> dict[str, Any]:
+    raw_inputs = {
+        str(key): value
+        for key, value in inputs.items()
+        if (
+            str(key) not in _SEMANTIC_INPUT_FIELDS
+            and str(key).lower() not in excluded_fields
+        )
+    }
+    operation = operation or {}
+    semantics: dict[str, Any] = {}
+    for key in _SEMANTIC_INPUT_FIELDS:
+        value = operation.get(key)
+        if value in (None, ""):
+            value = inputs.get(key)
         if value not in (None, ""):
-            identity[name] = _jsonable(value)
-    return identity
+            semantics[key] = value
+    return {
+        "schema": _SCIENTIFIC_INPUT_FINGERPRINT_SCHEMA,
+        "semantics": semantics,
+        "inputs": _normalise_scientific_input(
+            raw_inputs,
+            geometry_cache=geometry_cache,
+            excluded_fields=excluded_fields,
+        ),
+    }
+
+
+def input_geometry_fingerprint(inputs: Mapping[str, Any]) -> str | None:
+    """Hash every input structure using a translation/PBC-invariant signature."""
+    structures = _geometry_structures(inputs)
+    if not structures:
+        return None
+    return _hash_json(
+        {
+            "schema": _GEOMETRY_FINGERPRINT_SCHEMA,
+            "structures": structures,
+        }
+    )
+
+
+def scientific_input_fingerprint(
+    inputs: Mapping[str, Any],
+    *,
+    operation: Mapping[str, Any] | None = None,
+) -> str:
+    """Hash every scientifically relevant input for portable cache matching.
+
+    Atomic structures are replaced by translation-, wrapping-, rotation-, and
+    atom-order-invariant geometry signatures.  Scalar and structured inputs
+    such as charge, spin declarations, and gas energies remain in the digest.
+    Only the explicitly enumerated run-local identifiers above are omitted.
+    """
+    return _hash_json(
+        _scientific_input_payload(inputs, operation=operation)
+    )
+
+
+def input_coordinate_frame_fingerprint(inputs: Mapping[str, Any]) -> str | None:
+    """Hash exact input coordinates for safe reuse of structure outputs."""
+    structures = _input_frame_structures(inputs)
+    if not structures:
+        return None
+    return _hash_json(
+        {
+            "schema": _INPUT_FRAME_FINGERPRINT_SCHEMA,
+            "structures": structures,
+        }
+    )
+
+
+@dataclass(frozen=True)
+class _CalculationFingerprints:
+    geometry: str | None
+    scientific_input: str
+    electronic_scientific_input: str
+    input_frame: str | None
+
+
+@dataclass
+class CalculationFingerprintMemo:
+    """Single-request carrier for expensive portable fingerprints.
+
+    Stability workflows pass one memo from lookup through persistence.  The
+    exact cache key binds the memo to the request, preventing accidental reuse
+    for another calculation while avoiding a second O(A^2) geometry traversal
+    after a portable miss.
+    """
+
+    _cache_key: str | None = None
+    _fingerprints: _CalculationFingerprints | None = None
+
+    def get(
+        self,
+        cache_key: str,
+        inputs: Mapping[str, Any],
+        *,
+        operation: Mapping[str, Any] | None = None,
+    ) -> _CalculationFingerprints:
+        key = str(cache_key)
+        if self._cache_key != key or self._fingerprints is None:
+            self._fingerprints = _calculation_fingerprints(
+                inputs,
+                operation=operation,
+            )
+            self._cache_key = key
+        return self._fingerprints
+
+
+def _calculation_fingerprints(
+    inputs: Mapping[str, Any],
+    *,
+    operation: Mapping[str, Any] | None = None,
+) -> _CalculationFingerprints:
+    """Compute all portable request fingerprints in one structure traversal."""
+    geometry_cache: dict[int, dict[str, Any]] = {}
+    structures = _geometry_structures(inputs, geometry_cache=geometry_cache)
+    geometry = (
+        None
+        if not structures
+        else _hash_json(
+            {
+                "schema": _GEOMETRY_FINGERPRINT_SCHEMA,
+                "structures": structures,
+            }
+        )
+    )
+    scientific_input = _hash_json(
+        _scientific_input_payload(
+            inputs,
+            operation=operation,
+            geometry_cache=geometry_cache,
+        )
+    )
+    electronic_scientific_input = _hash_json(
+        _scientific_input_payload(
+            inputs,
+            operation=operation,
+            geometry_cache=geometry_cache,
+            excluded_fields=_THERMOCHEMISTRY_INPUT_FIELDS,
+        )
+    )
+    frame_structures = _input_frame_structures(inputs)
+    input_frame = (
+        None
+        if not frame_structures
+        else _hash_json(
+            {
+                "schema": _INPUT_FRAME_FINGERPRINT_SCHEMA,
+                "structures": frame_structures,
+            }
+        )
+    )
+    return _CalculationFingerprints(
+        geometry=geometry,
+        scientific_input=scientific_input,
+        electronic_scientific_input=electronic_scientific_input,
+        input_frame=input_frame,
+    )
+
+
+def _electronic_parameters(parameters: Mapping[str, Any]) -> dict[str, Any]:
+    """Drop thermochemistry-only controls from endpoint/NEB identity."""
+    return {
+        str(key): value
+        for key, value in parameters.items()
+        if str(key).lower() not in _THERMOCHEMISTRY_PARAMETER_FIELDS
+    }
 
 
 def calculation_cache_key(
@@ -358,13 +1088,154 @@ def _database_root(root: str | os.PathLike[str]) -> Path:
     return Path(root).expanduser().resolve()
 
 
-@contextmanager
-def _connect(root: Path) -> Iterator[sqlite3.Connection]:
-    root.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(root / _INDEX_FILENAME, timeout=30.0)
+_INDEX_SCHEMA_LOCK = threading.RLock()
+_INITIALISED_INDEX_FILES: set[tuple[str, int, int]] = set()
+_THREAD_CONNECTIONS = threading.local()
+_INDEX_METADATA_COLUMNS: dict[str, str] = {
+    "geometry_hash": "TEXT",
+    "scientific_input_hash": "TEXT",
+    "electronic_scientific_input_hash": "TEXT",
+    "calculator_digest": "TEXT",
+    "input_frame_hash": "TEXT",
+    "electronic_parameter_hash": "TEXT",
+}
+
+
+@dataclass
+class _ThreadConnection:
+    connection: sqlite3.Connection
+    file_identity: tuple[int, int]
+
+
+def _index_file_identity(path: Path) -> tuple[int, int] | None:
     try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return int(stat.st_dev), int(stat.st_ino)
+
+
+def _thread_connection_map() -> dict[str, _ThreadConnection]:
+    pid = os.getpid()
+    if getattr(_THREAD_CONNECTIONS, "pid", None) != pid:
+        # Never carry SQLite handles into a forked process.
+        for item in getattr(_THREAD_CONNECTIONS, "connections", {}).values():
+            try:
+                item.connection.close()
+            except sqlite3.Error:
+                pass
+        _THREAD_CONNECTIONS.pid = pid
+        _THREAD_CONNECTIONS.connections = {}
+    return _THREAD_CONNECTIONS.connections
+
+
+def close_calculation_cache_connections(
+    root: str | os.PathLike[str] | None = None,
+) -> None:
+    """Close reusable SQLite handles owned by the calling thread.
+
+    Worker threads maintain independent connections.  Normal workflows can
+    leave them open for the run; tests or applications that replace/delete a
+    live database may call this explicit lifecycle hook.
+    """
+    connections = _thread_connection_map()
+    if root is None:
+        keys = list(connections)
+    else:
+        keys = [str(_database_root(root) / _INDEX_FILENAME)]
+    for key in keys:
+        item = connections.pop(key, None)
+        if item is not None:
+            item.connection.close()
+
+
+def _backfill_index_metadata(root: Path, connection: sqlite3.Connection) -> None:
+    """Populate newly added, rebuildable metadata columns from record JSON."""
+    rows = connection.execute(
+        """
+        SELECT cache_key, record_path
+        FROM records
+        WHERE scientific_input_hash IS NULL
+           OR electronic_scientific_input_hash IS NULL
+           OR electronic_parameter_hash IS NULL
+           OR calculator_digest IS NULL
+           OR input_frame_hash IS NULL
+        """
+    ).fetchall()
+    for cache_key, relative_path in rows:
+        try:
+            record_path = root / str(relative_path)
+            isaac = json.loads(record_path.read_text(encoding="utf-8"))
+            configuration = isaac["system"]["configuration"]["autokmc"]
+            parameters = configuration.get("parameters", {})
+            calculator = parameters.get("calculator")
+            calculator_digest = (
+                None if calculator is None else _hash_json(calculator)
+            )
+            electronic_parameter_hash = _hash_json(
+                _electronic_parameters(parameters)
+            )
+            scientific_input_hash = configuration.get("scientific_input_hash")
+            electronic_scientific_input_hash = configuration.get(
+                "electronic_scientific_input_hash"
+            )
+            if electronic_scientific_input_hash is None:
+                # Legacy records did not persist enough raw structure data to
+                # derive this value safely.  A full scientific hash remains a
+                # valid electronic hash only when no thermochemistry-only
+                # inputs were present.
+                raw_inputs = configuration.get("inputs", {})
+                if not any(
+                    key in raw_inputs for key in _THERMOCHEMISTRY_INPUT_FIELDS
+                ):
+                    electronic_scientific_input_hash = scientific_input_hash
+            connection.execute(
+                """
+                UPDATE records
+                SET geometry_hash = ?,
+                    scientific_input_hash = ?,
+                    electronic_scientific_input_hash = ?,
+                    calculator_digest = ?,
+                    input_frame_hash = ?,
+                    electronic_parameter_hash = ?
+                WHERE cache_key = ?
+                """,
+                (
+                    configuration.get("geometry_hash"),
+                    scientific_input_hash,
+                    electronic_scientific_input_hash,
+                    configuration.get("calculator_digest", calculator_digest),
+                    configuration.get("input_frame_hash"),
+                    electronic_parameter_hash,
+                    str(cache_key),
+                ),
+            )
+        except (OSError, TypeError, KeyError, json.JSONDecodeError):
+            # The immutable record will be rejected if selected.  The index is
+            # merely an accelerator and remains rebuildable.
+            continue
+
+
+def _ensure_index_schema(root: Path, connection: sqlite3.Connection) -> None:
+    index_path = root / _INDEX_FILENAME
+    identity = _index_file_identity(index_path)
+    cache_key = (
+        str(index_path),
+        -1 if identity is None else identity[0],
+        -1 if identity is None else identity[1],
+    )
+    if cache_key in _INITIALISED_INDEX_FILES:
+        return
+    with _INDEX_SCHEMA_LOCK:
+        identity = _index_file_identity(index_path)
+        cache_key = (
+            str(index_path),
+            -1 if identity is None else identity[0],
+            -1 if identity is None else identity[1],
+        )
+        if cache_key in _INITIALISED_INDEX_FILES:
+            return
         connection.execute("PRAGMA journal_mode=WAL")
-        connection.execute("PRAGMA foreign_keys=ON")
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS records (
@@ -374,42 +1245,123 @@ def _connect(root: Path) -> Iterator[sqlite3.Connection]:
                 operation_key TEXT NOT NULL,
                 parameter_hash TEXT NOT NULL,
                 graph_hash TEXT NOT NULL,
+                geometry_hash TEXT,
+                scientific_input_hash TEXT,
+                electronic_scientific_input_hash TEXT,
+                calculator_digest TEXT,
+                input_frame_hash TEXT,
+                electronic_parameter_hash TEXT,
                 record_path TEXT NOT NULL,
                 created_utc TEXT NOT NULL
             )
             """
         )
+        existing_columns = {
+            str(row[1])
+            for row in connection.execute("PRAGMA table_info(records)").fetchall()
+        }
+        for name, declaration in _INDEX_METADATA_COLUMNS.items():
+            if name not in existing_columns:
+                connection.execute(
+                    f"ALTER TABLE records ADD COLUMN {name} {declaration}"
+                )
         connection.execute(
             """
             CREATE INDEX IF NOT EXISTS records_graph_lookup
             ON records(kind, operation_key, parameter_hash, graph_hash)
             """
         )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS records_portable_lookup
+            ON records(
+                kind, operation_key, parameter_hash, graph_hash,
+                geometry_hash, scientific_input_hash, calculator_digest,
+                input_frame_hash
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS records_electronic_lookup
+            ON records(
+                kind, operation_key, electronic_parameter_hash, graph_hash,
+                geometry_hash, electronic_scientific_input_hash,
+                calculator_digest, input_frame_hash
+            )
+            """
+        )
+        _backfill_index_metadata(root, connection)
+        connection.commit()
+        identity = _index_file_identity(index_path)
+        _INITIALISED_INDEX_FILES.add(
+            (
+                str(index_path),
+                -1 if identity is None else identity[0],
+                -1 if identity is None else identity[1],
+            )
+        )
+
+
+def _open_index_connection(
+    root: Path,
+    *,
+    reuse: bool,
+) -> sqlite3.Connection:
+    root.mkdir(parents=True, exist_ok=True)
+    index_path = root / _INDEX_FILENAME
+    if not reuse:
+        connection = sqlite3.connect(index_path, timeout=30.0)
+        connection.execute("PRAGMA foreign_keys=ON")
+        _ensure_index_schema(root, connection)
+        return connection
+
+    key = str(index_path)
+    connections = _thread_connection_map()
+    existing = connections.get(key)
+    current_identity = _index_file_identity(index_path)
+    if (
+        existing is not None
+        and current_identity is not None
+        and existing.file_identity == current_identity
+    ):
+        return existing.connection
+    if existing is not None:
+        try:
+            existing.connection.close()
+        finally:
+            connections.pop(key, None)
+    connection = sqlite3.connect(index_path, timeout=30.0)
+    connection.execute("PRAGMA foreign_keys=ON")
+    _ensure_index_schema(root, connection)
+    identity = _index_file_identity(index_path)
+    if identity is None:  # pragma: no cover - SQLite always creates the file
+        connection.close()
+        raise sqlite3.OperationalError(f"index was not created: {index_path}")
+    connections[key] = _ThreadConnection(connection, identity)
+    return connection
+
+
+@contextmanager
+def _connect(
+    root: Path,
+    *,
+    reuse: bool = True,
+) -> Iterator[sqlite3.Connection]:
+    connection = _open_index_connection(root, reuse=reuse)
+    try:
         yield connection
         connection.commit()
     except Exception:
         connection.rollback()
         raise
     finally:
-        connection.close()
+        if not reuse:
+            connection.close()
 
 
 def _atomic_json(path: Path, value: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(_jsonable(value), handle, indent=2, sort_keys=True, allow_nan=False)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp_name, path)
-    except Exception:
-        try:
-            os.unlink(tmp_name)
-        except FileNotFoundError:
-            pass
-        raise
+    write_json_atomic(path, value, sort_keys=True, transform=_jsonable)
 
 
 def _safe_atoms_copy(atoms: Atoms, energy_ev: float | None = None) -> Atoms:
@@ -425,18 +1377,8 @@ def _safe_atoms_copy(atoms: Atoms, energy_ev: float | None = None) -> Atoms:
 
 
 def _atomic_extxyz(path: Path, images: Atoms | list[Atoms]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-    os.close(fd)
-    try:
-        ase_write(tmp_name, images, format="extxyz")
-        os.replace(tmp_name, path)
-    except Exception:
-        try:
-            os.unlink(tmp_name)
-        except FileNotFoundError:
-            pass
-        raise
+    with atomic_output_path(path) as temporary:
+        ase_write(temporary, images, format="extxyz")
 
 
 def _asset(
@@ -606,6 +1548,12 @@ def _build_isaac_record(
     graph_hash: str,
     operation_key: str,
     parameter_hash: str,
+    electronic_parameter_hash: str,
+    geometry_hash: str | None,
+    scientific_input_hash: str,
+    electronic_scientific_input_hash: str,
+    input_frame_hash: str | None,
+    calculator_digest: str | None,
     assets: list[dict[str, Any]],
     state_assets: Mapping[str, str],
     neb_asset: str | None,
@@ -627,6 +1575,12 @@ def _build_isaac_record(
         "cache_key": source["cache_key"],
         "operation_key": operation_key,
         "parameter_hash": parameter_hash,
+        "electronic_parameter_hash": electronic_parameter_hash,
+        "geometry_hash": geometry_hash,
+        "scientific_input_hash": scientific_input_hash,
+        "electronic_scientific_input_hash": electronic_scientific_input_hash,
+        "input_frame_hash": input_frame_hash,
+        "calculator_digest": calculator_digest,
         "graph_hash": graph_hash,
         "operation": operation,
         "parameters": parameters,
@@ -714,15 +1668,21 @@ def _build_isaac_record(
     return record
 
 
-def validate_isaac_record(record: Mapping[str, Any]) -> None:
-    """Validate against the vendored official ISAAC v1.05 JSON schema."""
+@lru_cache(maxsize=1)
+def _isaac_validator():
+    """Compile the immutable vendored ISAAC schema once per process."""
     try:
         from jsonschema import Draft202012Validator, FormatChecker
     except ImportError as exc:  # pragma: no cover - declared core dependency
         raise RuntimeError("ISAAC validation requires the jsonschema package") from exc
     schema_path = resource_files("autokmc").joinpath("schema/isaac_record_v1.json")
     schema = json.loads(schema_path.read_text(encoding="utf-8"))
-    validator = Draft202012Validator(schema, format_checker=FormatChecker())
+    return Draft202012Validator(schema, format_checker=FormatChecker())
+
+
+def validate_isaac_record(record: Mapping[str, Any]) -> None:
+    """Validate against the vendored official ISAAC v1.05 JSON schema."""
+    validator = _isaac_validator()
     errors = sorted(validator.iter_errors(dict(record)), key=lambda error: list(error.path))
     if errors:
         error = errors[0]
@@ -730,11 +1690,14 @@ def validate_isaac_record(record: Mapping[str, Any]) -> None:
         raise ValueError(f"ISAAC schema validation failed at {location}: {error.message}")
 
 
+@instrument("calculation_cache.write")
 def write_calculation_record(
     root: str | os.PathLike[str],
     kind: str,
     cache_key: str,
     record: Mapping[str, Any],
+    *,
+    fingerprint_memo: CalculationFingerprintMemo | None = None,
 ) -> Path:
     """Persist one immutable reaction result and update the SQLite index."""
     root_path = _database_root(root)
@@ -745,6 +1708,23 @@ def write_calculation_record(
     graph_digest = reaction_graph_hash(graph)
     operation_digest = _operation_key(record["operation"])
     parameter_digest = _hash_json(record["parameters"])
+    electronic_parameter_digest = _hash_json(
+        _electronic_parameters(record["parameters"])
+    )
+    fingerprints = (
+        _calculation_fingerprints(
+            record["inputs"],
+            operation=record["operation"],
+        )
+        if fingerprint_memo is None
+        else fingerprint_memo.get(
+            cache_key,
+            record["inputs"],
+            operation=record["operation"],
+        )
+    )
+    calculator = record["parameters"].get("calculator")
+    calculator_digest = None if calculator is None else _hash_json(calculator)
     created_utc = _utc_now()
     record_id = _record_id(cache_key, created_utc)
     record_dir = root_path / "records" / record_id
@@ -821,6 +1801,14 @@ def write_calculation_record(
         graph_hash=graph_digest,
         operation_key=operation_digest,
         parameter_hash=parameter_digest,
+        electronic_parameter_hash=electronic_parameter_digest,
+        geometry_hash=fingerprints.geometry,
+        scientific_input_hash=fingerprints.scientific_input,
+        electronic_scientific_input_hash=(
+            fingerprints.electronic_scientific_input
+        ),
+        input_frame_hash=fingerprints.input_frame,
+        calculator_digest=calculator_digest,
         assets=assets,
         state_assets=state_assets,
         neb_asset=neb_asset,
@@ -835,14 +1823,23 @@ def write_calculation_record(
             """
             INSERT INTO records(
                 record_id, cache_key, kind, operation_key, parameter_hash,
-                graph_hash, record_path, created_utc
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                graph_hash, geometry_hash, scientific_input_hash,
+                electronic_scientific_input_hash, calculator_digest,
+                input_frame_hash, electronic_parameter_hash, record_path,
+                created_utc
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(cache_key) DO UPDATE SET
                 record_id=excluded.record_id,
                 kind=excluded.kind,
                 operation_key=excluded.operation_key,
                 parameter_hash=excluded.parameter_hash,
                 graph_hash=excluded.graph_hash,
+                geometry_hash=excluded.geometry_hash,
+                scientific_input_hash=excluded.scientific_input_hash,
+                electronic_scientific_input_hash=excluded.electronic_scientific_input_hash,
+                calculator_digest=excluded.calculator_digest,
+                input_frame_hash=excluded.input_frame_hash,
+                electronic_parameter_hash=excluded.electronic_parameter_hash,
                 record_path=excluded.record_path,
                 created_utc=excluded.created_utc
             """,
@@ -853,6 +1850,12 @@ def write_calculation_record(
                 operation_digest,
                 parameter_digest,
                 graph_digest,
+                fingerprints.geometry,
+                fingerprints.scientific_input,
+                fingerprints.electronic_scientific_input,
+                calculator_digest,
+                fingerprints.input_frame,
+                electronic_parameter_digest,
                 str(record_path.relative_to(root_path)),
                 created_utc,
             ),
@@ -871,28 +1874,46 @@ def _load_record_path(
     record_path: Path,
     *,
     query_graph: nx.Graph | None,
+    expected_metadata: Mapping[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     try:
         with record_path.open("r", encoding="utf-8") as handle:
             isaac = json.load(handle)
         validate_isaac_record(isaac)
+        configuration = isaac["system"]["configuration"]["autokmc"]
+        for name, expected in (expected_metadata or {}).items():
+            if configuration.get(name) != expected:
+                return None
+
         record_dir = record_path.parent
         assets_by_id: dict[str, tuple[dict[str, Any], Path]] = {}
         for asset in isaac.get("assets", []):
             path = _safe_asset_path(record_dir, str(asset["uri"]))
-            if not path.is_file() or _sha256_file(path) != asset["sha256"]:
-                return None
             assets_by_id[str(asset["asset_id"])] = (asset, path)
 
         graph_asset = assets_by_id.get("reaction_graph")
         if graph_asset is None:
+            return None
+        graph_descriptor, graph_path = graph_asset
+        if (
+            not graph_path.is_file()
+            or _sha256_file(graph_path) != graph_descriptor["sha256"]
+        ):
             return None
         with graph_asset[1].open("r", encoding="utf-8") as handle:
             stored_graph = reaction_graph_from_payload(json.load(handle))
         if query_graph is not None and not reaction_graphs_isomorphic(stored_graph, query_graph):
             return None
 
-        configuration = isaac["system"]["configuration"]["autokmc"]
+        # Only candidates that passed cheap indexed/configuration metadata and
+        # authoritative graph isomorphism pay to verify and hydrate every
+        # structure asset.
+        for asset_id, (asset, path) in assets_by_id.items():
+            if asset_id == "reaction_graph":
+                continue
+            if not path.is_file() or _sha256_file(path) != asset["sha256"]:
+                return None
+
         stored_kind = str(configuration["kind"])
         if stored_kind not in _STATE_FILENAMES:
             return None
@@ -916,6 +1937,17 @@ def _load_record_path(
             "cache_key": configuration["cache_key"],
             "operation": configuration.get("operation", {}),
             "parameters": configuration.get("parameters", {}),
+            "parameter_hash": configuration.get("parameter_hash"),
+            "electronic_parameter_hash": configuration.get(
+                "electronic_parameter_hash"
+            ),
+            "geometry_hash": configuration.get("geometry_hash"),
+            "scientific_input_hash": configuration.get("scientific_input_hash"),
+            "electronic_scientific_input_hash": configuration.get(
+                "electronic_scientific_input_hash"
+            ),
+            "input_frame_hash": configuration.get("input_frame_hash"),
+            "calculator_digest": configuration.get("calculator_digest"),
             "states": states,
             "lateral_attributes": configuration.get("lateral_attributes", {}),
             "reaction_graph": stored_graph,
@@ -940,10 +1972,11 @@ def rebuild_calculation_index(root: str | os.PathLike[str]) -> int:
     """Rebuild SQLite exclusively from checksum-verified record folders."""
     root_path = _database_root(root)
     root_path.mkdir(parents=True, exist_ok=True)
+    close_calculation_cache_connections(root_path)
     record_paths = sorted((root_path / "records").glob(f"*/{_RECORD_FILENAME}"))
     with tempfile.TemporaryDirectory(prefix=".index-rebuild-", dir=root_path) as tmp_dir:
         temporary_root = Path(tmp_dir)
-        with _connect(temporary_root) as connection:
+        with _connect(temporary_root, reuse=False) as connection:
             for record_path in record_paths:
                 loaded = _load_record_path(record_path, query_graph=None)
                 if loaded is None:
@@ -955,14 +1988,23 @@ def rebuild_calculation_index(root: str | os.PathLike[str]) -> int:
                     """
                     INSERT INTO records(
                         record_id, cache_key, kind, operation_key, parameter_hash,
-                        graph_hash, record_path, created_utc
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        graph_hash, geometry_hash, scientific_input_hash,
+                        electronic_scientific_input_hash, calculator_digest,
+                        input_frame_hash, electronic_parameter_hash, record_path,
+                        created_utc
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(cache_key) DO UPDATE SET
                         record_id=excluded.record_id,
                         kind=excluded.kind,
                         operation_key=excluded.operation_key,
                         parameter_hash=excluded.parameter_hash,
                         graph_hash=excluded.graph_hash,
+                        geometry_hash=excluded.geometry_hash,
+                        scientific_input_hash=excluded.scientific_input_hash,
+                        electronic_scientific_input_hash=excluded.electronic_scientific_input_hash,
+                        calculator_digest=excluded.calculator_digest,
+                        input_frame_hash=excluded.input_frame_hash,
+                        electronic_parameter_hash=excluded.electronic_parameter_hash,
                         record_path=excluded.record_path,
                         created_utc=excluded.created_utc
                     """,
@@ -973,6 +2015,19 @@ def rebuild_calculation_index(root: str | os.PathLike[str]) -> int:
                         str(configuration["operation_key"]),
                         str(configuration["parameter_hash"]),
                         str(configuration["graph_hash"]),
+                        configuration.get("geometry_hash"),
+                        configuration.get("scientific_input_hash"),
+                        configuration.get(
+                            "electronic_scientific_input_hash"
+                        ),
+                        configuration.get("calculator_digest"),
+                        configuration.get("input_frame_hash"),
+                        configuration.get("electronic_parameter_hash")
+                        or _hash_json(
+                            _electronic_parameters(
+                                configuration.get("parameters", {})
+                            )
+                        ),
                         str(record_path.relative_to(root_path)),
                         str(isaac["timestamps"]["created_utc"]),
                     ),
@@ -982,6 +2037,7 @@ def rebuild_calculation_index(root: str | os.PathLike[str]) -> int:
     return count
 
 
+@instrument("calculation_cache.lookup")
 def load_calculation_record(
     root: str | os.PathLike[str],
     kind: str,
@@ -990,76 +2046,260 @@ def load_calculation_record(
     reaction_graph: nx.Graph | None = None,
     operation: Mapping[str, Any] | None = None,
     parameters: Mapping[str, Any] | None = None,
+    inputs: Mapping[str, Any] | None = None,
+    allow_electronic_match: bool = False,
+    fingerprint_memo: CalculationFingerprintMemo | None = None,
 ) -> dict[str, Any] | None:
-    """Find a compatible result, then verify checksums and graph isomorphism."""
+    """Find a verified exact or portable calculation result.
+
+    Exact cache keys retain their original behavior.  Portable graph-search
+    fallback additionally requires a normalized identity for every scientific
+    input.  Structure-bearing results require the query's exact input
+    coordinate frame because persisted outputs cannot otherwise be mapped into
+    translated, rotated, wrapped, or permuted query coordinates safely.
+    """
     root_path = _database_root(root)
     if not root_path.exists():
+        increment("calculation_cache.misses")
         return None
     index_path = root_path / _INDEX_FILENAME
-    if not index_path.is_file() and any((root_path / "records").glob(f"*/{_RECORD_FILENAME}")):
+    if (
+        not index_path.is_file()
+        and any((root_path / "records").glob(f"*/{_RECORD_FILENAME}"))
+    ):
         rebuild_calculation_index(root_path)
-    query_graph = None if reaction_graph is None else normalise_reaction_graph(reaction_graph)
-    rows: list[tuple[str]] = []
-    try:
+    query_graph = (
+        None
+        if reaction_graph is None
+        else normalise_reaction_graph(reaction_graph)
+    )
+
+    def _exact_paths() -> list[str]:
         with _connect(root_path) as connection:
-            rows.extend(
-                connection.execute(
+            return [
+                str(relative_path)
+                for (relative_path,) in connection.execute(
                     "SELECT record_path FROM records WHERE cache_key = ?",
                     (str(cache_key),),
                 ).fetchall()
-            )
-            if query_graph is not None and operation is not None and parameters is not None:
-                graph_digest = reaction_graph_hash(query_graph)
-                operation_digest = _operation_key(operation)
-                parameter_digest = _hash_json(parameters)
-                rows.extend(
-                    connection.execute(
-                        """
-                        SELECT record_path FROM records
-                        WHERE kind = ? AND operation_key = ?
-                          AND parameter_hash = ? AND graph_hash = ?
-                        ORDER BY created_utc DESC
-                        """,
-                        (str(kind), operation_digest, parameter_digest, graph_digest),
-                    ).fetchall()
-                )
+            ]
+
+    try:
+        exact_paths = _exact_paths()
     except sqlite3.Error:
         _log.warning("Reaction database index is invalid; rebuilding %s", index_path)
         rebuild_calculation_index(root_path)
-        with _connect(root_path) as connection:
-            rows.extend(
-                connection.execute(
-                    "SELECT record_path FROM records WHERE cache_key = ?",
-                    (str(cache_key),),
-                ).fetchall()
-            )
-            if query_graph is not None and operation is not None and parameters is not None:
-                rows.extend(
-                    connection.execute(
-                        """
-                        SELECT record_path FROM records
-                        WHERE kind = ? AND operation_key = ?
-                          AND parameter_hash = ? AND graph_hash = ?
-                        ORDER BY created_utc DESC
-                        """,
-                        (
-                            str(kind), _operation_key(operation),
-                            _hash_json(parameters), reaction_graph_hash(query_graph),
-                        ),
-                    ).fetchall()
-                )
+        exact_paths = _exact_paths()
 
-    seen: set[str] = set()
-    for (relative_path,) in rows:
-        if relative_path in seen:
-            continue
-        seen.add(relative_path)
+    # Exact-key lookup is intentionally first.  It avoids every portable
+    # O(A^2) geometry fingerprint on the common same-run hit path.
+    for relative_path in exact_paths:
         loaded = _load_record_path(
             root_path / relative_path,
             query_graph=query_graph,
+            expected_metadata={
+                "kind": str(kind),
+                "cache_key": str(cache_key),
+            },
         )
-        if loaded is not None and loaded.get("kind") == str(kind):
+        if loaded is not None:
+            loaded["_cache_match"] = "exact"
+            increment("calculation_cache.hits")
+            increment("calculation_cache.exact_hits")
             return loaded
+
+    if (
+        query_graph is None
+        or operation is None
+        or parameters is None
+        or inputs is None
+    ):
+        increment("calculation_cache.misses")
+        return None
+
+    graph_digest = reaction_graph_hash(query_graph)
+    operation_digest = _operation_key(operation)
+    parameter_digest = _hash_json(parameters)
+    electronic_parameter_digest = _hash_json(
+        _electronic_parameters(parameters)
+    )
+    calculator = parameters.get("calculator")
+    calculator_digest = None if calculator is None else _hash_json(calculator)
+
+    def _has_portable_prefix() -> bool:
+        """Check cheap indexed identity before building O(A^2) fingerprints."""
+        with _connect(root_path) as connection:
+            if connection.execute(
+                """
+                SELECT 1 FROM records
+                WHERE kind = ? AND operation_key = ?
+                  AND parameter_hash = ? AND graph_hash = ?
+                  AND calculator_digest IS ?
+                LIMIT 1
+                """,
+                (
+                    str(kind),
+                    operation_digest,
+                    parameter_digest,
+                    graph_digest,
+                    calculator_digest,
+                ),
+            ).fetchone():
+                return True
+            if not allow_electronic_match:
+                return False
+            return (
+                connection.execute(
+                    """
+                    SELECT 1 FROM records
+                    WHERE kind = ? AND operation_key = ?
+                      AND electronic_parameter_hash = ? AND graph_hash = ?
+                      AND calculator_digest IS ?
+                    LIMIT 1
+                    """,
+                    (
+                        str(kind),
+                        operation_digest,
+                        electronic_parameter_digest,
+                        graph_digest,
+                        calculator_digest,
+                    ),
+                ).fetchone()
+                is not None
+            )
+
+    try:
+        has_portable_prefix = _has_portable_prefix()
+    except sqlite3.Error:
+        _log.warning("Reaction database index is invalid; rebuilding %s", index_path)
+        rebuild_calculation_index(root_path)
+        has_portable_prefix = _has_portable_prefix()
+    if not has_portable_prefix:
+        increment("calculation_cache.misses")
+        return None
+
+    fingerprints = (
+        _calculation_fingerprints(inputs, operation=operation)
+        if fingerprint_memo is None
+        else fingerprint_memo.get(
+            cache_key,
+            inputs,
+            operation=operation,
+        )
+    )
+    if fingerprints.geometry is None or fingerprints.input_frame is None:
+        increment("calculation_cache.misses")
+        return None
+
+    def _portable_rows() -> list[tuple[str, str]]:
+        rows: list[tuple[str, str]] = []
+        with _connect(root_path) as connection:
+            rows.extend(
+                (str(relative_path), "portable")
+                for (relative_path,) in connection.execute(
+                    """
+                    SELECT record_path FROM records
+                    WHERE kind = ? AND operation_key = ?
+                      AND parameter_hash = ? AND graph_hash = ?
+                      AND geometry_hash = ?
+                      AND scientific_input_hash = ?
+                      AND calculator_digest IS ?
+                      AND input_frame_hash = ?
+                    ORDER BY created_utc DESC
+                    """,
+                    (
+                        str(kind),
+                        operation_digest,
+                        parameter_digest,
+                        graph_digest,
+                        fingerprints.geometry,
+                        fingerprints.scientific_input,
+                        calculator_digest,
+                        fingerprints.input_frame,
+                    ),
+                ).fetchall()
+            )
+            if allow_electronic_match:
+                rows.extend(
+                    (str(relative_path), "electronic")
+                    for (relative_path,) in connection.execute(
+                        """
+                        SELECT record_path FROM records
+                        WHERE kind = ? AND operation_key = ?
+                          AND electronic_parameter_hash = ?
+                          AND graph_hash = ?
+                          AND geometry_hash = ?
+                          AND electronic_scientific_input_hash = ?
+                          AND calculator_digest IS ?
+                          AND input_frame_hash = ?
+                        ORDER BY created_utc DESC
+                        """,
+                        (
+                            str(kind),
+                            operation_digest,
+                            electronic_parameter_digest,
+                            graph_digest,
+                            fingerprints.geometry,
+                            fingerprints.electronic_scientific_input,
+                            calculator_digest,
+                            fingerprints.input_frame,
+                        ),
+                    ).fetchall()
+                )
+        return rows
+
+    try:
+        rows = _portable_rows()
+    except sqlite3.Error:
+        _log.warning("Reaction database index is invalid; rebuilding %s", index_path)
+        rebuild_calculation_index(root_path)
+        rows = _portable_rows()
+
+    seen = set(exact_paths)
+    for relative_path, match_kind in rows:
+        if relative_path in seen:
+            continue
+        seen.add(relative_path)
+        expected = {
+            "kind": str(kind),
+            "operation_key": operation_digest,
+            "graph_hash": graph_digest,
+            "geometry_hash": fingerprints.geometry,
+            "calculator_digest": calculator_digest,
+            "input_frame_hash": fingerprints.input_frame,
+        }
+        if match_kind == "portable":
+            expected.update(
+                {
+                    "parameter_hash": parameter_digest,
+                    "scientific_input_hash": fingerprints.scientific_input,
+                }
+            )
+        else:
+            expected.update(
+                {
+                    "electronic_parameter_hash": electronic_parameter_digest,
+                    "electronic_scientific_input_hash": (
+                        fingerprints.electronic_scientific_input
+                    ),
+                }
+            )
+        loaded = _load_record_path(
+            root_path / relative_path,
+            query_graph=query_graph,
+            expected_metadata=expected,
+        )
+        if loaded is None:
+            continue
+        loaded["_cache_match"] = match_kind
+        increment("calculation_cache.hits")
+        increment(
+            "calculation_cache.electronic_hits"
+            if match_kind == "electronic"
+            else "calculation_cache.portable_hits"
+        )
+        return loaded
+    increment("calculation_cache.misses")
     return None
 
 
@@ -1067,6 +2307,8 @@ def apply_cached_states(
     lateral_class: Any,
     record: Mapping[str, Any],
     state_mapping: Mapping[str, tuple[str, str]],
+    *,
+    include_properties: bool = True,
 ) -> bool:
     """Hydrate a lateral class from a verified database record."""
     states = record.get("states", {})
@@ -1088,16 +2330,30 @@ def apply_cached_states(
     for energy_attr, atoms_attr, energy, atoms, properties in pending:
         setattr(lateral_class, energy_attr, energy)
         setattr(lateral_class, atoms_attr, atoms)
-        for name, value in properties.items():
-            if value is not None:
-                setattr(lateral_class, name, value)
+        if include_properties:
+            for name, value in properties.items():
+                if (
+                    value is not None
+                    and str(name) not in _RUN_DEPENDENT_LATERAL_ATTRIBUTES
+                ):
+                    setattr(lateral_class, name, value)
+        else:
+            # An electronic-only match must not leave temperature-dependent
+            # values from either the cached record or a previously populated
+            # lateral object visible to the current request.
+            for name in properties:
+                if str(name) not in _RUN_DEPENDENT_LATERAL_ATTRIBUTES:
+                    setattr(lateral_class, name, None)
 
     neb = record.get("neb")
     if neb:
         lateral_class.atoms_neb_path = [image.copy() for image in neb.get("path", [])]
         lateral_class.neb_path_energies = list(neb.get("energies_ev", []))
     for name, value in record.get("lateral_attributes", {}).items():
-        if value is not None:
+        if (
+            value is not None
+            and str(name) not in _RUN_DEPENDENT_LATERAL_ATTRIBUTES
+        ):
             setattr(lateral_class, name, value)
     lateral_class.stable = True
     if hasattr(lateral_class, "invalid_reason"):
@@ -1135,14 +2391,20 @@ def write_isaac_export(
 __all__ = [
     "ISAAC_RECORD_VERSION",
     "REACTION_DATABASE_SCHEMA",
+    "CalculationFingerprintMemo",
     "apply_cached_states",
     "atoms_to_json",
     "calculation_cache_key",
     "calculator_identity",
+    "close_calculation_cache_connections",
     "initialise_calculation_database",
+    "input_coordinate_frame_fingerprint",
+    "input_geometry_fingerprint",
+    "invalidate_calculator_identity",
     "load_calculation_record",
     "make_calculation_record",
     "rebuild_calculation_index",
+    "scientific_input_fingerprint",
     "state_payload",
     "validate_isaac_record",
     "write_calculation_record",

@@ -71,7 +71,6 @@ Public API
 
 from __future__ import annotations
 
-import os
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -80,10 +79,10 @@ from networkx.algorithms import isomorphism
 
 from ase import Atoms
 from ase.constraints import FixAtoms
-from ase.optimize import BFGS
 
 from autokmc.io.calculators import acquire_calculator
 from autokmc.io.calculation_cache import (
+    CalculationFingerprintMemo,
     apply_cached_states,
     calculation_cache_key,
     calculator_identity,
@@ -109,6 +108,11 @@ from autokmc.sites.stability.adsorption import (
     SurfaceConnectivityError,
     AdsorbateDissociationError,
     OptimisationFailedError,
+)
+from autokmc.sites.stability.neb import (
+    make_neb_band,
+    neb_optimizer_logfile,
+    run_neb,
 )
 from autokmc.core.constants import (
     LATERAL_SHELLS_DEFAULT,
@@ -217,26 +221,10 @@ class TransitionStateInvalidError(DiffusionStabilityError):
     """
 
 
-# ---------------------------------------------------------------------------
-# ASE NEB import shim (modern: ``ase.mep``; older: ``ase.neb``).
-# ---------------------------------------------------------------------------
-
-try:                                                              # pragma: no cover
-    from ase.mep import NEB                                       # type: ignore
-except ImportError:                                               # pragma: no cover
-    from ase.neb import NEB                                       # type: ignore
-
-try:                                                              # pragma: no cover
-    from ase.mep import idpp_interpolate as _idpp_interpolate    # type: ignore
-except ImportError:                                               # pragma: no cover
-    try:
-        from ase.neb import idpp_interpolate as _idpp_interpolate  # type: ignore
-    except ImportError:                                           # pragma: no cover
-        _idpp_interpolate = None
-
-
-def _neb_optimizer_logfile(verbose: bool) -> str:
-    return "-" if verbose else os.devnull
+# Compatibility aliases for callers that imported the former channel-local
+# helpers.  The implementation now lives in ``stability.neb``.
+_make_neb_band = make_neb_band
+_neb_optimizer_logfile = neb_optimizer_logfile
 
 
 # ---------------------------------------------------------------------------
@@ -411,7 +399,7 @@ def check_diffusion_site_lateral(
     fp_index: dict | None = getattr(diffusion_site, "_lateral_fp_index", None)
     if fp_index is None:
         fp_index = {}
-        diffusion_site._lateral_fp_index = fp_index   # type: ignore[attr-defined]
+        diffusion_site._lateral_fp_index = fp_index
 
     # If this member was previously assigned to a different lateral class,
     # remove it from that class's members list before re-assigning so
@@ -447,7 +435,7 @@ def check_diffusion_site_lateral(
         n_shells      = depth,
         members       = [member_index],
     )
-    new_lc._fingerprint = fkey  # type: ignore[attr-defined]
+    new_lc._fingerprint = fkey
     diffusion_site.lateral_classes.append(new_lc)
     fp_index.setdefault(fkey, []).append(new_lc)
 
@@ -703,67 +691,6 @@ def _relax_endpoint(
 # NEB band construction + TS validity
 # ---------------------------------------------------------------------------
 
-def _make_neb_band(
-    atoms_a: Atoms,
-    atoms_b: Atoms,
-    *,
-    n_images: int,
-    interpolation: str,
-    spring_k: float,
-    climb: bool,
-    calculator,
-    frozen_indices: list[int] | None,
-) -> tuple["NEB", list[Atoms]]:
-    """Build an ASE NEB band of ``n_images + 2`` images between A and B.
-
-    The same calculator instance is attached to every image and ASE's
-    ``allow_shared_calculator`` path is enabled.  This is the current ASE
-    equivalent of deprecated ``SingleCalculatorNEB`` and avoids requiring
-    calculators to be deep-copyable.
-
-    ``interpolation == "idpp"`` uses the IDPP interpolator (falling back
-    to linear if the optional ASE module is unavailable); otherwise a
-    straight-line cartesian interpolation is used.
-    """
-    images: list[Atoms] = [atoms_a.copy()]
-    for _ in range(int(n_images)):
-        images.append(atoms_a.copy())
-    images.append(atoms_b.copy())
-
-    # Atoms.copy() preserves constraints, but be defensive in case the
-    # caller passed un-constrained endpoints and frozen_indices separately.
-    if frozen_indices:
-        for im in images:
-            im.set_constraint(FixAtoms(indices=list(frozen_indices)))
-
-    for im in images:
-        im.calc = calculator
-
-    neb = NEB(
-        images,
-        k=float(spring_k),
-        climb=bool(climb),
-        method="improvedtangent",
-        allow_shared_calculator=True,
-    )
-
-    if interpolation == "idpp" and _idpp_interpolate is not None:
-        try:
-            _idpp_interpolate(neb, mic=True)
-        except Exception as exc:
-            # IDPP can fail for very short bands or pathological geometries;
-            # fall back gracefully so a single bad pair doesn't kill the run.
-            _log.warning(
-                "IDPP interpolation failed (%s: %s); falling back to linear.",
-                type(exc).__name__, exc,
-            )
-            neb.interpolate("linear", mic=True)
-    else:
-        neb.interpolate("linear", mic=True)
-
-    return neb, images
-
-
 def _check_ts_validity(
     atoms_ts: Atoms,
     atoms_a: Atoms,
@@ -869,6 +796,209 @@ def _check_ts_validity(
 # ---------------------------------------------------------------------------
 # Public — stability + NEB
 # ---------------------------------------------------------------------------
+
+def _apply_diffusion_thermochemistry(
+    lateral_class: DiffusionLateral,
+    diffusion_site: DiffusionSite,
+    *,
+    atoms_a: Atoms,
+    atoms_b: Atoms,
+    atoms_ts: Atoms,
+    energy_a: float,
+    energy_b: float,
+    energy_ts: float,
+    n_slab: int,
+    n_lateral: int,
+    n_migrating: int,
+    calculator,
+    free_energy_options,
+    temperature_k: float | None,
+    vib_cache_root: str | None,
+) -> None:
+    """Populate thermochemistry from cached or freshly calculated states."""
+    if (
+        free_energy_options is None
+        or not getattr(free_energy_options, "enabled", False)
+        or temperature_k is None
+    ):
+        return
+
+    from pathlib import Path as _Path
+
+    from autokmc.thermo.free_energy import compute_harmonic_thermo
+
+    vib_indices = list(
+        range(
+            n_slab + n_lateral,
+            n_slab + n_lateral + n_migrating,
+        )
+    )
+    cache_dir_root = (
+        _Path(vib_cache_root) if vib_cache_root is not None else None
+    )
+    per_lat_dir = (
+        cache_dir_root
+        / f"diff_{smiles_to_dirname(diffusion_site.reactant)}"
+        / (
+            f"diff_iso{diffusion_site.iso_class}_"
+            f"lat{lateral_class.lateral_class}"
+        )
+        if cache_dir_root is not None
+        else None
+    )
+
+    def _harm(atoms, label, energy_ev, drop_imag):
+        return compute_harmonic_thermo(
+            atoms,
+            vib_indices,
+            energy_ev=float(energy_ev),
+            temperature_k=float(temperature_k),
+            calculator=calculator,
+            options=free_energy_options,
+            cache_dir=(str(per_lat_dir) if per_lat_dir is not None else None),
+            label=label,
+            drop_imaginary=drop_imag,
+        )
+
+    a_thermo = _harm(atoms_a, "state_a", energy_a, True)
+    b_thermo = _harm(atoms_b, "state_b", energy_b, True)
+    if getattr(free_energy_options, "include_ts_vibrations", True):
+        ts_thermo = _harm(atoms_ts, "ts", energy_ts, True)
+    else:
+        ts_thermo = None
+
+    if a_thermo is not None:
+        lateral_class.g_correction_a = a_thermo["g_corr_ev"]
+        lateral_class.g_a = a_thermo["g_total_ev"]
+        lateral_class.zpe_a = a_thermo["zpe_ev"]
+        lateral_class.entropy_a = a_thermo["entropy_ev_per_k"]
+        lateral_class.frequencies_a_ev = a_thermo["frequencies_ev"]
+        lateral_class.imaginary_a_ev = a_thermo["imaginary_ev"]
+    if b_thermo is not None:
+        lateral_class.g_correction_b = b_thermo["g_corr_ev"]
+        lateral_class.g_b = b_thermo["g_total_ev"]
+        lateral_class.zpe_b = b_thermo["zpe_ev"]
+        lateral_class.entropy_b = b_thermo["entropy_ev_per_k"]
+        lateral_class.frequencies_b_ev = b_thermo["frequencies_ev"]
+        lateral_class.imaginary_b_ev = b_thermo["imaginary_ev"]
+    if ts_thermo is not None:
+        lateral_class.g_correction_ts = ts_thermo["g_corr_ev"]
+        lateral_class.g_ts = ts_thermo["g_total_ev"]
+        lateral_class.zpe_ts = ts_thermo["zpe_ev"]
+        lateral_class.entropy_ts = ts_thermo["entropy_ev_per_k"]
+        lateral_class.frequencies_ts_ev = ts_thermo["frequencies_ev"]
+        lateral_class.imaginary_ts_ev = ts_thermo["imaginary_ev"]
+    elif a_thermo is not None and b_thermo is not None:
+        avg_corr = 0.5 * (a_thermo["g_corr_ev"] + b_thermo["g_corr_ev"])
+        lateral_class.g_correction_ts = float(avg_corr)
+        lateral_class.g_ts = float(energy_ts) + float(avg_corr)
+
+
+def _write_diffusion_calculation_cache(
+    calculation_cache_root: str,
+    cache_key: str,
+    cache_graph: nx.Graph,
+    cache_parameters: dict,
+    cache_inputs: dict,
+    fingerprint_memo: CalculationFingerprintMemo,
+    diffusion_site: DiffusionSite,
+    lateral_class: DiffusionLateral,
+    *,
+    atoms_a: Atoms,
+    atoms_b: Atoms,
+    atoms_ts: Atoms,
+    energy_a: float,
+    energy_b: float,
+    energy_ts: float,
+) -> None:
+    props_a = {
+        name: getattr(lateral_class, name, None)
+        for name in (
+            "g_correction_a",
+            "g_a",
+            "zpe_a",
+            "entropy_a",
+            "frequencies_a_ev",
+            "imaginary_a_ev",
+        )
+    }
+    props_b = {
+        name: getattr(lateral_class, name, None)
+        for name in (
+            "g_correction_b",
+            "g_b",
+            "zpe_b",
+            "entropy_b",
+            "frequencies_b_ev",
+            "imaginary_b_ev",
+        )
+    }
+    props_ts = {
+        name: getattr(lateral_class, name, None)
+        for name in (
+            "g_correction_ts",
+            "g_ts",
+            "zpe_ts",
+            "entropy_ts",
+            "frequencies_ts_ev",
+            "imaginary_ts_ev",
+        )
+    }
+    neb = None
+    if getattr(lateral_class, "atoms_neb_path", None):
+        neb = {
+            "energies_ev": list(
+                getattr(lateral_class, "neb_path_energies", []) or []
+            ),
+            "path_atoms": list(
+                getattr(lateral_class, "atoms_neb_path", []) or []
+            ),
+        }
+    record = make_calculation_record(
+        kind="diffusion",
+        cache_key=cache_key,
+        operation={
+            "label": f"diffusion:{diffusion_site.reactant}",
+            "reaction": f"{diffusion_site.reactant}* site_a -> site_b",
+            "reactant_smiles": diffusion_site.reactant,
+            "iso_class": int(diffusion_site.iso_class),
+            "lateral_class": int(lateral_class.lateral_class),
+            "temperature_k": cache_parameters["temperature_k"],
+        },
+        parameters=cache_parameters,
+        inputs={
+            **cache_inputs,
+            "reactant_smiles": diffusion_site.reactant,
+            "iso_class": int(diffusion_site.iso_class),
+            "lateral_class": int(lateral_class.lateral_class),
+        },
+        states={
+            "state_a": state_payload(
+                atoms_a,
+                energy_ev=energy_a,
+                properties=props_a,
+            ),
+            "state_b": state_payload(
+                atoms_b,
+                energy_ev=energy_b,
+                properties=props_b,
+            ),
+            "transition": state_payload(
+                atoms_ts,
+                energy_ev=energy_ts,
+                properties=props_ts,
+            ),
+        },
+        reaction_graph=cache_graph,
+        neb=neb,
+    )
+    write_calculation_record(
+        calculation_cache_root,
+        "diffusion",
+        cache_key,
+        record,
+        fingerprint_memo=fingerprint_memo,
+    )
 
 def check_diffusion_stability(
     G: nx.Graph,
@@ -986,6 +1116,13 @@ def check_diffusion_stability(
     cache_kind = "diffusion"
     cache_key: str | None = None
     cache_graph: nx.Graph | None = None
+    cache_fingerprint_memo = CalculationFingerprintMemo()
+    electronic_cache_state: tuple[float, float, float, Atoms, Atoms, Atoms] | None = None
+    thermochemistry_requested = bool(
+        free_energy_options is not None
+        and getattr(free_energy_options, "enabled", False)
+        and free_energy_temperature_k is not None
+    )
     cache_parameters = {
         "fmax": float(fmax),
         "max_steps": int(max_steps),
@@ -1004,7 +1141,6 @@ def check_diffusion_stability(
             None if free_energy_temperature_k is None
             else float(free_energy_temperature_k)
         ),
-        "calculator": calculator_identity(calculator),
     }
     if free_energy_options is not None:
         cache_parameters["free_energy"] = {
@@ -1027,6 +1163,7 @@ def check_diffusion_stability(
 
     if calculation_cache_root is not None:
         try:
+            cache_parameters["calculator"] = calculator_identity(calculator)
             cache_graph = normalise_reaction_graph(lateral_class.ego_graph)
             cache_graph.graph["n_shells"] = int(lateral_class.n_shells)
             atoms_b_seed, _, _, _, _ = _build_diffusion_atoms(
@@ -1040,14 +1177,15 @@ def check_diffusion_stability(
                 "iso_class": int(diffusion_site.iso_class),
                 "lateral_class": int(lateral_class.lateral_class),
             }
+            cache_inputs = {
+                "state_a_initial": atoms_a_init,
+                "state_b_seed_initial": atoms_b_seed,
+            }
             cache_key = calculation_cache_key(
                 kind=cache_kind,
                 identity=cache_identity,
                 parameters=cache_parameters,
-                inputs={
-                    "state_a_initial": atoms_a_init,
-                    "state_b_seed_initial": atoms_b_seed,
-                },
+                inputs=cache_inputs,
             )
             cached = load_calculation_record(
                 calculation_cache_root,
@@ -1056,6 +1194,9 @@ def check_diffusion_stability(
                 reaction_graph=cache_graph,
                 operation=cache_identity,
                 parameters=cache_parameters,
+                inputs=cache_inputs,
+                allow_electronic_match=True,
+                fingerprint_memo=cache_fingerprint_memo,
             )
             if cached is not None and apply_cached_states(
                 lateral_class,
@@ -1065,17 +1206,32 @@ def check_diffusion_stability(
                     "state_b": ("energy_b", "atoms_b"),
                     "transition": ("energy_ts", "atoms_ts"),
                 },
+                include_properties=cached.get("_cache_match") != "electronic",
             ):
+                electronic_only = cached.get("_cache_match") == "electronic"
                 if verbose:
                     print(
                         f"  [cache] diffusion iso={diffusion_site.iso_class} "
                         f"lat={lateral_class.lateral_class}: loaded "
                         "endpoint/NEB calculation"
+                        + (
+                            "; recomputing thermochemistry"
+                            if electronic_only and thermochemistry_requested
+                            else ""
+                        )
                     )
-                return (
+                energies = (
                     float(lateral_class.energy_a),
                     float(lateral_class.energy_b),
                     float(lateral_class.energy_ts),
+                )
+                if not electronic_only or not thermochemistry_requested:
+                    return energies
+                electronic_cache_state = (
+                    *energies,
+                    lateral_class.atoms_a,
+                    lateral_class.atoms_b,
+                    lateral_class.atoms_ts,
                 )
         except Exception as exc:
             _log.debug(
@@ -1085,6 +1241,53 @@ def check_diffusion_stability(
                 lateral_class.lateral_class,
                 exc,
             )
+
+    if electronic_cache_state is not None:
+        (
+            E_a,
+            E_b,
+            E_ts,
+            atoms_a_opt,
+            atoms_b_opt,
+            atoms_ts,
+        ) = electronic_cache_state
+        _apply_diffusion_thermochemistry(
+            lateral_class,
+            diffusion_site,
+            atoms_a=atoms_a_opt,
+            atoms_b=atoms_b_opt,
+            atoms_ts=atoms_ts,
+            energy_a=E_a,
+            energy_b=E_b,
+            energy_ts=E_ts,
+            n_slab=n_slab,
+            n_lateral=n_lat,
+            n_migrating=n_mig,
+            calculator=calculator,
+            free_energy_options=free_energy_options,
+            temperature_k=free_energy_temperature_k,
+            vib_cache_root=vib_cache_root,
+        )
+        assert calculation_cache_root is not None
+        assert cache_key is not None
+        assert cache_graph is not None
+        _write_diffusion_calculation_cache(
+            calculation_cache_root,
+            cache_key,
+            cache_graph,
+            cache_parameters,
+            cache_inputs,
+            cache_fingerprint_memo,
+            diffusion_site,
+            lateral_class,
+            atoms_a=atoms_a_opt,
+            atoms_b=atoms_b_opt,
+            atoms_ts=atoms_ts,
+            energy_a=E_a,
+            energy_b=E_b,
+            energy_ts=E_ts,
+        )
+        return E_a, E_b, E_ts
 
     if verbose:
         print(
@@ -1157,56 +1360,35 @@ def check_diffusion_stability(
             f"fmax={float(fmax):.4f} eV/Å  max_steps={int(max_steps)}"
         )
 
-    with acquire_calculator(calculator, purpose="diffusion NEB") as neb_calc:
-        neb, images = _make_neb_band(
-            atoms_a_opt, atoms_b_opt,
-            n_images       = int(n_images),
-            interpolation  = str(interpolation),
-            spring_k       = float(spring_k),
-            climb          = bool(climb),
-            calculator     = neb_calc,
-            frozen_indices = frozen_indices,
-        )
-        try:
-            opt = BFGS(neb, logfile=_neb_optimizer_logfile(verbose))
-            opt.run(fmax=float(fmax), steps=int(max_steps))
+    neb_result = run_neb(
+        atoms_a_opt,
+        atoms_b_opt,
+        calculator=calculator,
+        purpose="diffusion NEB",
+        n_images=int(n_images),
+        interpolation=str(interpolation),
+        spring_k=float(spring_k),
+        climb=bool(climb),
+        frozen_indices=frozen_indices,
+        fmax=float(fmax),
+        max_steps=int(max_steps),
+        verbose=verbose,
+        not_converged_error=NEBNotConvergedError,
+        persist_path=persist_neb_path,
+        band_factory=_make_neb_band,
+        logfile_factory=_neb_optimizer_logfile,
+    )
+    E_ts = neb_result.energy_ts
+    atoms_ts = neb_result.atoms_ts
+    k_ts = neb_result.transition_index
 
-            if not opt.converged():
-                raise NEBNotConvergedError(
-                    f"CI-NEB did not converge: fmax={fmax} eV/Å not reached in "
-                    f"{max_steps} steps."
-                )
-
-            # ── 5. Identify TS = highest-energy interior image; validate ────────
-            energies = np.array([float(im.get_potential_energy()) for im in images])
-            interior = energies[1:-1]
-            if len(interior) == 0:
-                raise NEBNotConvergedError(
-                    "NEB band has no interior images (n_images=0); "
-                    "cannot identify a TS."
-                )
-            k_ts = 1 + int(np.argmax(interior))
-            E_ts = float(energies[k_ts])
-            atoms_ts = images[k_ts].copy()
-            atoms_ts.calc = None
-
-            # Store TS and NEB path immediately — they will be available even if
-            # _check_ts_validity raises so callers can read partial results from
-            # lateral_class after catching the exception.
-            lateral_class.energy_ts = E_ts
-            lateral_class.atoms_ts  = atoms_ts
-            if persist_neb_path:
-                lateral_class.neb_path_energies = [
-                    float(im.get_potential_energy()) for im in images
-                ]
-                lateral_class.atoms_neb_path = []
-                for im in images:
-                    snap = im.copy()
-                    snap.calc = None
-                    lateral_class.atoms_neb_path.append(snap)
-        finally:
-            for im in images:
-                im.calc = None
+    # Store TS and NEB path immediately — they remain available if the
+    # channel-specific validity check below rejects the transition state.
+    lateral_class.energy_ts = E_ts
+    lateral_class.atoms_ts = atoms_ts
+    if persist_neb_path:
+        lateral_class.neb_path_energies = neb_result.path_energies
+        lateral_class.atoms_neb_path = neb_result.path_images
 
     _check_ts_validity(
         atoms_ts, atoms_a_opt, atoms_b_opt,
@@ -1218,84 +1400,35 @@ def check_diffusion_stability(
         e_b        = E_b,
         e_ts       = E_ts,
         ts_index   = k_ts,
-        n_interior = len(interior),
+        n_interior = neb_result.n_interior,
     )
 
     # ── 6. Mark stable ────────────────────────────────────────────────────
     lateral_class.stable     = True
     if verbose:
         print(
-            f"  [NEB] converged=True steps={opt.nsteps}  "
-            f"E_ts={E_ts:.4f} eV  image={k_ts}/{len(interior)}  ✓ stable"
+            f"  [NEB] converged=True steps={neb_result.optimizer_steps}  "
+            f"E_ts={E_ts:.4f} eV  "
+            f"image={k_ts}/{neb_result.n_interior}  ✓ stable"
         )
 
-    # ── 7. Optional harmonic thermochemistry on A / B / TS ──────────────
-    # The migrating molecule occupies the tail of the per-image atom array
-    # (slab | lateral_neighbours | migrating_block).  Vibrate only those
-    # indices so frozen slab + lateral neighbours contribute zero.
-    if (free_energy_options is not None
-            and getattr(free_energy_options, "enabled", False)
-            and free_energy_temperature_k is not None):
-        from autokmc.thermo.free_energy import compute_harmonic_thermo
-        from pathlib import Path as _Path
-
-        vib_indices = list(range(n_slab + n_lat, n_slab + n_lat + n_mig))
-        cache_dir_root = (
-            _Path(vib_cache_root) if vib_cache_root is not None else None
-        )
-        per_lat_dir = (
-            cache_dir_root / f"diff_{smiles_to_dirname(diffusion_site.reactant)}" /
-            f"diff_iso{diffusion_site.iso_class}_lat{lateral_class.lateral_class}"
-            if cache_dir_root is not None else None
-        )
-
-        def _harm(atoms, label, energy_ev, drop_imag):
-            return compute_harmonic_thermo(
-                atoms, vib_indices,
-                energy_ev      = float(energy_ev),
-                temperature_k  = float(free_energy_temperature_k),
-                calculator     = calculator,
-                options        = free_energy_options,
-                cache_dir      = (str(per_lat_dir) if per_lat_dir is not None else None),
-                label          = label,
-                drop_imaginary = drop_imag,
-            )
-
-        a_thermo  = _harm(atoms_a_opt, "state_a", E_a,  True)
-        b_thermo  = _harm(atoms_b_opt, "state_b", E_b,  True)
-        if getattr(free_energy_options, "include_ts_vibrations", True):
-            ts_thermo = _harm(atoms_ts, "ts", E_ts, True)
-        else:
-            ts_thermo = None
-
-        if a_thermo is not None:
-            lateral_class.g_correction_a   = a_thermo["g_corr_ev"]
-            lateral_class.g_a              = a_thermo["g_total_ev"]
-            lateral_class.zpe_a            = a_thermo["zpe_ev"]
-            lateral_class.entropy_a        = a_thermo["entropy_ev_per_k"]
-            lateral_class.frequencies_a_ev = a_thermo["frequencies_ev"]
-            lateral_class.imaginary_a_ev   = a_thermo["imaginary_ev"]
-        if b_thermo is not None:
-            lateral_class.g_correction_b   = b_thermo["g_corr_ev"]
-            lateral_class.g_b              = b_thermo["g_total_ev"]
-            lateral_class.zpe_b            = b_thermo["zpe_ev"]
-            lateral_class.entropy_b        = b_thermo["entropy_ev_per_k"]
-            lateral_class.frequencies_b_ev = b_thermo["frequencies_ev"]
-            lateral_class.imaginary_b_ev   = b_thermo["imaginary_ev"]
-        if ts_thermo is not None:
-            lateral_class.g_correction_ts   = ts_thermo["g_corr_ev"]
-            lateral_class.g_ts              = ts_thermo["g_total_ev"]
-            lateral_class.zpe_ts            = ts_thermo["zpe_ev"]
-            lateral_class.entropy_ts        = ts_thermo["entropy_ev_per_k"]
-            lateral_class.frequencies_ts_ev = ts_thermo["frequencies_ev"]
-            lateral_class.imaginary_ts_ev   = ts_thermo["imaginary_ev"]
-        elif a_thermo is not None and b_thermo is not None:
-            # Endpoint-ZPE-only fallback: use the average correction of A/B
-            # as the TS correction so detailed-balance ratios are preserved
-            # without paying the cost of a dedicated TS vib analysis.
-            avg_corr = 0.5 * (a_thermo["g_corr_ev"] + b_thermo["g_corr_ev"])
-            lateral_class.g_correction_ts = float(avg_corr)
-            lateral_class.g_ts            = float(E_ts) + float(avg_corr)
+    _apply_diffusion_thermochemistry(
+        lateral_class,
+        diffusion_site,
+        atoms_a=atoms_a_opt,
+        atoms_b=atoms_b_opt,
+        atoms_ts=atoms_ts,
+        energy_a=E_a,
+        energy_b=E_b,
+        energy_ts=E_ts,
+        n_slab=n_slab,
+        n_lateral=n_lat,
+        n_migrating=n_mig,
+        calculator=calculator,
+        free_energy_options=free_energy_options,
+        temperature_k=free_energy_temperature_k,
+        vib_cache_root=vib_cache_root,
+    )
 
     _log.debug(
         "check_diffusion_stability: diff_iso=%d member=%d lat=%d  "
@@ -1303,78 +1436,25 @@ def check_diffusion_stability(
         diffusion_site.iso_class, member_index, lateral_class.lateral_class,
         E_a, E_b, E_ts, E_ts - E_a, E_ts - E_b,
     )
-    if calculation_cache_root is not None and cache_key is not None:
-        props_a = {
-            name: getattr(lateral_class, name, None)
-            for name in (
-                "g_correction_a",
-                "g_a",
-                "zpe_a",
-                "entropy_a",
-                "frequencies_a_ev",
-                "imaginary_a_ev",
-            )
-        }
-        props_b = {
-            name: getattr(lateral_class, name, None)
-            for name in (
-                "g_correction_b",
-                "g_b",
-                "zpe_b",
-                "entropy_b",
-                "frequencies_b_ev",
-                "imaginary_b_ev",
-            )
-        }
-        props_ts = {
-            name: getattr(lateral_class, name, None)
-            for name in (
-                "g_correction_ts",
-                "g_ts",
-                "zpe_ts",
-                "entropy_ts",
-                "frequencies_ts_ev",
-                "imaginary_ts_ev",
-            )
-        }
-        neb = None
-        if getattr(lateral_class, "atoms_neb_path", None):
-            neb = {
-                "energies_ev": list(getattr(lateral_class, "neb_path_energies", []) or []),
-                "path_atoms": list(getattr(lateral_class, "atoms_neb_path", []) or []),
-            }
-        record = make_calculation_record(
-            kind=cache_kind,
-            cache_key=cache_key,
-            operation={
-                "label": f"diffusion:{diffusion_site.reactant}",
-                "reaction": f"{diffusion_site.reactant}* site_a -> site_b",
-                "reactant_smiles": diffusion_site.reactant,
-                "iso_class": int(diffusion_site.iso_class),
-                "lateral_class": int(lateral_class.lateral_class),
-                "temperature_k": cache_parameters["temperature_k"],
-            },
-            parameters=cache_parameters,
-            inputs={
-                "reactant_smiles": diffusion_site.reactant,
-                "iso_class": int(diffusion_site.iso_class),
-                "lateral_class": int(lateral_class.lateral_class),
-            },
-            states={
-                "state_a": state_payload(
-                    atoms_a_opt, energy_ev=E_a, properties=props_a,
-                ),
-                "state_b": state_payload(
-                    atoms_b_opt, energy_ev=E_b, properties=props_b,
-                ),
-                "transition": state_payload(
-                    atoms_ts, energy_ev=E_ts, properties=props_ts,
-                ),
-            },
-            reaction_graph=cache_graph,
-            neb=neb,
-        )
-        write_calculation_record(
-            calculation_cache_root, cache_kind, cache_key, record,
+    if (
+        calculation_cache_root is not None
+        and cache_key is not None
+        and cache_graph is not None
+    ):
+        _write_diffusion_calculation_cache(
+            calculation_cache_root,
+            cache_key,
+            cache_graph,
+            cache_parameters,
+            cache_inputs,
+            cache_fingerprint_memo,
+            diffusion_site,
+            lateral_class,
+            atoms_a=atoms_a_opt,
+            atoms_b=atoms_b_opt,
+            atoms_ts=atoms_ts,
+            energy_a=E_a,
+            energy_b=E_b,
+            energy_ts=E_ts,
         )
     return E_a, E_b, E_ts

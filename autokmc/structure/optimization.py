@@ -7,7 +7,6 @@ import os
 from typing import Dict, Optional, Tuple
 
 from ase import Atoms
-from ase.calculators.emt import EMT
 from ase.optimize import LBFGS
 
 try:
@@ -25,10 +24,12 @@ from autokmc.structure.builders import (
     _validate_crystal_structure,
 )
 from autokmc.core.pbc import set_full_pbc_if_cell
-from autokmc.io.calculators import acquire_calculator
+from autokmc.io.calculators import CalculatorConfigError, acquire_calculator
 from autokmc.structure.types import LatticeParams
+from autokmc.utils.telemetry import instrument
 
 
+@instrument("optimization.bulk")
 def optimise_bulk(
     symbol: str,
     crystal_structure: str = "fcc",
@@ -39,7 +40,9 @@ def optimise_bulk(
 ) -> Tuple[Atoms, Dict[str, float]]:
     """Relax a bulk unit cell and return the optimised Atoms and lattice params."""
     if calculator is None:
-        calculator = EMT()
+        raise CalculatorConfigError(
+            "optimise_bulk requires an explicit calculator"
+        )
 
     crystal_structure = crystal_structure.lower()
     _validate_crystal_structure(crystal_structure)
@@ -79,6 +82,7 @@ def optimise_bulk(
     return bulk_atoms, lp_out
 
 
+@instrument("optimization.structure")
 def optimise_structure(
     atoms: Atoms,
     calculator=None,
@@ -109,7 +113,10 @@ def optimise_structure(
                         "the 'calculator' argument."
                     ) from deepcopy_exc
         else:
-            result.calc = EMT()
+            raise CalculatorConfigError(
+                "optimise_structure requires an explicit calculator or an "
+                "input Atoms object with an attached calculator"
+            )
 
     log = logfile if logfile is not None else os.devnull
     opt = LBFGS(result, logfile=log)

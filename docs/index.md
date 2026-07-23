@@ -16,8 +16,7 @@ event and structural information for reproducible post-processing.
   event schema, trajectories, checkpoint continuation, product rates, and
   backward-propagated mechanisms.
 - [ISAAC reaction database](reaction-database.md): record layout, `.extxyz`
-  assets, matching rules, index recovery, and the intentional
-  geometry-insensitive fallback.
+  assets, geometry/model-aware matching rules, and index recovery.
 - [Development guide](development.md): package layout, tests, static checks,
   and schema-change conventions.
 
@@ -31,13 +30,20 @@ entry point. The two production-style platinum examples are:
 
 ```bash
 autokmc validate-config CONFIG.yaml
+autokmc preflight CONFIG.yaml
+autokmc doctor [CONFIG.yaml]
 autokmc run CONFIG.yaml
 autokmc analyze RUN_DIR
+autokmc report RUN_DIR
 autokmc rebuild-index CALCULATION_CACHE_DIR
 ```
 
 Use `autokmc COMMAND --help` for the current command-line arguments. Running
 `python -m autokmc.cli ...` is equivalent to the installed `autokmc` command.
+`preflight` performs read-only run-safety and calculator-import checks;
+`--check-calculator` adds a finite energy/force probe. `doctor` reports
+runtime/package readiness without chemistry. Expected failures are concise;
+put the global `--debug` option before the command to show a traceback.
 
 ## Reproducibility model
 

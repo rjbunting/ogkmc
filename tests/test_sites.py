@@ -11,9 +11,11 @@ from ase import Atoms
 from ase.calculators.singlepoint import SinglePointCalculator
 
 from autokmc.sites.anchors import (
+    _enumerate_cliques,
     _get_cell,
     _optimise_position,
     _outward_height_for_clique,
+    _reserve_node_ids,
 )
 from autokmc.sites.adsorbate import (
     AdsorbateSite,
@@ -33,7 +35,10 @@ from autokmc.sites.bond import (
     _prune_one_per_adsorption_triple,
     rebuild_bond_reverse_indexes,
 )
-from autokmc.sites.diffusion import rebuild_diffusion_reverse_indexes
+from autokmc.sites.diffusion import (
+    find_diffusion_sites,
+    rebuild_diffusion_reverse_indexes,
+)
 from autokmc.sites.stability.adsorption import check_adsorbate_site_lateral
 from autokmc.sites.stability.adsorption import check_site_stability
 from autokmc.sites.stability.bond import _select_c_to_ab_mapping
@@ -48,6 +53,225 @@ def test_sites_package_exports_public_api():
     assert callable(sites.find_adsorbate_sites)
     assert callable(sites.find_diffusion_sites)
     assert callable(sites.find_bond_sites)
+
+
+def test_node_id_allocator_uses_persistent_monotonic_cursor():
+    graph = nx.Graph()
+    graph.add_nodes_from(range(100))
+
+    first = list(_reserve_node_ids(graph, 3))
+    graph.add_nodes_from(first)
+    graph.remove_node(first[-1])
+    second = list(_reserve_node_ids(graph, 2))
+
+    assert first == [100, 101, 102]
+    assert second == [103, 104]
+    assert graph.graph["_autokmc_next_node_id"] == 105
+
+
+def test_configured_clique_cap_skips_unbounded_maximal_clique_scan(monkeypatch):
+    graph = nx.Graph()
+    graph.graph["cell"] = np.eye(3) * 10.0
+    graph.graph["pbc"] = np.array([False, False, False])
+    for node in range(4):
+        graph.add_node(
+            node,
+            type="surface",
+            element="Cu",
+            position=np.array([float(node), 0.0, 0.0]),
+        )
+    co_bond = nx.complete_graph(4)
+
+    import autokmc.sites.anchors as anchor_module
+
+    monkeypatch.setattr(
+        anchor_module,
+        "_build_co_bond_graph",
+        lambda *_args, **_kwargs: co_bond,
+    )
+    monkeypatch.setattr(
+        nx,
+        "find_cliques",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("bounded enumeration must not scan maximal cliques")
+        ),
+    )
+
+    sites = _enumerate_cliques(
+        graph,
+        "O",
+        0.66,
+        k_max=2,
+    )
+
+    assert set(sites) == {1, 2}
+    assert len(sites[1]) == 4
+    assert len(sites[2]) == 6
+
+
+def test_adsorbate_enumeration_applies_anchor_cap_to_dense_surface(monkeypatch):
+    graph = nx.Graph()
+    graph.graph["cell"] = np.eye(3) * 20.0
+    graph.graph["pbc"] = np.array([True, True, False])
+    for node, angle in enumerate(np.linspace(0.0, 2.0 * np.pi, 5, endpoint=False)):
+        graph.add_node(
+            node,
+            type="surface",
+            element="Cu",
+            index=node,
+            covalent_radius=1.32,
+            position=np.array(
+                [5.0 + np.cos(angle), 5.0 + np.sin(angle), 0.0]
+            ),
+        )
+    graph.add_edges_from(nx.complete_graph(5).edges)
+    co_bond = nx.complete_graph(5)
+
+    import autokmc.sites.anchors as anchor_module
+
+    monkeypatch.setattr(
+        anchor_module,
+        "_build_co_bond_graph",
+        lambda *_args, **_kwargs: co_bond,
+    )
+    monkeypatch.setattr(
+        nx,
+        "find_cliques",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("configured workflows must remain bounded")
+        ),
+    )
+    reactant_graph = nx.Graph()
+    reactant_graph.add_node(0, element="O", covalent_radius=0.66)
+    reactant = SimpleNamespace(
+        smiles="[O]",
+        atoms=Atoms("O"),
+        graph=reactant_graph,
+        anchor_atoms=[0],
+        unique_nodes={"O": [[0]]},
+    )
+
+    sites = find_adsorbate_sites(
+        graph,
+        reactant,
+        anchor_k_max=2,
+        n_shells_anchor=1,
+        n_shells_pair=1,
+        prune_stable_only=False,
+    )
+
+    raw = graph.graph["raw_cliques"]["O"]
+    assert sites
+    assert set(raw) == {1, 2}
+    assert len(raw[1]) == 5
+    assert len(raw[2]) == 10
+    assert graph.graph["_anchor_k_max_by_element"]["O"] == 2
+
+
+def test_adsorbate_runtime_geometry_parameters_reach_each_algorithm_stage(
+    monkeypatch,
+):
+    import autokmc.sites.adsorbate as adsorbate_module
+
+    graph = nx.Graph()
+    graph.graph["cell"] = np.eye(3) * 20.0
+    graph.graph["pbc"] = np.array([False, False, False])
+    graph.add_node(
+        0,
+        type="surface",
+        element="Cu",
+        index=0,
+        covalent_radius=1.32,
+        position=np.zeros(3),
+    )
+
+    reactant_graph = nx.Graph()
+    reactant_graph.add_node(0, element="C", covalent_radius=0.76)
+    reactant_graph.add_node(1, element="H", covalent_radius=0.31)
+    reactant_graph.add_edge(0, 1)
+    reactant = SimpleNamespace(
+        smiles="[CH]",
+        atoms=Atoms("CH", positions=[[0.0, 0.0, 0.0], [0.0, 0.0, 4.2]]),
+        graph=reactant_graph,
+        anchor_atoms=[0],
+        unique_nodes={"C": [[0]], "H": [[1]]},
+    )
+
+    captured = {}
+    real_find_anchor_sites = adsorbate_module.find_anchor_sites
+
+    def capture_anchor(*args, **kwargs):
+        captured["anchor"] = dict(kwargs)
+        return real_find_anchor_sites(*args, **kwargs)
+
+    def capture_refinement(graph_arg, smiles, _reactant, **kwargs):
+        captured["refinement"] = dict(kwargs)
+        return graph_arg.graph["adsorbate_sites"][smiles]
+
+    def capture_pruning(_graph, sites, _reactant, _calculator, **kwargs):
+        captured["pruning"] = dict(kwargs)
+        return sites
+
+    monkeypatch.setattr(
+        adsorbate_module,
+        "find_anchor_sites",
+        capture_anchor,
+    )
+    monkeypatch.setattr(
+        adsorbate_module,
+        "optimise_adsorbate_site_positions",
+        capture_refinement,
+    )
+    monkeypatch.setattr(
+        adsorbate_module,
+        "prune_unstable_adsorbate_sites",
+        capture_pruning,
+    )
+
+    sites = find_adsorbate_sites(
+        graph,
+        reactant,
+        n_shells_anchor=None,
+        n_shells_pair=2,
+        co_factor=0.91,
+        opt_factor=0.86,
+        repulsion_weight=0.23,
+        repulsion_cutoff=8.5,
+        contact_factor=1.07,
+        standoff_factor=0.04,
+        n_restarts=3,
+        nn_distance=1.1,
+        max_pair_shells=7,
+        hull_tolerance=-0.15,
+        kabsch_max_mappings=123,
+        nl_mult=0.88,
+        calculator=object(),
+    )
+
+    assert sites
+    assert captured["anchor"] == {
+        "co_factor": 0.91,
+        "opt_factor": 0.86,
+        "repulsion_weight": 0.23,
+        "repulsion_cutoff": 8.5,
+        "n_shells": 4,
+        "k_max": None,
+        "hull_tolerance": -0.15,
+        "kabsch_max_mappings": 123,
+        "verbose": False,
+    }
+    assert captured["refinement"] == {
+        "repulsion_cutoff": 8.5,
+        "contact_factor": 1.07,
+        "standoff_factor": 0.04,
+        "n_restarts": 3,
+        "n_shells_pair": 2,
+        "nl_mult": 0.88,
+        "kabsch_max_mappings": 123,
+        "verbose": False,
+    }
+    assert captured["pruning"]["nl_mult"] == 0.88
+    assert captured["pruning"]["kabsch_max_mappings"] == 123
 
 
 def test_stability_package_exports_public_api():
@@ -323,6 +547,47 @@ def test_rebuild_diffusion_reverse_indexes_replaces_old_entries():
     assert G.graph["diffusion_surface_node_to_members"][1] == [(ds, 0)]
 
 
+def test_diffusion_enumeration_uses_local_surface_shell_without_apsp():
+    graph = nx.Graph()
+    graph.graph["cell"] = np.eye(3) * 10.0
+    graph.graph["pbc"] = np.array([True, True, False])
+    for surface_id, x_position in ((1, 0.0), (2, 2.5)):
+        graph.add_node(
+            surface_id,
+            type="surface",
+            element="Pt",
+            position=np.array([x_position, 0.0, 0.0]),
+        )
+    graph.add_edge(1, 2)
+    sites = []
+    for iso_class, node_id, surface_id in ((0, 10, 1), (1, 20, 2)):
+        clique = frozenset({surface_id})
+        graph.add_node(
+            node_id,
+            type="adsorbate",
+            element="O",
+            reactant="[O]",
+            iso_class=iso_class,
+            reactant_index=0,
+            clique=clique,
+            occupied=False,
+            siblings=(),
+            position=np.array([2.5 * iso_class, 0.0, 1.8]),
+        )
+        graph.add_edge(node_id, surface_id, anchor_bond=True)
+        sites.append(_site("[O]", iso_class, node_id, clique))
+
+    found = find_diffusion_sites(
+        graph,
+        sites,
+        max_hops=1,
+        prune_by_adsorption_pair=False,
+    )
+
+    assert sum(len(group) for group in found.values()) == 1
+    assert "surface_apsp" not in graph.graph
+
+
 def test_rebuild_bond_reverse_indexes_replaces_old_entries():
     G = nx.Graph()
     old_clique = frozenset({9})
@@ -428,6 +693,7 @@ def test_find_bond_sites_allows_gas_product_without_c_surface_site():
     brs = bond_sites[0]
     assert brs.gas_product is True
     assert brs.gas_reactant is gas_c
+    assert "surface_apsp" not in G.graph
     assert brs.members[0][4:] == (None, -1)
     assert brs.member_node_ids[0] == ([10], [20], [])
     assert brs._member_cliques[0] == ((clique_a,), (clique_b,), tuple())

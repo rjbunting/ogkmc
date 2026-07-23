@@ -2,7 +2,15 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from autokmc.cli.main import main
-from autokmc.cli.pipeline import run_from_config
+
+
+def run_from_config(*args: Any, **kwargs: Any) -> dict[str, Any]:
+    """Load the scientific pipeline only when a configured run is requested."""
+    from autokmc.cli.pipeline import run_from_config as implementation
+
+    return implementation(*args, **kwargs)
 
 __all__ = ["main", "run_from_config"]
