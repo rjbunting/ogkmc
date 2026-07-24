@@ -70,7 +70,7 @@ Public API
 * :class:`SiteStabilityError`        — base error for stability failures.
 * :class:`SurfaceConnectivityError`  — surface bonds changed after relaxation.
 * :class:`AdsorbateDissociationError`— adsorbate broke apart after relaxation.
-* :class:`OptimisationFailedError`   — LBFGS did not converge.
+* :class:`OptimisationFailedError`   — the selected optimizer did not converge.
 * :func:`check_adsorbate_site_lateral` — classify the lateral environment of
   one specific member; updates ``adsorbate_site.lateral_classes`` in place.
 * :func:`check_site_stability`       — relax occupied / unoccupied structures,
@@ -106,6 +106,7 @@ from autokmc.core.pbc import full_pbc_for_cell
 from autokmc.sites.adsorbate import AdsorbateSite, AdsorbateSiteLateral
 from autokmc.core.constants import NL_MULT_DEFAULT, LATERAL_SHELLS_DEFAULT
 from autokmc.utils.logging import get_logger
+from autokmc.utils.optimizers import DEFAULT_OPTIMIZER
 
 if TYPE_CHECKING:
     pass
@@ -130,7 +131,7 @@ class AdsorbateDissociationError(SiteStabilityError):
 
 
 class OptimisationFailedError(SiteStabilityError):
-    """LBFGS relaxation did not converge within the allowed number of steps."""
+    """The selected optimizer did not converge within the step limit."""
 
 
 # ---------------------------------------------------------------------------
@@ -1020,6 +1021,7 @@ def check_site_stability(
     fmax: float = 0.05,
     max_steps: int = 200,
     nl_mult: float = NL_MULT_DEFAULT,
+    optimizer: str = DEFAULT_OPTIMIZER,
     verbose: bool = False,
     free_energy_options=None,
     free_energy_temperature_k: float | None = None,
@@ -1035,7 +1037,7 @@ def check_site_stability(
     * **unoccupied** — same slab + lateral neighbours, site absent.
 
     Each is relaxed with a calculator acquired from *calculator* via
-    :func:`~autokmc.structure.optimise_structure` (LBFGS).  Before and after
+    :func:`~autokmc.structure.optimise_structure`.  Before and after
     each relaxation the ASE :class:`~ase.neighborlist.NeighborList` bond
     topology is compared; changes raise a :class:`SiteStabilityError`
     subclass.
@@ -1068,7 +1070,7 @@ def check_site_stability(
     fmax : float
         Force convergence threshold (eV/Å).  Default 0.05.
     max_steps : int
-        Maximum LBFGS steps.  Default 200.
+        Maximum optimizer steps.  Default 200.
     nl_mult : float
         Neighborlist cutoff multiplier for the connectivity stability check.
         Default :data:`~autokmc.core.constants.NL_MULT_DEFAULT`.
@@ -1085,7 +1087,7 @@ def check_site_stability(
     IndexError
         *member_index* out of range.
     OptimisationFailedError
-        LBFGS did not converge for either the occupied or unoccupied structure.
+        The selected optimizer did not converge for either endpoint.
     SurfaceConnectivityError
         A slab bond changed during either relaxation.
     AdsorbateDissociationError
@@ -1117,6 +1119,7 @@ def check_site_stability(
     cache_parameters = {
         "fmax": float(fmax),
         "max_steps": int(max_steps),
+        "optimizer": str(optimizer).strip().lower(),
         "nl_mult": float(nl_mult),
         "n_shells": int(lateral_class.n_shells),
         "free_energy_enabled": bool(
@@ -1352,6 +1355,7 @@ def check_site_stability(
                 calculator = calc,
                 fmax       = fmax,
                 steps      = max_steps,
+                optimizer  = optimizer,
                 verbose    = verbose,
             )
 
@@ -1368,7 +1372,7 @@ def check_site_stability(
 
             if max_force > fmax:
                 raise OptimisationFailedError(
-                    f"[{state}] LBFGS did not converge: "
+                    f"[{state}] optimizer {optimizer!r} did not converge: "
                     f"max|F| = {max_force:.4f} eV/Å after {max_steps} "
                     f"steps (fmax={fmax} eV/Å)."
                 )

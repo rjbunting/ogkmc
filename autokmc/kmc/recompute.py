@@ -41,6 +41,7 @@ from autokmc.sites.identity import (
 )
 from autokmc.sites.stability.adsorption import _surface_bfs_shells
 from autokmc.utils.telemetry import increment, instrument, set_gauge
+from autokmc.utils.optimizers import DEFAULT_OPTIMIZER
 
 IndexedReaction: TypeAlias = AdsorptionReaction | DiffusionReaction | BondReaction
 _RESERVED_CHANNEL_KWARGS = (
@@ -255,6 +256,7 @@ def recompute_affected_sites(
     fmax: float,
     max_steps: int,
     verbose: bool,
+    optimizer: str = DEFAULT_OPTIMIZER,
     max_n_shells: int = 1,
     rxn_index: _ReactionIndex | None = None,
     diffusion_sites: list[DiffusionSite] | None = None,
@@ -354,6 +356,7 @@ def recompute_affected_sites(
             frozen_indices=frozen_indices,
             fmax=fmax,
             max_steps=max_steps,
+            optimizer=optimizer,
             verbose=verbose,
             lateral_interactions=lateral_interactions,
             lateral_shells=lateral_shells,

@@ -163,6 +163,7 @@ def initialise_runtime(
         frozen_indices=settings.frozen_indices,
         fmax=settings.fmax,
         max_steps=settings.max_steps,
+        optimizer=settings.optimizer,
         verbose=settings.verbose,
         lateral_interactions=settings.lateral_interactions,
         lateral_shells=settings.lateral_shells,

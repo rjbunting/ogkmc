@@ -15,6 +15,7 @@ from __future__ import annotations
 import os
 import threading
 import warnings
+from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor, wait
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -24,7 +25,8 @@ from typing import TYPE_CHECKING, Any, Callable
 import numpy as np
 from ase import Atoms
 from ase.constraints import FixAtoms
-from ase.optimize import BFGS
+from ase.geometry import find_mic
+from ase.optimize import BFGS, FIRE, MDMin
 
 from autokmc.io.calculators import (
     CalculatorPool,
@@ -32,6 +34,11 @@ from autokmc.io.calculators import (
     calculator_batch_active,
 )
 from autokmc.utils.logging import get_logger
+from autokmc.utils.optimizers import (
+    DEFAULT_NEB_OPTIMIZER,
+    NEB_OPTIMIZERS,
+    normalize_optimizer_name,
+)
 from autokmc.utils.telemetry import instrument
 
 if TYPE_CHECKING:
@@ -220,6 +227,174 @@ def neb_optimizer_logfile(verbose: bool) -> str:
     return "-" if verbose else os.devnull
 
 
+def project_neb_path(
+    source_path: Sequence[Atoms],
+    atoms_initial: Atoms,
+    atoms_final: Atoms,
+    *,
+    n_slab: int,
+    n_lateral: int,
+) -> list[Atoms] | None:
+    """Project a bare optimized path into a lateral endpoint pair.
+
+    ``source_path`` must use the bare layout ``[slab | reacting]`` while the
+    target endpoints use ``[slab | lateral | reacting]``.  The target path is
+    first interpolated linearly with minimum-image displacements.  For each
+    interior image, the source path's minimum-image displacement away from its
+    own linear path is then transferred to the matching slab and reacting
+    atoms.  Lateral atoms therefore remain on the target linear path. The
+    source and target must represent the same concrete reaction member; a
+    caller must not transfer unrotated Cartesian residuals between different
+    symmetry-equivalent members. The returned endpoint images are exact copies
+    of ``atoms_initial`` and ``atoms_final``.
+
+    ``None`` is a deliberate fallback signal.  It is returned for any layout,
+    chemistry, cell, periodicity, image-count, or finite-coordinate mismatch
+    rather than constructing a potentially invalid NEB band.
+    """
+    try:
+        source_images = list(source_path)
+    except TypeError:
+        return None
+
+    try:
+        n_slab = int(n_slab)
+        n_lateral = int(n_lateral)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if (
+        len(source_images) < 3
+        or n_slab < 0
+        or n_lateral < 0
+        or len(atoms_initial) != len(atoms_final)
+    ):
+        return None
+
+    n_reacting = len(atoms_initial) - n_slab - n_lateral
+    if n_reacting <= 0:
+        return None
+    n_source = n_slab + n_reacting
+    if any(
+        not isinstance(image, Atoms) or len(image) != n_source
+        for image in source_images
+    ):
+        return None
+
+    target_cell = np.asarray(atoms_initial.cell.array, dtype=float)
+    target_pbc = np.asarray(atoms_initial.pbc, dtype=bool)
+    if (
+        not np.isfinite(target_cell).all()
+        or not np.array_equal(target_pbc, np.asarray(atoms_final.pbc, dtype=bool))
+        or not np.allclose(
+            target_cell,
+            np.asarray(atoms_final.cell.array, dtype=float),
+            rtol=0.0,
+            atol=1.0e-8,
+        )
+    ):
+        return None
+
+    source_cell = np.asarray(source_images[0].cell.array, dtype=float)
+    source_pbc = np.asarray(source_images[0].pbc, dtype=bool)
+    if (
+        not np.isfinite(source_cell).all()
+        or not np.array_equal(source_pbc, target_pbc)
+        or not np.allclose(
+            source_cell,
+            target_cell,
+            rtol=0.0,
+            atol=1.0e-8,
+        )
+    ):
+        return None
+    for image in source_images[1:]:
+        if (
+            not np.array_equal(np.asarray(image.pbc, dtype=bool), source_pbc)
+            or not np.allclose(
+                np.asarray(image.cell.array, dtype=float),
+                source_cell,
+                rtol=0.0,
+                atol=1.0e-8,
+            )
+        ):
+            return None
+
+    target_numbers_initial = np.asarray(atoms_initial.numbers, dtype=int)
+    target_numbers_final = np.asarray(atoms_final.numbers, dtype=int)
+    source_numbers = np.asarray(source_images[0].numbers, dtype=int)
+    target_reacting_indices = np.arange(
+        n_slab + n_lateral,
+        n_slab + n_lateral + n_reacting,
+        dtype=int,
+    )
+    target_common_indices = np.concatenate(
+        (np.arange(n_slab, dtype=int), target_reacting_indices)
+    )
+    source_common_indices = np.arange(n_source, dtype=int)
+    if (
+        not np.array_equal(target_numbers_initial, target_numbers_final)
+        or not np.array_equal(
+            source_numbers,
+            target_numbers_initial[
+                np.concatenate(
+                    (np.arange(n_slab, dtype=int), target_reacting_indices)
+                )
+            ],
+        )
+        or any(
+            not np.array_equal(np.asarray(image.numbers, dtype=int), source_numbers)
+            for image in source_images[1:]
+        )
+    ):
+        return None
+
+    all_positions = (
+        [np.asarray(image.positions, dtype=float) for image in source_images]
+        + [
+            np.asarray(atoms_initial.positions, dtype=float),
+            np.asarray(atoms_final.positions, dtype=float),
+        ]
+    )
+    if not all(np.isfinite(positions).all() for positions in all_positions):
+        return None
+
+    def _minimum_image(vectors: np.ndarray) -> np.ndarray:
+        if not np.any(target_pbc):
+            return np.asarray(vectors, dtype=float).copy()
+        mic_vectors, _ = find_mic(vectors, cell=target_cell, pbc=target_pbc)
+        return np.asarray(mic_vectors, dtype=float)
+
+    source_initial_positions = all_positions[0]
+    source_delta = _minimum_image(
+        all_positions[len(source_images) - 1] - source_initial_positions
+    )
+    target_initial_positions = all_positions[-2]
+    target_delta = _minimum_image(all_positions[-1] - target_initial_positions)
+
+    projected = [atoms_initial.copy()]
+    denominator = float(len(source_images) - 1)
+    for image_index, source_image in enumerate(source_images[1:-1], start=1):
+        fraction = float(image_index) / denominator
+        target_positions = target_initial_positions + fraction * target_delta
+        source_linear = source_initial_positions + fraction * source_delta
+        source_residual = _minimum_image(
+            np.asarray(source_image.positions, dtype=float) - source_linear
+        )
+        target_positions[target_common_indices] += source_residual[
+            source_common_indices
+        ]
+
+        image = atoms_initial.copy()
+        image.set_positions(target_positions, apply_constraint=False)
+        image.calc = None
+        projected.append(image)
+
+    projected.append(atoms_final.copy())
+    for image in projected:
+        image.calc = None
+    return projected
+
+
 def make_neb_band(
     atoms_initial: Atoms,
     atoms_final: Atoms,
@@ -230,17 +405,82 @@ def make_neb_band(
     climb: bool,
     calculator,
     frozen_indices: list[int] | None,
+    initial_path: Sequence[Atoms] | None = None,
 ) -> tuple[Any, list[Atoms]]:
     """Build an ASE NEB band with one shared, non-deepcopyable calculator.
 
-    ``n_images`` counts interior images.  IDPP interpolation falls back to a
-    linear path for the same short-band/pathological-geometry cases handled by
-    the former channel-local implementations.
+    ``n_images`` counts interior images.  A compatible ``initial_path`` is
+    copied directly into the band; otherwise IDPP interpolation falls back to
+    a linear path for the same short-band/pathological-geometry cases handled
+    by the former channel-local implementations.
     """
-    images: list[Atoms] = [atoms_initial.copy()]
-    for _ in range(int(n_images)):
-        images.append(atoms_initial.copy())
-    images.append(atoms_final.copy())
+    images: list[Atoms] | None = None
+    if initial_path is not None:
+        try:
+            candidates = list(initial_path)
+        except TypeError:
+            candidates = []
+        expected_count = int(n_images) + 2
+        target_numbers = np.asarray(atoms_initial.numbers, dtype=int)
+        target_cell = np.asarray(atoms_initial.cell.array, dtype=float)
+        target_pbc = np.asarray(atoms_initial.pbc, dtype=bool)
+        compatible = (
+            len(candidates) == expected_count
+            and len(atoms_initial) == len(atoms_final)
+            and np.array_equal(
+                target_numbers,
+                np.asarray(atoms_final.numbers, dtype=int),
+            )
+            and np.array_equal(
+                target_pbc,
+                np.asarray(atoms_final.pbc, dtype=bool),
+            )
+            and np.allclose(
+                target_cell,
+                np.asarray(atoms_final.cell.array, dtype=float),
+                rtol=0.0,
+                atol=1.0e-8,
+            )
+            and all(
+                isinstance(image, Atoms)
+                and len(image) == len(atoms_initial)
+                and np.array_equal(
+                    np.asarray(image.numbers, dtype=int),
+                    target_numbers,
+                )
+                and np.array_equal(
+                    np.asarray(image.pbc, dtype=bool),
+                    target_pbc,
+                )
+                and np.allclose(
+                    np.asarray(image.cell.array, dtype=float),
+                    target_cell,
+                    rtol=0.0,
+                    atol=1.0e-8,
+                )
+                and np.isfinite(
+                    np.asarray(image.positions, dtype=float)
+                ).all()
+                for image in candidates
+            )
+        )
+        if compatible:
+            images = [atoms_initial.copy()]
+            images.extend(image.copy() for image in candidates[1:-1])
+            images.append(atoms_final.copy())
+        else:
+            _log.warning(
+                "Bare NEB warm-start path is incompatible with the requested "
+                "band; falling back to %s interpolation.",
+                interpolation,
+            )
+
+    seeded = images is not None
+    if images is None:
+        images = [atoms_initial.copy()]
+        for _ in range(int(n_images)):
+            images.append(atoms_initial.copy())
+        images.append(atoms_final.copy())
 
     if frozen_indices:
         for image in images:
@@ -275,7 +515,7 @@ def make_neb_band(
     else:
         neb = NEB(images, parallel=False, **neb_kwargs)
 
-    if interpolation == "idpp" and _idpp_interpolate is not None:
+    if not seeded and interpolation == "idpp" and _idpp_interpolate is not None:
         # ASE's public ``NEB.interpolate(method="idpp")`` first builds a
         # linear path before invoking the low-level IDPP optimiser.  Calling
         # ``idpp_interpolate`` directly on the initial-state copies above
@@ -319,7 +559,7 @@ def make_neb_band(
             # optimiser raises before reaching the restoration loop.
             for image, calculator_for_image in zip(images, real_calculators):
                 image.calc = calculator_for_image
-    else:
+    elif not seeded:
         neb.interpolate("linear", mic=True)
 
     return neb, images
@@ -341,7 +581,10 @@ def run_neb(
     max_steps: int,
     verbose: bool,
     not_converged_error: type[Exception],
+    optimizer: str = DEFAULT_NEB_OPTIMIZER,
     persist_path: bool = False,
+    capture_path: bool = False,
+    initial_path: Sequence[Atoms] | None = None,
     initial_path_callback: Callable[[list[Atoms]], None] | None = None,
     band_factory=None,
     logfile_factory=None,
@@ -373,33 +616,54 @@ def run_neb(
             yield concrete
 
     with _band_calculator() as neb_calculator:
+        band_kwargs = {
+            "n_images": int(n_images),
+            "interpolation": str(interpolation),
+            "spring_k": float(spring_k),
+            "climb": False,
+            "calculator": neb_calculator,
+            "frozen_indices": frozen_indices,
+        }
+        if initial_path is not None:
+            band_kwargs["initial_path"] = initial_path
         neb, images = build_band(
             atoms_initial,
             atoms_final,
-            n_images=int(n_images),
-            interpolation=str(interpolation),
-            spring_k=float(spring_k),
-            climb=False,
-            calculator=neb_calculator,
-            frozen_indices=frozen_indices,
+            **band_kwargs,
         )
         try:
             if initial_path_callback is not None:
-                initial_path = []
+                initial_snapshot_path = []
                 for image in images:
                     snapshot = image.copy()
                     snapshot.calc = None
-                    initial_path.append(snapshot)
-                initial_path_callback(initial_path)
+                    initial_snapshot_path.append(snapshot)
+                initial_path_callback(initial_snapshot_path)
 
             optimizer_steps = 0
 
             def _optimise_stage(*, stage: str) -> None:
                 nonlocal optimizer_steps
-                optimizer = BFGS(neb, logfile=select_logfile(verbose))
-                optimizer.run(fmax=float(fmax), steps=int(max_steps))
-                optimizer_steps += int(optimizer.nsteps)
-                if not optimizer.converged():
+                optimizer_name = normalize_optimizer_name(
+                    optimizer,
+                    allowed=NEB_OPTIMIZERS,
+                    setting="neb_optimizer",
+                )
+                optimizer_cls = {
+                    "bfgs": BFGS,
+                    "fire": FIRE,
+                    "mdmin": MDMin,
+                }[optimizer_name]
+                stage_optimizer = optimizer_cls(
+                    neb,
+                    logfile=select_logfile(verbose),
+                )
+                stage_optimizer.run(
+                    fmax=float(fmax),
+                    steps=int(max_steps),
+                )
+                optimizer_steps += int(stage_optimizer.nsteps)
+                if not stage_optimizer.converged():
                     raise not_converged_error(
                         f"{stage} did not converge: fmax={fmax} eV/Å not "
                         f"reached in {max_steps} steps."
@@ -424,9 +688,10 @@ def run_neb(
             atoms_ts = images[transition_index].copy()
             atoms_ts.calc = None
 
-            path_energies = list(energies) if persist_path else None
+            retain_path = bool(persist_path or capture_path)
+            path_energies = list(energies) if retain_path else None
             path_images = None
-            if persist_path:
+            if retain_path:
                 path_images = []
                 for image in images:
                     snapshot = image.copy()
@@ -496,6 +761,7 @@ __all__ = [
     "NEBRunResult",
     "make_neb_band",
     "neb_optimizer_logfile",
+    "project_neb_path",
     "run_neb",
     # Legacy facade exports.
     "NEBNotConvergedError",

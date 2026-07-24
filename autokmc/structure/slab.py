@@ -29,6 +29,7 @@ from autokmc.structure.builders import (
 )
 from autokmc.structure.optimization import _resolve_lattice_params, optimise_structure
 from autokmc.structure.types import Composition, LatticeParams
+from autokmc.utils.optimizers import DEFAULT_OPTIMIZER
 
 try:
     from pymatgen.core.surface import SlabGenerator
@@ -60,6 +61,7 @@ def build_surface(
     fmax: float = 0.05,
     max_steps: int = 1000,
     logfile: Optional[str] = None,
+    optimizer: str = DEFAULT_OPTIMIZER,
     verbose: bool = True,
 ) -> Atoms:
     """Build and optimise a metal surface slab."""
@@ -81,7 +83,7 @@ def build_surface(
     primary = _primary_element(comp)
     lp = _resolve_lattice_params(
         primary, crystal_structure, lattice_constant, calculator,
-        fmax=fmax, verbose=verbose,
+        fmax=fmax, optimizer=optimizer, verbose=verbose,
     )
 
     bulk_atoms = _build_surface_parent_cell(primary, crystal_structure, lp)
@@ -172,6 +174,7 @@ def build_surface(
             fmax=fmax,
             steps=max_steps,
             logfile=logfile,
+            optimizer=optimizer,
             verbose=verbose,
         )
         result.calc = None

@@ -70,6 +70,7 @@ from autokmc.core.constants import (
 )
 from autokmc.io.calculators import CalculatorCfg
 from autokmc.reactions.rates import DEFAULT_TRANSMISSION_COEFFICIENT
+from autokmc.utils.optimizers import DEFAULT_NEB_OPTIMIZER, DEFAULT_OPTIMIZER
 
 
 # ---------------------------------------------------------------------------
@@ -120,6 +121,14 @@ class ConstantsCfg:
 
 
 @dataclass
+class OptimizationCfg:
+    """ASE optimizer choices used by calculator-backed relaxations."""
+
+    optimizer: str = DEFAULT_OPTIMIZER
+    neb_optimizer: str = DEFAULT_NEB_OPTIMIZER
+
+
+@dataclass
 class StructureCfg:
     kind: str = "surface"   # "surface", "nanoparticle", or "file"
     # File-backed structure knobs (used when kind == "file"):
@@ -143,9 +152,9 @@ class StructureCfg:
     #: Scale applied to covalent radii when classifying nanoparticle hull atoms.
     nanoparticle_hull_tolerance_factor: float = 0.5
     #: Force convergence criterion (eV/Å) for the slab/nanoparticle
-    #: LBFGS optimisation.  Default 0.05 eV/Å.
+    #: calculator-backed optimisation.  Default 0.05 eV/Å.
     fmax: float = 0.05
-    #: Maximum number of LBFGS steps for the slab/nanoparticle
+    #: Maximum number of optimizer steps for the slab/nanoparticle
     #: optimisation.  Default 1000.
     max_steps: int = 1000
     # Nanoparticle-only knobs (used when kind == "nanoparticle"):
@@ -292,7 +301,7 @@ class BondCfg:
     prune_with_calculator:   bool = BOND_PRUNE_WITH_CALCULATOR
     #: Force convergence threshold for the Stage-1 endpoint relaxation.
     prune_fmax:              float = PRUNE_FMAX
-    #: Maximum LBFGS steps for the Stage-1 endpoint relaxation.
+    #: Maximum optimizer steps for the Stage-1 endpoint relaxation.
     prune_max_steps:         int  = PRUNE_MAX_STEPS
     # ── NEB knobs (consumed by ``check_bond_site_stability`` via the KMC loop)
     neb_fmax:                float = NEB_FMAX
@@ -360,6 +369,7 @@ class RunConfig:
     schema_version: str = CONFIG_SCHEMA_VERSION
     output:           OutputCfg          = field(default_factory=OutputCfg)
     constants:        ConstantsCfg       = field(default_factory=ConstantsCfg)
+    optimization:     OptimizationCfg    = field(default_factory=OptimizationCfg)
     structure:        StructureCfg       = field(default_factory=StructureCfg)
     reactants:        list[ReactantCfg]  = field(default_factory=list)
     calculator:       CalculatorCfg      = field(default_factory=CalculatorCfg)
@@ -397,6 +407,7 @@ def _coerce(cls, value: Any, *, path: str = ""):
         "RunConfig": {
             "output":          OutputCfg,
             "constants":       ConstantsCfg,
+            "optimization":    OptimizationCfg,
             "structure":       StructureCfg,
             "calculator":      CalculatorCfg,
             "adsorbate_sites": AdsorbateSitesCfg,

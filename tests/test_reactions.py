@@ -6,8 +6,11 @@ from types import SimpleNamespace
 
 import networkx as nx
 import pytest
+from ase import Atoms
 
 from autokmc.reactions import AdsorptionReaction, BondReaction, DiffusionReaction
+import autokmc.reactions.bond as bond_module
+import autokmc.reactions.diffusion as diffusion_module
 from autokmc.reactions.adsorption import fast_reaction_for_member
 from autokmc.reactions.adsorption import _energetics_cached
 from autokmc.reactions.bond import _bond_energetics_cached, is_bond_applicable
@@ -161,3 +164,375 @@ def test_reactions_package_exports_public_models():
     assert AdsorptionReaction.__name__ == "AdsorptionReaction"
     assert DiffusionReaction.__name__ == "DiffusionReaction"
     assert BondReaction.__name__ == "BondReaction"
+
+
+def _detached_seed_band() -> list[Atoms]:
+    return [
+        Atoms("H", positions=[[float(index), 0.0, 0.0]])
+        for index in range(3)
+    ]
+
+
+def test_diffusion_runs_missing_bare_path_before_lateral_neb(monkeypatch):
+    order = []
+    bare = SimpleNamespace(
+        stable=None,
+        members=[],
+        lateral_class=0,
+        atoms_neb_path=None,
+    )
+    lateral = SimpleNamespace(
+        stable=None,
+        members=[0],
+        lateral_class=1,
+        energy_a=None,
+        energy_b=None,
+        energy_ts=None,
+    )
+    site = SimpleNamespace(
+        iso_class=4,
+        _member_lc={},
+        applicable_reactions=[],
+    )
+
+    monkeypatch.setattr(
+        diffusion_module,
+        "is_diffusion_applicable",
+        lambda *_args: (True, "a_to_b"),
+    )
+
+    def get_bare(*_args, **_kwargs):
+        order.append("bare_lookup")
+        return bare
+
+    def classify_lateral(*_args, **_kwargs):
+        order.append("lateral_classify")
+        return lateral
+
+    def check_stability(_graph, _site, member_index, lc, _calculator, **kwargs):
+        if lc is bare:
+            order.append("bare_neb")
+            assert kwargs["capture_neb_path"] is True
+            lc._warm_start_neb_path = _detached_seed_band()
+            lc._warm_start_member_index = member_index
+            lc.stable = True
+            return 0.0, 0.2, 0.8
+
+        order.append("lateral_neb")
+        assert kwargs["neb_seed_member_index"] == member_index
+        assert len(kwargs["neb_seed_path"]) == 3
+        lc.energy_a = 0.0
+        lc.energy_b = 0.2
+        lc.energy_ts = 0.8
+        lc.stable = True
+        return 0.0, 0.2, 0.8
+
+    monkeypatch.setattr(diffusion_module, "get_diffusion_bare_lateral", get_bare)
+    monkeypatch.setattr(
+        diffusion_module,
+        "check_diffusion_site_lateral",
+        classify_lateral,
+    )
+    monkeypatch.setattr(
+        diffusion_module,
+        "check_diffusion_stability",
+        check_stability,
+    )
+
+    reaction = diffusion_module.get_applicable_diffusion_for_member(
+        nx.Graph(),
+        site,
+        0,
+        object(),
+        temperature=500.0,
+        n_images=1,
+    )
+
+    assert reaction is not None
+    assert reaction.lateral_class is lateral
+    assert site._member_lc[0] is lateral
+    assert bare.members == []
+    assert order == [
+        "bare_lookup",
+        "lateral_classify",
+        "bare_neb",
+        "lateral_neb",
+    ]
+
+
+def test_diffusion_bare_failure_falls_back_to_configured_interpolation(
+    monkeypatch,
+):
+    bare = SimpleNamespace(
+        stable=None,
+        members=[],
+        lateral_class=0,
+        atoms_neb_path=None,
+    )
+    lateral = SimpleNamespace(
+        stable=None,
+        members=[0],
+        lateral_class=1,
+        energy_a=None,
+        energy_b=None,
+        energy_ts=None,
+    )
+    site = SimpleNamespace(
+        iso_class=5,
+        _member_lc={},
+        applicable_reactions=[],
+    )
+
+    monkeypatch.setattr(
+        diffusion_module,
+        "is_diffusion_applicable",
+        lambda *_args: (True, "a_to_b"),
+    )
+    monkeypatch.setattr(
+        diffusion_module,
+        "get_diffusion_bare_lateral",
+        lambda *_args, **_kwargs: bare,
+    )
+    monkeypatch.setattr(
+        diffusion_module,
+        "check_diffusion_site_lateral",
+        lambda *_args, **_kwargs: lateral,
+    )
+
+    def check_stability(_graph, _site, _member_index, lc, _calculator, **kwargs):
+        if lc is bare:
+            raise diffusion_module.DiffusionStabilityError("bare failed")
+        assert kwargs["neb_seed_path"] is None
+        lc.energy_a = 0.0
+        lc.energy_b = 0.2
+        lc.energy_ts = 0.8
+        lc.stable = True
+        return 0.0, 0.2, 0.8
+
+    monkeypatch.setattr(
+        diffusion_module,
+        "check_diffusion_stability",
+        check_stability,
+    )
+
+    reaction = diffusion_module.get_applicable_diffusion_for_member(
+        nx.Graph(),
+        site,
+        0,
+        object(),
+        temperature=500.0,
+        n_images=1,
+    )
+
+    assert reaction is not None
+    assert bare.stable is False
+    assert "bare failed" in bare.invalid_reason
+
+
+@pytest.mark.parametrize(
+    (
+        "reaction_module",
+        "applicability_name",
+        "bare_getter_name",
+        "classifier_name",
+        "stability_name",
+        "entrypoint_name",
+        "direction",
+    ),
+    [
+        (
+            diffusion_module,
+            "is_diffusion_applicable",
+            "get_diffusion_bare_lateral",
+            "check_diffusion_site_lateral",
+            "check_diffusion_stability",
+            "get_applicable_diffusion_for_member",
+            "a_to_b",
+        ),
+        (
+            bond_module,
+            "is_bond_applicable",
+            "get_bond_bare_lateral",
+            "check_bond_site_lateral",
+            "check_bond_site_stability",
+            "get_applicable_bond_reaction_for_member",
+            "couple",
+        ),
+    ],
+)
+def test_bare_stability_value_errors_are_not_swallowed_as_classifier_errors(
+    monkeypatch,
+    reaction_module,
+    applicability_name,
+    bare_getter_name,
+    classifier_name,
+    stability_name,
+    entrypoint_name,
+    direction,
+):
+    bare = SimpleNamespace(
+        stable=None,
+        members=[],
+        lateral_class=0,
+        atoms_neb_path=None,
+    )
+    lateral = SimpleNamespace(stable=None, members=[0], lateral_class=1)
+    site = SimpleNamespace(
+        iso_class=8,
+        _member_lc={},
+        applicable_reactions=[],
+    )
+
+    monkeypatch.setattr(
+        reaction_module,
+        applicability_name,
+        lambda *_args: (True, direction),
+    )
+    monkeypatch.setattr(
+        reaction_module,
+        bare_getter_name,
+        lambda *_args, **_kwargs: bare,
+    )
+    monkeypatch.setattr(
+        reaction_module,
+        classifier_name,
+        lambda *_args, **_kwargs: lateral,
+    )
+
+    def fail_stability(*_args, **_kwargs):
+        raise ValueError("invalid NEB configuration")
+
+    monkeypatch.setattr(reaction_module, stability_name, fail_stability)
+
+    with pytest.raises(ValueError, match="invalid NEB configuration"):
+        getattr(reaction_module, entrypoint_name)(
+            nx.Graph(),
+            site,
+            0,
+            object(),
+            temperature=500.0,
+            n_images=1,
+        )
+
+
+@pytest.mark.parametrize(
+    "seed_helper",
+    [
+        diffusion_module._diffusion_seed_path,
+        bond_module._bond_seed_path,
+    ],
+)
+def test_bare_seed_requires_explicit_same_member_provenance(seed_helper):
+    lateral_class = SimpleNamespace(
+        atoms_neb_path=_detached_seed_band(),
+    )
+
+    assert seed_helper(
+        lateral_class,
+        n_images=1,
+        current_member_index=0,
+    ) == (None, None)
+
+    lateral_class._warm_start_member_index = 1
+    assert seed_helper(
+        lateral_class,
+        n_images=1,
+        current_member_index=0,
+    ) == (None, None)
+
+    lateral_class._warm_start_member_index = 0
+    path, source_member = seed_helper(
+        lateral_class,
+        n_images=1,
+        current_member_index=0,
+    )
+    assert path is not None
+    assert len(path) == 3
+    assert source_member == 0
+
+
+def test_bond_runs_missing_bare_path_before_lateral_neb(monkeypatch):
+    order = []
+    bare = SimpleNamespace(
+        stable=None,
+        members=[],
+        lateral_class=0,
+        atoms_neb_path=None,
+    )
+    lateral = SimpleNamespace(
+        stable=None,
+        members=[0],
+        lateral_class=1,
+        energy_ab=None,
+        energy_c=None,
+        energy_ts=None,
+    )
+    site = SimpleNamespace(
+        iso_class=6,
+        _member_lc={},
+        applicable_reactions=[],
+    )
+
+    monkeypatch.setattr(
+        bond_module,
+        "is_bond_applicable",
+        lambda *_args: (True, "couple"),
+    )
+
+    def get_bare(*_args, **_kwargs):
+        order.append("bare_lookup")
+        return bare
+
+    def classify_lateral(*_args, **_kwargs):
+        order.append("lateral_classify")
+        return lateral
+
+    def check_stability(_graph, _site, member_index, lc, _calculator, **kwargs):
+        if lc is bare:
+            order.append("bare_neb")
+            assert kwargs["capture_neb_path"] is True
+            lc._warm_start_neb_path = _detached_seed_band()
+            lc._warm_start_member_index = member_index
+            lc.stable = True
+            return 0.0, 0.2, 0.8
+
+        order.append("lateral_neb")
+        assert kwargs["neb_seed_member_index"] == member_index
+        assert len(kwargs["neb_seed_path"]) == 3
+        lc.energy_ab = 0.0
+        lc.energy_c = 0.2
+        lc.energy_ts = 0.8
+        lc.stable = True
+        return 0.0, 0.2, 0.8
+
+    monkeypatch.setattr(bond_module, "get_bond_bare_lateral", get_bare)
+    monkeypatch.setattr(
+        bond_module,
+        "check_bond_site_lateral",
+        classify_lateral,
+    )
+    monkeypatch.setattr(
+        bond_module,
+        "check_bond_site_stability",
+        check_stability,
+    )
+
+    reaction = bond_module.get_applicable_bond_reaction_for_member(
+        nx.Graph(),
+        site,
+        0,
+        object(),
+        temperature=500.0,
+        n_images=1,
+    )
+
+    assert reaction is not None
+    assert reaction.lateral_class is lateral
+    assert site._member_lc[0] is lateral
+    assert bare.members == []
+    assert order == [
+        "bare_lookup",
+        "lateral_classify",
+        "bare_neb",
+        "lateral_neb",
+    ]

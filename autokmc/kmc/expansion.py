@@ -122,6 +122,7 @@ from autokmc.core.constants import (
     STANDOFF_FACTOR,
 )
 from autokmc.utils.logging import get_logger
+from autokmc.utils.optimizers import DEFAULT_OPTIMIZER
 
 _log = get_logger(__name__)
 _T = TypeVar("_T")
@@ -424,6 +425,7 @@ def _ensure_species_known(
     random_seed: int,
     prune_fmax: float,
     prune_max_steps: int,
+    optimizer: str,
     anchor_k_max: int | None,
     adsorbate_bond_tolerance: float,
     adsorbate_n_shells_anchor: int | None,
@@ -497,6 +499,7 @@ def _ensure_species_known(
                     free_energy_options=free_energy_options,
                     free_energy_temperature_k=free_energy_temperature_k,
                     vib_cache_root=vib_cache_root,
+                    optimizer=optimizer,
                 ),
             )
         except ReactantDefinitionError as exc:
@@ -538,6 +541,7 @@ def _ensure_species_known(
             frozen_indices=frozen_indices,
             prune_fmax=prune_fmax,
             prune_max_steps=prune_max_steps,
+            optimizer=optimizer,
             verbose=verbose,
         )
     )
@@ -566,6 +570,7 @@ def expand_bond_sites_for_new_species(
     random_seed: int = RANDOM_SEED,
     prune_fmax: float = PRUNE_FMAX,
     prune_max_steps: int = PRUNE_MAX_STEPS,
+    optimizer: str = DEFAULT_OPTIMIZER,
     anchor_k_max: int | None = None,
     adsorbate_bond_tolerance: float = BOND_TOLERANCE,
     adsorbate_n_shells_anchor: int | None = None,
@@ -669,6 +674,7 @@ def expand_bond_sites_for_new_species(
         "random_seed": random_seed,
         "prune_fmax": prune_fmax,
         "prune_max_steps": prune_max_steps,
+        "optimizer": optimizer,
         "anchor_k_max": anchor_k_max,
         "adsorbate_bond_tolerance": adsorbate_bond_tolerance,
         "adsorbate_n_shells_anchor": adsorbate_n_shells_anchor,
@@ -1034,6 +1040,7 @@ def expand_bond_sites_for_new_species(
                     fmax=prune_fmax,
                     max_steps=prune_max_steps,
                     nl_mult=nl_mult,
+                    optimizer=optimizer,
                     verbose=verbose,
                 )
             if bond_prune_by_triple and candidate_sites:

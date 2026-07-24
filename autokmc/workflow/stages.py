@@ -66,6 +66,7 @@ def configured_adsorbate_site_kwargs(cfg) -> dict:
         "prune_stable_only": settings.prune_stable_only,
         "prune_fmax": settings.fmax,
         "prune_max_steps": settings.max_steps,
+        "optimizer": cfg.optimization.optimizer,
     }
 
 
@@ -162,6 +163,7 @@ def prepare_structure(
                 raycast_disc_samples=cfg.constants.raycast_disc_samples,
                 fmax=structure_cfg.fmax,
                 max_steps=structure_cfg.max_steps,
+                optimizer=cfg.optimization.optimizer,
                 calculator=calculator,
                 verbose=verbose,
                 **structure_kwargs,
@@ -184,6 +186,7 @@ def prepare_structure(
                 surface_energy_vacuum=structure_cfg.surface_energy_vacuum,
                 surface_energy_fmax=structure_cfg.surface_energy_fmax,
                 surface_energy_max_steps=structure_cfg.surface_energy_max_steps,
+                optimizer=cfg.optimization.optimizer,
                 calculator=calculator,
                 verbose=verbose,
                 **structure_kwargs,
@@ -356,6 +359,7 @@ def prepare_reactants(
                 spin=reactant_cfg.spin,
                 geometry=reactant_cfg.geometry,
                 vib_cache_root=thermo_runtime.vibration_cache_root,
+                optimizer=cfg.optimization.optimizer,
             )
             reactants.append(reactant)
             if verbose:

@@ -97,6 +97,7 @@ from autokmc.sites.anchors import (
     _reserve_node_ids,
 )
 from autokmc.utils.logging import get_logger
+from autokmc.utils.optimizers import DEFAULT_OPTIMIZER
 
 _log = get_logger(__name__)
 
@@ -1577,6 +1578,7 @@ def prune_unstable_adsorbate_sites(
     nl_mult: float = NL_MULT_DEFAULT,
     kabsch_max_mappings: int = KABSCH_MAX_MAPPINGS,
     diagnostics_dir: str | None = None,
+    optimizer: str = DEFAULT_OPTIMIZER,
     verbose: bool = False,
 ) -> list[AdsorbateSite]:
     """Remove iso-classes whose representative placement is unstable under ML relaxation.
@@ -1635,7 +1637,7 @@ def prune_unstable_adsorbate_sites(
         Force convergence threshold (eV/Å).  Default
         :data:`~autokmc.core.constants.PRUNE_FMAX`.
     max_steps : int
-        Maximum LBFGS steps.  Default
+        Maximum optimizer steps.  Default
         :data:`~autokmc.core.constants.PRUNE_MAX_STEPS`.
     nl_mult : float
         Neighbour-list cutoff multiplier handed to
@@ -1732,6 +1734,7 @@ def prune_unstable_adsorbate_sites(
                     calculator = calc,
                     fmax       = fmax,
                     steps      = max_steps,
+                    optimizer  = optimizer,
                     verbose    = False,
                 )
                 forces = atoms_opt.get_forces()
@@ -2055,6 +2058,7 @@ def find_adsorbate_sites(
     prune_fmax: float = PRUNE_FMAX,
     prune_max_steps: int = PRUNE_MAX_STEPS,
     diagnostics_dir: str | None = None,
+    optimizer: str = DEFAULT_OPTIMIZER,
     verbose: bool = False,
 ) -> list[AdsorbateSite]:
     """Universal N-atom adsorbate site enumerator (N ≥ 1).
@@ -2151,7 +2155,7 @@ def find_adsorbate_sites(
         Force convergence threshold (eV/Å) for pruning relaxations.
         Default :data:`~autokmc.core.constants.PRUNE_FMAX` (0.05).
     prune_max_steps : int
-        Maximum LBFGS steps for pruning relaxations.
+        Maximum optimizer steps for pruning relaxations.
         Default :data:`~autokmc.core.constants.PRUNE_MAX_STEPS` (200).
     diagnostics_dir : str | None
         Run diagnostics directory. Adsorption candidates rejected by MLIP
@@ -2529,6 +2533,7 @@ def find_adsorbate_sites(
                 nl_mult        = nl_mult,
                 kabsch_max_mappings=kabsch_max_mappings,
                 diagnostics_dir=diagnostics_dir,
+                optimizer       = optimizer,
                 verbose        = verbose,
             )
             # prune_unstable_adsorbate_sites already updates G.graph; keep

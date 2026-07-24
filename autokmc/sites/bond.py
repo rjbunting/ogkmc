@@ -102,6 +102,7 @@ from autokmc.core.constants import (
     PRUNE_MAX_STEPS,
 )
 from autokmc.utils.logging import get_logger
+from autokmc.utils.optimizers import DEFAULT_OPTIMIZER
 from autokmc.utils.rdkit_logging import silence_rdkit_warnings
 
 _log = get_logger(__name__)
@@ -1910,6 +1911,7 @@ def prune_unstable_bond_sites(
     fmax: float = PRUNE_FMAX,
     max_steps: int = PRUNE_MAX_STEPS,
     nl_mult: float = NL_MULT_DEFAULT,
+    optimizer: str = DEFAULT_OPTIMIZER,
     verbose: bool = False,
     debug_output_dir: str | None = None,
 ) -> list[BondReactionSite]:
@@ -2052,6 +2054,7 @@ def prune_unstable_bond_sites(
                     calculator = calc,
                     fmax       = fmax,
                     steps      = max_steps,
+                    optimizer  = optimizer,
                     verbose    = False,
                 )
                 forces = atoms_opt.get_forces()

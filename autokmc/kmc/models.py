@@ -61,6 +61,7 @@ from autokmc.sites.bond import BondReactionSite
 from autokmc.sites.diffusion import DiffusionSite
 from autokmc.species.reactant import Reactant
 from autokmc.utils.telemetry import RuntimeTelemetry
+from autokmc.utils.optimizers import DEFAULT_NEB_OPTIMIZER, DEFAULT_OPTIMIZER
 
 RandomSource = random.Random | np.random.Generator
 CalculatorResource: TypeAlias = CalculatorLike | CalculatorPoolLike | None
@@ -103,6 +104,8 @@ class DiffusionChannelOptions:
     interpolation: str = NEB_INTERPOLATION
     nl_mult: float = NL_MULT_DEFAULT
     persist_neb_path: bool = False
+    optimizer: str = DEFAULT_OPTIMIZER
+    neb_optimizer: str = DEFAULT_NEB_OPTIMIZER
 
     @classmethod
     def from_mapping(
@@ -129,6 +132,8 @@ class BondChannelOptions:
     matching_trials: int = BOND_MATCHING_TRIALS
     nl_mult: float = NL_MULT_DEFAULT
     persist_neb_path: bool = False
+    optimizer: str = DEFAULT_OPTIMIZER
+    neb_optimizer: str = DEFAULT_NEB_OPTIMIZER
 
     @classmethod
     def from_mapping(
@@ -182,6 +187,7 @@ class BondGrowthOptions:
     bond_prune_by_triple: bool = BOND_PRUNE_BY_TRIPLE
     bond_prune_with_calculator: bool = BOND_PRUNE_WITH_CALCULATOR
     gas_lift_height: float = BOND_GAS_LIFT_HEIGHT
+    optimizer: str = DEFAULT_OPTIMIZER
 
     @classmethod
     def from_mapping(
@@ -209,6 +215,7 @@ class KMCSettings:
     verbose: bool = True
     lateral_interactions: bool = True
     lateral_shells: int = LATERAL_SHELLS_DEFAULT
+    optimizer: str = DEFAULT_OPTIMIZER
 
     @property
     def progress_enabled(self) -> bool:

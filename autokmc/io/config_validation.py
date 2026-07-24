@@ -6,6 +6,8 @@ import math
 from pathlib import Path, PureWindowsPath
 from typing import Any, NoReturn
 
+from autokmc.utils.optimizers import NEB_OPTIMIZERS, REGULAR_OPTIMIZERS
+
 
 class _Validator:
     """Validate one resolved config while preserving public error messages."""
@@ -254,6 +256,25 @@ class _Validator:
                 getattr(cfg, name),
                 f"constants.{name}",
                 minimum=minimum,
+            )
+
+    def optimization(self, cfg: Any) -> None:
+        optimizer = self.string(cfg.optimizer, "optimization.optimizer").lower()
+        if optimizer not in REGULAR_OPTIMIZERS:
+            choices = ", ".join(sorted(REGULAR_OPTIMIZERS))
+            self.fail(
+                "optimization.optimizer must be one of "
+                f"{choices}; got {cfg.optimizer!r}"
+            )
+        neb_optimizer = self.string(
+            cfg.neb_optimizer,
+            "optimization.neb_optimizer",
+        ).lower()
+        if neb_optimizer not in NEB_OPTIMIZERS:
+            choices = ", ".join(sorted(NEB_OPTIMIZERS))
+            self.fail(
+                "optimization.neb_optimizer must be one of "
+                f"{choices}; got {cfg.neb_optimizer!r}"
             )
 
     def structure(self, cfg: Any) -> None:
@@ -715,6 +736,7 @@ class _Validator:
     def run(self, cfg: Any) -> None:
         self.output(cfg.output)
         self.constants(cfg.constants)
+        self.optimization(cfg.optimization)
         self.structure(cfg.structure)
         self.reactants(cfg.reactants)
         self.adsorbate_sites(cfg.adsorbate_sites)

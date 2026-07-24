@@ -103,6 +103,12 @@ Temperature- and pressure-dependent KMC rates are recomputed for the current
 run; the database stores primitive structures and energetics rather than a
 rate frozen to old conditions.
 
+Bare diffusion and bond calculations retain their optimized NEB band in the
+calculation cache even when reaction-folder path persistence is disabled. A
+lateral calculation that uses this band records the seed policy, projection
+scope, and exact source-band fingerprint as cache inputs, so a result cannot be
+reused against a different initial path.
+
 Calculator constructor and factory arguments are retained even when the
 constructed backend object does not expose them. Resolvable files and
 directories nested under backend-specific parameter names are content-hashed,
