@@ -21,6 +21,7 @@ from autokmc.io.config import (
     DiffusionCfg,
     FreeEnergyCfg,
     KMCCfg,
+    OptimizationCfg,
     OutputCfg,
     ReactantCfg,
     RunConfig,
@@ -90,6 +91,28 @@ def test_channel_runtime_propagates_anchor_clique_cap(
 
     assert runtime.bond_growth is not None
     assert runtime.bond_growth.anchor_k_max == expected_cap
+
+
+def test_channel_runtime_propagates_optimizer_choices():
+    cfg = RunConfig(
+        optimization=OptimizationCfg(
+            optimizer="fire",
+            neb_optimizer="mdmin",
+        ),
+        diffusion=DiffusionCfg(enabled=True),
+        bond=BondCfg(enabled=True),
+    )
+
+    runtime = resolve_channel_runtime(cfg, frozen_indices=None)
+
+    assert runtime.diffusion is not None
+    assert runtime.diffusion.optimizer == "fire"
+    assert runtime.diffusion.neb_optimizer == "mdmin"
+    assert runtime.bond is not None
+    assert runtime.bond.optimizer == "fire"
+    assert runtime.bond.neb_optimizer == "mdmin"
+    assert runtime.bond_growth is not None
+    assert runtime.bond_growth.optimizer == "fire"
 
 
 def test_network_builder_flattens_diffusion_channels(tmp_path, monkeypatch):

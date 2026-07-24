@@ -75,6 +75,7 @@ from autokmc.reactions.rates import (
     _eyring_prefactor,
 )
 from autokmc.utils.logging import get_logger
+from autokmc.utils.optimizers import DEFAULT_OPTIMIZER
 
 _log = get_logger(__name__)
 
@@ -414,6 +415,7 @@ def get_applicable_reaction_for_member(
     frozen_indices: list[int] | None = None,
     fmax: float = 0.05,
     max_steps: int = 200,
+    optimizer: str = DEFAULT_OPTIMIZER,
     verbose: bool = False,
     lateral_interactions: bool = True,
     lateral_shells: int = LATERAL_SHELLS_DEFAULT,
@@ -468,6 +470,7 @@ def get_applicable_reaction_for_member(
                         frozen_indices=frozen_indices,
                         fmax=fmax,
                         max_steps=max_steps,
+                        optimizer=optimizer,
                         verbose=verbose,
                         free_energy_options=free_energy_options,
                         free_energy_temperature_k=float(temperature),
@@ -540,6 +543,7 @@ def get_applicable_reactions(
     frozen_indices: list[int] | None = None,
     fmax: float = 0.05,
     max_steps: int = 200,
+    optimizer: str = DEFAULT_OPTIMIZER,
     verbose: bool = False,
     lateral_interactions: bool = True,
     lateral_shells: int = LATERAL_SHELLS_DEFAULT,
@@ -596,6 +600,7 @@ def get_applicable_reactions(
             frozen_indices=frozen_indices,
             fmax=fmax,
             max_steps=max_steps,
+            optimizer=optimizer,
             verbose=verbose,
             lateral_interactions=lateral_interactions,
             lateral_shells=lateral_shells,
@@ -625,6 +630,7 @@ def compute_all_reactions(
     frozen_indices: list[int] | None = None,
     fmax: float = 0.05,
     max_steps: int = 200,
+    optimizer: str = DEFAULT_OPTIMIZER,
     verbose: bool = False,
     lateral_interactions: bool = True,
     lateral_shells: int = LATERAL_SHELLS_DEFAULT,
@@ -654,6 +660,7 @@ def compute_all_reactions(
                     frozen_indices           = frozen_indices,
                     fmax                     = fmax,
                     max_steps                = max_steps,
+                    optimizer                = optimizer,
                     verbose                  = verbose,
                     lateral_interactions     = lateral_interactions,
                     lateral_shells           = lateral_shells,
@@ -683,6 +690,7 @@ def compute_all_reactions(
             frozen_indices           = frozen_indices,
             fmax                     = fmax,
             max_steps                = max_steps,
+            optimizer                = optimizer,
             verbose                  = verbose,
             lateral_interactions     = lateral_interactions,
             lateral_shells           = lateral_shells,

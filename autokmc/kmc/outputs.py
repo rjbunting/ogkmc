@@ -57,7 +57,11 @@ class KMCOutputManager:
         collector = self.observers.summary_collector
         for site in sites:
             for lateral_class in site.lateral_classes:
-                if lateral_class.stable is False:
+                seed_only = bool(
+                    getattr(lateral_class, "_seed_only", False)
+                    and not getattr(lateral_class, "members", None)
+                )
+                if lateral_class.stable is False and not seed_only:
                     if writer is not None:
                         writer.write_invalid_diffusion(
                             site,

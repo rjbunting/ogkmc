@@ -10,6 +10,7 @@ import pytest
 
 from autokmc.io.config import (
     ConstantsCfg,
+    OptimizationCfg,
     RunConfig,
     ConfigError,
     load_config,
@@ -71,6 +72,56 @@ def test_load_yaml_ok(tmp_path):
     assert cfg.adsorbate_sites.anchor_k_max == 4
     assert cfg.output.calculation_cache_lookup_enabled is False
     assert cfg.output.isaac_export_enabled is False
+    assert cfg.optimization.optimizer == "lbfgs"
+    assert cfg.optimization.neb_optimizer == "bfgs"
+
+
+def test_loads_optimizer_choices(tmp_path):
+    pytest.importorskip("yaml")
+    path = _write(
+        tmp_path,
+        """
+schema_version: "1"
+optimization:
+  optimizer: fire
+  neb_optimizer: mdmin
+reactants:
+  - smiles: "[O]"
+calculator:
+  import_path: ase.calculators.emt.EMT
+""",
+    )
+
+    cfg = load_config(path)
+
+    assert cfg.optimization.optimizer == "fire"
+    assert cfg.optimization.neb_optimizer == "mdmin"
+
+
+@pytest.mark.parametrize(
+    ("key", "value", "message"),
+    [
+        ("optimizer", "not-an-optimizer", "optimization.optimizer"),
+        ("neb_optimizer", "lbfgs", "optimization.neb_optimizer"),
+    ],
+)
+def test_rejects_invalid_optimizer_choices(tmp_path, key, value, message):
+    pytest.importorskip("yaml")
+    path = _write(
+        tmp_path,
+        f"""
+schema_version: "1"
+optimization:
+  {key}: {value}
+reactants:
+  - smiles: "[O]"
+calculator:
+  import_path: ase.calculators.emt.EMT
+""",
+    )
+
+    with pytest.raises(ConfigError, match=message):
+        load_config(path)
 
 
 def test_loads_every_shared_constant_and_site_geometry_control(tmp_path):
@@ -143,6 +194,9 @@ def test_all_options_template_lists_every_shared_constant():
     cfg = load_config(path)
 
     assert set(raw["constants"]) == {item.name for item in fields(ConstantsCfg)}
+    assert set(raw["optimization"]) == {
+        item.name for item in fields(OptimizationCfg)
+    }
     assert cfg.structure.surface_side == "top"
     assert cfg.adsorbate_sites.max_pair_shells == 10
 

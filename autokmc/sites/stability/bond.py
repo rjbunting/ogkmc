@@ -76,6 +76,7 @@ Public API
 from __future__ import annotations
 
 import itertools
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, TYPE_CHECKING
 
@@ -92,6 +93,7 @@ from autokmc.io.calculation_cache import (
     apply_cached_states,
     calculation_cache_key,
     calculator_identity,
+    input_coordinate_frame_fingerprint,
     load_calculation_record,
     make_calculation_record,
     state_payload,
@@ -113,6 +115,7 @@ from autokmc.sites.stability.adsorption import (
 from autokmc.sites.stability.neb import (
     make_neb_band,
     neb_optimizer_logfile,
+    project_neb_path,
     run_neb,
 )
 from autokmc.sites.bond import BondReactionSite, BondReactionLateral
@@ -130,6 +133,7 @@ from autokmc.core.constants import (
     BOND_MATCHING_TRIALS,
 )
 from autokmc.utils.logging import get_logger
+from autokmc.utils.optimizers import DEFAULT_NEB_OPTIMIZER, DEFAULT_OPTIMIZER
 
 if TYPE_CHECKING:
     pass
@@ -313,6 +317,7 @@ def check_bond_site_lateral(
     *,
     n_shells: int = LATERAL_SHELLS_DEFAULT,
     ignore_lateral: bool = False,
+    _assign_member: bool = True,
 ) -> BondReactionLateral:
     """Classify the lateral-interaction environment of one triple member.
 
@@ -400,6 +405,8 @@ def check_bond_site_lateral(
         return target_lc
 
     def _drop_from_other_classes(new_lc=None) -> None:
+        if not _assign_member:
+            return
         for other in brs.lateral_classes:
             if other is new_lc:
                 continue
@@ -413,9 +420,11 @@ def check_bond_site_lateral(
             ego, lc.ego_graph, node_match=_bond_lateral_node_match,
         )
         if gm.is_isomorphic():
-            _drop_from_other_classes(new_lc=lc)
-            if member_index not in lc.members:
-                lc.members.append(member_index)
+            if _assign_member:
+                _drop_from_other_classes(new_lc=lc)
+                if member_index not in lc.members:
+                    lc.members.append(member_index)
+                lc._seed_only = False
             _log.debug(
                 "check_bond_site_lateral: bond_iso=%d member=%d "
                 "→ existing lateral_class=%d",
@@ -428,8 +437,9 @@ def check_bond_site_lateral(
         lateral_class = len(brs.lateral_classes),
         ego_graph     = ego,
         n_shells      = depth,
-        members       = [member_index],
+        members       = [member_index] if _assign_member else [],
     )
+    new_lc._seed_only = not _assign_member
     _stamp_gas_product(new_lc)
     new_lc._fingerprint = fkey
     brs.lateral_classes.append(new_lc)
@@ -442,6 +452,27 @@ def check_bond_site_lateral(
         new_lc.lateral_class, len(brs.lateral_classes),
     )
     return new_lc
+
+
+def get_bond_bare_lateral(
+    G: nx.Graph,
+    brs: BondReactionSite,
+    member_index: int,
+    *,
+    n_shells: int = LATERAL_SHELLS_DEFAULT,
+) -> BondReactionLateral:
+    """Find or create the bare class without reassigning the live member."""
+    lateral_class = check_bond_site_lateral(
+        G,
+        brs,
+        member_index,
+        n_shells=n_shells,
+        ignore_lateral=True,
+        _assign_member=False,
+    )
+    if not lateral_class.members:
+        lateral_class._seed_only = True
+    return lateral_class
 
 
 # ---------------------------------------------------------------------------
@@ -1150,6 +1181,7 @@ def _relax_bond_endpoint(
     calculator,
     fmax: float,
     max_steps: int,
+    optimizer: str,
     frozen_indices: list[int] | None,
     nl_mult: float,
     n_slab: int,
@@ -1180,6 +1212,7 @@ def _relax_bond_endpoint(
                 calculator = calc,
                 fmax       = fmax,
                 steps      = max_steps,
+                optimizer  = optimizer,
                 verbose    = verbose,
             )
 
@@ -1193,7 +1226,7 @@ def _relax_bond_endpoint(
 
             if max_force > fmax:
                 raise OptimisationFailedError(
-                    f"[{state_label}] LBFGS did not converge: "
+                    f"[{state_label}] optimizer {optimizer!r} did not converge: "
                     f"max|F|={max_force:.4f} eV/Å after {max_steps} steps "
                     f"(fmax={fmax} eV/Å)."
                 )
@@ -1548,13 +1581,19 @@ def _write_bond_calculation_cache(
             "imaginary_ts_ev",
         )
     }
+    public_neb_path = getattr(lc, "atoms_neb_path", None)
+    private_neb_path = getattr(lc, "_warm_start_neb_path", None)
+    cache_neb_path = public_neb_path or private_neb_path
     neb = None
-    if getattr(lc, "atoms_neb_path", None):
+    if cache_neb_path:
+        cache_neb_energies = (
+            getattr(lc, "neb_path_energies", None)
+            if public_neb_path
+            else getattr(lc, "_warm_start_neb_energies", None)
+        )
         neb = {
-            "energies_ev": list(
-                getattr(lc, "neb_path_energies", []) or []
-            ),
-            "path_atoms": list(getattr(lc, "atoms_neb_path", []) or []),
+            "energies_ev": list(cache_neb_energies or []),
+            "path_atoms": list(cache_neb_path),
         }
     record = make_calculation_record(
         kind="bond",
@@ -1614,6 +1653,16 @@ def _write_bond_calculation_cache(
                 getattr(lc, "matching_diagnostics", {}) or {}
             ),
             "gas_product": getattr(lc, "gas_product", None),
+            "neb_initialization": getattr(
+                lc,
+                "neb_initialization",
+                None,
+            ),
+            "neb_seed_fingerprint": getattr(
+                lc,
+                "neb_seed_fingerprint",
+                None,
+            ),
         },
     )
     write_calculation_record(
@@ -1643,19 +1692,24 @@ def check_bond_site_stability(
     matching_trials: int = BOND_MATCHING_TRIALS,
     nl_mult: float = NL_MULT_DEFAULT,
     persist_neb_path: bool = False,
+    optimizer: str = DEFAULT_OPTIMIZER,
+    neb_optimizer: str = DEFAULT_NEB_OPTIMIZER,
     verbose: bool = False,
     calculation_cache_root: str | None = None,
     calculation_cache_lookup_enabled: bool = False,
     free_energy_options=None,
     free_energy_temperature_k: float | None = None,
     vib_cache_root: str | None = None,
+    neb_seed_path: Sequence[Atoms] | None = None,
+    neb_seed_member_index: int | None = None,
+    capture_neb_path: bool = False,
 ) -> tuple[float, float, float]:
     """Relax both endpoints and the NEB band; return ``(E_ab, E_c, E_ts)``.
 
     Pipeline (mirrors :func:`autokmc.sites.stability.diffusion.check_diffusion_stability`):
 
     1. Build the AB endpoint (slab + lateral neighbours + A's atoms +
-       B's atoms at their graph positions); relax with LBFGS; verify
+       B's atoms at their graph positions); relax with the configured optimizer; verify
        both A's and B's intended surface coordination survive.
     2. Pair C's atoms to the AB reacting block using the configured
        same-element matching strategy (``auto`` defaults to a Hungarian/MIC
@@ -1735,6 +1789,29 @@ def check_bond_site_stability(
     cache_graph: nx.Graph | None = None
     cache_fingerprint_memo = CalculationFingerprintMemo()
     electronic_cache_state: tuple[float, float, float, Atoms, Atoms, Atoms] | None = None
+    try:
+        seed_images = None if neb_seed_path is None else list(neb_seed_path)
+    except TypeError:
+        seed_images = None
+    seed_fingerprint = (
+        None
+        if not seed_images
+        else input_coordinate_frame_fingerprint(
+            {"neb_seed_path": seed_images}
+        )
+    )
+    try:
+        seed_member_index = int(neb_seed_member_index)
+    except (TypeError, ValueError, OverflowError):
+        seed_member_index = None
+    same_member_seed = (
+        seed_images is not None
+        and seed_member_index == int(member_index)
+    )
+    if not same_member_seed:
+        seed_images = None
+        seed_fingerprint = None
+    seed_projection_scope = "slab_and_reacting"
     thermochemistry_requested = bool(
         free_energy_options is not None
         and getattr(free_energy_options, "enabled", False)
@@ -1743,6 +1820,8 @@ def check_bond_site_stability(
     cache_parameters = {
         "fmax": float(fmax),
         "max_steps": int(max_steps),
+        "optimizer": str(optimizer).strip().lower(),
+        "neb_optimizer": str(neb_optimizer).strip().lower(),
         "n_images": int(n_images),
         "climb": bool(climb),
         "spring_k": float(spring_k),
@@ -1752,6 +1831,8 @@ def check_bond_site_stability(
         "nl_mult": float(nl_mult),
         "n_shells": int(lc.n_shells),
         "persist_neb_path": bool(persist_neb_path),
+        "capture_neb_path": bool(capture_neb_path),
+        "neb_seed_policy": "auto_bare_transfer_v1",
         "gas_product": bool(gas_product),
         "gas_lift_height": float(getattr(brs, "gas_lift_height", 6.0)),
         "free_energy_enabled": bool(
@@ -1810,6 +1891,19 @@ def check_bond_site_stability(
                 "b_node_ids": list(b_node_ids),
                 "c_node_ids": list(c_node_ids),
                 "gas_product": bool(gas_product),
+                "neb_seed": {
+                    "mode": (
+                        "bare_transfer"
+                        if seed_fingerprint is not None
+                        else "configured_interpolation"
+                    ),
+                    "projection_scope": (
+                        seed_projection_scope
+                        if seed_fingerprint is not None
+                        else None
+                    ),
+                    "path_sha256": seed_fingerprint,
+                },
             }
             if gas_product:
                 cache_inputs.update(
@@ -1851,6 +1945,28 @@ def check_bond_site_stability(
                 },
                 include_properties=cached.get("_cache_match") != "electronic",
             ):
+                if capture_neb_path:
+                    cached_path = list(
+                        getattr(lc, "atoms_neb_path", None) or []
+                    )
+                    if len(cached_path) != int(n_images) + 2:
+                        lc.stable = None
+                        raise ValueError(
+                            "cached bare bond result has no compatible "
+                            "optimized NEB path"
+                        )
+                    lc._warm_start_neb_path = [
+                        image.copy() for image in cached_path
+                    ]
+                    for image in lc._warm_start_neb_path:
+                        image.calc = None
+                    lc._warm_start_neb_energies = list(
+                        getattr(lc, "neb_path_energies", None) or []
+                    )
+                    lc._warm_start_member_index = int(member_index)
+                    if not persist_neb_path:
+                        lc.atoms_neb_path = None
+                        lc.neb_path_energies = None
                 electronic_only = cached.get("_cache_match") == "electronic"
                 if electronic_only and thermochemistry_requested:
                     # ``apply_cached_states`` marks the electronic states
@@ -1959,6 +2075,7 @@ def check_bond_site_stability(
         calculator      = calculator,
         fmax            = fmax,
         max_steps       = max_steps,
+        optimizer       = optimizer,
         frozen_indices  = frozen_indices,
         nl_mult         = nl_mult,
         n_slab          = n_slab,
@@ -1999,6 +2116,7 @@ def check_bond_site_stability(
                 calculator=calc,
                 fmax=fmax,
                 steps=max_steps,
+                optimizer=optimizer,
                 verbose=verbose,
             )
             E_empty = float(atoms_empty_opt.get_potential_energy())
@@ -2089,6 +2207,7 @@ def check_bond_site_stability(
             calculator      = calculator,
             fmax            = fmax,
             max_steps       = max_steps,
+            optimizer       = optimizer,
             frozen_indices  = frozen_indices,
             nl_mult         = nl_mult,
             n_slab          = n_slab,
@@ -2103,11 +2222,40 @@ def check_bond_site_stability(
     lc.atoms_c  = atoms_c_opt
 
     # ── 3-4. NEB band ───────────────────────────────────────────────────
+    projected_seed_path = None
+    if seed_images:
+        projected_seed_path = project_neb_path(
+            seed_images,
+            atoms_ab_opt,
+            atoms_c_opt,
+            n_slab=n_slab,
+            n_lateral=n_lat,
+        )
+    lc.neb_seed_fingerprint = seed_fingerprint
+    lc.neb_initialization = (
+        "bare_transfer"
+        if projected_seed_path is not None
+        else (
+            "configured_interpolation_fallback"
+            if seed_images
+            else "configured_interpolation"
+        )
+    )
     if verbose:
         print(
             f"  [NEB] images={int(n_images)}  climb={bool(climb)}  "
             f"fmax={float(fmax):.4f} eV/Å  max_steps={int(max_steps)}"
         )
+        if projected_seed_path is not None:
+            print(
+                "  [NEB] initialization=bare optimized path "
+                f"({seed_projection_scope})"
+            )
+        elif seed_images:
+            print(
+                "  [NEB] bare path incompatible; using "
+                f"{interpolation} interpolation"
+            )
 
     neb_result = run_neb(
         atoms_ab_opt,
@@ -2121,9 +2269,12 @@ def check_bond_site_stability(
         frozen_indices=frozen_indices,
         fmax=float(fmax),
         max_steps=int(max_steps),
+        optimizer=neb_optimizer,
         verbose=verbose,
         not_converged_error=BondNEBNotConvergedError,
         persist_path=persist_neb_path,
+        capture_path=capture_neb_path,
+        initial_path=projected_seed_path,
         initial_path_callback=(
             (
                 lambda images: setattr(
@@ -2144,6 +2295,16 @@ def check_bond_site_stability(
 
     lc.energy_ts = E_ts
     lc.atoms_ts = atoms_ts
+    if capture_neb_path and neb_result.path_images:
+        lc._warm_start_neb_path = [
+            image.copy() for image in neb_result.path_images
+        ]
+        for image in lc._warm_start_neb_path:
+            image.calc = None
+        lc._warm_start_neb_energies = list(
+            neb_result.path_energies or []
+        )
+        lc._warm_start_member_index = int(member_index)
     if persist_neb_path:
         lc.neb_path_energies = neb_result.path_energies
         lc.atoms_neb_path = neb_result.path_images
@@ -2230,4 +2391,5 @@ __all__ = [
     "OptimisationFailedError",
     "check_bond_site_lateral",
     "check_bond_site_stability",
+    "get_bond_bare_lateral",
 ]

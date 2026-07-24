@@ -78,6 +78,25 @@ determines which multi-coordinate anchor cliques can exist, and
 `structure.surface_radius_factor` changes the ray-casting discs used only for
 slab surface classification.
 
+## `optimization`
+
+```yaml
+optimization:
+  optimizer: lbfgs
+  neb_optimizer: bfgs
+```
+
+`optimizer` controls calculator-backed ordinary relaxations, including
+generated catalyst structures, gas-phase reactants, adsorbate and bond-site
+pruning, adsorption stability, and NEB endpoint relaxation. Valid values are
+`lbfgs`, `bfgs`, `fire`, and `mdmin`.
+
+`neb_optimizer` controls the diffusion and bond-reaction NEB band, including
+the climbing-image refinement when enabled. Valid values are `bfgs`, `fire`,
+and `mdmin`. `lbfgs` is intentionally excluded because ASE does not recommend
+it for NEB. Defaults preserve the previous behavior: `lbfgs` for ordinary
+relaxations and `bfgs` for NEB.
+
 ## `structure`
 
 | Key | Default | Meaning |
@@ -287,6 +306,15 @@ cache or resume contract being able to detect it.
 | `atom_matching` | `auto` | `auto`, `greedy`, `hungarian`, or `reactant_index`. |
 | `matching_trials` | `8` | Number of mapping trials used by automatic matching. |
 | `persist_neb_path` | `false` | Save both the initial interpolated and final optimized bond NEB paths. |
+
+When lateral interactions are enabled, diffusion and bond channels
+automatically retain the optimized no-neighbour NEB band as an internal
+warm-start asset. Before evaluating a lateral class with a neighbouring
+adsorbate, AutoKMC runs the corresponding bare calculation if no compatible
+band exists, projects that band into the new endpoint layout, and reoptimizes
+all images. If the bare calculation fails or its band is incompatible, the
+channel uses its configured interpolation. This behavior is automatic and
+does not change the output-only `persist_neb_path` setting.
 
 ## `free_energy`
 

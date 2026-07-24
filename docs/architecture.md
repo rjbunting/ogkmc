@@ -94,6 +94,13 @@ and reverse barriers are derived from one effective transition-state level so
 detailed energy consistency is preserved when the minimum barrier floor is
 applied.
 
+For a lateral environment containing neighbouring adsorbates, the reaction
+evaluator first ensures that the corresponding no-neighbour lateral class has
+an optimized NEB band. It calculates that bare class on demand, projects the
+bare band curvature onto the lateral endpoints, and then performs the normal
+full NEB optimization. Bare failures and projection incompatibilities degrade
+to the channel's configured interpolation.
+
 ### Bond changes
 
 Bond templates represent reversible `A + B <=> C` chemistry. AutoKMC can build

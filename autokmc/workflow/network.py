@@ -203,6 +203,7 @@ class SpeciesNetworkBuilder:
                     fmax=settings.prune_fmax,
                     max_steps=settings.prune_max_steps,
                     nl_mult=self.cfg.constants.neighbor_list_multiplier,
+                    optimizer=self.cfg.optimization.optimizer,
                     verbose=self.verbose,
                 )
 
@@ -288,6 +289,7 @@ class SpeciesNetworkBuilder:
                 free_energy_temperature_k=self.cfg.kmc.temperature_k,
                 partial_pressure_bar=0.0,
                 vib_cache_root=self.thermo_runtime.vibration_cache_root,
+                optimizer=self.cfg.optimization.optimizer,
             )
             reactants.append(leaf)
             reactant_by_smiles[canonical] = leaf

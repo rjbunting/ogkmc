@@ -111,6 +111,41 @@ def test_shared_neb_selects_transition_and_detaches_images(monkeypatch):
     assert telemetry.timings_s["neb.seconds"] >= 0.0
 
 
+def test_shared_neb_uses_selected_optimizer(monkeypatch):
+    images = [_image(0.0), _image(1.0), _image(0.0)]
+    neb = SimpleNamespace(climb=False)
+    selected = []
+
+    class SelectedFire(_ConvergedOptimizer):
+        def __init__(self, stage_neb, *, logfile):
+            selected.append(stage_neb)
+            super().__init__(stage_neb, logfile=logfile)
+
+    monkeypatch.setattr(neb_module, "acquire_calculator", _calculator_context)
+    monkeypatch.setattr(neb_module, "FIRE", SelectedFire)
+
+    result = neb_module.run_neb(
+        images[0],
+        images[-1],
+        calculator=object(),
+        purpose="FIRE NEB",
+        n_images=1,
+        interpolation="linear",
+        spring_k=0.1,
+        climb=False,
+        frozen_indices=None,
+        fmax=0.05,
+        max_steps=20,
+        optimizer="fire",
+        verbose=False,
+        not_converged_error=RuntimeError,
+        band_factory=lambda *_args, **_kwargs: (neb, images),
+    )
+
+    assert selected == [neb]
+    assert result.optimizer_steps == 4
+
+
 def test_shared_neb_stops_when_preclimb_stage_does_not_converge(monkeypatch):
     images = [_image(0.0), _image(0.5), _image(0.2)]
     neb = SimpleNamespace(climb=False)
@@ -133,6 +168,27 @@ def test_shared_neb_stops_when_preclimb_stage_does_not_converge(monkeypatch):
     monkeypatch.setattr(neb_module, "acquire_calculator", _calculator_context)
     monkeypatch.setattr(neb_module, "BFGS", NonConvergedOptimizer)
 
+    def legacy_band_factory(
+        _atoms_initial,
+        _atoms_final,
+        *,
+        n_images,
+        interpolation,
+        spring_k,
+        climb,
+        calculator,
+        frozen_indices,
+    ):
+        del (
+            n_images,
+            interpolation,
+            spring_k,
+            climb,
+            calculator,
+            frozen_indices,
+        )
+        return neb, images
+
     with pytest.raises(RuntimeError, match="NEB pre-climb relaxation"):
         neb_module.run_neb(
             images[0],
@@ -149,7 +205,7 @@ def test_shared_neb_stops_when_preclimb_stage_does_not_converge(monkeypatch):
             verbose=False,
             not_converged_error=RuntimeError,
             initial_path_callback=initial_paths.append,
-            band_factory=lambda *_args, **_kwargs: (neb, images),
+            band_factory=legacy_band_factory,
         )
 
     assert optimizer_climb_states == [False]
@@ -295,6 +351,198 @@ def test_nonfinite_idpp_output_restores_linear_band_and_calculators(monkeypatch)
         images,
         replacement_calculators,
     ))
+
+
+def test_make_neb_band_uses_compatible_seed_without_interpolation(monkeypatch):
+    def fail_idpp(*_args, **_kwargs):
+        raise AssertionError("seeded NEB bands must not be re-interpolated")
+
+    monkeypatch.setattr(neb_module, "_idpp_interpolate", fail_idpp)
+    calculator = object()
+    initial = Atoms("H", positions=[[0.0, 0.0, 0.0]])
+    final = Atoms("H", positions=[[3.0, 0.0, 0.0]])
+    seed = [
+        Atoms("H", positions=[[9.0, 0.0, 0.0]]),
+        Atoms("H", positions=[[0.4, 0.5, 0.0]]),
+        Atoms("H", positions=[[2.5, -0.2, 0.0]]),
+        Atoms("H", positions=[[-9.0, 0.0, 0.0]]),
+    ]
+
+    _, images = neb_module.make_neb_band(
+        initial,
+        final,
+        n_images=2,
+        interpolation="idpp",
+        spring_k=0.1,
+        climb=False,
+        calculator=calculator,
+        frozen_indices=None,
+        initial_path=seed,
+    )
+
+    np.testing.assert_allclose(images[0].positions, initial.positions)
+    np.testing.assert_allclose(images[1].positions, seed[1].positions)
+    np.testing.assert_allclose(images[2].positions, seed[2].positions)
+    np.testing.assert_allclose(images[-1].positions, final.positions)
+    assert all(image.calc is calculator for image in images)
+
+
+def test_run_neb_can_capture_path_without_public_persistence(monkeypatch):
+    images = [_image(0.0), _image(0.7), _image(0.1)]
+    neb = SimpleNamespace(climb=False)
+
+    monkeypatch.setattr(neb_module, "acquire_calculator", _calculator_context)
+    monkeypatch.setattr(neb_module, "BFGS", _ConvergedOptimizer)
+    result = neb_module.run_neb(
+        images[0],
+        images[-1],
+        calculator=object(),
+        purpose="bare warm-start asset",
+        n_images=1,
+        interpolation="linear",
+        spring_k=0.1,
+        climb=False,
+        frozen_indices=None,
+        fmax=0.05,
+        max_steps=20,
+        verbose=False,
+        not_converged_error=RuntimeError,
+        persist_path=False,
+        capture_path=True,
+        band_factory=lambda *_args, **_kwargs: (neb, images),
+    )
+
+    assert result.path_energies == pytest.approx([0.0, 0.7, 0.1])
+    assert result.path_images is not None
+    assert len(result.path_images) == 3
+    assert all(image.calc is None for image in result.path_images)
+
+
+def test_project_neb_path_transfers_bare_curvature_with_mic():
+    cell = [10.0, 10.0, 10.0]
+    source_initial = Atoms(
+        "CuCuH",
+        positions=[
+            [9.8, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [8.8, 0.0, 0.0],
+        ],
+        cell=cell,
+        pbc=[True, True, False],
+    )
+    source_middle = Atoms(
+        "CuCuH",
+        positions=[
+            [0.1, 0.4, 0.0],
+            [3.0, -0.2, 0.0],
+            [0.0, 0.6, 0.0],
+        ],
+        cell=cell,
+        pbc=[True, True, False],
+    )
+    source_final = Atoms(
+        "CuCuH",
+        positions=[
+            [0.2, 0.0, 0.0],
+            [4.0, 0.0, 0.0],
+            [0.8, 0.0, 0.0],
+        ],
+        cell=cell,
+        pbc=[True, True, False],
+    )
+    target_initial = Atoms(
+        "CuCuOH",
+        positions=[
+            [1.0, 1.0, 0.0],
+            [5.0, 1.0, 0.0],
+            [9.0, 2.0, 0.0],
+            [7.5, 1.0, 0.0],
+        ],
+        cell=cell,
+        pbc=[True, True, False],
+    )
+    target_final = Atoms(
+        "CuCuOH",
+        positions=[
+            [3.0, 1.0, 0.0],
+            [7.0, 1.0, 0.0],
+            [1.0, 4.0, 0.0],
+            [9.5, 1.0, 0.0],
+        ],
+        cell=cell,
+        pbc=[True, True, False],
+    )
+
+    projected = neb_module.project_neb_path(
+        [source_initial, source_middle, source_final],
+        target_initial,
+        target_final,
+        n_slab=2,
+        n_lateral=1,
+    )
+
+    assert projected is not None
+    assert len(projected) == 3
+    assert all(len(image) == len(target_initial) for image in projected)
+    assert np.array_equal(projected[0].positions, target_initial.positions)
+    assert np.array_equal(projected[-1].positions, target_final.positions)
+    np.testing.assert_allclose(
+        projected[1].positions,
+        [
+            [2.1, 1.4, 0.0],
+            [6.0, 0.8, 0.0],
+            [10.0, 3.0, 0.0],
+            [8.7, 1.6, 0.0],
+        ],
+    )
+    assert all(image.calc is None for image in projected)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda source, _initial, _final: source.pop(),
+        lambda source, _initial, _final: source[1].set_cell([11.0, 10.0, 10.0]),
+        lambda source, _initial, _final: source[1].set_chemical_symbols("CuOH"),
+        lambda _source, _initial, final: final.set_pbc([False, True, False]),
+        lambda _source, _initial, final: final.set_chemical_symbols("CuCuNH"),
+        lambda source, _initial, _final: source[1].positions.__setitem__(
+            (0, 0),
+            np.nan,
+        ),
+    ],
+)
+def test_project_neb_path_rejects_incompatible_inputs(mutate):
+    source = [
+        Atoms(
+            "CuCuH",
+            positions=[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]],
+            cell=[10.0, 10.0, 10.0],
+            pbc=[True, True, False],
+        )
+        for _ in range(3)
+    ]
+    initial = Atoms(
+        "CuCuOH",
+        positions=[
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.5, 1.0, 0.0],
+            [2.0, 0.0, 0.0],
+        ],
+        cell=[10.0, 10.0, 10.0],
+        pbc=[True, True, False],
+    )
+    final = initial.copy()
+    mutate(source, initial, final)
+
+    assert neb_module.project_neb_path(
+        source,
+        initial,
+        final,
+        n_slab=2,
+        n_lateral=1,
+    ) is None
 
 
 def test_parallel_neb_propagates_interior_calculator_exception():

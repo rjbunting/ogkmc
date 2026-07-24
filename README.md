@@ -281,6 +281,12 @@ Each new diffusion lateral class can trigger two endpoint relaxations, an
 ordinary NEB relaxation, and then a climbing-image NEB refinement of the same
 band. These are often among the most expensive parts of a run.
 
+With lateral interactions enabled, AutoKMC automatically uses the optimized
+no-neighbour path as the initial band for a diffusion class containing a
+neighbouring adsorbate. If that bare path has not been calculated yet, the bare
+calculation runs first. The complete lateral band is still reoptimized, and a
+failed or incompatible bare path falls back to the configured `interpolation`.
+
 ### Bond-Changing Reactions
 
 Bond reactions are generated from the reactant SMILES and represent
@@ -317,6 +323,11 @@ endpoints are paired before NEB interpolation. The default `auto` tries several
 reasonable same-element mappings and keeps the lowest-displacement path.
 `hungarian` uses global same-element assignment directly. `greedy` and
 `reactant_index` are useful comparison modes.
+
+Bond NEBs use the same automatic bare-first initialization as diffusion NEBs:
+the no-neighbour lateral class is calculated on demand and its optimized band
+seeds classes with neighbouring adsorbates. No additional configuration key is
+required.
 
 ### Free Energy
 

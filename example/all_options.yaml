@@ -99,6 +99,20 @@ constants:
 
 
 # ---------------------------------------------------------------------------
+# Calculator-backed optimization algorithms
+# ---------------------------------------------------------------------------
+optimization:
+  # Used for ordinary relaxations: structures, gas-phase reactants, adsorption
+  # endpoints, NEB endpoints, and calculator-based stability pruning.
+  # Valid choices: lbfgs, bfgs, fire, mdmin.
+  optimizer: lbfgs
+
+  # Used only to optimize diffusion and bond-reaction NEB bands.
+  # Valid choices: bfgs, fire, mdmin. ASE does not recommend LBFGS for NEB.
+  neb_optimizer: bfgs
+
+
+# ---------------------------------------------------------------------------
 # Output files
 # ---------------------------------------------------------------------------
 output:

@@ -45,9 +45,11 @@ Public API
 from __future__ import annotations
 
 from contextvars import copy_context
+from copy import copy
 from dataclasses import dataclass
 import numpy as np
 import networkx as nx
+from ase import Atoms
 
 from autokmc.io.calculators import (
     CalculatorConfigError,
@@ -60,6 +62,7 @@ from autokmc.sites.stability.diffusion import (
     check_diffusion_site_lateral,
     check_diffusion_stability,
     DiffusionStabilityError,
+    get_diffusion_bare_lateral,
 )
 from autokmc.reactions.rates import (
     EA_MIN,
@@ -77,6 +80,7 @@ from autokmc.core.constants import (
     LATERAL_SHELLS_DEFAULT,
 )
 from autokmc.utils.logging import get_logger
+from autokmc.utils.optimizers import DEFAULT_NEB_OPTIMIZER, DEFAULT_OPTIMIZER
 
 _log = get_logger(__name__)
 
@@ -325,6 +329,48 @@ def _replace_cached_member_diffusion(
     site.applicable_reactions = reactions
 
 
+def _diffusion_seed_path(
+    lateral_class: DiffusionLateral,
+    *,
+    n_images: int,
+    current_member_index: int,
+) -> tuple[list[Atoms] | None, int | None]:
+    """Return a detached compatible bare band and its source member."""
+    source_member = getattr(
+        lateral_class,
+        "_warm_start_member_index",
+        None,
+    )
+    try:
+        source_member = int(source_member)
+    except (TypeError, ValueError, OverflowError):
+        return None, None
+    if source_member != int(current_member_index):
+        return None, None
+
+    path = (
+        getattr(lateral_class, "_warm_start_neb_path", None)
+        or getattr(lateral_class, "atoms_neb_path", None)
+    )
+    try:
+        images = list(path or [])
+    except TypeError:
+        return None, None
+    if (
+        len(images) != int(n_images) + 2
+        or not all(isinstance(image, Atoms) for image in images)
+    ):
+        return None, None
+    detached = [image.copy() for image in images]
+    for image in detached:
+        image.calc = None
+    lateral_class._warm_start_neb_path = [
+        image.copy() for image in detached
+    ]
+    lateral_class._warm_start_member_index = source_member
+    return detached, source_member
+
+
 def get_applicable_diffusion_for_member(
     G: nx.Graph,
     ds: DiffusionSite,
@@ -342,6 +388,8 @@ def get_applicable_diffusion_for_member(
     interpolation: str = NEB_INTERPOLATION,
     nl_mult: float = NL_MULT_DEFAULT,
     persist_neb_path: bool = False,
+    optimizer: str = DEFAULT_OPTIMIZER,
+    neb_optimizer: str = DEFAULT_NEB_OPTIMIZER,
     verbose: bool = False,
     lateral_interactions: bool = True,
     lateral_shells: int = LATERAL_SHELLS_DEFAULT,
@@ -360,7 +408,38 @@ def get_applicable_diffusion_for_member(
     if not applicable or direction is None:
         ds._member_lc.pop(index, None)
     else:
+        stability_kwargs = {
+            "frozen_indices": frozen_indices,
+            "fmax": fmax,
+            "max_steps": max_steps,
+            "n_images": n_images,
+            "climb": climb,
+            "spring_k": spring_k,
+            "interpolation": interpolation,
+            "nl_mult": nl_mult,
+            "persist_neb_path": persist_neb_path,
+            "optimizer": optimizer,
+            "neb_optimizer": neb_optimizer,
+            "verbose": verbose,
+            "free_energy_options": free_energy_options,
+            "free_energy_temperature_k": float(temperature),
+            "vib_cache_root": vib_cache_root,
+            "calculation_cache_root": calculation_cache_root,
+            "calculation_cache_lookup_enabled": (
+                calculation_cache_lookup_enabled
+            ),
+        }
+        bare_lc: DiffusionLateral | None = None
+        bare_seed_path: list[Atoms] | None = None
+        bare_seed_member_index: int | None = None
         try:
+            if lateral_interactions and calculator is not None:
+                bare_lc = get_diffusion_bare_lateral(
+                    G,
+                    ds,
+                    index,
+                    n_shells=lateral_shells,
+                )
             lc = check_diffusion_site_lateral(
                 G,
                 ds,
@@ -368,6 +447,8 @@ def get_applicable_diffusion_for_member(
                 n_shells=lateral_shells,
                 ignore_lateral=not lateral_interactions,
             )
+        except CalculatorConfigError:
+            raise
         except (ValueError, IndexError) as exc:
             ds._member_lc.pop(index, None)
             if verbose:
@@ -376,6 +457,77 @@ def get_applicable_diffusion_for_member(
                     f"lateral check skipped ({exc})"
                 )
         else:
+            if bare_lc is not None and lc.stable is None:
+                bare_seed_path, bare_seed_member_index = (
+                    _diffusion_seed_path(
+                        bare_lc,
+                        n_images=n_images,
+                        current_member_index=index,
+                    )
+                )
+                capture_lc = bare_lc
+                preserve_bare_result = (
+                    bare_lc.stable is True and bare_seed_path is None
+                )
+                if preserve_bare_result:
+                    # The prior bare result is scientifically valid, but its
+                    # path is missing or belongs to another concrete member.
+                    # Capture a same-frame path without risking that result.
+                    capture_lc = copy(bare_lc)
+                    capture_lc.stable = None
+                elif bare_lc.stable is not True:
+                    bare_seed_path = None
+                    bare_seed_member_index = None
+                if capture_lc.stable is None:
+                    try:
+                        check_diffusion_stability(
+                            G,
+                            ds,
+                            index,
+                            capture_lc,
+                            calculator,
+                            capture_neb_path=True,
+                            **stability_kwargs,
+                        )
+                    except DiffusionStabilityError as exc:
+                        reason = f"{type(exc).__name__}: {exc}"
+                        if not preserve_bare_result:
+                            bare_lc.stable = False
+                            bare_lc.invalid_reason = reason
+                        bare_seed_path = None
+                        bare_seed_member_index = None
+                        _log.warning(
+                            "diff_iso=%d m=%d bare warm-start failed: %s; "
+                            "lateral calculation will use %s interpolation",
+                            ds.iso_class,
+                            index,
+                            reason,
+                            interpolation,
+                        )
+                    else:
+                        bare_seed_path, bare_seed_member_index = (
+                            _diffusion_seed_path(
+                                capture_lc,
+                                n_images=n_images,
+                                current_member_index=index,
+                            )
+                        )
+                        if preserve_bare_result and bare_seed_path is not None:
+                            bare_lc._warm_start_neb_path = [
+                                image.copy() for image in bare_seed_path
+                            ]
+                            bare_lc._warm_start_neb_energies = list(
+                                getattr(
+                                    capture_lc,
+                                    "_warm_start_neb_energies",
+                                    [],
+                                )
+                                or []
+                            )
+                            bare_lc._warm_start_member_index = (
+                                bare_seed_member_index
+                            )
+
             if lc.stable is None:
                 try:
                     check_diffusion_stability(
@@ -384,23 +536,13 @@ def get_applicable_diffusion_for_member(
                         index,
                         lc,
                         calculator,
-                        frozen_indices=frozen_indices,
-                        fmax=fmax,
-                        max_steps=max_steps,
-                        n_images=n_images,
-                        climb=climb,
-                        spring_k=spring_k,
-                        interpolation=interpolation,
-                        nl_mult=nl_mult,
-                        persist_neb_path=persist_neb_path,
-                        verbose=verbose,
-                        free_energy_options=free_energy_options,
-                        free_energy_temperature_k=float(temperature),
-                        vib_cache_root=vib_cache_root,
-                        calculation_cache_root=calculation_cache_root,
-                        calculation_cache_lookup_enabled=(
-                            calculation_cache_lookup_enabled
+                        neb_seed_path=(
+                            bare_seed_path
+                            if lc is not bare_lc
+                            else None
                         ),
+                        neb_seed_member_index=bare_seed_member_index,
+                        **stability_kwargs,
                     )
                 except DiffusionStabilityError as exc:
                     reason = f"{type(exc).__name__}: {exc}"
@@ -471,6 +613,8 @@ def get_applicable_diffusions(
     interpolation: str = NEB_INTERPOLATION,
     nl_mult: float = NL_MULT_DEFAULT,
     persist_neb_path: bool = False,
+    optimizer: str = DEFAULT_OPTIMIZER,
+    neb_optimizer: str = DEFAULT_NEB_OPTIMIZER,
     verbose: bool = False,
     lateral_interactions: bool = True,
     lateral_shells: int = LATERAL_SHELLS_DEFAULT,
@@ -510,6 +654,8 @@ def get_applicable_diffusions(
             interpolation=interpolation,
             nl_mult=nl_mult,
             persist_neb_path=persist_neb_path,
+            optimizer=optimizer,
+            neb_optimizer=neb_optimizer,
             verbose=verbose,
             lateral_interactions=lateral_interactions,
             lateral_shells=lateral_shells,
@@ -542,6 +688,8 @@ def compute_all_diffusions(
     interpolation: str = NEB_INTERPOLATION,
     nl_mult: float = NL_MULT_DEFAULT,
     persist_neb_path: bool = False,
+    optimizer: str = DEFAULT_OPTIMIZER,
+    neb_optimizer: str = DEFAULT_NEB_OPTIMIZER,
     verbose: bool = False,
     lateral_interactions: bool = True,
     lateral_shells: int = LATERAL_SHELLS_DEFAULT,
@@ -573,6 +721,8 @@ def compute_all_diffusions(
                     interpolation            = interpolation,
                     nl_mult                  = nl_mult,
                     persist_neb_path         = persist_neb_path,
+                    optimizer                = optimizer,
+                    neb_optimizer            = neb_optimizer,
                     verbose                  = verbose,
                     lateral_interactions     = lateral_interactions,
                     lateral_shells           = lateral_shells,
@@ -606,6 +756,8 @@ def compute_all_diffusions(
             interpolation            = interpolation,
             nl_mult                  = nl_mult,
             persist_neb_path         = persist_neb_path,
+            optimizer                = optimizer,
+            neb_optimizer            = neb_optimizer,
             verbose                  = verbose,
             lateral_interactions     = lateral_interactions,
             lateral_shells           = lateral_shells,

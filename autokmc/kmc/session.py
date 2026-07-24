@@ -167,6 +167,7 @@ class KMCSession:
             frozen_indices=self.settings.frozen_indices,
             fmax=self.settings.fmax,
             max_steps=self.settings.max_steps,
+            optimizer=self.settings.optimizer,
             verbose=self.settings.verbose,
             max_n_shells=self.settings.max_n_shells,
             rxn_index=runtime.reaction_index,
