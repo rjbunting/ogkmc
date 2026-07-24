@@ -84,6 +84,7 @@ class OutputCfg:
     run_manifest_filename: str = RUN_MANIFEST_FILENAME
     trajectory_filename:   str = TRAJECTORY_FILENAME
     calculation_cache_enabled:   bool = True
+    calculation_cache_lookup_enabled: bool = False
     calculation_cache_dir:       str = CALCULATION_CACHE_DIR
     isaac_export_enabled:        bool = False
     isaac_export_filename:       str = ISAAC_EXPORT_FILENAME

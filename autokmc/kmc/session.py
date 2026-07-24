@@ -181,6 +181,9 @@ class KMCSession:
             free_energy_options=self.thermochemistry.free_energy_options,
             vib_cache_root=self.thermochemistry.vib_cache_root,
             calculation_cache_root=self.thermochemistry.calculation_cache_root,
+            calculation_cache_lookup_enabled=bool(
+                self.thermochemistry.calculation_cache_lookup_enabled
+            ),
         )
 
         if reaction.kind == "bond":

@@ -146,6 +146,7 @@ old index. Record folders are not modified.
 ```yaml
 output:
   calculation_cache_enabled: true
+  calculation_cache_lookup_enabled: false
   calculation_cache_dir: calculation_cache
   isaac_export_enabled: false
   isaac_export_filename: isaac_records.json
@@ -153,6 +154,10 @@ output:
 
 Disable database reads/writes with `calculation_cache_enabled: false`. This
 does not disable reaction-folder `.extxyz` persistence in the run directory.
+By default, `calculation_cache_lookup_enabled: false` skips calculation-record
+lookups while continuing to write ISAAC records and update the SQLite index.
+Set it to `true` to reuse matching records. The default write-only mode is
+useful when generating a database for later upload or reuse elsewhere.
 The portable, potentially expensive aggregate export is opt-in; set
 `isaac_export_enabled: true` when an `isaac_records.json` bundle is needed.
 

@@ -1025,6 +1025,7 @@ def check_site_stability(
     free_energy_temperature_k: float | None = None,
     vib_cache_root: str | None = None,
     calculation_cache_root: str | None = None,
+    calculation_cache_lookup_enabled: bool = False,
 ) -> tuple[float, float]:
     """Relax the occupied and unoccupied structures and check for stability.
 
@@ -1164,6 +1165,10 @@ def check_site_stability(
                 include_self=False,
                 frozen_indices=frozen_indices,
             )
+            lateral_class.atoms_occupied_initial = atoms_occ_init.copy()
+            lateral_class.atoms_occupied_initial.calc = None
+            lateral_class.atoms_unoccupied_initial = atoms_unocc_init.copy()
+            lateral_class.atoms_unoccupied_initial.calc = None
             cache_inputs = {
                 "occupied_initial": atoms_occ_init,
                 "unoccupied_initial": atoms_unocc_init,
@@ -1180,17 +1185,19 @@ def check_site_stability(
                 parameters=cache_parameters,
                 inputs=cache_inputs,
             )
-            cached = load_calculation_record(
-                calculation_cache_root,
-                cache_kind,
-                cache_key,
-                reaction_graph=cache_graph,
-                operation=cache_identity,
-                parameters=cache_parameters,
-                inputs=cache_inputs,
-                allow_electronic_match=True,
-                fingerprint_memo=cache_fingerprint_memo,
-            )
+            cached = None
+            if calculation_cache_lookup_enabled:
+                cached = load_calculation_record(
+                    calculation_cache_root,
+                    cache_kind,
+                    cache_key,
+                    reaction_graph=cache_graph,
+                    operation=cache_identity,
+                    parameters=cache_parameters,
+                    inputs=cache_inputs,
+                    allow_electronic_match=True,
+                    fingerprint_memo=cache_fingerprint_memo,
+                )
             if cached is not None and apply_cached_states(
                 lateral_class,
                 cached,
@@ -1298,6 +1305,14 @@ def check_site_stability(
             include_self    = include_self,
             frozen_indices  = frozen_indices,
         )
+        initial_attribute = (
+            "atoms_occupied_initial"
+            if include_self
+            else "atoms_unoccupied_initial"
+        )
+        initial_snapshot = atoms_init.copy()
+        initial_snapshot.calc = None
+        setattr(lateral_class, initial_attribute, initial_snapshot)
 
         n_ads = n_lat + n_self_actual
 

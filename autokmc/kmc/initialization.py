@@ -43,6 +43,20 @@ def normalise_channels(
         cache_root = channels._legacy_bond_growth_reserved.get(
             "calculation_cache_root"
         )
+    cache_lookup_enabled = thermochemistry.calculation_cache_lookup_enabled
+    if cache_lookup_enabled is None:
+        for reserved_values in (
+            channels._legacy_diffusion_reserved,
+            channels._legacy_bond_reserved,
+            channels._legacy_bond_growth_reserved,
+        ):
+            if "calculation_cache_lookup_enabled" in reserved_values:
+                cache_lookup_enabled = bool(
+                    reserved_values["calculation_cache_lookup_enabled"]
+                )
+                break
+    if cache_lookup_enabled is None:
+        cache_lookup_enabled = False
 
     free_energy_options = thermochemistry.free_energy_options
     for reserved_values in (
@@ -83,6 +97,7 @@ def normalise_channels(
     return normalised, replace(
         thermochemistry,
         calculation_cache_root=cache_root,
+        calculation_cache_lookup_enabled=cache_lookup_enabled,
         free_energy_options=free_energy_options,
         vib_cache_root=vib_cache_root,
         free_energy_temperature_k=free_energy_temperature_k,
@@ -156,6 +171,9 @@ def initialise_runtime(
         free_energy_options=thermochemistry.free_energy_options,
         vib_cache_root=thermochemistry.vib_cache_root,
         calculation_cache_root=thermochemistry.calculation_cache_root,
+        calculation_cache_lookup_enabled=bool(
+            thermochemistry.calculation_cache_lookup_enabled
+        ),
     )
     if settings.verbose:
         n_reactions = sum(
@@ -194,6 +212,9 @@ def initialise_runtime(
             free_energy_options=thermochemistry.free_energy_options,
             vib_cache_root=thermochemistry.vib_cache_root,
             calculation_cache_root=thermochemistry.calculation_cache_root,
+            calculation_cache_lookup_enabled=bool(
+                thermochemistry.calculation_cache_lookup_enabled
+            ),
             **channels.diffusion_options.to_kwargs(),
         )
         if settings.verbose:
@@ -229,6 +250,9 @@ def initialise_runtime(
             lateral_interactions=settings.lateral_interactions,
             lateral_shells=settings.lateral_shells,
             calculation_cache_root=thermochemistry.calculation_cache_root,
+            calculation_cache_lookup_enabled=bool(
+                thermochemistry.calculation_cache_lookup_enabled
+            ),
             free_energy_options=thermochemistry.free_energy_options,
             vib_cache_root=thermochemistry.vib_cache_root,
             **channels.bond_options.to_kwargs(),

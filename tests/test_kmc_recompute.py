@@ -235,6 +235,7 @@ def test_recompute_refreshes_each_channel_and_strips_reserved_kwargs(monkeypatch
         },
         lateral_shells=3,
         calculation_cache_root="cache",
+        calculation_cache_lookup_enabled=False,
         **_settings(),
     )
 
@@ -252,6 +253,9 @@ def test_recompute_refreshes_each_channel_and_strips_reserved_kwargs(monkeypatch
     assert calls["bond"]["lateral_shells"] == 3
     assert calls["diffusion"]["calculation_cache_root"] == "cache"
     assert calls["bond"]["calculation_cache_root"] == "cache"
+    assert calls["adsorption"]["calculation_cache_lookup_enabled"] is False
+    assert calls["diffusion"]["calculation_cache_lookup_enabled"] is False
+    assert calls["bond"]["calculation_cache_lookup_enabled"] is False
 
 
 def test_recompute_replaces_only_the_affected_member_leaf(monkeypatch):

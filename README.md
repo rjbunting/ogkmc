@@ -272,13 +272,14 @@ diffusion:
   max_steps: 500
   n_images: 8
   climb: true
-  spring_k: 0.1
+  spring_k: 5.0
   interpolation: idpp
   persist_neb_path: true
 ```
 
-Each new diffusion lateral class can trigger two endpoint relaxations and a
-CI-NEB calculation. These are often among the most expensive parts of a run.
+Each new diffusion lateral class can trigger two endpoint relaxations, an
+ordinary NEB relaxation, and then a climbing-image NEB refinement of the same
+band. These are often among the most expensive parts of a run.
 
 ### Bond-Changing Reactions
 
@@ -304,7 +305,7 @@ bond:
   neb_max_steps: 500
   neb_n_images: 8
   neb_climb: true
-  neb_spring_k: 0.1
+  neb_spring_k: 5.0
   neb_interpolation: idpp
   atom_matching: auto
   matching_trials: 8
@@ -365,6 +366,8 @@ Important files:
 - `kmc.extxyz`: trajectory snapshots with graph node/species/site identities
   and a per-atom frozen mask at the configured cadence, plus a guaranteed
   nonduplicate final frame.
+- `diagnostics/invalid_adsorption/`: initial and, when available, optimized
+  structures for adsorption candidates pruned by the MLIP.
 - `diagnostics/invalid_diffusion/`: failed diffusion candidates kept outside
   the authoritative reaction network.
 - `isaac_records.json`: optional ISAAC AI-ready scientific record bundle.
@@ -384,24 +387,35 @@ reactions/
   index.jsonl
   adsorption/<species>/isoX_latY/
     reaction.json
+    occupied_initial.extxyz
     occupied.extxyz
+    unoccupied_initial.extxyz
     unoccupied.extxyz
   diffusion/<species>/diff_isoX_latY/
     reaction.json
+    state_a_initial.extxyz
     state_a.extxyz
+    state_b_initial.extxyz
     state_b.extxyz
     ts.extxyz
-    neb_path.extxyz
+    neb_path_initial.extxyz       # when persist_neb_path is true
+    neb_path.extxyz               # when persist_neb_path is true
   bond/<A+B<->C>/bond_isoX_latY/
     reaction.json
+    state_ab_initial.extxyz
     state_ab.extxyz
+    state_c_initial.extxyz
     state_c.extxyz
     ts.extxyz
-    neb_path.extxyz
+    neb_path_initial.extxyz       # when persist_neb_path is true
+    neb_path.extxyz               # when persist_neb_path is true
 ```
 
 `reaction.json` stores the energies, barriers, vibrational data when present,
 calculator metadata, and references to the structures written in that folder.
+The `*_initial.extxyz` endpoint files are the structures before relaxation.
+For diffusion and bond reactions, `neb_path_initial.extxyz` is the interpolated
+band before NEB optimization and `neb_path.extxyz` is the optimized band.
 
 ## Post-Processing Events
 
@@ -529,13 +543,17 @@ Configure the reaction database with:
 ```yaml
 output:
   calculation_cache_enabled: true
+  calculation_cache_lookup_enabled: false
   calculation_cache_dir: calculation_cache
   isaac_export_enabled: false
   isaac_export_filename: isaac_records.json
 ```
 
 Set `isaac_export_enabled: true` to write the aggregate export. The calculation
-cache remains enabled independently. The ISAAC export follows the public
+cache remains enabled independently. Cache lookup is off by default, so new
+database records are written for later ISAAC upload without first checking for
+reusable records. Set `calculation_cache_lookup_enabled: true` to opt into
+reuse. The ISAAC export follows the public
 [ISAAC AI-ready scientific record](https://github.com/ISAAC-DOE/isaac-ai-ready-record)
 v1.05 schema. Numerical quantities are written as ISAAC descriptors and
 structures are external assets rather than embedded JSON. The configured

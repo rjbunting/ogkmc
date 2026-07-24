@@ -1645,11 +1645,12 @@ def check_bond_site_stability(
     persist_neb_path: bool = False,
     verbose: bool = False,
     calculation_cache_root: str | None = None,
+    calculation_cache_lookup_enabled: bool = False,
     free_energy_options=None,
     free_energy_temperature_k: float | None = None,
     vib_cache_root: str | None = None,
 ) -> tuple[float, float, float]:
-    """Relax both endpoints and the CI-NEB band; return ``(E_ab, E_c, E_ts)``.
+    """Relax both endpoints and the NEB band; return ``(E_ab, E_c, E_ts)``.
 
     Pipeline (mirrors :func:`autokmc.sites.stability.diffusion.check_diffusion_stability`):
 
@@ -1662,10 +1663,11 @@ def check_bond_site_stability(
        C's atoms overwriting the reacting-block positions inherited from the
        relaxed AB slab+lat.  Relax; verify C's intended surface coordination
        survives.
-    3. Run a CI-NEB band of ``n_images`` interior images between the
-       two relaxed endpoints with the requested *interpolation* and
-       *spring_k*.  All images share one acquired calculator via ASE's
-       SingleCalculatorNEB-style path.
+    3. Converge an ordinary NEB band of ``n_images`` interior images between
+       the two relaxed endpoints with the requested *interpolation* and
+       *spring_k*.  If *climb* is enabled, retain the same band and spring
+       constant, enable its climbing image, and converge it again.  All images
+       share one acquired calculator via ASE's SingleCalculatorNEB-style path.
     4. Identify the TS as the highest-energy interior image; validate
        (no fragmentation into a third species, no collapse onto an
        endpoint); store all energies / atoms / (optional) full band on
@@ -1780,6 +1782,8 @@ def check_bond_site_stability(
         endpoint        = "ab",
         frozen_indices  = frozen_indices,
     )
+    lc.atoms_ab_initial = atoms_ab_init.copy()
+    lc.atoms_ab_initial.calc = None
     n_react = len(react_idx)
     a_ordered = _ordered_endpoint_nodes(G, a_node_ids)
     b_ordered = _ordered_endpoint_nodes(G, b_node_ids)
@@ -1824,17 +1828,19 @@ def check_bond_site_stability(
                 parameters=cache_parameters,
                 inputs=cache_inputs,
             )
-            cached = load_calculation_record(
-                calculation_cache_root,
-                cache_kind,
-                cache_key,
-                reaction_graph=cache_graph,
-                operation=cache_identity,
-                parameters=cache_parameters,
-                inputs=cache_inputs,
-                allow_electronic_match=True,
-                fingerprint_memo=cache_fingerprint_memo,
-            )
+            cached = None
+            if calculation_cache_lookup_enabled:
+                cached = load_calculation_record(
+                    calculation_cache_root,
+                    cache_kind,
+                    cache_key,
+                    reaction_graph=cache_graph,
+                    operation=cache_identity,
+                    parameters=cache_parameters,
+                    inputs=cache_inputs,
+                    allow_electronic_match=True,
+                    fingerprint_memo=cache_fingerprint_memo,
+                )
             if cached is not None and apply_cached_states(
                 lc,
                 cached,
@@ -1979,6 +1985,8 @@ def check_bond_site_stability(
             )
 
         atoms_empty_init = atoms_ab_opt[: n_slab + n_lat].copy()
+        lc.atoms_c_initial = atoms_empty_init.copy()
+        lc.atoms_c_initial.calc = None
         if frozen_indices:
             atoms_empty_init.set_constraint(
                 FixAtoms(indices=[i for i in frozen_indices if i < len(atoms_empty_init)])
@@ -2008,6 +2016,11 @@ def check_bond_site_stability(
             G=G,
             lift_height=float(getattr(brs, "gas_lift_height", 6.0)),
         )
+        # The gas-product C endpoint is constructed directly rather than
+        # relaxed as one combined structure, so this is the actual
+        # pre-NEB endpoint supplied to the band.
+        lc.atoms_c_initial = atoms_c_opt.copy()
+        lc.atoms_c_initial.calc = None
         lc.atom_matching_method = gas_mapping_diag["selected_method"]
         lc.atom_mapping = list(gas_mapping_diag.get("gas_atom_order", []))
         lc.matching_diagnostics = gas_mapping_diag
@@ -2060,6 +2073,8 @@ def check_bond_site_stability(
             base_atoms      = atoms_ab_opt,
             c_node_order    = c_node_order,
         )
+        lc.atoms_c_initial = atoms_c_init.copy()
+        lc.atoms_c_initial.calc = None
 
         if verbose:
             print(
@@ -2109,6 +2124,17 @@ def check_bond_site_stability(
         verbose=verbose,
         not_converged_error=BondNEBNotConvergedError,
         persist_path=persist_neb_path,
+        initial_path_callback=(
+            (
+                lambda images: setattr(
+                    lc,
+                    "atoms_neb_path_initial",
+                    images,
+                )
+            )
+            if persist_neb_path
+            else None
+        ),
         band_factory=_make_neb_band,
         logfile_factory=_neb_optimizer_logfile,
     )

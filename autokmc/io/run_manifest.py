@@ -617,6 +617,15 @@ def configured_artifact_descriptors(
                     True,
                 )
             ),
+            "lookup_enabled": bool(
+                _configured_value(
+                    cfg,
+                    manifest,
+                    "output",
+                    "calculation_cache_lookup_enabled",
+                    False,
+                )
+            ),
         },
         "isaac_records": {
             "path": root / isaac_name,
@@ -641,6 +650,11 @@ def configured_artifact_descriptors(
             "path": root / REACTIONS_DIR / REACTION_INDEX_FILENAME,
             "type": "reaction-index-jsonl",
             "schema_version": REACTION_INDEX_SCHEMA_VERSION,
+        },
+        "invalid_adsorption": {
+            "path": root / "diagnostics" / "invalid_adsorption",
+            "type": "invalid-adsorption-diagnostics-directory",
+            "schema_version": "1",
         },
         "invalid_diffusion": {
             "path": root / "diagnostics" / "invalid_diffusion",

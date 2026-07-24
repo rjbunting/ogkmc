@@ -45,6 +45,7 @@ from autokmc.utils.telemetry import increment, instrument, set_gauge
 IndexedReaction: TypeAlias = AdsorptionReaction | DiffusionReaction | BondReaction
 _RESERVED_CHANNEL_KWARGS = (
     "calculation_cache_root",
+    "calculation_cache_lookup_enabled",
     "free_energy_options",
     "vib_cache_root",
 )
@@ -267,6 +268,7 @@ def recompute_affected_sites(
     free_energy_options=None,
     vib_cache_root: str | None = None,
     calculation_cache_root: str | None = None,
+    calculation_cache_lookup_enabled: bool = False,
 ) -> tuple[list[IndexedReaction], list[DiffusionSite]]:
     """Refresh every reaction whose lateral environment may have changed."""
     increment("kmc.recompute.affected_cliques", len(affected_cliques))
@@ -360,6 +362,7 @@ def recompute_affected_sites(
             free_energy_options=free_energy_options,
             vib_cache_root=vib_cache_root,
             calculation_cache_root=calculation_cache_root,
+            calculation_cache_lookup_enabled=calculation_cache_lookup_enabled,
             update_site_cache=False,
         )
 
@@ -385,6 +388,7 @@ def recompute_affected_sites(
             free_energy_options=free_energy_options,
             vib_cache_root=vib_cache_root,
             calculation_cache_root=calculation_cache_root,
+            calculation_cache_lookup_enabled=calculation_cache_lookup_enabled,
             update_site_cache=False,
             **diffusion_options,
         )
@@ -409,6 +413,7 @@ def recompute_affected_sites(
             lateral_shells=lateral_shells,
             verbose=verbose,
             calculation_cache_root=calculation_cache_root,
+            calculation_cache_lookup_enabled=calculation_cache_lookup_enabled,
             free_energy_options=free_energy_options,
             vib_cache_root=vib_cache_root,
             update_site_cache=False,

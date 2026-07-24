@@ -1021,6 +1021,7 @@ def check_diffusion_stability(
     free_energy_temperature_k: float | None = None,
     vib_cache_root: str | None = None,
     calculation_cache_root: str | None = None,
+    calculation_cache_lookup_enabled: bool = False,
 ) -> tuple[float, float, float]:
     """Relax both endpoints and the NEB band; store and return energies.
 
@@ -1032,11 +1033,13 @@ def check_diffusion_stability(
        connectivity / coordination stability checks.
     2. Same for endpoint-B (migrating molecule at B's positions, atom
        ordering identical to A).
-    3. Build an ``n_images``-image CI-NEB band between the two relaxed
-       endpoints (IDPP or linear interpolation, configurable spring
-       constant).  All images share one acquired calculator via ASE's
+    3. Build an ``n_images``-image NEB band between the two relaxed endpoints
+       (IDPP or linear interpolation, configurable spring constant).  All
+       images share one acquired calculator via ASE's
        SingleCalculatorNEB-style path.
-    4. Run :class:`~ase.optimize.BFGS` on the NEB to ``fmax``.
+    4. Run :class:`~ase.optimize.BFGS` on the ordinary NEB to ``fmax``.  If
+       *climb* is enabled, retain the same band and spring constant, enable
+       its climbing image, and converge a second BFGS optimization.
     5. Identify the TS as the highest-energy interior image; validate
        (no fragmentation, no collapse onto an endpoint); store all
        energies, atoms, and (optionally) the full band on *lateral_class*.
@@ -1064,7 +1067,7 @@ def check_diffusion_stability(
     n_images : int
         Number of *intermediate* NEB images (default :data:`NEB_N_IMAGES`).
     climb : bool
-        Use climbing-image NEB.
+        Refine the converged ordinary NEB with a climbing image.
     spring_k : float
         NEB spring constant (eV/Å²).
     interpolation : str
@@ -1159,6 +1162,8 @@ def check_diffusion_stability(
         endpoint_position = "a",
         frozen_indices    = frozen_indices,
     )
+    lateral_class.atoms_a_initial = atoms_a_init.copy()
+    lateral_class.atoms_a_initial.calc = None
     n_mig = len(mig_idx_a)
 
     if calculation_cache_root is not None:
@@ -1171,6 +1176,8 @@ def check_diffusion_stability(
                 endpoint_position="b",
                 frozen_indices=frozen_indices,
             )
+            lateral_class.atoms_b_initial = atoms_b_seed.copy()
+            lateral_class.atoms_b_initial.calc = None
             cache_identity = {
                 "kind": cache_kind,
                 "reactant_smiles": diffusion_site.reactant,
@@ -1187,17 +1194,19 @@ def check_diffusion_stability(
                 parameters=cache_parameters,
                 inputs=cache_inputs,
             )
-            cached = load_calculation_record(
-                calculation_cache_root,
-                cache_kind,
-                cache_key,
-                reaction_graph=cache_graph,
-                operation=cache_identity,
-                parameters=cache_parameters,
-                inputs=cache_inputs,
-                allow_electronic_match=True,
-                fingerprint_memo=cache_fingerprint_memo,
-            )
+            cached = None
+            if calculation_cache_lookup_enabled:
+                cached = load_calculation_record(
+                    calculation_cache_root,
+                    cache_kind,
+                    cache_key,
+                    reaction_graph=cache_graph,
+                    operation=cache_identity,
+                    parameters=cache_parameters,
+                    inputs=cache_inputs,
+                    allow_electronic_match=True,
+                    fingerprint_memo=cache_fingerprint_memo,
+                )
             if cached is not None and apply_cached_states(
                 lateral_class,
                 cached,
@@ -1333,6 +1342,8 @@ def check_diffusion_stability(
         frozen_indices    = frozen_indices,
         base_atoms        = atoms_a_opt,
     )
+    lateral_class.atoms_b_initial = atoms_b_init.copy()
+    lateral_class.atoms_b_initial.calc = None
 
     if verbose:
         print(
@@ -1382,6 +1393,17 @@ def check_diffusion_stability(
         verbose=verbose,
         not_converged_error=NEBNotConvergedError,
         persist_path=persist_neb_path,
+        initial_path_callback=(
+            (
+                lambda images: setattr(
+                    lateral_class,
+                    "atoms_neb_path_initial",
+                    images,
+                )
+            )
+            if persist_neb_path
+            else None
+        ),
         band_factory=_make_neb_band,
         logfile_factory=_neb_optimizer_logfile,
     )

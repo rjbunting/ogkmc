@@ -132,6 +132,10 @@ class _Validator:
             "output.calculation_cache_enabled",
         )
         self.boolean(
+            cfg.calculation_cache_lookup_enabled,
+            "output.calculation_cache_lookup_enabled",
+        )
+        self.boolean(
             cfg.isaac_export_enabled,
             "output.isaac_export_enabled",
         )

@@ -188,6 +188,10 @@ class AdsorbateSiteLateral:
     atoms_occupied    : Any          = None
     #: Relaxed ASE :class:`~ase.Atoms` snapshot of the **unoccupied** state.
     atoms_unoccupied  : Any          = None
+    #: Pre-optimization structures supplied to the occupied/unoccupied
+    #: relaxations. Persisted beside the relaxed structures for diagnostics.
+    atoms_occupied_initial   : Any    = None
+    atoms_unoccupied_initial : Any    = None
     # ── Free-energy / vibrational fields (autokmc.thermo.free_energy) ────────────
     #: Gibbs/Helmholtz correction (eV) for the **occupied** state — added
     #: to ``energy_occupied`` to obtain the surface free energy at *T*.
@@ -1572,6 +1576,7 @@ def prune_unstable_adsorbate_sites(
     max_steps: int = PRUNE_MAX_STEPS,
     nl_mult: float = NL_MULT_DEFAULT,
     kabsch_max_mappings: int = KABSCH_MAX_MAPPINGS,
+    diagnostics_dir: str | None = None,
     verbose: bool = False,
 ) -> list[AdsorbateSite]:
     """Remove iso-classes whose representative placement is unstable under ML relaxation.
@@ -1641,6 +1646,9 @@ def prune_unstable_adsorbate_sites(
         Maximum number of graph-isomorphism mappings tested when propagating
         a relaxed representative to equivalent members.  Default
         :data:`~autokmc.core.constants.KABSCH_MAX_MAPPINGS`.
+    diagnostics_dir : str | None
+        Run diagnostics directory. Rejected MLIP-pruning structures are
+        written below ``invalid_adsorption`` when supplied.
     verbose : bool
         Print per-iso-class outcomes (stable ✓ / pruned ✗) to stdout.
 
@@ -1652,10 +1660,41 @@ def prune_unstable_adsorbate_sites(
     """
     from autokmc.structure import optimise_structure  # avoid circular at module level
     from autokmc.core.graph import build_graph
+    from autokmc.io.persistence import write_invalid_adsorption_diagnostic
 
     react_sym = list(reactant.atoms.get_chemical_symbols())
     stable: list[AdsorbateSite] = []
     n_pruned = 0
+    resolved_diagnostics_dir = (
+        diagnostics_dir or G.graph.get("diagnostics_dir")
+    )
+
+    def _persist_invalid(
+        site: AdsorbateSite,
+        atoms_initial,
+        atoms_optimized,
+        reason: str,
+        **details,
+    ) -> None:
+        if resolved_diagnostics_dir is None:
+            return
+        try:
+            write_invalid_adsorption_diagnostic(
+                resolved_diagnostics_dir,
+                site,
+                reactant_smiles=reactant.smiles,
+                atoms_initial=atoms_initial,
+                atoms_optimized=atoms_optimized,
+                invalid_reason=reason,
+                details=details,
+            )
+        except Exception as exc:
+            _log.warning(
+                "prune_unstable_adsorbate_sites: failed to persist invalid "
+                "adsorption iso_class=%d (%s)",
+                site.iso_class,
+                exc,
+            )
 
     if verbose:
         print(
@@ -1713,6 +1752,13 @@ def prune_unstable_adsorbate_sites(
             )
             if verbose:
                 print(f"  ✗ iso={ms.iso_class}: relaxation failed ({exc}) — pruned")
+            _persist_invalid(
+                ms,
+                atoms_init,
+                None,
+                "relaxation_failed",
+                error=f"{type(exc).__name__}: {exc}",
+            )
             n_pruned += 1
             _remove_iso_class_nodes(G, ms)
             continue
@@ -1724,6 +1770,15 @@ def prune_unstable_adsorbate_sites(
                     f"  ✗ iso={ms.iso_class}: not converged "
                     f"(max|F|={max_force:.4f} eV/Å > {fmax}) — pruned"
                 )
+            _persist_invalid(
+                ms,
+                atoms_init,
+                atoms_opt,
+                "not_converged",
+                max_force_ev_per_ang=float(max_force),
+                fmax_ev_per_ang=float(fmax),
+                energy_ev=float(E),
+            )
             n_pruned += 1
             _remove_iso_class_nodes(G, ms)
             continue
@@ -1750,6 +1805,15 @@ def prune_unstable_adsorbate_sites(
                     f"  ✗ iso={ms.iso_class}: build_graph(relaxed) failed "
                     f"({exc}) — pruned"
                 )
+            _persist_invalid(
+                ms,
+                atoms_init,
+                atoms_opt,
+                "relaxed_graph_failed",
+                error=f"{type(exc).__name__}: {exc}",
+                max_force_ev_per_ang=float(max_force),
+                energy_ev=float(E),
+            )
             n_pruned += 1
             _remove_iso_class_nodes(G, ms)
             continue
@@ -1772,6 +1836,16 @@ def prune_unstable_adsorbate_sites(
                     f"extra={len(extra)} [{extr_s}"
                     f"{'…' if len(extra) > 3 else ''}]) — pruned"
                 )
+            _persist_invalid(
+                ms,
+                atoms_init,
+                atoms_opt,
+                "connectivity_changed",
+                missing_edge_count=len(missing),
+                extra_edge_count=len(extra),
+                max_force_ev_per_ang=float(max_force),
+                energy_ev=float(E),
+            )
             n_pruned += 1
             _remove_iso_class_nodes(G, ms)
             continue
@@ -1980,6 +2054,7 @@ def find_adsorbate_sites(
     frozen_indices: list[int] | None = None,
     prune_fmax: float = PRUNE_FMAX,
     prune_max_steps: int = PRUNE_MAX_STEPS,
+    diagnostics_dir: str | None = None,
     verbose: bool = False,
 ) -> list[AdsorbateSite]:
     """Universal N-atom adsorbate site enumerator (N ≥ 1).
@@ -2078,6 +2153,9 @@ def find_adsorbate_sites(
     prune_max_steps : int
         Maximum LBFGS steps for pruning relaxations.
         Default :data:`~autokmc.core.constants.PRUNE_MAX_STEPS` (200).
+    diagnostics_dir : str | None
+        Run diagnostics directory. Adsorption candidates rejected by MLIP
+        pruning are written below ``invalid_adsorption`` when supplied.
     verbose : bool
         Print per-step progress to stdout.
 
@@ -2450,6 +2528,7 @@ def find_adsorbate_sites(
                 max_steps      = prune_max_steps,
                 nl_mult        = nl_mult,
                 kabsch_max_mappings=kabsch_max_mappings,
+                diagnostics_dir=diagnostics_dir,
                 verbose        = verbose,
             )
             # prune_unstable_adsorbate_sites already updates G.graph; keep

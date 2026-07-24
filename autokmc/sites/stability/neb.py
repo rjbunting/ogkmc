@@ -19,7 +19,7 @@ from concurrent.futures import ThreadPoolExecutor, wait
 from contextlib import contextmanager
 from dataclasses import dataclass
 from importlib import import_module
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 import numpy as np
 from ase import Atoms
@@ -64,7 +64,7 @@ _log = get_logger(__name__)
 
 @dataclass(frozen=True)
 class NEBRunResult:
-    """Calculator-detached result of one converged NEB optimisation."""
+    """Calculator-detached result of a converged NEB optimisation."""
 
     atoms_ts: Atoms
     energy_ts: float
@@ -342,6 +342,7 @@ def run_neb(
     verbose: bool,
     not_converged_error: type[Exception],
     persist_path: bool = False,
+    initial_path_callback: Callable[[list[Atoms]], None] | None = None,
     band_factory=None,
     logfile_factory=None,
 ) -> NEBRunResult:
@@ -349,7 +350,10 @@ def run_neb(
 
     The caller supplies its channel-specific non-convergence exception class;
     scientific transition-state validation remains in the caller after this
-    mechanical optimisation step.
+    mechanical optimisation step.  When ``climb`` is requested, the ordinary
+    NEB is converged first and the same band is then converged again after
+    enabling its climbing image.  ``max_steps`` applies independently to each
+    stage, while ``optimizer_steps`` reports their combined step count.
     """
     build_band = band_factory or make_neb_band
     select_logfile = logfile_factory or neb_optimizer_logfile
@@ -375,19 +379,38 @@ def run_neb(
             n_images=int(n_images),
             interpolation=str(interpolation),
             spring_k=float(spring_k),
-            climb=bool(climb),
+            climb=False,
             calculator=neb_calculator,
             frozen_indices=frozen_indices,
         )
         try:
-            optimizer = BFGS(neb, logfile=select_logfile(verbose))
-            optimizer.run(fmax=float(fmax), steps=int(max_steps))
+            if initial_path_callback is not None:
+                initial_path = []
+                for image in images:
+                    snapshot = image.copy()
+                    snapshot.calc = None
+                    initial_path.append(snapshot)
+                initial_path_callback(initial_path)
 
-            if not optimizer.converged():
-                raise not_converged_error(
-                    f"CI-NEB did not converge: fmax={fmax} eV/Å not reached in "
-                    f"{max_steps} steps."
-                )
+            optimizer_steps = 0
+
+            def _optimise_stage(*, stage: str) -> None:
+                nonlocal optimizer_steps
+                optimizer = BFGS(neb, logfile=select_logfile(verbose))
+                optimizer.run(fmax=float(fmax), steps=int(max_steps))
+                optimizer_steps += int(optimizer.nsteps)
+                if not optimizer.converged():
+                    raise not_converged_error(
+                        f"{stage} did not converge: fmax={fmax} eV/Å not "
+                        f"reached in {max_steps} steps."
+                    )
+
+            _optimise_stage(
+                stage="NEB pre-climb relaxation" if climb else "NEB"
+            )
+            if climb:
+                neb.climb = True
+                _optimise_stage(stage="CI-NEB")
 
             energies = [float(image.get_potential_energy()) for image in images]
             interior = energies[1:-1]
@@ -415,7 +438,7 @@ def run_neb(
                 energy_ts=float(energies[transition_index]),
                 transition_index=transition_index,
                 n_interior=len(interior),
-                optimizer_steps=int(optimizer.nsteps),
+                optimizer_steps=optimizer_steps,
                 path_energies=path_energies,
                 path_images=path_images,
             )

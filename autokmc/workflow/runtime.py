@@ -336,6 +336,9 @@ def resolve_thermo_runtime(cfg, identity: RunIdentity) -> ThermoRuntime:
         options=options,
         vibration_cache_root=vibration_cache_root,
         calculation_cache_root=calculation_cache_root,
+        calculation_cache_lookup_enabled=bool(
+            cfg.output.calculation_cache_lookup_enabled
+        ),
     )
 
 

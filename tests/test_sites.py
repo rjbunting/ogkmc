@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import networkx as nx
@@ -922,6 +923,79 @@ def test_adsorbate_pruning_reads_energy_before_detaching_calculator(monkeypatch)
     )
 
     assert stable == [site]
+
+
+def test_adsorbate_pruning_persists_mlip_rejected_structures(
+    tmp_path,
+    monkeypatch,
+):
+    graph = nx.Graph()
+    graph.graph["cell"] = np.eye(3) * 10.0
+    graph.graph["pbc"] = np.array([True, True, True])
+    graph.add_node(
+        0,
+        type="surface",
+        element="Pt",
+        position=np.array([0.0, 0.0, 0.0]),
+        index=0,
+    )
+    site = AdsorbateSite(
+        reactant="[O]",
+        n_atoms=1,
+        atom_cliques=[frozenset({0})],
+        positions=np.array([[0.0, 0.0, 1.8]]),
+        iso_class=0,
+        members=[[frozenset({0})]],
+        member_node_ids=[],
+    )
+    reactant = SimpleNamespace(
+        smiles="[O]",
+        atoms=Atoms("O", positions=[[0.0, 0.0, 0.0]]),
+        graph=nx.Graph(),
+    )
+    reactant.graph.add_node(0, element="O")
+
+    def fake_optimise_structure(atoms, **_kwargs):
+        optimized = atoms.copy()
+        optimized.calc = SinglePointCalculator(
+            optimized,
+            energy=-12.3,
+            forces=np.ones((len(optimized), 3)),
+        )
+        return optimized
+
+    monkeypatch.setattr(
+        "autokmc.structure.optimise_structure",
+        fake_optimise_structure,
+    )
+
+    stable = prune_unstable_adsorbate_sites(
+        graph,
+        [site],
+        reactant,
+        calculator=object(),
+        fmax=0.05,
+        max_steps=1,
+        diagnostics_dir=tmp_path / "diagnostics",
+    )
+
+    assert stable == []
+    folder = (
+        tmp_path
+        / "diagnostics"
+        / "invalid_adsorption"
+        / "(O)"
+        / "ads_iso0"
+    )
+    assert (folder / "initial.extxyz").is_file()
+    assert (folder / "optimized.extxyz").is_file()
+    payload = json.loads((folder / "diagnostic.json").read_text())
+    assert payload["invalid_reason"] == "not_converged"
+    assert payload["structures"] == {
+        "initial": "initial.extxyz",
+        "optimized": "optimized.extxyz",
+    }
+    assert payload["details"]["max_force_ev_per_ang"] > 0.05
 
 
 def test_adsorbate_pruning_projects_relaxed_adsorbate_back_to_graph_frame(monkeypatch):

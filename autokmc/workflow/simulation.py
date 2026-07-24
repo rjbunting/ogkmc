@@ -15,7 +15,11 @@ from autokmc.io.performance import (
     build_performance_summary,
     write_performance_diagnostics,
 )
-from autokmc.io.persistence import DIAGNOSTICS_DIR, INVALID_DIFFUSION_DIR
+from autokmc.io.persistence import (
+    DIAGNOSTICS_DIR,
+    INVALID_ADSORPTION_DIR,
+    INVALID_DIFFUSION_DIR,
+)
 from autokmc.io.run_manifest import (
     begin_run_manifest,
     build_artifact_inventory,
@@ -141,6 +145,9 @@ def _output_paths(
         ),
         "reactions_dir": str(sinks.reactions.reactions_root),
         "reaction_index": str(sinks.reactions.reaction_index_path),
+        "invalid_adsorption": str(
+            identity.output_dir / DIAGNOSTICS_DIR / INVALID_ADSORPTION_DIR
+        ),
         "invalid_diffusion": str(
             identity.output_dir / DIAGNOSTICS_DIR / INVALID_DIFFUSION_DIR
         ),
@@ -351,6 +358,9 @@ def execute_kmc_stage(
                 ),
                 vib_cache_root=context.thermo.vibration_cache_root,
                 calculation_cache_root=context.thermo.calculation_cache_root,
+                calculation_cache_lookup_enabled=(
+                    context.thermo.calculation_cache_lookup_enabled
+                ),
             ),
             observers=KMCObservers(
                 reaction_writer=sinks.reactions,
@@ -414,6 +424,9 @@ def execute_kmc_stage(
                 ),
                 vib_cache_root=context.thermo.vibration_cache_root,
                 calculation_cache_root=context.thermo.calculation_cache_root,
+                calculation_cache_lookup_enabled=(
+                    context.thermo.calculation_cache_lookup_enabled
+                ),
                 reaction_writer=sinks.reactions,
                 trajectory_writer=sinks.trajectory,
                 summary_collector=sinks.summary,

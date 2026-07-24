@@ -113,6 +113,7 @@ _log = get_logger(__name__)
 
 UNCOMMITTED_REACTIONS_DIR = "uncommitted_reactions"
 DIAGNOSTICS_DIR = "diagnostics"
+INVALID_ADSORPTION_DIR = "invalid_adsorption"
 INVALID_DIFFUSION_DIR = "invalid_diffusion"
 
 
@@ -159,6 +160,67 @@ def _safe_atoms_copy(atoms: Atoms) -> Atoms:
     except Exception:
         snap.calc = None
     return snap
+
+
+def write_invalid_adsorption_diagnostic(
+    diagnostics_dir: str | Path,
+    site,
+    *,
+    reactant_smiles: str,
+    atoms_initial: Atoms,
+    atoms_optimized: Atoms | None,
+    invalid_reason: str,
+    details: dict[str, Any] | None = None,
+) -> Path:
+    """Persist one adsorption iso-class rejected by MLIP pruning.
+
+    These structures are diagnostic candidates rather than KMC reactions, so
+    they live outside the authoritative reaction tree under
+    ``diagnostics/invalid_adsorption/<species>/ads_isoX/``.
+    """
+    species = (
+        _smiles_to_dirname(reactant_smiles)
+        if reactant_smiles
+        else "unknown"
+    )
+    iso_class = int(site.iso_class)
+    folder = (
+        Path(diagnostics_dir)
+        / INVALID_ADSORPTION_DIR
+        / species
+        / f"ads_iso{iso_class}"
+    )
+    ensure_directory(folder)
+    _atomic_extxyz(
+        folder / "initial.extxyz",
+        _safe_atoms_copy(atoms_initial),
+    )
+    if atoms_optimized is not None:
+        _atomic_extxyz(
+            folder / "optimized.extxyz",
+            _safe_atoms_copy(atoms_optimized),
+        )
+    _atomic_json(
+        folder / "diagnostic.json",
+        {
+            "artifact_type": "autokmc-invalid-adsorption-diagnostic",
+            "schema_version": "1",
+            "kind": "adsorption",
+            "iso_class": iso_class,
+            "reactant_smiles": str(reactant_smiles),
+            "invalid_reason": str(invalid_reason),
+            "structures": {
+                "initial": "initial.extxyz",
+                "optimized": (
+                    "optimized.extxyz"
+                    if atoms_optimized is not None
+                    else None
+                ),
+            },
+            "details": dict(details or {}),
+        },
+    )
+    return folder
 
 
 def _read_discovery_step(path: Path) -> int | None:
@@ -521,8 +583,10 @@ class ReactionWriter:
     Each unique ``(kind, species, iso_class, lateral_class)`` tuple gets a
     folder under ``output_dir/reactions/<sub>/<species>/`` containing:
 
-    * ``occupied.extxyz``   — relaxed atoms behind ``E_occupied``.
-    * ``unoccupied.extxyz`` — relaxed atoms behind ``E_unoccupied``.
+    * ``*_initial.extxyz``  — endpoint structures before relaxation.
+    * endpoint ``.extxyz`` files — relaxed structures behind the energies.
+    * ``neb_path_initial.extxyz`` — optional interpolated diffusion/bond band.
+    * ``neb_path.extxyz`` — optional optimized diffusion/bond band.
     * ``reaction.json``     — description + energies + ΔE / barrier / rate
       / fired-event count.
 
@@ -828,9 +892,21 @@ class ReactionWriter:
 
         lc = reaction.lateral_class
         if sub == "diffusion":
+            atoms_a_initial = getattr(lc, "atoms_a_initial", None)
+            atoms_b_initial = getattr(lc, "atoms_b_initial", None)
             atoms_a  = getattr(lc, "atoms_a",  None)
             atoms_b  = getattr(lc, "atoms_b",  None)
             atoms_ts = getattr(lc, "atoms_ts", None)
+            if atoms_a_initial is not None:
+                _atomic_extxyz(
+                    folder / "state_a_initial.extxyz",
+                    _safe_atoms_copy(atoms_a_initial),
+                )
+            if atoms_b_initial is not None:
+                _atomic_extxyz(
+                    folder / "state_b_initial.extxyz",
+                    _safe_atoms_copy(atoms_b_initial),
+                )
             if atoms_a is not None:
                 _atomic_extxyz(folder / "state_a.extxyz", _safe_atoms_copy(atoms_a))
             else:
@@ -864,10 +940,32 @@ class ReactionWriter:
                     folder / "neb_path.extxyz",
                     [_safe_atoms_copy(im) for im in atoms_neb_path],
                 )
+            atoms_neb_path_initial = getattr(
+                lc,
+                "atoms_neb_path_initial",
+                None,
+            )
+            if atoms_neb_path_initial:
+                _atomic_extxyz(
+                    folder / "neb_path_initial.extxyz",
+                    [_safe_atoms_copy(im) for im in atoms_neb_path_initial],
+                )
         elif sub == "bond":
+            atoms_ab_initial = getattr(lc, "atoms_ab_initial", None)
+            atoms_c_initial = getattr(lc, "atoms_c_initial", None)
             atoms_ab = getattr(lc, "atoms_ab", None)
             atoms_c  = getattr(lc, "atoms_c",  None)
             atoms_ts = getattr(lc, "atoms_ts", None)
+            if atoms_ab_initial is not None:
+                _atomic_extxyz(
+                    folder / "state_ab_initial.extxyz",
+                    _safe_atoms_copy(atoms_ab_initial),
+                )
+            if atoms_c_initial is not None:
+                _atomic_extxyz(
+                    folder / "state_c_initial.extxyz",
+                    _safe_atoms_copy(atoms_c_initial),
+                )
             if atoms_ab is not None:
                 _atomic_extxyz(folder / "state_ab.extxyz", _safe_atoms_copy(atoms_ab))
             else:
@@ -898,10 +996,32 @@ class ReactionWriter:
                     folder / "neb_path.extxyz",
                     [_safe_atoms_copy(im) for im in atoms_neb_path],
                 )
+            atoms_neb_path_initial = getattr(
+                lc,
+                "atoms_neb_path_initial",
+                None,
+            )
+            if atoms_neb_path_initial:
+                _atomic_extxyz(
+                    folder / "neb_path_initial.extxyz",
+                    [_safe_atoms_copy(im) for im in atoms_neb_path_initial],
+                )
         else:
             # Stamped onto the lateral class by check_site_stability().
+            atoms_occ_initial = getattr(lc, "atoms_occupied_initial", None)
+            atoms_unocc_initial = getattr(lc, "atoms_unoccupied_initial", None)
             atoms_occ   = getattr(lc, "atoms_occupied",   None)
             atoms_unocc = getattr(lc, "atoms_unoccupied", None)
+            if atoms_occ_initial is not None:
+                _atomic_extxyz(
+                    folder / "occupied_initial.extxyz",
+                    _safe_atoms_copy(atoms_occ_initial),
+                )
+            if atoms_unocc_initial is not None:
+                _atomic_extxyz(
+                    folder / "unoccupied_initial.extxyz",
+                    _safe_atoms_copy(atoms_unocc_initial),
+                )
             if atoms_occ is not None:
                 _atomic_extxyz(
                     folder / "occupied.extxyz",
@@ -1123,12 +1243,36 @@ class ReactionWriter:
         atoms_a  = getattr(lc, "atoms_a",  None)
         atoms_b  = getattr(lc, "atoms_b",  None)
         atoms_ts = getattr(lc, "atoms_ts", None)
+        atoms_a_initial = getattr(lc, "atoms_a_initial", None)
+        atoms_b_initial = getattr(lc, "atoms_b_initial", None)
+        if atoms_a_initial is not None:
+            _atomic_extxyz(
+                folder / "state_a_initial.extxyz",
+                _safe_atoms_copy(atoms_a_initial),
+            )
+        if atoms_b_initial is not None:
+            _atomic_extxyz(
+                folder / "state_b_initial.extxyz",
+                _safe_atoms_copy(atoms_b_initial),
+            )
         if atoms_a is not None:
             _atomic_extxyz(folder / "state_a.extxyz", _safe_atoms_copy(atoms_a))
         if atoms_b is not None:
             _atomic_extxyz(folder / "state_b.extxyz", _safe_atoms_copy(atoms_b))
         if atoms_ts is not None:
             _atomic_extxyz(folder / "ts.extxyz", _safe_atoms_copy(atoms_ts))
+        atoms_neb_path_initial = getattr(lc, "atoms_neb_path_initial", None)
+        if atoms_neb_path_initial:
+            _atomic_extxyz(
+                folder / "neb_path_initial.extxyz",
+                [_safe_atoms_copy(image) for image in atoms_neb_path_initial],
+            )
+        atoms_neb_path = getattr(lc, "atoms_neb_path", None)
+        if atoms_neb_path:
+            _atomic_extxyz(
+                folder / "neb_path.extxyz",
+                [_safe_atoms_copy(image) for image in atoms_neb_path],
+            )
 
         metadata_path = folder / "reaction.json"
         existing_discovery_step = (
@@ -1165,6 +1309,35 @@ class ReactionWriter:
                 "state_a":   None if getattr(lc, "energy_a",  None) is None else float(lc.energy_a),
                 "state_b":   None if getattr(lc, "energy_b",  None) is None else float(lc.energy_b),
                 "transition": None if getattr(lc, "energy_ts", None) is None else float(lc.energy_ts),
+            },
+            "atoms": {
+                "state_a_initial": (
+                    "state_a_initial.extxyz"
+                    if atoms_a_initial is not None
+                    else None
+                ),
+                "state_b_initial": (
+                    "state_b_initial.extxyz"
+                    if atoms_b_initial is not None
+                    else None
+                ),
+                "state_a": (
+                    "state_a.extxyz" if atoms_a is not None else None
+                ),
+                "state_b": (
+                    "state_b.extxyz" if atoms_b is not None else None
+                ),
+                "transition": (
+                    "ts.extxyz" if atoms_ts is not None else None
+                ),
+                "neb_path_initial": (
+                    "neb_path_initial.extxyz"
+                    if atoms_neb_path_initial
+                    else None
+                ),
+                "neb_path": (
+                    "neb_path.extxyz" if atoms_neb_path else None
+                ),
             },
             "calculator": dict(self._calc_meta),
         }

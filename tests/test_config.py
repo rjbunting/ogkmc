@@ -65,8 +65,11 @@ def test_load_yaml_ok(tmp_path):
     assert cfg.calculator.import_path == "ase.calculators.emt.EMT"
     assert cfg.kmc.n_steps == 10
     assert cfg.diffusion.enabled is False
+    assert cfg.diffusion.spring_k == pytest.approx(5.0)
+    assert cfg.bond.neb_spring_k == pytest.approx(5.0)
     assert cfg.free_energy.symmetry_tolerance == pytest.approx(0.3)
     assert cfg.adsorbate_sites.anchor_k_max == 4
+    assert cfg.output.calculation_cache_lookup_enabled is False
     assert cfg.output.isaac_export_enabled is False
 
 
@@ -298,6 +301,7 @@ schema_version: "1"
 output:
   dir: ./out
   calculation_cache_enabled: true
+  calculation_cache_lookup_enabled: false
   calculation_cache_dir: calc_cache
   isaac_export_enabled: true
   isaac_export_filename: isaac_upload.json
@@ -328,6 +332,7 @@ structure:
     assert cfg.checkpoint.every_n_steps == 5
     assert cfg.structure.surface_energy_facets == ((1, 1, 1), (1, 0, 0))
     assert cfg.output.calculation_cache_enabled is True
+    assert cfg.output.calculation_cache_lookup_enabled is False
     assert cfg.output.calculation_cache_dir == "calc_cache"
     assert cfg.output.isaac_export_enabled is True
     assert cfg.output.isaac_export_filename == "isaac_upload.json"
@@ -373,6 +378,7 @@ def test_missing_file():
 @pytest.mark.parametrize(
     "fragment",
     [
+        "output:\n  calculation_cache_lookup_enabled: 'false'\n",
         "diffusion:\n  enabled: 'false'\n",
         "bond:\n  neb_climb: 'true'\n",
         "kmc:\n  temperature_k: 0\n",

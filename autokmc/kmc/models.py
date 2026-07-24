@@ -265,9 +265,15 @@ class KMCChannels:
             raise TypeError("pass bond_options or bond_kwargs, not both")
         if bond_growth_options is not None and bond_growth_kwargs is not None:
             raise TypeError("pass bond_growth_options or bond_growth_kwargs, not both")
-        reserved = {"calculation_cache_root", "free_energy_options", "vib_cache_root"}
+        reserved = {
+            "calculation_cache_root",
+            "calculation_cache_lookup_enabled",
+            "free_energy_options",
+            "vib_cache_root",
+        }
         growth_reserved = {
             "calculation_cache_root",
+            "calculation_cache_lookup_enabled",
             "free_energy_options",
             "free_energy_temperature_k",
             "verbose",
@@ -337,6 +343,7 @@ class KMCThermochemistry:
     free_energy_options: Any = None
     vib_cache_root: str | None = None
     calculation_cache_root: str | None = None
+    calculation_cache_lookup_enabled: bool | None = None
     # Compatibility override used only by legacy dynamic bond-growth calls.
     # Typed configured runs leave it unset and use ``KMCSettings.temperature``.
     free_energy_temperature_k: float | None = None

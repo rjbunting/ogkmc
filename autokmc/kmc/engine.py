@@ -95,6 +95,7 @@ def run_kmc_steps(
     free_energy_options=None,
     vib_cache_root: str | None = None,
     calculation_cache_root: str | None = None,
+    calculation_cache_lookup_enabled: bool | None = None,
     reaction_writer=None,
     trajectory_writer=None,
     summary_collector=None,
@@ -123,6 +124,23 @@ def run_kmc_steps(
         resolved_cache_root = bond_values.pop("calculation_cache_root", None)
     else:
         bond_values.pop("calculation_cache_root", None)
+    resolved_cache_lookup_enabled = calculation_cache_lookup_enabled
+    if resolved_cache_lookup_enabled is None:
+        legacy_lookup_enabled = diffusion_values.pop(
+            "calculation_cache_lookup_enabled",
+            None,
+        )
+        if legacy_lookup_enabled is None:
+            legacy_lookup_enabled = bond_values.pop(
+                "calculation_cache_lookup_enabled",
+                None,
+            )
+        resolved_cache_lookup_enabled = (
+            False if legacy_lookup_enabled is None else bool(legacy_lookup_enabled)
+        )
+    else:
+        diffusion_values.pop("calculation_cache_lookup_enabled", None)
+        bond_values.pop("calculation_cache_lookup_enabled", None)
     for reserved in ("free_energy_options", "vib_cache_root"):
         diffusion_values.pop(reserved, None)
         bond_values.pop(reserved, None)
@@ -160,6 +178,7 @@ def run_kmc_steps(
             free_energy_options=free_energy_options,
             vib_cache_root=vib_cache_root,
             calculation_cache_root=resolved_cache_root,
+            calculation_cache_lookup_enabled=resolved_cache_lookup_enabled,
         ),
         observers=KMCObservers(
             reaction_writer=reaction_writer,

@@ -278,6 +278,9 @@ class DynamicNetworkExpander:
             free_energy_options=self.thermochemistry.free_energy_options,
             vib_cache_root=self.thermochemistry.vib_cache_root,
             calculation_cache_root=self.thermochemistry.calculation_cache_root,
+            calculation_cache_lookup_enabled=bool(
+                self.thermochemistry.calculation_cache_lookup_enabled
+            ),
         )
         if self.settings.verbose:
             count = sum(
@@ -331,6 +334,9 @@ class DynamicNetworkExpander:
             free_energy_options=self.thermochemistry.free_energy_options,
             vib_cache_root=self.thermochemistry.vib_cache_root,
             calculation_cache_root=self.thermochemistry.calculation_cache_root,
+            calculation_cache_lookup_enabled=bool(
+                self.thermochemistry.calculation_cache_lookup_enabled
+            ),
             **self.channels.diffusion_options.to_kwargs(),
         )
         if self.settings.verbose:
@@ -385,6 +391,9 @@ class DynamicNetworkExpander:
                 lateral_interactions=self.settings.lateral_interactions,
                 lateral_shells=self.settings.lateral_shells,
                 calculation_cache_root=self.thermochemistry.calculation_cache_root,
+                calculation_cache_lookup_enabled=bool(
+                    self.thermochemistry.calculation_cache_lookup_enabled
+                ),
                 free_energy_options=self.thermochemistry.free_energy_options,
                 vib_cache_root=self.thermochemistry.vib_cache_root,
                 **self.channels.bond_options.to_kwargs(),

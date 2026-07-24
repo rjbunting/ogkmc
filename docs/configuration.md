@@ -41,6 +41,7 @@ calculator, thermochemistry, and convergence settings explicitly.
 | `trajectory_filename` | `kmc.extxyz` | Extended-XYZ trajectory name. |
 | `trajectory_dump_every` | `10` | Write every Nth KMC step; `0` disables it. |
 | `calculation_cache_enabled` | `true` | Enable the ISAAC reaction database. |
+| `calculation_cache_lookup_enabled` | `false` | Reuse matching database records when `true`; the default write-only mode only generates database records. |
 | `calculation_cache_dir` | `calculation_cache` | Database directory below `output.dir`. |
 | `isaac_export_enabled` | `false` | Write a portable ISAAC record-array export at finalization. |
 | `isaac_export_filename` | `isaac_records.json` | Export name used when `isaac_export_enabled` is true. |
@@ -253,10 +254,10 @@ cache or resume contract being able to detect it.
 | `fmax` | `0.01` eV/Å | NEB force threshold. |
 | `max_steps` | `200` | NEB optimization limit. |
 | `n_images` | `10` | Number of NEB images. |
-| `climb` | `true` | Use climbing-image NEB. |
-| `spring_k` | `0.1` | NEB spring constant. |
+| `climb` | `true` | Refine the converged ordinary NEB with a climbing image. |
+| `spring_k` | `5.0` eV/Å² | NEB spring constant used for both optimization stages. |
 | `interpolation` | `linear` | `linear` or `idpp`. |
-| `persist_neb_path` | `false` | Save the complete image sequence as `.extxyz`. |
+| `persist_neb_path` | `false` | Save both the initial interpolated and final optimized image sequences as `.extxyz`. |
 
 ## `bond`
 
@@ -280,12 +281,12 @@ cache or resume contract being able to detect it.
 | `neb_fmax` | `0.01` eV/Å | Bond NEB threshold. |
 | `neb_max_steps` | `200` | Bond NEB step limit. |
 | `neb_n_images` | `10` | Bond NEB images. |
-| `neb_climb` | `true` | Use climbing-image NEB. |
-| `neb_spring_k` | `0.1` | Bond NEB spring constant. |
+| `neb_climb` | `true` | Refine the converged ordinary bond NEB with a climbing image. |
+| `neb_spring_k` | `5.0` eV/Å² | Bond NEB spring constant used for both optimization stages. |
 | `neb_interpolation` | `idpp` | `linear` or `idpp`. |
 | `atom_matching` | `auto` | `auto`, `greedy`, `hungarian`, or `reactant_index`. |
 | `matching_trials` | `8` | Number of mapping trials used by automatic matching. |
-| `persist_neb_path` | `false` | Save the complete bond NEB path. |
+| `persist_neb_path` | `false` | Save both the initial interpolated and final optimized bond NEB paths. |
 
 ## `free_energy`
 

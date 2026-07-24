@@ -391,6 +391,7 @@ def get_applicable_bond_reaction_for_member(
     lateral_shells: int = LATERAL_SHELLS_DEFAULT,
     verbose: bool = False,
     calculation_cache_root: str | None = None,
+    calculation_cache_lookup_enabled: bool = False,
     free_energy_options=None,
     vib_cache_root: str | None = None,
     update_site_cache: bool = True,
@@ -441,6 +442,9 @@ def get_applicable_bond_reaction_for_member(
                         persist_neb_path=persist_neb_path,
                         verbose=verbose,
                         calculation_cache_root=calculation_cache_root,
+                        calculation_cache_lookup_enabled=(
+                            calculation_cache_lookup_enabled
+                        ),
                         free_energy_options=free_energy_options,
                         free_energy_temperature_k=float(temperature),
                         vib_cache_root=vib_cache_root,
@@ -520,6 +524,7 @@ def get_applicable_bond_reactions(
     lateral_shells: int = LATERAL_SHELLS_DEFAULT,
     verbose: bool = False,
     calculation_cache_root: str | None = None,
+    calculation_cache_lookup_enabled: bool = False,
     free_energy_options=None,
     vib_cache_root: str | None = None,
 ) -> list[BondReaction]:
@@ -559,6 +564,7 @@ def get_applicable_bond_reactions(
             lateral_shells=lateral_shells,
             verbose=verbose,
             calculation_cache_root=calculation_cache_root,
+            calculation_cache_lookup_enabled=calculation_cache_lookup_enabled,
             free_energy_options=free_energy_options,
             vib_cache_root=vib_cache_root,
             update_site_cache=False,
@@ -592,6 +598,7 @@ def compute_all_bond_reactions(
     lateral_shells: int = LATERAL_SHELLS_DEFAULT,
     verbose: bool = False,
     calculation_cache_root: str | None = None,
+    calculation_cache_lookup_enabled: bool = False,
     free_energy_options=None,
     vib_cache_root: str | None = None,
 ) -> list[BondReaction]:
@@ -625,6 +632,9 @@ def compute_all_bond_reactions(
                     lateral_shells           = lateral_shells,
                     verbose                  = verbose,
                     calculation_cache_root   = calculation_cache_root,
+                    calculation_cache_lookup_enabled = (
+                        calculation_cache_lookup_enabled
+                    ),
                     free_energy_options      = free_energy_options,
                     vib_cache_root           = vib_cache_root,
                 )
@@ -657,6 +667,7 @@ def compute_all_bond_reactions(
             lateral_shells           = lateral_shells,
             verbose                  = verbose,
             calculation_cache_root   = calculation_cache_root,
+            calculation_cache_lookup_enabled = calculation_cache_lookup_enabled,
             free_energy_options      = free_energy_options,
             vib_cache_root           = vib_cache_root,
         ))

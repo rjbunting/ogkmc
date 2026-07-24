@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from ase import Atoms
 from ase.constraints import FixAtoms
 from ase.io import read as ase_read, write as ase_write
 
@@ -177,6 +178,108 @@ def test_reaction_writer_atomically_publishes_structure_files(
     assert folder / "occupied.extxyz" in published
     assert folder / "unoccupied.extxyz" in published
     assert not list(folder.glob(".*.extxyz.*"))
+
+
+def test_reaction_writer_persists_initial_structures_and_neb_paths(
+    tmp_path,
+    stub_reaction,
+    tiny_atoms,
+):
+    initial = tiny_atoms.copy()
+    optimized = tiny_atoms.copy()
+    path_initial = [tiny_atoms.copy(), tiny_atoms.copy()]
+    path_optimized = [tiny_atoms.copy(), tiny_atoms.copy()]
+
+    adsorption_lateral = stub_reaction.lateral_class
+    adsorption_lateral.atoms_occupied_initial = initial.copy()
+    adsorption_lateral.atoms_unoccupied_initial = initial.copy()
+    adsorption_lateral.atoms_occupied = optimized.copy()
+    adsorption_lateral.atoms_unoccupied = optimized.copy()
+
+    diffusion_lateral = SimpleNamespace(
+        lateral_class=2,
+        energy_a=-2.0,
+        energy_b=-1.8,
+        energy_ts=-1.0,
+        atoms_a_initial=initial.copy(),
+        atoms_b_initial=initial.copy(),
+        atoms_a=optimized.copy(),
+        atoms_b=optimized.copy(),
+        atoms_ts=optimized.copy(),
+        atoms_neb_path_initial=path_initial,
+        atoms_neb_path=path_optimized,
+    )
+    diffusion_reaction = SimpleNamespace(
+        kind="diffusion",
+        direction="a_to_b",
+        site=SimpleNamespace(iso_class=1, reactant="[O]"),
+        member_index=0,
+        lateral_class=diffusion_lateral,
+        delta_e=0.2,
+        barrier=1.0,
+        rate=1.0,
+    )
+
+    bond_lateral = SimpleNamespace(
+        lateral_class=3,
+        energy_ab=-3.0,
+        energy_c=-3.5,
+        energy_ts=-2.0,
+        atoms_ab_initial=initial.copy(),
+        atoms_c_initial=initial.copy(),
+        atoms_ab=optimized.copy(),
+        atoms_c=optimized.copy(),
+        atoms_ts=optimized.copy(),
+        atoms_neb_path_initial=path_initial,
+        atoms_neb_path=path_optimized,
+    )
+    bond_reaction = SimpleNamespace(
+        kind="bond",
+        direction="couple",
+        site=SimpleNamespace(
+            iso_class=2,
+            gas_product=False,
+            template=SimpleNamespace(
+                smiles_a="[H]",
+                smiles_b="[H]",
+                smiles_c="[H][H]",
+                bond_type="SINGLE",
+                source="test",
+            ),
+        ),
+        member_index=0,
+        lateral_class=bond_lateral,
+        delta_e=-0.5,
+        barrier=1.0,
+        rate=1.0,
+    )
+
+    writer = ReactionWriter(tmp_path)
+    adsorption_folder = writer.ensure_reaction(stub_reaction, step=0)
+    diffusion_folder = writer.ensure_reaction(diffusion_reaction, step=0)
+    bond_folder = writer.ensure_reaction(bond_reaction, step=0)
+    writer.close()
+
+    assert (adsorption_folder / "occupied_initial.extxyz").is_file()
+    assert (adsorption_folder / "unoccupied_initial.extxyz").is_file()
+    assert (diffusion_folder / "state_a_initial.extxyz").is_file()
+    assert (diffusion_folder / "state_b_initial.extxyz").is_file()
+    assert (diffusion_folder / "neb_path_initial.extxyz").is_file()
+    assert (diffusion_folder / "neb_path.extxyz").is_file()
+    assert (bond_folder / "state_ab_initial.extxyz").is_file()
+    assert (bond_folder / "state_c_initial.extxyz").is_file()
+    assert (bond_folder / "neb_path_initial.extxyz").is_file()
+    assert (bond_folder / "neb_path.extxyz").is_file()
+
+    diffusion_payload = json.loads(
+        (diffusion_folder / "reaction.json").read_text()
+    )
+    assert diffusion_payload["atoms"]["state_a_initial"] == (
+        "state_a_initial.extxyz"
+    )
+    assert diffusion_payload["atoms"]["neb_path_initial"] == (
+        "neb_path_initial.extxyz"
+    )
 
 
 def test_reaction_writer_reuses_folder_across_events(
@@ -918,7 +1021,14 @@ def test_reaction_writer_records_bond_direction(tmp_path):
 
 def test_invalid_diffusion_record_tolerates_missing_energies(tmp_path):
     ds = SimpleNamespace(iso_class=1, reactant="[O]")
-    lc = SimpleNamespace(lateral_class=2, invalid_reason="NEB failed early")
+    atoms = Atoms("H", positions=[[0.0, 0.0, 0.0]])
+    lc = SimpleNamespace(
+        lateral_class=2,
+        invalid_reason="NEB failed early",
+        atoms_a_initial=atoms.copy(),
+        atoms_b_initial=atoms.copy(),
+        atoms_neb_path_initial=[atoms.copy(), atoms.copy()],
+    )
 
     w = ReactionWriter(tmp_path)
     folder = w.write_invalid_diffusion(ds, lc)
@@ -939,6 +1049,12 @@ def test_invalid_diffusion_record_tolerates_missing_energies(tmp_path):
         "state_b": None,
         "transition": None,
     }
+    assert (folder / "state_a_initial.extxyz").is_file()
+    assert (folder / "state_b_initial.extxyz").is_file()
+    assert (folder / "neb_path_initial.extxyz").is_file()
+    assert payload["atoms"]["state_a_initial"] == "state_a_initial.extxyz"
+    assert payload["atoms"]["state_b_initial"] == "state_b_initial.extxyz"
+    assert payload["atoms"]["neb_path_initial"] == "neb_path_initial.extxyz"
     definitions = load_reaction_index(tmp_path / "reactions" / "index.jsonl")
     definition = definitions[payload["reaction_id"]]
     assert definition["valid"] is False

@@ -75,6 +75,7 @@ class ThermoRuntime:
     options: Any
     vibration_cache_root: str
     calculation_cache_root: str | None
+    calculation_cache_lookup_enabled: bool = False
 
 
 @dataclass(frozen=True)

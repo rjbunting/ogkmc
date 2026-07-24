@@ -348,6 +348,7 @@ def get_applicable_diffusion_for_member(
     free_energy_options=None,
     vib_cache_root: str | None = None,
     calculation_cache_root: str | None = None,
+    calculation_cache_lookup_enabled: bool = False,
     update_site_cache: bool = True,
 ) -> DiffusionReaction | None:
     """Scientifically reclassify and evaluate one concrete diffusion member."""
@@ -397,6 +398,9 @@ def get_applicable_diffusion_for_member(
                         free_energy_temperature_k=float(temperature),
                         vib_cache_root=vib_cache_root,
                         calculation_cache_root=calculation_cache_root,
+                        calculation_cache_lookup_enabled=(
+                            calculation_cache_lookup_enabled
+                        ),
                     )
                 except DiffusionStabilityError as exc:
                     reason = f"{type(exc).__name__}: {exc}"
@@ -473,6 +477,7 @@ def get_applicable_diffusions(
     free_energy_options=None,
     vib_cache_root: str | None = None,
     calculation_cache_root: str | None = None,
+    calculation_cache_lookup_enabled: bool = False,
 ) -> list[DiffusionReaction]:
     """Enumerate all currently-applicable hop events for one DiffusionSite.
 
@@ -511,6 +516,7 @@ def get_applicable_diffusions(
             free_energy_options=free_energy_options,
             vib_cache_root=vib_cache_root,
             calculation_cache_root=calculation_cache_root,
+            calculation_cache_lookup_enabled=calculation_cache_lookup_enabled,
             update_site_cache=False,
         )
         if reaction is not None:
@@ -542,6 +548,7 @@ def compute_all_diffusions(
     free_energy_options=None,
     vib_cache_root: str | None = None,
     calculation_cache_root: str | None = None,
+    calculation_cache_lookup_enabled: bool = False,
 ) -> list[DiffusionReaction]:
     """Compute applicable hops for every DiffusionSite; return the flat list."""
     all_reactions: list[DiffusionReaction] = []
@@ -572,6 +579,9 @@ def compute_all_diffusions(
                     free_energy_options      = free_energy_options,
                     vib_cache_root           = vib_cache_root,
                     calculation_cache_root   = calculation_cache_root,
+                    calculation_cache_lookup_enabled = (
+                        calculation_cache_lookup_enabled
+                    ),
                 )
 
         futures = [
@@ -602,6 +612,7 @@ def compute_all_diffusions(
             free_energy_options      = free_energy_options,
             vib_cache_root           = vib_cache_root,
             calculation_cache_root   = calculation_cache_root,
+            calculation_cache_lookup_enabled = calculation_cache_lookup_enabled,
         )
         all_reactions.extend(rxns)
     return all_reactions

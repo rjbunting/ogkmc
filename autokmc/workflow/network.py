@@ -296,6 +296,7 @@ class SpeciesNetworkBuilder:
                 leaf,
                 calculator=self.calculator_resource,
                 frozen_indices=self.frozen_indices,
+                diagnostics_dir=str(self.identity.output_dir / "diagnostics"),
                 verbose=self.verbose,
                 **site_kwargs,
             )

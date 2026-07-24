@@ -383,6 +383,8 @@ def prepare_adsorbate_sites(
     """Enumerate the feed-species adsorption sites used to seed the network."""
     from autokmc.sites.adsorbate import find_adsorbate_sites
 
+    diagnostics_dir = identity.output_dir / "diagnostics"
+    graph.graph["diagnostics_dir"] = str(diagnostics_dir)
     if identity.resume_state is not None:
         return list(identity.resume_state.adsorbate_sites)
 
@@ -407,6 +409,7 @@ def prepare_adsorbate_sites(
             reactant,
             calculator=calculator_resource,
             frozen_indices=frozen_indices,
+            diagnostics_dir=str(diagnostics_dir),
             verbose=verbose,
             **site_kwargs,
         )

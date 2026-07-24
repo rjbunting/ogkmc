@@ -17,6 +17,7 @@ RUN_DIR/
   reactions/
     index.jsonl
   diagnostics/
+    invalid_adsorption/
     invalid_diffusion/
   analysis/                      # after `autokmc analyze`
 ```
@@ -110,19 +111,27 @@ reactions/
   index.jsonl
   adsorption/<species>/isoX_latY/
     reaction.json
+    occupied_initial.extxyz
     occupied.extxyz
+    unoccupied_initial.extxyz
     unoccupied.extxyz
   diffusion/<species>/diff_isoX_latY/
     reaction.json
+    state_a_initial.extxyz
     state_a.extxyz
+    state_b_initial.extxyz
     state_b.extxyz
     ts.extxyz
+    neb_path_initial.extxyz      # optional
     neb_path.extxyz              # optional
   bond/<process>/bond_isoX_latY/
     reaction.json
+    state_ab_initial.extxyz
     state_ab.extxyz
+    state_c_initial.extxyz
     state_c.extxyz
     ts.extxyz
+    neb_path_initial.extxyz      # optional
     neb_path.extxyz              # optional
 ```
 
@@ -131,6 +140,10 @@ vibrational results, KMC barriers, calculator identity, validity, and
 cumulative firing statistics. The `.extxyz` files preserve the structures
 behind those values. Its immutable `discovery_step` records when the folder
 first became part of the discovered network.
+Endpoint files ending in `_initial.extxyz` contain the exact structures passed
+to relaxation. When `persist_neb_path` is enabled,
+`neb_path_initial.extxyz` contains the interpolated band before NEB
+optimization and `neb_path.extxyz` contains the optimized band.
 
 `reactions/index.jsonl` is the versioned network index. Each stable
 `reaction_id` records validity, discovery step, supported directions, firing
@@ -139,6 +152,14 @@ definition. Invalid diffusion candidates are excluded from the authoritative
 reaction tree and written under
 `diagnostics/invalid_diffusion/<species>/diff_isoX_latY/`; their invalid index
 entries remain available for discovery accounting and diagnostics.
+Those folders retain any available initial and optimized endpoints, plus the
+initial and optimized NEB paths when path persistence is enabled.
+
+Adsorption candidates rejected during MLIP pruning are written under
+`diagnostics/invalid_adsorption/<species>/ads_isoX/`. Each folder contains
+`initial.extxyz`, `optimized.extxyz` when relaxation produced a structure, and
+`diagnostic.json` with the rejection reason and relevant force, energy, or
+connectivity details.
 
 ## `kmc.extxyz`
 

@@ -134,9 +134,24 @@ def build_diffusion_payload(
         "last_event": _directed_last_event(reaction, step, fired=fired),
         "stats": _stats_payload(stats),
         "atoms": {
+            "state_a_initial": (
+                "state_a_initial.extxyz"
+                if getattr(lc, "atoms_a_initial", None) is not None
+                else None
+            ),
+            "state_b_initial": (
+                "state_b_initial.extxyz"
+                if getattr(lc, "atoms_b_initial", None) is not None
+                else None
+            ),
             "state_a": "state_a.extxyz",
             "state_b": "state_b.extxyz",
             "transition": "ts.extxyz",
+            "neb_path_initial": (
+                "neb_path_initial.extxyz"
+                if getattr(lc, "atoms_neb_path_initial", None)
+                else None
+            ),
             "neb_path": ("neb_path.extxyz" if getattr(lc, "atoms_neb_path", None) else None),
         },
         "calculator": dict(calculator_meta),
@@ -249,9 +264,24 @@ def build_bond_payload(
         "last_event": _directed_last_event(reaction, step, fired=fired),
         "stats": _stats_payload(stats),
         "atoms": {
+            "state_ab_initial": (
+                "state_ab_initial.extxyz"
+                if getattr(lc, "atoms_ab_initial", None) is not None
+                else None
+            ),
+            "state_c_initial": (
+                "state_c_initial.extxyz"
+                if getattr(lc, "atoms_c_initial", None) is not None
+                else None
+            ),
             "state_ab": "state_ab.extxyz",
             "state_c": "state_c.extxyz",
             "transition": "ts.extxyz",
+            "neb_path_initial": (
+                "neb_path_initial.extxyz"
+                if getattr(lc, "atoms_neb_path_initial", None)
+                else None
+            ),
             "neb_path": ("neb_path.extxyz" if getattr(lc, "atoms_neb_path", None) else None),
         },
         "calculator": dict(calculator_meta),
@@ -324,6 +354,16 @@ def build_adsorption_payload(
         "last_event": _adsorption_last_event(reaction, step, fired=fired),
         "stats": _stats_payload(stats),
         "atoms": {
+            "occupied_initial": (
+                "occupied_initial.extxyz"
+                if getattr(lc, "atoms_occupied_initial", None) is not None
+                else None
+            ),
+            "unoccupied_initial": (
+                "unoccupied_initial.extxyz"
+                if getattr(lc, "atoms_unoccupied_initial", None) is not None
+                else None
+            ),
             "occupied": "occupied.extxyz",
             "unoccupied": "unoccupied.extxyz",
         },

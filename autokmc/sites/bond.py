@@ -202,6 +202,10 @@ class BondReactionLateral:
     atoms_ab, atoms_c, atoms_ts : Atoms | None
         Relaxed ASE atoms snapshots persisted by
         :class:`autokmc.io.persistence.ReactionWriter`.
+    atoms_ab_initial, atoms_c_initial : Atoms | None
+        Pre-optimization endpoint structures supplied to the relaxations.
+    atoms_neb_path_initial : list[Atoms] | None
+        Interpolated NEB band before any NEB optimization.
     atoms_neb_path : list[Atoms] | None
         Full NEB band — optional, only kept when ``persist_neb_path=True``.
     neb_path_energies : list[float] | None
@@ -223,6 +227,9 @@ class BondReactionLateral:
     atoms_ab         : Any              = None
     atoms_c          : Any              = None
     atoms_ts         : Any              = None
+    atoms_ab_initial : Any              = None
+    atoms_c_initial  : Any              = None
+    atoms_neb_path_initial: Any         = None
     atoms_neb_path   : Any              = None
     neb_path_energies: list[float] | None = None
     stable           : bool | None      = None

@@ -27,6 +27,7 @@ def test_channel_normalisation_copies_inputs_and_resolves_cache_root():
     diffusion_kwargs = {
         "fmax": 0.1,
         "calculation_cache_root": "diffusion-cache",
+        "calculation_cache_lookup_enabled": False,
         "free_energy_options": object(),
     }
     channels = KMCChannels(
@@ -41,6 +42,7 @@ def test_channel_normalisation_copies_inputs_and_resolves_cache_root():
     )
 
     assert thermochemistry.calculation_cache_root == "diffusion-cache"
+    assert thermochemistry.calculation_cache_lookup_enabled is False
     assert normalised.diffusion_sites == diffusion_sites
     assert normalised.diffusion_sites is not diffusion_sites
     assert normalised.diffusion_kwargs == {"fmax": 0.1}

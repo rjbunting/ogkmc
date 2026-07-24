@@ -56,8 +56,23 @@ class _ConvergedOptimizer:
 
 def test_shared_neb_selects_transition_and_detaches_images(monkeypatch):
     images = [_image(0.0), _image(0.5), _image(1.5), _image(0.2)]
+    neb = SimpleNamespace(climb=None)
+    optimizer_climb_states = []
+    initial_paths = []
+
+    class StageTrackingOptimizer(_ConvergedOptimizer):
+        def __init__(self, stage_neb, *, logfile):
+            optimizer_climb_states.append(stage_neb.climb)
+            super().__init__(stage_neb, logfile=logfile)
+
+    def band_factory(*_args, climb, spring_k, **_kwargs):
+        assert climb is False
+        assert spring_k == pytest.approx(5.0)
+        neb.climb = climb
+        return neb, images
+
     monkeypatch.setattr(neb_module, "acquire_calculator", _calculator_context)
-    monkeypatch.setattr(neb_module, "BFGS", _ConvergedOptimizer)
+    monkeypatch.setattr(neb_module, "BFGS", StageTrackingOptimizer)
     telemetry = RuntimeTelemetry()
 
     with telemetry_context(telemetry):
@@ -68,7 +83,7 @@ def test_shared_neb_selects_transition_and_detaches_images(monkeypatch):
             purpose="test NEB",
             n_images=2,
             interpolation="linear",
-            spring_k=0.1,
+            spring_k=5.0,
             climb=True,
             frozen_indices=None,
             fmax=0.05,
@@ -76,19 +91,72 @@ def test_shared_neb_selects_transition_and_detaches_images(monkeypatch):
             verbose=False,
             not_converged_error=RuntimeError,
             persist_path=True,
-            band_factory=lambda *_args, **_kwargs: (object(), images),
+            initial_path_callback=initial_paths.append,
+            band_factory=band_factory,
         )
 
     assert result.energy_ts == pytest.approx(1.5)
     assert result.transition_index == 2
     assert result.n_interior == 2
-    assert result.optimizer_steps == 4
+    assert result.optimizer_steps == 8
+    assert optimizer_climb_states == [False, True]
     assert result.path_energies == pytest.approx([0.0, 0.5, 1.5, 0.2])
     assert result.atoms_ts.calc is None
     assert all(image.calc is None for image in images)
     assert all(image.calc is None for image in result.path_images or [])
+    assert len(initial_paths) == 1
+    assert len(initial_paths[0]) == len(images)
+    assert all(image.calc is None for image in initial_paths[0])
     assert telemetry.counters["neb.calls"] == 1
     assert telemetry.timings_s["neb.seconds"] >= 0.0
+
+
+def test_shared_neb_stops_when_preclimb_stage_does_not_converge(monkeypatch):
+    images = [_image(0.0), _image(0.5), _image(0.2)]
+    neb = SimpleNamespace(climb=False)
+    optimizer_climb_states = []
+    initial_paths = []
+
+    class NonConvergedOptimizer:
+        def __init__(self, stage_neb, *, logfile):
+            del logfile
+            optimizer_climb_states.append(stage_neb.climb)
+            self.nsteps = 20
+
+        def run(self, *, fmax, steps):
+            assert fmax == pytest.approx(0.05)
+            assert steps == 20
+
+        def converged(self) -> bool:
+            return False
+
+    monkeypatch.setattr(neb_module, "acquire_calculator", _calculator_context)
+    monkeypatch.setattr(neb_module, "BFGS", NonConvergedOptimizer)
+
+    with pytest.raises(RuntimeError, match="NEB pre-climb relaxation"):
+        neb_module.run_neb(
+            images[0],
+            images[-1],
+            calculator=object(),
+            purpose="test NEB",
+            n_images=1,
+            interpolation="linear",
+            spring_k=0.1,
+            climb=True,
+            frozen_indices=None,
+            fmax=0.05,
+            max_steps=20,
+            verbose=False,
+            not_converged_error=RuntimeError,
+            initial_path_callback=initial_paths.append,
+            band_factory=lambda *_args, **_kwargs: (neb, images),
+        )
+
+    assert optimizer_climb_states == [False]
+    assert len(initial_paths) == 1
+    assert all(image.calc is None for image in initial_paths[0])
+    assert neb.climb is False
+    assert all(image.calc is None for image in images)
 
 
 def test_neb_parallelizes_images_through_calculator_pool():
@@ -278,6 +346,7 @@ def test_parallel_neb_propagates_interior_calculator_exception():
 
 def test_neb_uses_one_concrete_calculator_inside_outer_batch(monkeypatch):
     images = [_image(0.0), _image(0.5), _image(1.5), _image(0.2)]
+    neb = SimpleNamespace(climb=False)
     calculators = [object(), object()]
     pool = CalculatorPool(calculators)
     received = []
@@ -285,7 +354,7 @@ def test_neb_uses_one_concrete_calculator_inside_outer_batch(monkeypatch):
 
     def band_factory(*_args, calculator, **_kwargs):
         received.append(calculator)
-        return object(), images
+        return neb, images
 
     with calculator_batch_context():
         result = neb_module.run_neb(
@@ -495,6 +564,87 @@ def _electronic_record(states):
     }
 
 
+def test_calculation_database_is_write_only_by_default(monkeypatch):
+    import autokmc.structure as structure_module
+
+    graph = nx.Graph()
+    graph.add_node(1)
+    site = SimpleNamespace(
+        member_node_ids=[[1]],
+        iso_class=4,
+        reactant="[H]",
+    )
+    lateral = SimpleNamespace(
+        n_shells=1,
+        lateral_class=2,
+        ego_graph=nx.Graph(),
+    )
+    writes = []
+
+    def _build(*_args, include_self, **_kwargs):
+        if include_self:
+            return Atoms("H2"), 1, 0, 1
+        return Atoms("H"), 1, 0, 0
+
+    def _optimise(atoms, **_kwargs):
+        result = atoms.copy()
+        energy = -2.0 if len(result) == 2 else -1.0
+        result.calc = SinglePointCalculator(
+            result,
+            energy=energy,
+            forces=np.zeros((len(result), 3)),
+        )
+        return result
+
+    monkeypatch.setattr(adsorption_module, "_build_stability_atoms", _build)
+    monkeypatch.setattr(
+        adsorption_module,
+        "normalise_reaction_graph",
+        lambda *_args, **_kwargs: nx.Graph(),
+    )
+    monkeypatch.setattr(
+        adsorption_module,
+        "calculator_identity",
+        lambda _calculator: {"class": "test.Calculator"},
+    )
+    monkeypatch.setattr(
+        adsorption_module,
+        "load_calculation_record",
+        lambda *_args, **_kwargs: pytest.fail("cache lookup should be disabled"),
+    )
+    monkeypatch.setattr(
+        adsorption_module,
+        "_write_adsorption_calculation_cache",
+        lambda *args, **kwargs: writes.append((args, kwargs)),
+    )
+    monkeypatch.setattr(adsorption_module, "acquire_calculator", _calculator_context)
+    monkeypatch.setattr(structure_module, "optimise_structure", _optimise)
+    monkeypatch.setattr(adsorption_module, "_bond_set", lambda *_args, **_kwargs: set())
+    monkeypatch.setattr(
+        adsorption_module,
+        "_check_connectivity_stable",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        adsorption_module,
+        "_check_intended_coordination_stable",
+        lambda *_args, **_kwargs: None,
+    )
+
+    result = adsorption_module.check_site_stability(
+        graph,
+        site,
+        0,
+        lateral,
+        object(),
+        calculation_cache_root="/tmp/test-cache",
+    )
+
+    assert result == pytest.approx((-2.0, -1.0))
+    assert lateral.stable is True
+    assert len(writes) == 1
+
+
 def test_adsorption_thermochemistry_reuses_cached_electronic_states(
     monkeypatch,
 ):
@@ -564,6 +714,7 @@ def test_adsorption_thermochemistry_reuses_cached_electronic_states(
         lateral,
         object(),
         calculation_cache_root="/tmp/test-cache",
+        calculation_cache_lookup_enabled=True,
         free_energy_options=_thermochemistry_options(),
         free_energy_temperature_k=700.0,
     )
@@ -638,6 +789,7 @@ def test_adsorption_thermochemistry_failure_keeps_cached_state_retryable(
             lateral,
             object(),
             calculation_cache_root="/tmp/test-cache",
+            calculation_cache_lookup_enabled=True,
             free_energy_options=_thermochemistry_options(),
             free_energy_temperature_k=700.0,
         )
@@ -729,6 +881,7 @@ def test_diffusion_thermochemistry_reuses_cached_endpoints_and_neb(
         lateral,
         object(),
         calculation_cache_root="/tmp/test-cache",
+        calculation_cache_lookup_enabled=True,
         free_energy_options=_thermochemistry_options(),
         free_energy_temperature_k=650.0,
     )
@@ -811,6 +964,7 @@ def test_diffusion_thermochemistry_failure_keeps_cached_state_retryable(
             lateral,
             object(),
             calculation_cache_root="/tmp/test-cache",
+            calculation_cache_lookup_enabled=True,
             free_energy_options=_thermochemistry_options(),
             free_energy_temperature_k=650.0,
         )
@@ -923,6 +1077,7 @@ def test_bond_thermochemistry_reuses_cached_endpoints_and_neb(
         lateral,
         object(),
         calculation_cache_root="/tmp/test-cache",
+        calculation_cache_lookup_enabled=True,
         free_energy_options=_thermochemistry_options(),
         free_energy_temperature_k=600.0,
     )
@@ -1024,6 +1179,7 @@ def test_bond_thermochemistry_failure_keeps_cached_state_retryable(
             lateral,
             object(),
             calculation_cache_root="/tmp/test-cache",
+            calculation_cache_lookup_enabled=True,
             free_energy_options=_thermochemistry_options(),
             free_energy_temperature_k=600.0,
         )

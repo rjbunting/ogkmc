@@ -262,12 +262,12 @@ NEB_FMAX: float = 0.01
 #: Maximum optimiser steps for the NEB band relaxation.
 NEB_MAX_STEPS: int = 200
 
-#: Use climbing-image NEB (CI-NEB) so the highest-energy image converges
-#: directly onto the saddle point.
+#: After ordinary NEB convergence, refine the highest-energy image with
+#: climbing-image NEB (CI-NEB) so it converges onto the saddle point.
 NEB_CLIMB: bool = True
 
 #: NEB spring constant (eV / Å²).
-NEB_SPRING_K: float = 0.1
+NEB_SPRING_K: float = 5.0
 
 #: NEB initial-band interpolation method: ``"idpp"`` (image-dependent pair
 #: potential, ASE default for chemistry) or ``"linear"``.

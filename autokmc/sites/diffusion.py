@@ -112,6 +112,10 @@ class DiffusionLateral:
     atoms_a, atoms_b, atoms_ts : Atoms | None
         Relaxed ASE atoms snapshots persisted by
         :class:`autokmc.io.persistence.ReactionWriter`.
+    atoms_a_initial, atoms_b_initial : Atoms | None
+        Pre-optimization endpoint structures supplied to the relaxations.
+    atoms_neb_path_initial : list[Atoms] | None
+        Interpolated NEB band before any NEB optimization.
     atoms_neb_path : list[Atoms] | None
         Full NEB band (endpoints + intermediate images) — optional, only
         kept when ``persist_neb_path=True``.
@@ -134,6 +138,9 @@ class DiffusionLateral:
     atoms_a       : Any              = None
     atoms_b       : Any              = None
     atoms_ts      : Any              = None
+    atoms_a_initial: Any             = None
+    atoms_b_initial: Any             = None
+    atoms_neb_path_initial: Any      = None
     atoms_neb_path: Any              = None
     neb_path_energies: list[float] | None = None
     stable        : bool | None      = None

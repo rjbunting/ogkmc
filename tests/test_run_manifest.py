@@ -224,6 +224,7 @@ def test_manifest_exists_while_preparing_and_tracks_failure(tmp_path):
     assert payload["artifacts"]["events"]["status"] == "missing"
     assert payload["artifacts"]["isaac_records"]["status"] == "disabled"
     assert payload["artifacts"]["reaction_index"]["status"] == "missing"
+    assert payload["artifacts"]["invalid_adsorption"]["status"] == "missing"
     assert payload["artifacts"]["invalid_diffusion"]["status"] == "missing"
 
 
