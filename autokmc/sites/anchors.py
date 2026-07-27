@@ -740,12 +740,16 @@ def _add_anchor_node(
         ego_subgraph    = ego_graph,
         optimised       = False,
     )
+    cell, cell_inv, pbc, use_mic = _get_cell(G)
     for s in clique:
         if s not in G:
             continue
-        d = float(np.linalg.norm(
+        displacement = (
             np.asarray(G.nodes[s]["position"], dtype=float) - position
-        ))
+        )
+        if use_mic and cell_inv is not None:
+            displacement = minimum_image_vectors(displacement, cell, pbc)
+        d = float(np.linalg.norm(displacement))
         G.add_edge(nid, s, distance=d, offset=(0, 0, 0), anchor_bond=True)
     return nid
 

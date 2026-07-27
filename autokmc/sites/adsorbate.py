@@ -83,6 +83,7 @@ from networkx.algorithms import isomorphism
 from autokmc.core.pbc import (
     full_pbc_for_cell,
     minimum_image_vectors,
+    unwrap_positions_about_reference,
     wrap_positions_into_cell,
 )
 from autokmc.io.calculators import CalculatorConfigError, acquire_calculator
@@ -474,6 +475,12 @@ def _full_adsorbate_positions(
     n_atoms   = react_pos.shape[0]
 
     if len(bonded_indices) >= 2:
+        cell = np.asarray(G.graph.get("cell", np.eye(3)), dtype=float)
+        bonded_positions = unwrap_positions_about_reference(
+            bonded_positions,
+            cell,
+            pbc,
+        )
         R, t = _kabsch(react_pos[bonded_indices], bonded_positions)
         return react_pos @ R.T + t
 
@@ -1168,10 +1175,17 @@ def _materialise_adsorbate_nodes(
                 for surf_id in clq:
                     if surf_id not in G:
                         continue
-                    d = float(np.linalg.norm(
+                    displacement = (
                         np.asarray(G.nodes[surf_id]["position"], dtype=float)
                         - positions[i]
-                    ))
+                    )
+                    if pbc.any():
+                        displacement = minimum_image_vectors(
+                            displacement,
+                            cell,
+                            pbc,
+                        )
+                    d = float(np.linalg.norm(displacement))
                     G.add_edge(nid, surf_id, distance=d, offset=(0, 0, 0),
                                anchor_bond=True)
 
@@ -1279,11 +1293,11 @@ def _relaxed_adsorbate_positions_in_graph_frame(
     if not frame_nodes:
         return ads_pos
 
-    graph_pos = np.asarray(
+    graph_pos_raw = np.asarray(
         [G.nodes[n]["position"] for n in frame_nodes],
         dtype=float,
     )
-    relaxed_pos = np.asarray(
+    relaxed_pos_raw = np.asarray(
         [all_pos[node_to_ase[n]] for n in frame_nodes],
         dtype=float,
     )
@@ -1291,11 +1305,25 @@ def _relaxed_adsorbate_positions_in_graph_frame(
     cell = np.array(G.graph.get("cell", np.eye(3)), dtype=float)
     pbc = _effective_pbc(G, cell)
     if pbc.any():
-        relaxed_pos = graph_pos + minimum_image_vectors(
-            relaxed_pos - graph_pos,
+        graph_pos = unwrap_positions_about_reference(
+            graph_pos_raw,
             cell,
             pbc,
         )
+        relaxed_pos = graph_pos + minimum_image_vectors(
+            relaxed_pos_raw - graph_pos_raw,
+            cell,
+            pbc,
+        )
+        ads_pos = unwrap_positions_about_reference(
+            ads_pos,
+            cell,
+            pbc,
+            reference=graph_pos[0],
+        )
+    else:
+        graph_pos = graph_pos_raw
+        relaxed_pos = relaxed_pos_raw
 
     R, t = _kabsch(relaxed_pos, graph_pos)
     return ads_pos @ R.T + t
@@ -2817,7 +2845,12 @@ def optimise_adsorbate_site_positions(
                 # surface).  Using `base` here double-counts the height,
                 # producing targets ~2× too far from the surface.
                 if rows:
-                    clique_centroid = surf_pos[rows].mean(axis=0)
+                    clique_positions = unwrap_positions_about_reference(
+                        surf_pos[rows],
+                        cell,
+                        pbc,
+                    )
+                    clique_centroid = clique_positions.mean(axis=0)
                 else:
                     clique_centroid = base
                 n_hat = _outward_normal_at(G, clique_centroid, pbc)
@@ -2827,6 +2860,13 @@ def optimise_adsorbate_site_positions(
             exclude_surf_by_atom[i].update(int(s) for s in clique)
 
         target_arr = np.array(targets, dtype=float).reshape(-1, 3)
+        if use_mic and target_arr.size:
+            current_bonded_positions = cur_pos[np.asarray(bonded_idx, dtype=int)]
+            target_arr = current_bonded_positions + minimum_image_vectors(
+                target_arr - current_bonded_positions,
+                cell,
+                pbc,
+            )
         free_rows  = np.arange(len(surf_ids), dtype=int)
         if (
             repulsion_cutoff is not None
@@ -3180,9 +3220,10 @@ def optimise_adsorbate_site_positions(
             _remove_iso_class_nodes(G, ms)
             continue
 
-        rms = float(np.sqrt(np.mean(
-            np.sum((new_pos - np.asarray(ms.positions)) ** 2, axis=1)
-        )))
+        position_change = new_pos - np.asarray(ms.positions)
+        if use_mic:
+            position_change = minimum_image_vectors(position_change, cell, pbc)
+        rms = float(np.sqrt(np.mean(np.sum(position_change ** 2, axis=1))))
         new_pos = _wrap_adsorbate_positions_for_storage(
             new_pos, ms.atom_cliques, cell, pbc,
         )

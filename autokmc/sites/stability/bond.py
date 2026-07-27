@@ -101,7 +101,11 @@ from autokmc.io.calculation_cache import (
 )
 from autokmc.io.reaction_graph import normalise_reaction_graph
 from autokmc.species.smiles import smiles_to_dirname
-from autokmc.core.pbc import full_pbc_for_cell, minimum_image_vectors
+from autokmc.core.pbc import (
+    full_pbc_for_cell,
+    minimum_image_vectors,
+    unwrap_positions_about_reference,
+)
 from autokmc.sites.stability.adsorption import (
     SurfaceConnectivityError,
     AdsorbateDissociationError,
@@ -604,6 +608,9 @@ def _greedy_pair_c_to_ab(
     ab_symbols: list[str],
     ab_positions: list[np.ndarray],
     c_nodes: list[int],
+    *,
+    cell=None,
+    pbc=None,
 ) -> list[int]:
     """Reorder *c_nodes* so that c[k]'s element matches ab[k]'s and c[k]'s
     physical position is closest (per element class) to ab[k]'s.
@@ -624,6 +631,16 @@ def _greedy_pair_c_to_ab(
             f"|A|+|B|={len(ab_symbols)}."
         )
 
+    cell = np.asarray(
+        G.graph.get("cell", np.eye(3)) if cell is None else cell,
+        dtype=float,
+    )
+    pbc = (
+        full_pbc_for_cell(cell)
+        if pbc is None
+        else np.asarray(pbc, dtype=bool)
+    )
+
     c_remaining_by_elem: dict[str, list[int]] = {}
     for nid in c_nodes:
         elem = G.nodes[nid]["element"]
@@ -643,7 +660,12 @@ def _greedy_pair_c_to_ab(
         best_d2  = float("inf")
         for i, cnid in enumerate(candidates):
             cpos = np.asarray(G.nodes[cnid]["position"], dtype=float)
-            d2 = float(np.sum((cpos - np.asarray(pos, dtype=float)) ** 2))
+            displacement = minimum_image_vectors(
+                cpos - np.asarray(pos, dtype=float),
+                cell,
+                pbc,
+            )
+            d2 = float(np.sum(displacement ** 2))
             if d2 < best_d2:
                 best_d2  = d2
                 best_idx = i
@@ -862,7 +884,14 @@ def _select_c_to_ab_mapping(
     if method in {"auto", "greedy", "symmetry_trials"}:
         raw_orders.append((
             "greedy",
-            _greedy_pair_c_to_ab(G, ab_symbols, ab_positions, c_present),
+            _greedy_pair_c_to_ab(
+                G,
+                ab_symbols,
+                ab_positions,
+                c_present,
+                cell=cell,
+                pbc=pbc,
+            ),
         ))
 
     if method in {"auto", "hungarian", "symmetry_trials"}:
@@ -1106,7 +1135,11 @@ def _gas_product_neb_endpoint(
 
     ab_positions = np.asarray(atoms_ab.get_positions(), dtype=float)
     react_slice = slice(n_slab + n_lat, n_slab + n_lat + n_react)
-    target_positions = ab_positions[react_slice]
+    target_positions = unwrap_positions_about_reference(
+        ab_positions[react_slice],
+        atoms_ab.cell.array,
+        atoms_ab.pbc,
+    )
     centroid = target_positions.mean(axis=0)
     target_centered = target_positions - centroid
 

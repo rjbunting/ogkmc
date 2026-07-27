@@ -22,6 +22,8 @@ from autokmc.sites.adsorbate import (
     AdsorbateSite,
     AdsorbateSiteLateral,
     _adsorbate_pose_is_outward,
+    _full_adsorbate_positions,
+    _relaxed_adsorbate_positions_in_graph_frame,
     find_adsorbate_sites,
     _geometry_connectivity_mismatch,
     optimise_adsorbate_site_positions,
@@ -286,7 +288,8 @@ def test_stability_package_exports_public_api():
     assert callable(stability.check_bond_site_lateral)
 
 
-def test_bond_atom_matching_uses_hungarian_mic_assignment():
+@pytest.mark.parametrize("method", ["hungarian", "greedy"])
+def test_bond_atom_matching_uses_mic_assignment(method):
     G = nx.Graph()
     G.graph["cell"] = np.eye(3) * 10.0
     # C nodes are deliberately out of order.  Node 10 is closest to the first
@@ -306,13 +309,172 @@ def test_bond_atom_matching_uses_hungarian_mic_assignment():
         ab_symbols,
         ab_positions,
         [10, 11, 12],
-        atom_matching="hungarian",
+        atom_matching=method,
         matching_trials=1,
     )
 
     assert order == [10, 11, 12]
-    assert diag["selected_method"] == "hungarian"
+    assert diag["selected_method"] == method
     assert diag["selected"]["max_distance_ang"] == pytest.approx(0.4)
+
+
+def test_multi_anchor_adsorbate_kabsch_unwraps_periodic_targets():
+    graph = nx.Graph()
+    graph.graph["cell"] = np.diag([10.0, 10.0, 10.0])
+    reactant = SimpleNamespace(
+        atoms=Atoms("H2", positions=[[0.0, 0.0, 0.0], [0.4, 0.0, 0.0]])
+    )
+
+    positions = _full_adsorbate_positions(
+        reactant,
+        [0, 1],
+        np.array([[9.8, 2.0, 3.0], [0.2, 2.0, 3.0]]),
+        graph,
+        np.array([True, False, False]),
+    )
+
+    np.testing.assert_allclose(
+        positions,
+        [[9.8, 2.0, 3.0], [10.2, 2.0, 3.0]],
+        atol=1.0e-12,
+    )
+
+
+def test_geometry_refinement_uses_periodic_clique_centroid(monkeypatch):
+    graph = nx.Graph()
+    graph.graph["cell"] = np.diag([10.0, 10.0, 20.0])
+    graph.graph["pbc"] = np.array([True, True, False])
+    graph.graph["connectivity_pbc"] = np.array([True, True, False])
+    for node, x_position in [(1, 9.8), (2, 0.2)]:
+        graph.add_node(
+            node,
+            type="surface",
+            element="Cu",
+            position=np.array([x_position, 3.0, 2.0]),
+            index=node - 1,
+            covalent_radius=1.32,
+        )
+
+    site = AdsorbateSite(
+        reactant="[H]",
+        n_atoms=1,
+        atom_cliques=[frozenset({1, 2})],
+        positions=np.array([[10.0, 3.0, 3.8]]),
+        iso_class=0,
+        members=[[frozenset({1, 2})]],
+        member_node_ids=[],
+    )
+    graph.graph["adsorbate_sites"] = {"[H]": [site]}
+    reactant_graph = nx.Graph()
+    reactant_graph.add_node(0, element="H", covalent_radius=0.31)
+    reactant = SimpleNamespace(
+        smiles="[H]",
+        atoms=Atoms("H", positions=[[0.0, 0.0, 0.0]]),
+        graph=reactant_graph,
+    )
+
+    mismatch_calls = {"count": 0}
+
+    def fake_mismatch(*_args, **_kwargs):
+        mismatch_calls["count"] += 1
+        if mismatch_calls["count"] == 1:
+            return {frozenset((0, 1))}, set()
+        return None
+
+    observed = {}
+
+    def fake_minimize(fn, x0, **_kwargs):
+        observed["energy_at_initial_pose"] = float(fn(np.asarray(x0, dtype=float)))
+        return SimpleNamespace(
+            fun=observed["energy_at_initial_pose"],
+            x=np.asarray(x0, dtype=float),
+        )
+
+    monkeypatch.setattr(
+        "autokmc.sites.adsorbate._geometry_connectivity_mismatch",
+        fake_mismatch,
+    )
+    monkeypatch.setattr("scipy.optimize.minimize", fake_minimize)
+
+    refined = optimise_adsorbate_site_positions(
+        graph,
+        "[H]",
+        reactant,
+        standoff_factor=1.8 / (1.32 + 0.31),
+        repulsion_weight=0.0,
+        n_restarts=1,
+        try_flip=False,
+        max_connectivity_attempts=1,
+        max_iter=1,
+    )
+
+    assert refined == [site]
+    assert observed["energy_at_initial_pose"] < 1.0e-12
+
+
+def test_relaxed_graph_frame_alignment_unwraps_periodic_surface_ego():
+    graph = nx.Graph()
+    graph.graph["cell"] = np.diag([10.0, 10.0, 10.0])
+    graph.graph["pbc"] = np.array([True, False, False])
+    graph.graph["connectivity_pbc"] = np.array([True, False, False])
+    graph_positions = np.array(
+        [
+            [9.8, 0.0, 0.0],
+            [0.2, 0.0, 0.0],
+            [9.8, 1.0, 0.0],
+        ]
+    )
+    for node, position in enumerate(graph_positions, start=1):
+        graph.add_node(node, type="surface", position=position)
+    graph.add_edges_from([(1, 2), (1, 3)])
+
+    graph_unwrapped = np.array(
+        [
+            [9.8, 0.0, 0.0],
+            [10.2, 0.0, 0.0],
+            [9.8, 1.0, 0.0],
+        ]
+    )
+    angle = np.deg2rad(8.0)
+    rotation = np.array(
+        [
+            [np.cos(angle), -np.sin(angle), 0.0],
+            [np.sin(angle), np.cos(angle), 0.0],
+            [0.0, 0.0, 1.0],
+        ]
+    )
+    origin = graph_unwrapped[0]
+    translation = np.array([0.05, -0.03, 0.02])
+    relaxed_unwrapped = (graph_unwrapped - origin) @ rotation.T + origin + translation
+    adsorbate_graph_position = np.array([[10.0, 0.3, 1.5]])
+    relaxed_adsorbate = (
+        (adsorbate_graph_position - origin) @ rotation.T + origin + translation
+    )
+    atoms_opt = Atoms(
+        "Cu3H",
+        positions=np.vstack((relaxed_unwrapped, relaxed_adsorbate)),
+        cell=graph.graph["cell"],
+        pbc=graph.graph["pbc"],
+    )
+    site = AdsorbateSite(
+        reactant="[H]",
+        n_atoms=1,
+        atom_cliques=[frozenset({1})],
+        positions=adsorbate_graph_position.copy(),
+        iso_class=0,
+    )
+
+    projected = _relaxed_adsorbate_positions_in_graph_frame(
+        graph,
+        site,
+        atoms_opt,
+        n_slab=3,
+        n_ads=1,
+        node_to_ase={1: 0, 2: 1, 3: 2},
+        frame_depth=1,
+    )
+
+    np.testing.assert_allclose(projected, adsorbate_graph_position, atol=1.0e-10)
 
 
 def _site(smiles: str, iso: int, node_id: int, clique: frozenset[int]):

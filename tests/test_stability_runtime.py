@@ -686,6 +686,51 @@ def _gas_reactant(**overrides):
     return type("GasReactant", (), values)()
 
 
+def test_gas_product_endpoint_uses_periodic_reacting_centroid():
+    cell = np.diag([10.0, 10.0, 20.0])
+    atoms_ab = Atoms(
+        "CuHH",
+        positions=[
+            [5.0, 5.0, 1.0],
+            [9.8, 4.0, 2.0],
+            [0.2, 4.0, 2.0],
+        ],
+        cell=cell,
+        pbc=[True, True, False],
+    )
+    atoms_empty = atoms_ab[:1].copy()
+    gas_reactant = SimpleNamespace(
+        atoms=Atoms(
+            "H2",
+            positions=[[-0.2, 0.0, 0.0], [0.2, 0.0, 0.0]],
+        )
+    )
+    graph = nx.Graph()
+    graph.add_node(11, element="H")
+    graph.add_node(12, element="H")
+
+    endpoint, diagnostics = bond_module._gas_product_neb_endpoint(
+        atoms_empty=atoms_empty,
+        atoms_ab=atoms_ab,
+        n_slab=1,
+        n_lat=0,
+        n_react=2,
+        react_nodes_ab=[11, 12],
+        gas_reactant=gas_reactant,
+        G=graph,
+        lift_height=6.0,
+    )
+
+    gas_positions = endpoint.positions[1:]
+    gas_centroid = gas_positions.mean(axis=0)
+    assert gas_centroid[0] == pytest.approx(10.0)
+    assert gas_centroid[1] == pytest.approx(4.0)
+    assert gas_centroid[2] == pytest.approx(
+        2.0 + diagnostics["selected_lift_height_ang"]
+    )
+    assert np.linalg.norm(gas_positions[1] - gas_positions[0]) == pytest.approx(0.4)
+
+
 @pytest.mark.parametrize(
     ("field", "changed"),
     [
