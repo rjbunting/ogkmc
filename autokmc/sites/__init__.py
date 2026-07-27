@@ -41,6 +41,12 @@ _EXPORTS = {
     "find_bond_sites": "autokmc.sites.bond",
     "prune_unstable_bond_sites": "autokmc.sites.bond",
     "rebuild_bond_reverse_indexes": "autokmc.sites.bond",
+    "SiteId": "autokmc.sites.identity",
+    "MemberSignature": "autokmc.sites.identity",
+    "SiteMemberId": "autokmc.sites.identity",
+    "member_identifier": "autokmc.sites.identity",
+    "member_signature": "autokmc.sites.identity",
+    "site_identifier": "autokmc.sites.identity",
 }
 
 __all__ = [
@@ -67,6 +73,12 @@ __all__ = [
     "find_bond_sites",
     "prune_unstable_bond_sites",
     "rebuild_bond_reverse_indexes",
+    "SiteId",
+    "MemberSignature",
+    "SiteMemberId",
+    "member_identifier",
+    "member_signature",
+    "site_identifier",
 ]
 
 

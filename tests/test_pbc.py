@@ -1,8 +1,12 @@
 import networkx as nx
 import numpy as np
+import pytest
 from ase.build import fcc111
 
-from autokmc.core.pbc import minimum_image_vectors
+from autokmc.core.pbc import (
+    minimum_image_vectors,
+    unwrap_positions_about_reference,
+)
 from autokmc.core.graph import build_graph
 from autokmc.io.atoms import atoms_from_graph
 from autokmc.sites.adsorbate import _mic_distance
@@ -30,6 +34,31 @@ def test_minimum_image_vectors_handles_skew_cells():
 
     assert np.allclose(mic, [-0.3, -0.3, 0.0])
     assert np.linalg.norm(mic) < np.linalg.norm(vector)
+
+
+def test_unwrap_positions_about_reference_keeps_boundary_group_contiguous():
+    positions = np.array(
+        [
+            [9.8, 4.0, 2.0],
+            [0.2, 4.0, 2.0],
+            [9.6, 4.0, 2.0],
+        ]
+    )
+
+    unwrapped = unwrap_positions_about_reference(
+        positions,
+        np.diag([10.0, 10.0, 10.0]),
+        [True, True, False],
+    )
+
+    np.testing.assert_allclose(
+        unwrapped,
+        [
+            [9.8, 4.0, 2.0],
+            [10.2, 4.0, 2.0],
+            [9.6, 4.0, 2.0],
+        ],
+    )
 
 
 def test_adsorbate_mic_distance_uses_true_triclinic_mic():
@@ -91,6 +120,17 @@ def test_materialised_site_positions_are_wrapped_for_skew_slab():
         positions.extend(np.asarray(site.positions, dtype=float))
         for node_ids in site.member_node_ids:
             positions.extend(G.nodes[n]["position"] for n in node_ids)
+
+    for left, right, data in G.edges(data=True):
+        if not data.get("anchor_bond"):
+            continue
+        displacement = minimum_image_vectors(
+            np.asarray(G.nodes[right]["position"], dtype=float)
+            - np.asarray(G.nodes[left]["position"], dtype=float),
+            G.graph["cell"],
+            G.graph["pbc"],
+        )
+        assert data["distance"] == pytest.approx(np.linalg.norm(displacement))
 
     frac = np.asarray(positions, dtype=float) @ cell_inv
     periodic_frac = frac[:, pbc_axes]

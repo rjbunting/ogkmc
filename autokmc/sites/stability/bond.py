@@ -76,9 +76,9 @@ Public API
 from __future__ import annotations
 
 import itertools
-import os
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 import numpy as np
 import networkx as nx
@@ -86,13 +86,14 @@ from networkx.algorithms import isomorphism
 
 from ase import Atoms
 from ase.constraints import FixAtoms
-from ase.optimize import BFGS
 
 from autokmc.io.calculators import acquire_calculator
 from autokmc.io.calculation_cache import (
+    CalculationFingerprintMemo,
     apply_cached_states,
     calculation_cache_key,
     calculator_identity,
+    input_coordinate_frame_fingerprint,
     load_calculation_record,
     make_calculation_record,
     state_payload,
@@ -100,7 +101,11 @@ from autokmc.io.calculation_cache import (
 )
 from autokmc.io.reaction_graph import normalise_reaction_graph
 from autokmc.species.smiles import smiles_to_dirname
-from autokmc.core.pbc import full_pbc_for_cell, minimum_image_vectors
+from autokmc.core.pbc import (
+    full_pbc_for_cell,
+    minimum_image_vectors,
+    unwrap_positions_about_reference,
+)
 from autokmc.sites.stability.adsorption import (
     SurfaceConnectivityError,
     AdsorbateDissociationError,
@@ -110,6 +115,12 @@ from autokmc.sites.stability.adsorption import (
     _check_connectivity_stable,
     _check_intended_coordination_stable,
     _bond_set,
+)
+from autokmc.sites.stability.neb import (
+    make_neb_band,
+    neb_optimizer_logfile,
+    project_neb_path,
+    run_neb,
 )
 from autokmc.sites.bond import BondReactionSite, BondReactionLateral
 from autokmc.sites.diffusion import _member_clique_union
@@ -126,6 +137,7 @@ from autokmc.core.constants import (
     BOND_MATCHING_TRIALS,
 )
 from autokmc.utils.logging import get_logger
+from autokmc.utils.optimizers import DEFAULT_NEB_OPTIMIZER, DEFAULT_OPTIMIZER
 
 if TYPE_CHECKING:
     pass
@@ -133,23 +145,10 @@ if TYPE_CHECKING:
 _log = get_logger(__name__)
 
 
-# ASE NEB import shim (modern: ``ase.mep``; older: ``ase.neb``).
-try:                                                              # pragma: no cover
-    from ase.mep import NEB                                       # type: ignore
-except ImportError:                                               # pragma: no cover
-    from ase.neb import NEB                                       # type: ignore
-
-try:                                                              # pragma: no cover
-    from ase.mep import idpp_interpolate as _idpp_interpolate    # type: ignore
-except ImportError:                                               # pragma: no cover
-    try:
-        from ase.neb import idpp_interpolate as _idpp_interpolate  # type: ignore
-    except ImportError:                                           # pragma: no cover
-        _idpp_interpolate = None
-
-
-def _neb_optimizer_logfile(verbose: bool) -> str:
-    return "-" if verbose else os.devnull
+# Compatibility aliases for callers that imported the former channel-local
+# helpers.  The implementation now lives in ``stability.neb``.
+_make_neb_band = make_neb_band
+_neb_optimizer_logfile = neb_optimizer_logfile
 
 
 # ---------------------------------------------------------------------------
@@ -322,6 +321,7 @@ def check_bond_site_lateral(
     *,
     n_shells: int = LATERAL_SHELLS_DEFAULT,
     ignore_lateral: bool = False,
+    _assign_member: bool = True,
 ) -> BondReactionLateral:
     """Classify the lateral-interaction environment of one triple member.
 
@@ -397,7 +397,7 @@ def check_bond_site_lateral(
     fp_index: dict | None = getattr(brs, "_lateral_fp_index", None)
     if fp_index is None:
         fp_index = {}
-        brs._lateral_fp_index = fp_index   # type: ignore[attr-defined]
+        brs._lateral_fp_index = fp_index
 
     def _stamp_gas_product(target_lc: BondReactionLateral) -> BondReactionLateral:
         if gas_product:
@@ -409,6 +409,8 @@ def check_bond_site_lateral(
         return target_lc
 
     def _drop_from_other_classes(new_lc=None) -> None:
+        if not _assign_member:
+            return
         for other in brs.lateral_classes:
             if other is new_lc:
                 continue
@@ -422,9 +424,11 @@ def check_bond_site_lateral(
             ego, lc.ego_graph, node_match=_bond_lateral_node_match,
         )
         if gm.is_isomorphic():
-            _drop_from_other_classes(new_lc=lc)
-            if member_index not in lc.members:
-                lc.members.append(member_index)
+            if _assign_member:
+                _drop_from_other_classes(new_lc=lc)
+                if member_index not in lc.members:
+                    lc.members.append(member_index)
+                lc._seed_only = False
             _log.debug(
                 "check_bond_site_lateral: bond_iso=%d member=%d "
                 "→ existing lateral_class=%d",
@@ -437,10 +441,11 @@ def check_bond_site_lateral(
         lateral_class = len(brs.lateral_classes),
         ego_graph     = ego,
         n_shells      = depth,
-        members       = [member_index],
+        members       = [member_index] if _assign_member else [],
     )
+    new_lc._seed_only = not _assign_member
     _stamp_gas_product(new_lc)
-    new_lc._fingerprint = fkey  # type: ignore[attr-defined]
+    new_lc._fingerprint = fkey
     brs.lateral_classes.append(new_lc)
     fp_index.setdefault(fkey, []).append(new_lc)
 
@@ -451,6 +456,27 @@ def check_bond_site_lateral(
         new_lc.lateral_class, len(brs.lateral_classes),
     )
     return new_lc
+
+
+def get_bond_bare_lateral(
+    G: nx.Graph,
+    brs: BondReactionSite,
+    member_index: int,
+    *,
+    n_shells: int = LATERAL_SHELLS_DEFAULT,
+) -> BondReactionLateral:
+    """Find or create the bare class without reassigning the live member."""
+    lateral_class = check_bond_site_lateral(
+        G,
+        brs,
+        member_index,
+        n_shells=n_shells,
+        ignore_lateral=True,
+        _assign_member=False,
+    )
+    if not lateral_class.members:
+        lateral_class._seed_only = True
+    return lateral_class
 
 
 # ---------------------------------------------------------------------------
@@ -582,6 +608,9 @@ def _greedy_pair_c_to_ab(
     ab_symbols: list[str],
     ab_positions: list[np.ndarray],
     c_nodes: list[int],
+    *,
+    cell=None,
+    pbc=None,
 ) -> list[int]:
     """Reorder *c_nodes* so that c[k]'s element matches ab[k]'s and c[k]'s
     physical position is closest (per element class) to ab[k]'s.
@@ -602,6 +631,16 @@ def _greedy_pair_c_to_ab(
             f"|A|+|B|={len(ab_symbols)}."
         )
 
+    cell = np.asarray(
+        G.graph.get("cell", np.eye(3)) if cell is None else cell,
+        dtype=float,
+    )
+    pbc = (
+        full_pbc_for_cell(cell)
+        if pbc is None
+        else np.asarray(pbc, dtype=bool)
+    )
+
     c_remaining_by_elem: dict[str, list[int]] = {}
     for nid in c_nodes:
         elem = G.nodes[nid]["element"]
@@ -621,7 +660,12 @@ def _greedy_pair_c_to_ab(
         best_d2  = float("inf")
         for i, cnid in enumerate(candidates):
             cpos = np.asarray(G.nodes[cnid]["position"], dtype=float)
-            d2 = float(np.sum((cpos - np.asarray(pos, dtype=float)) ** 2))
+            displacement = minimum_image_vectors(
+                cpos - np.asarray(pos, dtype=float),
+                cell,
+                pbc,
+            )
+            d2 = float(np.sum(displacement ** 2))
             if d2 < best_d2:
                 best_d2  = d2
                 best_idx = i
@@ -840,7 +884,14 @@ def _select_c_to_ab_mapping(
     if method in {"auto", "greedy", "symmetry_trials"}:
         raw_orders.append((
             "greedy",
-            _greedy_pair_c_to_ab(G, ab_symbols, ab_positions, c_present),
+            _greedy_pair_c_to_ab(
+                G,
+                ab_symbols,
+                ab_positions,
+                c_present,
+                cell=cell,
+                pbc=pbc,
+            ),
         ))
 
     if method in {"auto", "hungarian", "symmetry_trials"}:
@@ -1084,7 +1135,11 @@ def _gas_product_neb_endpoint(
 
     ab_positions = np.asarray(atoms_ab.get_positions(), dtype=float)
     react_slice = slice(n_slab + n_lat, n_slab + n_lat + n_react)
-    target_positions = ab_positions[react_slice]
+    target_positions = unwrap_positions_about_reference(
+        ab_positions[react_slice],
+        atoms_ab.cell.array,
+        atoms_ab.pbc,
+    )
     centroid = target_positions.mean(axis=0)
     target_centered = target_positions - centroid
 
@@ -1159,6 +1214,7 @@ def _relax_bond_endpoint(
     calculator,
     fmax: float,
     max_steps: int,
+    optimizer: str,
     frozen_indices: list[int] | None,
     nl_mult: float,
     n_slab: int,
@@ -1189,12 +1245,13 @@ def _relax_bond_endpoint(
                 calculator = calc,
                 fmax       = fmax,
                 steps      = max_steps,
+                optimizer  = optimizer,
                 verbose    = verbose,
             )
 
             forces = atoms_opt.get_forces()
             if frozen_indices:
-                free_mask = np.ones(len(atoms_opt), dtype=bool)
+                free_mask: np.ndarray = np.ones(len(atoms_opt), dtype=bool)
                 free_mask[list(frozen_indices)] = False
                 max_force = float(np.linalg.norm(forces[free_mask], axis=1).max())
             else:
@@ -1202,7 +1259,7 @@ def _relax_bond_endpoint(
 
             if max_force > fmax:
                 raise OptimisationFailedError(
-                    f"[{state_label}] LBFGS did not converge: "
+                    f"[{state_label}] optimizer {optimizer!r} did not converge: "
                     f"max|F|={max_force:.4f} eV/Å after {max_steps} steps "
                     f"(fmax={fmax} eV/Å)."
                 )
@@ -1242,59 +1299,6 @@ def _relax_bond_endpoint(
 # ---------------------------------------------------------------------------
 # NEB band construction + TS validity
 # ---------------------------------------------------------------------------
-
-def _make_neb_band(
-    atoms_a: Atoms,
-    atoms_b: Atoms,
-    *,
-    n_images: int,
-    interpolation: str,
-    spring_k: float,
-    climb: bool,
-    calculator,
-    frozen_indices: list[int] | None,
-) -> tuple["NEB", list[Atoms]]:
-    """Build an ASE NEB band of ``n_images + 2`` images between A and B.
-
-    The same calculator instance is attached to every image and ASE's
-    ``allow_shared_calculator`` path is enabled.  This is the current ASE
-    equivalent of deprecated ``SingleCalculatorNEB`` and avoids requiring
-    calculators to be deep-copyable.
-    """
-    images: list[Atoms] = [atoms_a.copy()]
-    for _ in range(int(n_images)):
-        images.append(atoms_a.copy())
-    images.append(atoms_b.copy())
-
-    if frozen_indices:
-        for im in images:
-            im.set_constraint(FixAtoms(indices=list(frozen_indices)))
-
-    for im in images:
-        im.calc = calculator
-
-    neb = NEB(
-        images,
-        k=float(spring_k),
-        climb=bool(climb),
-        method="improvedtangent",
-        allow_shared_calculator=True,
-    )
-
-    if interpolation == "idpp" and _idpp_interpolate is not None:
-        try:
-            _idpp_interpolate(neb, mic=True)
-        except Exception as exc:
-            _log.warning(
-                "IDPP interpolation failed (%s: %s); falling back to linear.",
-                type(exc).__name__, exc,
-            )
-            neb.interpolate("linear", mic=True)
-    else:
-        neb.interpolate("linear", mic=True)
-
-    return neb, images
-
 
 def _check_bond_ts_validity(
     atoms_ts: Atoms,
@@ -1384,6 +1388,325 @@ def _check_bond_ts_validity(
 # Public API — stability / NEB
 # ---------------------------------------------------------------------------
 
+def _gas_product_cache_inputs(
+    gas_reactant,
+    *,
+    include_thermochemistry: bool,
+) -> dict:
+    """Return every gas-species value consumed by the bond calculation.
+
+    Partial pressure is deliberately absent: it scales the live reverse rate
+    but does not alter the standard-state endpoint/NEB calculation.
+    """
+    inputs = {
+        "gas_reactant_smiles": getattr(gas_reactant, "smiles", None),
+        "gas_reactant_atoms": getattr(gas_reactant, "atoms", None),
+        "gas_energy_ev": getattr(gas_reactant, "energy", None),
+    }
+    if include_thermochemistry:
+        inputs.update(
+            {
+                "gas_gibbs_energy_ev": getattr(
+                    gas_reactant, "gibbs_energy", None,
+                ),
+                "gas_zpe_ev": getattr(gas_reactant, "zpe", None),
+                "gas_entropy_ev_per_k": getattr(
+                    gas_reactant, "entropy", None,
+                ),
+                "gas_frequencies_ev": list(
+                    getattr(gas_reactant, "frequencies_ev", []) or []
+                ),
+                "gas_imaginary_ev": list(
+                    getattr(gas_reactant, "imaginary_ev", []) or []
+                ),
+            }
+        )
+    return inputs
+
+
+def _stamp_gas_product_runtime_state(
+    lc: BondReactionLateral,
+    brs: BondReactionSite,
+) -> None:
+    """Restamp pressure-sensitive state after calculation or cache hydration."""
+    gas_product = bool(getattr(brs, "gas_product", False))
+    lc.gas_product = gas_product
+    if gas_product:
+        gas_reactant = getattr(brs, "gas_reactant", None)
+        lc.gas_pressure_bar = float(
+            getattr(gas_reactant, "partial_pressure_bar", 0.0) or 0.0
+        )
+
+
+def _apply_bond_thermochemistry(
+    lc: BondReactionLateral,
+    brs: BondReactionSite,
+    *,
+    atoms_ab: Atoms,
+    atoms_c: Atoms,
+    atoms_ts: Atoms,
+    energy_ab: float,
+    energy_c: float,
+    energy_ts: float,
+    n_slab: int,
+    n_lateral: int,
+    n_reacting: int,
+    gas_product: bool,
+    calculator,
+    free_energy_options,
+    temperature_k: float | None,
+    vib_cache_root: str | None,
+) -> None:
+    """Populate thermochemistry from cached or freshly calculated states."""
+    if (
+        free_energy_options is None
+        or not getattr(free_energy_options, "enabled", False)
+        or temperature_k is None
+    ):
+        return
+
+    from pathlib import Path as _Path
+
+    from autokmc.thermo.free_energy import compute_harmonic_thermo
+
+    tpl = brs.template
+    process = smiles_to_dirname(
+        f"{tpl.smiles_a}+{tpl.smiles_b}~{tpl.smiles_c}"
+    )
+    cache_root = _Path(vib_cache_root) if vib_cache_root is not None else None
+    per_lat_dir = (
+        cache_root
+        / f"bond_{process}"
+        / f"bond_iso{brs.iso_class}_lat{lc.lateral_class}"
+        if cache_root is not None
+        else None
+    )
+    vib_indices = list(
+        range(
+            n_slab + n_lateral,
+            n_slab + n_lateral + n_reacting,
+        )
+    )
+
+    def _harm(atoms, label, energy_ev):
+        return compute_harmonic_thermo(
+            atoms,
+            vib_indices,
+            energy_ev=float(energy_ev),
+            temperature_k=float(temperature_k),
+            calculator=calculator,
+            options=free_energy_options,
+            cache_dir=str(per_lat_dir) if per_lat_dir is not None else None,
+            label=label,
+            drop_imaginary=True,
+        )
+
+    ab_thermo = _harm(atoms_ab, "state_ab", energy_ab)
+    if gas_product:
+        gas_reactant = brs.gas_reactant
+        gas_g = float(getattr(gas_reactant, "gibbs_energy", float("nan")))
+        gas_e = float(getattr(gas_reactant, "energy", float("nan")))
+        if not np.isfinite(gas_g) or not np.isfinite(gas_e):
+            raise ValueError(
+                f"gas product {tpl.smiles_c!r} lacks finite free-energy data"
+            )
+        c_thermo = {
+            "g_corr_ev": gas_g - gas_e,
+            "g_total_ev": float(energy_c) + gas_g - gas_e,
+            "zpe_ev": float(getattr(gas_reactant, "zpe", 0.0)),
+            "entropy_ev_per_k": float(
+                getattr(gas_reactant, "entropy", 0.0)
+            ),
+            "frequencies_ev": list(
+                getattr(gas_reactant, "frequencies_ev", []) or []
+            ),
+            "imaginary_ev": list(
+                getattr(gas_reactant, "imaginary_ev", []) or []
+            ),
+        }
+    else:
+        c_thermo = _harm(atoms_c, "state_c", energy_c)
+
+    if getattr(free_energy_options, "include_ts_vibrations", True):
+        ts_thermo = _harm(atoms_ts, "ts", energy_ts)
+    else:
+        average = 0.5 * (ab_thermo["g_corr_ev"] + c_thermo["g_corr_ev"])
+        ts_thermo = {
+            "g_corr_ev": float(average),
+            "g_total_ev": float(energy_ts) + float(average),
+            "zpe_ev": None,
+            "entropy_ev_per_k": None,
+            "frequencies_ev": [],
+            "imaginary_ev": [],
+        }
+
+    for suffix, thermo in (
+        ("ab", ab_thermo),
+        ("c", c_thermo),
+        ("ts", ts_thermo),
+    ):
+        setattr(lc, f"g_correction_{suffix}", thermo["g_corr_ev"])
+        setattr(lc, f"g_{suffix}", thermo["g_total_ev"])
+        setattr(lc, f"zpe_{suffix}", thermo["zpe_ev"])
+        setattr(lc, f"entropy_{suffix}", thermo["entropy_ev_per_k"])
+        setattr(
+            lc,
+            f"frequencies_{suffix}_ev",
+            list(thermo["frequencies_ev"]),
+        )
+        setattr(
+            lc,
+            f"imaginary_{suffix}_ev",
+            list(thermo["imaginary_ev"]),
+        )
+        setattr(lc, f"vib_indices_{suffix}", list(vib_indices))
+
+
+def _write_bond_calculation_cache(
+    calculation_cache_root: str,
+    cache_key: str,
+    cache_graph: nx.Graph,
+    cache_parameters: dict[str, Any],
+    cache_inputs: dict[str, Any],
+    fingerprint_memo: CalculationFingerprintMemo,
+    brs: BondReactionSite,
+    lc: BondReactionLateral,
+    *,
+    atoms_ab: Atoms,
+    atoms_c: Atoms,
+    atoms_ts: Atoms,
+    energy_ab: float,
+    energy_c: float,
+    energy_ts: float,
+    gas_product: bool,
+) -> None:
+    tpl = getattr(brs, "template", None)
+    props_ab = {
+        name: getattr(lc, name, None)
+        for name in (
+            "g_correction_ab",
+            "g_ab",
+            "zpe_ab",
+            "entropy_ab",
+            "frequencies_ab_ev",
+            "imaginary_ab_ev",
+        )
+    }
+    props_c = {
+        name: getattr(lc, name, None)
+        for name in (
+            "g_correction_c",
+            "g_c",
+            "zpe_c",
+            "entropy_c",
+            "frequencies_c_ev",
+            "imaginary_c_ev",
+        )
+    }
+    props_ts = {
+        name: getattr(lc, name, None)
+        for name in (
+            "g_correction_ts",
+            "g_ts",
+            "zpe_ts",
+            "entropy_ts",
+            "frequencies_ts_ev",
+            "imaginary_ts_ev",
+        )
+    }
+    public_neb_path = getattr(lc, "atoms_neb_path", None)
+    private_neb_path = getattr(lc, "_warm_start_neb_path", None)
+    cache_neb_path = public_neb_path or private_neb_path
+    neb = None
+    if cache_neb_path:
+        cache_neb_energies = (
+            getattr(lc, "neb_path_energies", None)
+            if public_neb_path
+            else getattr(lc, "_warm_start_neb_energies", None)
+        )
+        neb = {
+            "energies_ev": list(cache_neb_energies or []),
+            "path_atoms": list(cache_neb_path),
+        }
+    record = make_calculation_record(
+        kind="bond",
+        cache_key=cache_key,
+        operation={
+            "label": (
+                f"bond:{getattr(tpl, 'smiles_a', '')}+"
+                f"{getattr(tpl, 'smiles_b', '')}->"
+                f"{getattr(tpl, 'smiles_c', '')}"
+            ),
+            "reaction": (
+                f"{getattr(tpl, 'smiles_a', '')}* + "
+                f"{getattr(tpl, 'smiles_b', '')}* -> "
+                f"{getattr(tpl, 'smiles_c', '')}*"
+            ),
+            "smiles_a": getattr(tpl, "smiles_a", ""),
+            "smiles_b": getattr(tpl, "smiles_b", ""),
+            "smiles_c": getattr(tpl, "smiles_c", ""),
+            "iso_class": int(brs.iso_class),
+            "lateral_class": int(lc.lateral_class),
+            "gas_product": bool(gas_product),
+        },
+        parameters=cache_parameters,
+        inputs={
+            **cache_inputs,
+            "iso_class": int(brs.iso_class),
+            "lateral_class": int(lc.lateral_class),
+            "gas_product": bool(gas_product),
+        },
+        states={
+            "state_ab": state_payload(
+                atoms_ab,
+                energy_ev=energy_ab,
+                properties=props_ab,
+            ),
+            "state_c": state_payload(
+                atoms_c,
+                energy_ev=energy_c,
+                properties=props_c,
+            ),
+            "transition": state_payload(
+                atoms_ts,
+                energy_ev=energy_ts,
+                properties=props_ts,
+            ),
+        },
+        reaction_graph=cache_graph,
+        neb=neb,
+        lateral_attributes={
+            "atom_matching_method": getattr(
+                lc,
+                "atom_matching_method",
+                None,
+            ),
+            "atom_mapping": list(getattr(lc, "atom_mapping", []) or []),
+            "matching_diagnostics": dict(
+                getattr(lc, "matching_diagnostics", {}) or {}
+            ),
+            "gas_product": getattr(lc, "gas_product", None),
+            "neb_initialization": getattr(
+                lc,
+                "neb_initialization",
+                None,
+            ),
+            "neb_seed_fingerprint": getattr(
+                lc,
+                "neb_seed_fingerprint",
+                None,
+            ),
+        },
+    )
+    write_calculation_record(
+        calculation_cache_root,
+        "bond",
+        cache_key,
+        record,
+        fingerprint_memo=fingerprint_memo,
+    )
+
+
 def check_bond_site_stability(
     G: nx.Graph,
     brs: BondReactionSite,
@@ -1402,18 +1725,24 @@ def check_bond_site_stability(
     matching_trials: int = BOND_MATCHING_TRIALS,
     nl_mult: float = NL_MULT_DEFAULT,
     persist_neb_path: bool = False,
+    optimizer: str = DEFAULT_OPTIMIZER,
+    neb_optimizer: str = DEFAULT_NEB_OPTIMIZER,
     verbose: bool = False,
     calculation_cache_root: str | None = None,
+    calculation_cache_lookup_enabled: bool = False,
     free_energy_options=None,
     free_energy_temperature_k: float | None = None,
     vib_cache_root: str | None = None,
+    neb_seed_path: Sequence[Atoms] | None = None,
+    neb_seed_member_index: int | None = None,
+    capture_neb_path: bool = False,
 ) -> tuple[float, float, float]:
-    """Relax both endpoints and the CI-NEB band; return ``(E_ab, E_c, E_ts)``.
+    """Relax both endpoints and the NEB band; return ``(E_ab, E_c, E_ts)``.
 
     Pipeline (mirrors :func:`autokmc.sites.stability.diffusion.check_diffusion_stability`):
 
     1. Build the AB endpoint (slab + lateral neighbours + A's atoms +
-       B's atoms at their graph positions); relax with LBFGS; verify
+       B's atoms at their graph positions); relax with the configured optimizer; verify
        both A's and B's intended surface coordination survive.
     2. Pair C's atoms to the AB reacting block using the configured
        same-element matching strategy (``auto`` defaults to a Hungarian/MIC
@@ -1421,10 +1750,11 @@ def check_bond_site_stability(
        C's atoms overwriting the reacting-block positions inherited from the
        relaxed AB slab+lat.  Relax; verify C's intended surface coordination
        survives.
-    3. Run a CI-NEB band of ``n_images`` interior images between the
-       two relaxed endpoints with the requested *interpolation* and
-       *spring_k*.  All images share one acquired calculator via ASE's
-       SingleCalculatorNEB-style path.
+    3. Converge an ordinary NEB band of ``n_images`` interior images between
+       the two relaxed endpoints with the requested *interpolation* and
+       *spring_k*.  If *climb* is enabled, retain the same band and spring
+       constant, enable its climbing image, and converge it again.  All images
+       share one acquired calculator via ASE's SingleCalculatorNEB-style path.
     4. Identify the TS as the highest-energy interior image; validate
        (no fragmentation into a third species, no collapse onto an
        endpoint); store all energies / atoms / (optional) full band on
@@ -1490,9 +1820,41 @@ def check_bond_site_stability(
     cache_kind = "bond"
     cache_key: str | None = None
     cache_graph: nx.Graph | None = None
+    cache_fingerprint_memo = CalculationFingerprintMemo()
+    electronic_cache_state: tuple[float, float, float, Atoms, Atoms, Atoms] | None = None
+    try:
+        seed_images = None if neb_seed_path is None else list(neb_seed_path)
+    except TypeError:
+        seed_images = None
+    seed_fingerprint = (
+        None
+        if not seed_images
+        else input_coordinate_frame_fingerprint(
+            {"neb_seed_path": seed_images}
+        )
+    )
+    try:
+        seed_member_index = int(neb_seed_member_index)
+    except (TypeError, ValueError, OverflowError):
+        seed_member_index = None
+    same_member_seed = (
+        seed_images is not None
+        and seed_member_index == int(member_index)
+    )
+    if not same_member_seed:
+        seed_images = None
+        seed_fingerprint = None
+    seed_projection_scope = "slab_and_reacting"
+    thermochemistry_requested = bool(
+        free_energy_options is not None
+        and getattr(free_energy_options, "enabled", False)
+        and free_energy_temperature_k is not None
+    )
     cache_parameters = {
         "fmax": float(fmax),
         "max_steps": int(max_steps),
+        "optimizer": str(optimizer).strip().lower(),
+        "neb_optimizer": str(neb_optimizer).strip().lower(),
         "n_images": int(n_images),
         "climb": bool(climb),
         "spring_k": float(spring_k),
@@ -1502,9 +1864,19 @@ def check_bond_site_stability(
         "nl_mult": float(nl_mult),
         "n_shells": int(lc.n_shells),
         "persist_neb_path": bool(persist_neb_path),
+        "capture_neb_path": bool(capture_neb_path),
+        "neb_seed_policy": "auto_bare_transfer_v1",
         "gas_product": bool(gas_product),
         "gas_lift_height": float(getattr(brs, "gas_lift_height", 6.0)),
-        "calculator": calculator_identity(calculator),
+        "free_energy_enabled": bool(
+            free_energy_options is not None
+            and getattr(free_energy_options, "enabled", False)
+        ),
+        "temperature_k": (
+            None
+            if free_energy_temperature_k is None
+            else float(free_energy_temperature_k)
+        ),
     }
     if free_energy_options is not None:
         cache_parameters["free_energy"] = {
@@ -1524,6 +1896,8 @@ def check_bond_site_stability(
         endpoint        = "ab",
         frozen_indices  = frozen_indices,
     )
+    lc.atoms_ab_initial = atoms_ab_init.copy()
+    lc.atoms_ab_initial.calc = None
     n_react = len(react_idx)
     a_ordered = _ordered_endpoint_nodes(G, a_node_ids)
     b_ordered = _ordered_endpoint_nodes(G, b_node_ids)
@@ -1532,6 +1906,7 @@ def check_bond_site_stability(
 
     if calculation_cache_root is not None:
         try:
+            cache_parameters["calculator"] = calculator_identity(calculator)
             cache_graph = normalise_reaction_graph(lc.ego_graph)
             cache_graph.graph["n_shells"] = int(lc.n_shells)
             tpl = getattr(brs, "template", None)
@@ -1548,25 +1923,51 @@ def check_bond_site_stability(
                 "a_node_ids": list(a_node_ids),
                 "b_node_ids": list(b_node_ids),
                 "c_node_ids": list(c_node_ids),
-                "gas_energy_ev": (
-                    getattr(getattr(brs, "gas_reactant", None), "energy", None)
-                    if gas_product else None
-                ),
+                "gas_product": bool(gas_product),
+                "neb_seed": {
+                    "mode": (
+                        "bare_transfer"
+                        if seed_fingerprint is not None
+                        else "configured_interpolation"
+                    ),
+                    "projection_scope": (
+                        seed_projection_scope
+                        if seed_fingerprint is not None
+                        else None
+                    ),
+                    "path_sha256": seed_fingerprint,
+                },
             }
+            if gas_product:
+                cache_inputs.update(
+                    _gas_product_cache_inputs(
+                        getattr(brs, "gas_reactant", None),
+                        include_thermochemistry=bool(
+                            free_energy_options is not None
+                            and getattr(free_energy_options, "enabled", False)
+                            and free_energy_temperature_k is not None
+                        ),
+                    )
+                )
             cache_key = calculation_cache_key(
                 kind=cache_kind,
                 identity=cache_identity,
                 parameters=cache_parameters,
                 inputs=cache_inputs,
             )
-            cached = load_calculation_record(
-                calculation_cache_root,
-                cache_kind,
-                cache_key,
-                reaction_graph=cache_graph,
-                operation=cache_identity,
-                parameters=cache_parameters,
-            )
+            cached = None
+            if calculation_cache_lookup_enabled:
+                cached = load_calculation_record(
+                    calculation_cache_root,
+                    cache_kind,
+                    cache_key,
+                    reaction_graph=cache_graph,
+                    operation=cache_identity,
+                    parameters=cache_parameters,
+                    inputs=cache_inputs,
+                    allow_electronic_match=True,
+                    fingerprint_memo=cache_fingerprint_memo,
+                )
             if cached is not None and apply_cached_states(
                 lc,
                 cached,
@@ -1575,17 +1976,61 @@ def check_bond_site_stability(
                     "state_c": ("energy_c", "atoms_c"),
                     "transition": ("energy_ts", "atoms_ts"),
                 },
+                include_properties=cached.get("_cache_match") != "electronic",
             ):
+                if capture_neb_path:
+                    cached_path = list(
+                        getattr(lc, "atoms_neb_path", None) or []
+                    )
+                    if len(cached_path) != int(n_images) + 2:
+                        lc.stable = None
+                        raise ValueError(
+                            "cached bare bond result has no compatible "
+                            "optimized NEB path"
+                        )
+                    lc._warm_start_neb_path = [
+                        image.copy() for image in cached_path
+                    ]
+                    for image in lc._warm_start_neb_path:
+                        image.calc = None
+                    lc._warm_start_neb_energies = list(
+                        getattr(lc, "neb_path_energies", None) or []
+                    )
+                    lc._warm_start_member_index = int(member_index)
+                    if not persist_neb_path:
+                        lc.atoms_neb_path = None
+                        lc.neb_path_energies = None
+                electronic_only = cached.get("_cache_match") == "electronic"
+                if electronic_only and thermochemistry_requested:
+                    # ``apply_cached_states`` marks the electronic states
+                    # stable.  Clear that marker until the requested
+                    # thermochemistry has completed so every failure between
+                    # cache hydration and vibration completion is retryable.
+                    lc.stable = None
+                _stamp_gas_product_runtime_state(lc, brs)
                 if verbose:
                     print(
                         f"  [cache] bond_iso={brs.iso_class} "
                         f"lat={lc.lateral_class}: loaded endpoint/NEB "
                         "calculation"
+                        + (
+                            "; recomputing thermochemistry"
+                            if electronic_only and thermochemistry_requested
+                            else ""
+                        )
                     )
-                return (
+                energies = (
                     float(lc.energy_ab),
                     float(lc.energy_c),
                     float(lc.energy_ts),
+                )
+                if not electronic_only or not thermochemistry_requested:
+                    return energies
+                electronic_cache_state = (
+                    *energies,
+                    lc.atoms_ab,
+                    lc.atoms_c,
+                    lc.atoms_ts,
                 )
         except Exception as exc:
             _log.debug(
@@ -1595,6 +2040,56 @@ def check_bond_site_stability(
                 lc.lateral_class,
                 exc,
             )
+
+    if electronic_cache_state is not None:
+        (
+            E_ab,
+            E_c,
+            E_ts,
+            atoms_ab_opt,
+            atoms_c_opt,
+            atoms_ts,
+        ) = electronic_cache_state
+        _apply_bond_thermochemistry(
+            lc,
+            brs,
+            atoms_ab=atoms_ab_opt,
+            atoms_c=atoms_c_opt,
+            atoms_ts=atoms_ts,
+            energy_ab=E_ab,
+            energy_c=E_c,
+            energy_ts=E_ts,
+            n_slab=n_slab,
+            n_lateral=n_lat,
+            n_reacting=n_react,
+            gas_product=gas_product,
+            calculator=calculator,
+            free_energy_options=free_energy_options,
+            temperature_k=free_energy_temperature_k,
+            vib_cache_root=vib_cache_root,
+        )
+        lc.stable = True
+        assert calculation_cache_root is not None
+        assert cache_key is not None
+        assert cache_graph is not None
+        _write_bond_calculation_cache(
+            calculation_cache_root,
+            cache_key,
+            cache_graph,
+            cache_parameters,
+            cache_inputs,
+            cache_fingerprint_memo,
+            brs,
+            lc,
+            atoms_ab=atoms_ab_opt,
+            atoms_c=atoms_c_opt,
+            atoms_ts=atoms_ts,
+            energy_ab=E_ab,
+            energy_c=E_c,
+            energy_ts=E_ts,
+            gas_product=gas_product,
+        )
+        return E_ab, E_c, E_ts
 
     if verbose:
         print(
@@ -1613,6 +2108,7 @@ def check_bond_site_stability(
         calculator      = calculator,
         fmax            = fmax,
         max_steps       = max_steps,
+        optimizer       = optimizer,
         frozen_indices  = frozen_indices,
         nl_mult         = nl_mult,
         n_slab          = n_slab,
@@ -1639,6 +2135,8 @@ def check_bond_site_stability(
             )
 
         atoms_empty_init = atoms_ab_opt[: n_slab + n_lat].copy()
+        lc.atoms_c_initial = atoms_empty_init.copy()
+        lc.atoms_c_initial.calc = None
         if frozen_indices:
             atoms_empty_init.set_constraint(
                 FixAtoms(indices=[i for i in frozen_indices if i < len(atoms_empty_init)])
@@ -1651,6 +2149,7 @@ def check_bond_site_stability(
                 calculator=calc,
                 fmax=fmax,
                 steps=max_steps,
+                optimizer=optimizer,
                 verbose=verbose,
             )
             E_empty = float(atoms_empty_opt.get_potential_energy())
@@ -1668,13 +2167,15 @@ def check_bond_site_stability(
             G=G,
             lift_height=float(getattr(brs, "gas_lift_height", 6.0)),
         )
+        # The gas-product C endpoint is constructed directly rather than
+        # relaxed as one combined structure, so this is the actual
+        # pre-NEB endpoint supplied to the band.
+        lc.atoms_c_initial = atoms_c_opt.copy()
+        lc.atoms_c_initial.calc = None
         lc.atom_matching_method = gas_mapping_diag["selected_method"]
         lc.atom_mapping = list(gas_mapping_diag.get("gas_atom_order", []))
         lc.matching_diagnostics = gas_mapping_diag
-        lc.gas_product = True
-        lc.gas_pressure_bar = float(
-            getattr(gas_reactant, "partial_pressure_bar", 0.0) or 0.0
-        )
+        _stamp_gas_product_runtime_state(lc, brs)
         if verbose:
             print(
                 f"  [endpoint C(gas)] E_empty={E_empty:.4f} eV  "
@@ -1723,6 +2224,8 @@ def check_bond_site_stability(
             base_atoms      = atoms_ab_opt,
             c_node_order    = c_node_order,
         )
+        lc.atoms_c_initial = atoms_c_init.copy()
+        lc.atoms_c_initial.calc = None
 
         if verbose:
             print(
@@ -1737,6 +2240,7 @@ def check_bond_site_stability(
             calculator      = calculator,
             fmax            = fmax,
             max_steps       = max_steps,
+            optimizer       = optimizer,
             frozen_indices  = frozen_indices,
             nl_mult         = nl_mult,
             n_slab          = n_slab,
@@ -1751,59 +2255,92 @@ def check_bond_site_stability(
     lc.atoms_c  = atoms_c_opt
 
     # ── 3-4. NEB band ───────────────────────────────────────────────────
+    projected_seed_path = None
+    if seed_images:
+        projected_seed_path = project_neb_path(
+            seed_images,
+            atoms_ab_opt,
+            atoms_c_opt,
+            n_slab=n_slab,
+            n_lateral=n_lat,
+        )
+    lc.neb_seed_fingerprint = seed_fingerprint
+    lc.neb_initialization = (
+        "bare_transfer"
+        if projected_seed_path is not None
+        else (
+            "configured_interpolation_fallback"
+            if seed_images
+            else "configured_interpolation"
+        )
+    )
     if verbose:
         print(
             f"  [NEB] images={int(n_images)}  climb={bool(climb)}  "
             f"fmax={float(fmax):.4f} eV/Å  max_steps={int(max_steps)}"
         )
+        if projected_seed_path is not None:
+            print(
+                "  [NEB] initialization=bare optimized path "
+                f"({seed_projection_scope})"
+            )
+        elif seed_images:
+            print(
+                "  [NEB] bare path incompatible; using "
+                f"{interpolation} interpolation"
+            )
 
-    with acquire_calculator(calculator, purpose="bond NEB") as neb_calc:
-        neb, images = _make_neb_band(
-            atoms_ab_opt, atoms_c_opt,
-            n_images       = int(n_images),
-            interpolation  = str(interpolation),
-            spring_k       = float(spring_k),
-            climb          = bool(climb),
-            calculator     = neb_calc,
-            frozen_indices = frozen_indices,
+    neb_result = run_neb(
+        atoms_ab_opt,
+        atoms_c_opt,
+        calculator=calculator,
+        purpose="bond NEB",
+        n_images=int(n_images),
+        interpolation=str(interpolation),
+        spring_k=float(spring_k),
+        climb=bool(climb),
+        frozen_indices=frozen_indices,
+        fmax=float(fmax),
+        max_steps=int(max_steps),
+        optimizer=neb_optimizer,
+        verbose=verbose,
+        not_converged_error=BondNEBNotConvergedError,
+        persist_path=persist_neb_path,
+        capture_path=capture_neb_path,
+        initial_path=projected_seed_path,
+        initial_path_callback=(
+            (
+                lambda images: setattr(
+                    lc,
+                    "atoms_neb_path_initial",
+                    images,
+                )
+            )
+            if persist_neb_path
+            else None
+        ),
+        band_factory=_make_neb_band,
+        logfile_factory=_neb_optimizer_logfile,
+    )
+    E_ts = neb_result.energy_ts
+    atoms_ts = neb_result.atoms_ts
+    k_ts = neb_result.transition_index
+
+    lc.energy_ts = E_ts
+    lc.atoms_ts = atoms_ts
+    if capture_neb_path and neb_result.path_images:
+        lc._warm_start_neb_path = [
+            image.copy() for image in neb_result.path_images
+        ]
+        for image in lc._warm_start_neb_path:
+            image.calc = None
+        lc._warm_start_neb_energies = list(
+            neb_result.path_energies or []
         )
-        try:
-            opt = BFGS(neb, logfile=_neb_optimizer_logfile(verbose))
-            opt.run(fmax=float(fmax), steps=int(max_steps))
-
-            if not opt.converged():
-                raise BondNEBNotConvergedError(
-                    f"CI-NEB did not converge: fmax={fmax} eV/Å not reached in "
-                    f"{max_steps} steps."
-                )
-
-            # ── 5. Identify TS = highest-energy interior image; validate ────────
-            energies = np.array([float(im.get_potential_energy()) for im in images])
-            interior = energies[1:-1]
-            if len(interior) == 0:
-                raise BondNEBNotConvergedError(
-                    "NEB band has no interior images (n_images=0); "
-                    "cannot identify a TS."
-                )
-            k_ts = 1 + int(np.argmax(interior))
-            E_ts = float(energies[k_ts])
-            atoms_ts = images[k_ts].copy()
-            atoms_ts.calc = None
-
-            lc.energy_ts = E_ts
-            lc.atoms_ts  = atoms_ts
-            if persist_neb_path:
-                lc.neb_path_energies = [
-                    float(im.get_potential_energy()) for im in images
-                ]
-                lc.atoms_neb_path = []
-                for im in images:
-                    snap = im.copy()
-                    snap.calc = None
-                    lc.atoms_neb_path.append(snap)
-        finally:
-            for im in images:
-                im.calc = None
+        lc._warm_start_member_index = int(member_index)
+    if persist_neb_path:
+        lc.neb_path_energies = neb_result.path_energies
+        lc.atoms_neb_path = neb_result.path_images
 
     _check_bond_ts_validity(
         atoms_ts, atoms_ab_opt, atoms_c_opt,
@@ -1815,89 +2352,34 @@ def check_bond_site_stability(
         e_c        = E_c,
         e_ts       = E_ts,
         ts_index   = k_ts,
-        n_interior = len(interior),
+        n_interior = neb_result.n_interior,
     )
 
-    if (
-        free_energy_options is not None
-        and getattr(free_energy_options, "enabled", False)
-        and free_energy_temperature_k is not None
-    ):
-        from pathlib import Path as _Path
-        from autokmc.thermo.free_energy import compute_harmonic_thermo
-
-        tpl = brs.template
-        process = smiles_to_dirname(
-            f"{tpl.smiles_a}+{tpl.smiles_b}~{tpl.smiles_c}"
-        )
-        cache_root = _Path(vib_cache_root) if vib_cache_root is not None else None
-        per_lat_dir = (
-            cache_root / f"bond_{process}" /
-            f"bond_iso{brs.iso_class}_lat{lc.lateral_class}"
-            if cache_root is not None else None
-        )
-        vib_indices = list(range(n_slab + n_lat, n_slab + n_lat + n_react))
-
-        def _harm(atoms, label, energy_ev):
-            return compute_harmonic_thermo(
-                atoms,
-                vib_indices,
-                energy_ev=float(energy_ev),
-                temperature_k=float(free_energy_temperature_k),
-                calculator=calculator,
-                options=free_energy_options,
-                cache_dir=str(per_lat_dir) if per_lat_dir is not None else None,
-                label=label,
-                drop_imaginary=True,
-            )
-
-        ab_thermo = _harm(atoms_ab_opt, "state_ab", E_ab)
-        if gas_product:
-            gas_reactant = brs.gas_reactant
-            gas_g = float(getattr(gas_reactant, "gibbs_energy", float("nan")))
-            gas_e = float(getattr(gas_reactant, "energy", float("nan")))
-            if not np.isfinite(gas_g) or not np.isfinite(gas_e):
-                raise ValueError(
-                    f"gas product {tpl.smiles_c!r} lacks finite free-energy data"
-                )
-            c_thermo = {
-                "g_corr_ev": gas_g - gas_e,
-                "g_total_ev": float(E_c) + gas_g - gas_e,
-                "zpe_ev": float(getattr(gas_reactant, "zpe", 0.0)),
-                "entropy_ev_per_k": float(getattr(gas_reactant, "entropy", 0.0)),
-                "frequencies_ev": list(getattr(gas_reactant, "frequencies_ev", []) or []),
-                "imaginary_ev": list(getattr(gas_reactant, "imaginary_ev", []) or []),
-            }
-        else:
-            c_thermo = _harm(atoms_c_opt, "state_c", E_c)
-
-        if getattr(free_energy_options, "include_ts_vibrations", True):
-            ts_thermo = _harm(atoms_ts, "ts", E_ts)
-        else:
-            average = 0.5 * (ab_thermo["g_corr_ev"] + c_thermo["g_corr_ev"])
-            ts_thermo = {
-                "g_corr_ev": float(average),
-                "g_total_ev": float(E_ts) + float(average),
-                "zpe_ev": None,
-                "entropy_ev_per_k": None,
-                "frequencies_ev": [],
-                "imaginary_ev": [],
-            }
-
-        for suffix, thermo in (("ab", ab_thermo), ("c", c_thermo), ("ts", ts_thermo)):
-            setattr(lc, f"g_correction_{suffix}", thermo["g_corr_ev"])
-            setattr(lc, f"g_{suffix}", thermo["g_total_ev"])
-            setattr(lc, f"zpe_{suffix}", thermo["zpe_ev"])
-            setattr(lc, f"entropy_{suffix}", thermo["entropy_ev_per_k"])
-            setattr(lc, f"frequencies_{suffix}_ev", list(thermo["frequencies_ev"]))
-            setattr(lc, f"imaginary_{suffix}_ev", list(thermo["imaginary_ev"]))
-            setattr(lc, f"vib_indices_{suffix}", list(vib_indices))
+    _apply_bond_thermochemistry(
+        lc,
+        brs,
+        atoms_ab=atoms_ab_opt,
+        atoms_c=atoms_c_opt,
+        atoms_ts=atoms_ts,
+        energy_ab=E_ab,
+        energy_c=E_c,
+        energy_ts=E_ts,
+        n_slab=n_slab,
+        n_lateral=n_lat,
+        n_reacting=n_react,
+        gas_product=gas_product,
+        calculator=calculator,
+        free_energy_options=free_energy_options,
+        temperature_k=free_energy_temperature_k,
+        vib_cache_root=vib_cache_root,
+    )
 
     lc.stable = True
     if verbose:
         print(
-            f"  [NEB] converged=True steps={opt.nsteps}  "
-            f"E_ts={E_ts:.4f} eV  image={k_ts}/{len(interior)}  ✓ stable"
+            f"  [NEB] converged=True steps={neb_result.optimizer_steps}  "
+            f"E_ts={E_ts:.4f} eV  "
+            f"image={k_ts}/{neb_result.n_interior}  ✓ stable"
         )
 
     _log.debug(
@@ -1906,99 +2388,27 @@ def check_bond_site_stability(
         brs.iso_class, member_index, lc.lateral_class,
         E_ab, E_c, E_ts, E_ts - E_ab, E_ts - E_c,
     )
-    if calculation_cache_root is not None and cache_key is not None:
-        tpl = getattr(brs, "template", None)
-        props_ab = {
-            name: getattr(lc, name, None)
-            for name in (
-                "g_correction_ab",
-                "g_ab",
-                "zpe_ab",
-                "entropy_ab",
-                "frequencies_ab_ev",
-                "imaginary_ab_ev",
-            )
-        }
-        props_c = {
-            name: getattr(lc, name, None)
-            for name in (
-                "g_correction_c",
-                "g_c",
-                "zpe_c",
-                "entropy_c",
-                "frequencies_c_ev",
-                "imaginary_c_ev",
-            )
-        }
-        props_ts = {
-            name: getattr(lc, name, None)
-            for name in (
-                "g_correction_ts",
-                "g_ts",
-                "zpe_ts",
-                "entropy_ts",
-                "frequencies_ts_ev",
-                "imaginary_ts_ev",
-            )
-        }
-        neb = None
-        if getattr(lc, "atoms_neb_path", None):
-            neb = {
-                "energies_ev": list(getattr(lc, "neb_path_energies", []) or []),
-                "path_atoms": list(getattr(lc, "atoms_neb_path", []) or []),
-            }
-        record = make_calculation_record(
-            kind=cache_kind,
-            cache_key=cache_key,
-            operation={
-                "label": (
-                    f"bond:{getattr(tpl, 'smiles_a', '')}+"
-                    f"{getattr(tpl, 'smiles_b', '')}->"
-                    f"{getattr(tpl, 'smiles_c', '')}"
-                ),
-                "reaction": (
-                    f"{getattr(tpl, 'smiles_a', '')}* + "
-                    f"{getattr(tpl, 'smiles_b', '')}* -> "
-                    f"{getattr(tpl, 'smiles_c', '')}*"
-                ),
-                "smiles_a": getattr(tpl, "smiles_a", ""),
-                "smiles_b": getattr(tpl, "smiles_b", ""),
-                "smiles_c": getattr(tpl, "smiles_c", ""),
-                "iso_class": int(brs.iso_class),
-                "lateral_class": int(lc.lateral_class),
-                "gas_product": bool(gas_product),
-            },
-            parameters=cache_parameters,
-            inputs={
-                "iso_class": int(brs.iso_class),
-                "lateral_class": int(lc.lateral_class),
-                "gas_product": bool(gas_product),
-            },
-            states={
-                "state_ab": state_payload(
-                    atoms_ab_opt, energy_ev=E_ab, properties=props_ab,
-                ),
-                "state_c": state_payload(
-                    atoms_c_opt, energy_ev=E_c, properties=props_c,
-                ),
-                "transition": state_payload(
-                    atoms_ts, energy_ev=E_ts, properties=props_ts,
-                ),
-            },
-            reaction_graph=cache_graph,
-            neb=neb,
-            lateral_attributes={
-                "atom_matching_method": getattr(lc, "atom_matching_method", None),
-                "atom_mapping": list(getattr(lc, "atom_mapping", []) or []),
-                "matching_diagnostics": dict(
-                    getattr(lc, "matching_diagnostics", {}) or {}
-                ),
-                "gas_product": getattr(lc, "gas_product", None),
-                "gas_pressure_bar": getattr(lc, "gas_pressure_bar", None),
-            },
-        )
-        write_calculation_record(
-            calculation_cache_root, cache_kind, cache_key, record,
+    if (
+        calculation_cache_root is not None
+        and cache_key is not None
+        and cache_graph is not None
+    ):
+        _write_bond_calculation_cache(
+            calculation_cache_root,
+            cache_key,
+            cache_graph,
+            cache_parameters,
+            cache_inputs,
+            cache_fingerprint_memo,
+            brs,
+            lc,
+            atoms_ab=atoms_ab_opt,
+            atoms_c=atoms_c_opt,
+            atoms_ts=atoms_ts,
+            energy_ab=E_ab,
+            energy_c=E_c,
+            energy_ts=E_ts,
+            gas_product=gas_product,
         )
     return E_ab, E_c, E_ts
 
@@ -2014,4 +2424,5 @@ __all__ = [
     "OptimisationFailedError",
     "check_bond_site_lateral",
     "check_bond_site_stability",
+    "get_bond_bare_lateral",
 ]

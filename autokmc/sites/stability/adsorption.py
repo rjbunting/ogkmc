@@ -70,7 +70,7 @@ Public API
 * :class:`SiteStabilityError`        — base error for stability failures.
 * :class:`SurfaceConnectivityError`  — surface bonds changed after relaxation.
 * :class:`AdsorbateDissociationError`— adsorbate broke apart after relaxation.
-* :class:`OptimisationFailedError`   — LBFGS did not converge.
+* :class:`OptimisationFailedError`   — the selected optimizer did not converge.
 * :func:`check_adsorbate_site_lateral` — classify the lateral environment of
   one specific member; updates ``adsorbate_site.lateral_classes`` in place.
 * :func:`check_site_stability`       — relax occupied / unoccupied structures,
@@ -79,7 +79,7 @@ Public API
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 import numpy as np
 import networkx as nx
@@ -91,6 +91,7 @@ from ase.neighborlist import NeighborList, natural_cutoffs
 
 from autokmc.io.calculators import acquire_calculator
 from autokmc.io.calculation_cache import (
+    CalculationFingerprintMemo,
     apply_cached_states,
     calculation_cache_key,
     calculator_identity,
@@ -105,6 +106,7 @@ from autokmc.core.pbc import full_pbc_for_cell
 from autokmc.sites.adsorbate import AdsorbateSite, AdsorbateSiteLateral
 from autokmc.core.constants import NL_MULT_DEFAULT, LATERAL_SHELLS_DEFAULT
 from autokmc.utils.logging import get_logger
+from autokmc.utils.optimizers import DEFAULT_OPTIMIZER
 
 if TYPE_CHECKING:
     pass
@@ -129,7 +131,7 @@ class AdsorbateDissociationError(SiteStabilityError):
 
 
 class OptimisationFailedError(SiteStabilityError):
-    """LBFGS relaxation did not converge within the allowed number of steps."""
+    """The selected optimizer did not converge within the step limit."""
 
 
 # ---------------------------------------------------------------------------
@@ -436,7 +438,7 @@ def check_adsorbate_site_lateral(
     fp_index: dict = getattr(adsorbate_site, "_lateral_fp_index", None)
     if fp_index is None:
         fp_index = {}
-        adsorbate_site._lateral_fp_index = fp_index  # type: ignore[attr-defined]
+        adsorbate_site._lateral_fp_index = fp_index
 
     def _drop_from_other_classes(new_lc=None) -> None:
         for other in adsorbate_site.lateral_classes:
@@ -471,7 +473,7 @@ def check_adsorbate_site_lateral(
         n_shells      = depth,
         members       = [member_index],
     )
-    new_lc._fingerprint = fkey  # type: ignore[attr-defined]
+    new_lc._fingerprint = fkey
     adsorbate_site.lateral_classes.append(new_lc)
     fp_index.setdefault(fkey, []).append(new_lc)
 
@@ -830,6 +832,184 @@ def _check_connectivity_stable(
 # Public API — check_site_stability
 # ---------------------------------------------------------------------------
 
+def _apply_adsorption_thermochemistry(
+    lateral_class: AdsorbateSiteLateral,
+    adsorbate_site: AdsorbateSite,
+    *,
+    atoms_occupied: Atoms,
+    atoms_unoccupied: Atoms,
+    energy_occupied: float,
+    energy_unoccupied: float,
+    n_slab_occupied: int,
+    n_lateral_occupied: int,
+    n_self_occupied: int,
+    calculator: Any,
+    free_energy_options: Any,
+    temperature_k: float | None,
+    vib_cache_root: str | None,
+) -> None:
+    """Populate temperature-dependent properties on cached or fresh endpoints."""
+    if (
+        free_energy_options is None
+        or not getattr(free_energy_options, "enabled", False)
+        or temperature_k is None
+    ):
+        return
+
+    from pathlib import Path as _Path
+
+    from autokmc.thermo.free_energy import compute_harmonic_thermo
+
+    vib_idx_occ = list(
+        range(
+            n_slab_occupied + n_lateral_occupied,
+            n_slab_occupied + n_lateral_occupied + n_self_occupied,
+        )
+    )
+    vib_idx_unocc: list[int] = []
+    cache_dir_root = (
+        _Path(vib_cache_root) if vib_cache_root is not None else None
+    )
+    per_lat_dir = (
+        cache_dir_root
+        / f"ads_{smiles_to_dirname(adsorbate_site.reactant)}"
+        / f"iso{adsorbate_site.iso_class}_lat{lateral_class.lateral_class}"
+        if cache_dir_root is not None
+        else None
+    )
+
+    atoms_occ_vib = atoms_occupied.copy()
+    atoms_occ_vib.set_constraint([])
+    _log.debug(
+        "check_site_stability: harmonic thermo for OCCUPIED "
+        "state (iso=%d, lat=%d) — n_atoms=%d  vib_idx=%s",
+        adsorbate_site.iso_class,
+        lateral_class.lateral_class,
+        len(atoms_occ_vib),
+        vib_idx_occ,
+    )
+    occ_thermo = compute_harmonic_thermo(
+        atoms_occ_vib,
+        vib_idx_occ,
+        energy_ev=float(energy_occupied),
+        temperature_k=float(temperature_k),
+        calculator=calculator,
+        options=free_energy_options,
+        cache_dir=(str(per_lat_dir) if per_lat_dir is not None else None),
+        label="occupied",
+        drop_imaginary=True,
+    )
+
+    atoms_unocc_vib = atoms_unoccupied.copy()
+    atoms_unocc_vib.set_constraint([])
+    unocc_thermo = compute_harmonic_thermo(
+        atoms_unocc_vib,
+        vib_idx_unocc,
+        energy_ev=float(energy_unoccupied),
+        temperature_k=float(temperature_k),
+        calculator=calculator,
+        options=free_energy_options,
+        cache_dir=(str(per_lat_dir) if per_lat_dir is not None else None),
+        label="unoccupied",
+        drop_imaginary=True,
+    )
+
+    if occ_thermo is not None:
+        lateral_class.g_correction_occupied = occ_thermo["g_corr_ev"]
+        lateral_class.g_occupied = occ_thermo["g_total_ev"]
+        lateral_class.zpe_occupied = occ_thermo["zpe_ev"]
+        lateral_class.entropy_occupied = occ_thermo["entropy_ev_per_k"]
+        lateral_class.frequencies_occupied_ev = occ_thermo["frequencies_ev"]
+        lateral_class.imaginary_occupied_ev = occ_thermo["imaginary_ev"]
+        lateral_class.vib_indices_occupied = occ_thermo["vib_indices"]
+    if unocc_thermo is not None:
+        lateral_class.g_correction_unoccupied = unocc_thermo["g_corr_ev"]
+        lateral_class.g_unoccupied = unocc_thermo["g_total_ev"]
+        lateral_class.zpe_unoccupied = unocc_thermo["zpe_ev"]
+        lateral_class.entropy_unoccupied = unocc_thermo["entropy_ev_per_k"]
+        lateral_class.frequencies_unoccupied_ev = unocc_thermo["frequencies_ev"]
+        lateral_class.imaginary_unoccupied_ev = unocc_thermo["imaginary_ev"]
+        lateral_class.vib_indices_unoccupied = unocc_thermo["vib_indices"]
+
+
+def _write_adsorption_calculation_cache(
+    calculation_cache_root: str,
+    cache_key: str,
+    cache_graph: nx.Graph,
+    cache_parameters: dict[str, Any],
+    cache_inputs: dict[str, Any],
+    fingerprint_memo: CalculationFingerprintMemo,
+    adsorbate_site: AdsorbateSite,
+    lateral_class: AdsorbateSiteLateral,
+    *,
+    atoms_occupied: Atoms,
+    atoms_unoccupied: Atoms,
+    energy_occupied: float,
+    energy_unoccupied: float,
+) -> None:
+    occupied_props = {
+        name: getattr(lateral_class, name, None)
+        for name in (
+            "g_correction_occupied",
+            "g_occupied",
+            "zpe_occupied",
+            "entropy_occupied",
+            "frequencies_occupied_ev",
+            "imaginary_occupied_ev",
+            "vib_indices_occupied",
+        )
+    }
+    unoccupied_props = {
+        name: getattr(lateral_class, name, None)
+        for name in (
+            "g_correction_unoccupied",
+            "g_unoccupied",
+            "zpe_unoccupied",
+            "entropy_unoccupied",
+            "frequencies_unoccupied_ev",
+            "imaginary_unoccupied_ev",
+            "vib_indices_unoccupied",
+        )
+    }
+    record = make_calculation_record(
+        kind="adsorption",
+        cache_key=cache_key,
+        operation={
+            "label": f"adsorption:{adsorbate_site.reactant}",
+            "reactant_smiles": adsorbate_site.reactant,
+            "iso_class": int(adsorbate_site.iso_class),
+            "lateral_class": int(lateral_class.lateral_class),
+            "temperature_k": cache_parameters["temperature_k"],
+        },
+        parameters=cache_parameters,
+        inputs={
+            **cache_inputs,
+            "reactant_smiles": adsorbate_site.reactant,
+            "iso_class": int(adsorbate_site.iso_class),
+            "lateral_class": int(lateral_class.lateral_class),
+        },
+        states={
+            "occupied": state_payload(
+                atoms_occupied,
+                energy_ev=energy_occupied,
+                properties=occupied_props,
+            ),
+            "unoccupied": state_payload(
+                atoms_unoccupied,
+                energy_ev=energy_unoccupied,
+                properties=unoccupied_props,
+            ),
+        },
+        reaction_graph=cache_graph,
+    )
+    write_calculation_record(
+        calculation_cache_root,
+        "adsorption",
+        cache_key,
+        record,
+        fingerprint_memo=fingerprint_memo,
+    )
+
 def check_site_stability(
     G: nx.Graph,
     adsorbate_site: AdsorbateSite,
@@ -841,11 +1021,13 @@ def check_site_stability(
     fmax: float = 0.05,
     max_steps: int = 200,
     nl_mult: float = NL_MULT_DEFAULT,
+    optimizer: str = DEFAULT_OPTIMIZER,
     verbose: bool = False,
     free_energy_options=None,
     free_energy_temperature_k: float | None = None,
     vib_cache_root: str | None = None,
     calculation_cache_root: str | None = None,
+    calculation_cache_lookup_enabled: bool = False,
 ) -> tuple[float, float]:
     """Relax the occupied and unoccupied structures and check for stability.
 
@@ -855,7 +1037,7 @@ def check_site_stability(
     * **unoccupied** — same slab + lateral neighbours, site absent.
 
     Each is relaxed with a calculator acquired from *calculator* via
-    :func:`~autokmc.structure.optimise_structure` (LBFGS).  Before and after
+    :func:`~autokmc.structure.optimise_structure`.  Before and after
     each relaxation the ASE :class:`~ase.neighborlist.NeighborList` bond
     topology is compared; changes raise a :class:`SiteStabilityError`
     subclass.
@@ -888,7 +1070,7 @@ def check_site_stability(
     fmax : float
         Force convergence threshold (eV/Å).  Default 0.05.
     max_steps : int
-        Maximum LBFGS steps.  Default 200.
+        Maximum optimizer steps.  Default 200.
     nl_mult : float
         Neighborlist cutoff multiplier for the connectivity stability check.
         Default :data:`~autokmc.core.constants.NL_MULT_DEFAULT`.
@@ -905,7 +1087,7 @@ def check_site_stability(
     IndexError
         *member_index* out of range.
     OptimisationFailedError
-        LBFGS did not converge for either the occupied or unoccupied structure.
+        The selected optimizer did not converge for either endpoint.
     SurfaceConnectivityError
         A slab bond changed during either relaxation.
     AdsorbateDissociationError
@@ -927,9 +1109,17 @@ def check_site_stability(
     cache_kind = "adsorption"
     cache_key: str | None = None
     cache_graph: nx.Graph | None = None
+    cache_fingerprint_memo = CalculationFingerprintMemo()
+    electronic_cache_state: tuple[float, float, Atoms, Atoms, int, int, int] | None = None
+    thermochemistry_requested = bool(
+        free_energy_options is not None
+        and getattr(free_energy_options, "enabled", False)
+        and free_energy_temperature_k is not None
+    )
     cache_parameters = {
         "fmax": float(fmax),
         "max_steps": int(max_steps),
+        "optimizer": str(optimizer).strip().lower(),
         "nl_mult": float(nl_mult),
         "n_shells": int(lateral_class.n_shells),
         "free_energy_enabled": bool(
@@ -940,7 +1130,6 @@ def check_site_stability(
             None if free_energy_temperature_k is None
             else float(free_energy_temperature_k)
         ),
-        "calculator": calculator_identity(calculator),
     }
     if free_energy_options is not None:
         cache_parameters["free_energy"] = {
@@ -954,13 +1143,22 @@ def check_site_stability(
         }
     if calculation_cache_root is not None:
         try:
+            # Model/checkpoint content hashing is needed only for persistent
+            # cache compatibility.  ``calculator_identity`` snapshots the
+            # result on the loaded calculator after this first call.
+            cache_parameters["calculator"] = calculator_identity(calculator)
             cache_graph = normalise_reaction_graph(
                 lateral_class.ego_graph,
                 endpoint_node_ids=self_node_ids,
                 endpoint_role="site",
             )
             cache_graph.graph["n_shells"] = int(lateral_class.n_shells)
-            atoms_occ_init, _, _, _ = _build_stability_atoms(
+            (
+                atoms_occ_init,
+                cache_n_slab_occ,
+                cache_n_lat_occ,
+                cache_n_self_occ,
+            ) = _build_stability_atoms(
                 G, lateral_class, self_node_ids,
                 include_self=True,
                 frozen_indices=frozen_indices,
@@ -970,6 +1168,10 @@ def check_site_stability(
                 include_self=False,
                 frozen_indices=frozen_indices,
             )
+            lateral_class.atoms_occupied_initial = atoms_occ_init.copy()
+            lateral_class.atoms_occupied_initial.calc = None
+            lateral_class.atoms_unoccupied_initial = atoms_unocc_init.copy()
+            lateral_class.atoms_unoccupied_initial.calc = None
             cache_inputs = {
                 "occupied_initial": atoms_occ_init,
                 "unoccupied_initial": atoms_unocc_init,
@@ -986,14 +1188,19 @@ def check_site_stability(
                 parameters=cache_parameters,
                 inputs=cache_inputs,
             )
-            cached = load_calculation_record(
-                calculation_cache_root,
-                cache_kind,
-                cache_key,
-                reaction_graph=cache_graph,
-                operation=cache_identity,
-                parameters=cache_parameters,
-            )
+            cached = None
+            if calculation_cache_lookup_enabled:
+                cached = load_calculation_record(
+                    calculation_cache_root,
+                    cache_kind,
+                    cache_key,
+                    reaction_graph=cache_graph,
+                    operation=cache_identity,
+                    parameters=cache_parameters,
+                    inputs=cache_inputs,
+                    allow_electronic_match=True,
+                    fingerprint_memo=cache_fingerprint_memo,
+                )
             if cached is not None and apply_cached_states(
                 lateral_class,
                 cached,
@@ -1001,14 +1208,40 @@ def check_site_stability(
                     "occupied": ("energy_occupied", "atoms_occupied"),
                     "unoccupied": ("energy_unoccupied", "atoms_unoccupied"),
                 },
+                include_properties=cached.get("_cache_match") != "electronic",
             ):
+                electronic_only = cached.get("_cache_match") == "electronic"
+                if electronic_only and thermochemistry_requested:
+                    # ``apply_cached_states`` marks the electronic states
+                    # stable.  Clear that marker until the requested
+                    # thermochemistry has completed so every failure between
+                    # cache hydration and vibration completion is retryable.
+                    lateral_class.stable = None
                 if verbose:
                     print(
                         f"  [cache] adsorption iso={adsorbate_site.iso_class} "
                         f"lat={lateral_class.lateral_class}: loaded "
                         "occupied/unoccupied relaxations"
+                        + (
+                            "; recomputing thermochemistry"
+                            if electronic_only and thermochemistry_requested
+                            else ""
+                        )
                     )
-                return float(lateral_class.energy_occupied), float(lateral_class.energy_unoccupied)
+                energies = (
+                    float(lateral_class.energy_occupied),
+                    float(lateral_class.energy_unoccupied),
+                )
+                if not electronic_only or not thermochemistry_requested:
+                    return energies
+                electronic_cache_state = (
+                    *energies,
+                    lateral_class.atoms_occupied,
+                    lateral_class.atoms_unoccupied,
+                    cache_n_slab_occ,
+                    cache_n_lat_occ,
+                    cache_n_self_occ,
+                )
         except Exception as exc:
             _log.debug(
                 "check_site_stability: calculation cache lookup failed "
@@ -1017,6 +1250,51 @@ def check_site_stability(
                 lateral_class.lateral_class,
                 exc,
             )
+
+    if electronic_cache_state is not None:
+        (
+            E_occ,
+            E_unocc,
+            atoms_occ,
+            atoms_unocc,
+            n_slab_occ,
+            n_lat_occ,
+            n_self_occ,
+        ) = electronic_cache_state
+        _apply_adsorption_thermochemistry(
+            lateral_class,
+            adsorbate_site,
+            atoms_occupied=atoms_occ,
+            atoms_unoccupied=atoms_unocc,
+            energy_occupied=E_occ,
+            energy_unoccupied=E_unocc,
+            n_slab_occupied=n_slab_occ,
+            n_lateral_occupied=n_lat_occ,
+            n_self_occupied=n_self_occ,
+            calculator=calculator,
+            free_energy_options=free_energy_options,
+            temperature_k=free_energy_temperature_k,
+            vib_cache_root=vib_cache_root,
+        )
+        lateral_class.stable = True
+        assert calculation_cache_root is not None
+        assert cache_key is not None
+        assert cache_graph is not None
+        _write_adsorption_calculation_cache(
+            calculation_cache_root,
+            cache_key,
+            cache_graph,
+            cache_parameters,
+            cache_inputs,
+            cache_fingerprint_memo,
+            adsorbate_site,
+            lateral_class,
+            atoms_occupied=atoms_occ,
+            atoms_unoccupied=atoms_unocc,
+            energy_occupied=E_occ,
+            energy_unoccupied=E_unocc,
+        )
+        return E_occ, E_unocc
 
     def _relax_and_check(include_self: bool) -> tuple:
         state = "occupied" if include_self else "unoccupied"
@@ -1030,6 +1308,14 @@ def check_site_stability(
             include_self    = include_self,
             frozen_indices  = frozen_indices,
         )
+        initial_attribute = (
+            "atoms_occupied_initial"
+            if include_self
+            else "atoms_unoccupied_initial"
+        )
+        initial_snapshot = atoms_init.copy()
+        initial_snapshot.calc = None
+        setattr(lateral_class, initial_attribute, initial_snapshot)
 
         n_ads = n_lat + n_self_actual
 
@@ -1069,6 +1355,7 @@ def check_site_stability(
                 calculator = calc,
                 fmax       = fmax,
                 steps      = max_steps,
+                optimizer  = optimizer,
                 verbose    = verbose,
             )
 
@@ -1085,7 +1372,7 @@ def check_site_stability(
 
             if max_force > fmax:
                 raise OptimisationFailedError(
-                    f"[{state}] LBFGS did not converge: "
+                    f"[{state}] optimizer {optimizer!r} did not converge: "
                     f"max|F| = {max_force:.4f} eV/Å after {max_steps} "
                     f"steps (fmax={fmax} eV/Å)."
                 )
@@ -1140,115 +1427,23 @@ def check_site_stability(
     # reactions/iso{N}_lat{M}/{occupied,unoccupied}.extxyz.
     lateral_class.atoms_occupied    = atoms_occ
     lateral_class.atoms_unoccupied  = atoms_unocc
-    lateral_class.stable            = True
 
-    # ── Optional harmonic thermochemistry on the relaxed states ─────────
-    # Vibrate ONLY the reactive species (the site's own atoms).  Frozen
-    # slab atoms and frozen lateral-shell adsorbates contribute zero by
-    # construction.  The Atoms ordering is [slab | lat_neighbours | self]
-    # — the self-adsorbate atoms occupy the tail of the array.
-    if (free_energy_options is not None
-            and getattr(free_energy_options, "enabled", False)
-            and free_energy_temperature_k is not None):
-        from autokmc.thermo.free_energy import compute_harmonic_thermo
-
-        # Use the n_slab / n_lat / n_self values captured inside
-        # _relax_and_check from the SAME _build_stability_atoms call that
-        # produced atoms_occ / atoms_unocc.  n_self is the count of adsorbate
-        # atoms ACTUALLY placed in atoms_occ (len(self_nodes)), NOT
-        # len(self_node_ids), which can be larger if any node id was absent
-        # from G when _build_stability_atoms ran.  Using the actual placed
-        # count prevents vib_idx_occ from ever pointing past the end of
-        # atoms_occ.
-        n_slab_occ   = _n_slab_occ
-        n_lat_occ    = _n_lat_occ
-        n_self_occ   = _n_self_occ       # atoms actually in atoms_occ tail
-        n_slab_unocc = _n_slab_unocc
-        n_lat_unocc  = _n_lat_unocc
-
-        # Vibrate ONLY the adsorbate atoms (the tail of atoms_occ).
-        # The Atoms ordering is [slab | lat_neighbours | self]; self atoms
-        # occupy exactly the last n_self_occ indices.
-        vib_idx_occ = list(range(
-            n_slab_occ + n_lat_occ,
-            n_slab_occ + n_lat_occ + n_self_occ,
-        ))
-        # Unoccupied state has no reactive species — nothing vibrates,
-        # so the harmonic correction is zero by construction.  We still
-        # call the helper to populate the bookkeeping fields with zeros
-        # so downstream code can rely on them.
-        vib_idx_unocc: list[int] = []
-
-        from pathlib import Path as _Path
-        cache_dir_root = (
-            _Path(vib_cache_root) if vib_cache_root is not None else None
-        )
-        per_lat_dir = (
-            cache_dir_root / f"ads_{smiles_to_dirname(adsorbate_site.reactant)}" /
-            f"iso{adsorbate_site.iso_class}_lat{lateral_class.lateral_class}"
-            if cache_dir_root is not None else None
-        )
-
-        # Strip FixAtoms constraints from the vibration copies.  The
-        # constraints were applied inside _build_stability_atoms to freeze
-        # bottom-layer slab atoms during ML relaxation; they are NOT needed
-        # here because vib_idx_occ already limits displacements to the
-        # adsorbate atoms only.  Keeping them can cause ASE's internal
-        # constraint-adjustment code (adjust_forces / adjust_positions) to
-        # fail with an IndexError when the frozen-atoms index array is applied
-        # to force arrays whose leading dimension differs from what was set up
-        # during earlier relaxation calls (e.g. different n_ads between calls).
-        atoms_occ_vib = atoms_occ.copy()
-        atoms_occ_vib.set_constraint([])   # remove all constraints
-
-        _log.debug(
-            "check_site_stability: harmonic thermo for OCCUPIED "
-            "state (iso=%d, lat=%d) — n_atoms=%d  vib_idx=%s",
-            adsorbate_site.iso_class, lateral_class.lateral_class,
-            len(atoms_occ_vib), vib_idx_occ,
-        )
-
-        occ_thermo = compute_harmonic_thermo(
-            atoms_occ_vib, vib_idx_occ,
-            energy_ev     = float(E_occ),
-            temperature_k = float(free_energy_temperature_k),
-            calculator    = calculator,
-            options       = free_energy_options,
-            cache_dir     = (str(per_lat_dir) if per_lat_dir is not None else None),
-            label         = "occupied",
-            drop_imaginary= True,
-        )
-
-        atoms_unocc_vib = atoms_unocc.copy()
-        atoms_unocc_vib.set_constraint([])  # remove all constraints
-
-        unocc_thermo = compute_harmonic_thermo(
-            atoms_unocc_vib, vib_idx_unocc,
-            energy_ev     = float(E_unocc),
-            temperature_k = float(free_energy_temperature_k),
-            calculator    = calculator,
-            options       = free_energy_options,
-            cache_dir     = (str(per_lat_dir) if per_lat_dir is not None else None),
-            label         = "unoccupied",
-            drop_imaginary= True,
-        )
-
-        if occ_thermo is not None:
-            lateral_class.g_correction_occupied   = occ_thermo["g_corr_ev"]
-            lateral_class.g_occupied              = occ_thermo["g_total_ev"]
-            lateral_class.zpe_occupied            = occ_thermo["zpe_ev"]
-            lateral_class.entropy_occupied        = occ_thermo["entropy_ev_per_k"]
-            lateral_class.frequencies_occupied_ev = occ_thermo["frequencies_ev"]
-            lateral_class.imaginary_occupied_ev   = occ_thermo["imaginary_ev"]
-            lateral_class.vib_indices_occupied    = occ_thermo["vib_indices"]
-        if unocc_thermo is not None:
-            lateral_class.g_correction_unoccupied   = unocc_thermo["g_corr_ev"]
-            lateral_class.g_unoccupied              = unocc_thermo["g_total_ev"]
-            lateral_class.zpe_unoccupied            = unocc_thermo["zpe_ev"]
-            lateral_class.entropy_unoccupied        = unocc_thermo["entropy_ev_per_k"]
-            lateral_class.frequencies_unoccupied_ev = unocc_thermo["frequencies_ev"]
-            lateral_class.imaginary_unoccupied_ev   = unocc_thermo["imaginary_ev"]
-            lateral_class.vib_indices_unoccupied    = unocc_thermo["vib_indices"]
+    _apply_adsorption_thermochemistry(
+        lateral_class,
+        adsorbate_site,
+        atoms_occupied=atoms_occ,
+        atoms_unoccupied=atoms_unocc,
+        energy_occupied=E_occ,
+        energy_unoccupied=E_unocc,
+        n_slab_occupied=_n_slab_occ,
+        n_lateral_occupied=_n_lat_occ,
+        n_self_occupied=_n_self_occ,
+        calculator=calculator,
+        free_energy_options=free_energy_options,
+        temperature_k=free_energy_temperature_k,
+        vib_cache_root=vib_cache_root,
+    )
+    lateral_class.stable = True
 
     _log.debug(
         "check_site_stability: iso_class=%d member=%d lateral_class=%d "
@@ -1256,58 +1451,23 @@ def check_site_stability(
         adsorbate_site.iso_class, member_index,
         lateral_class.lateral_class, E_occ, E_unocc,
     )
-    if calculation_cache_root is not None and cache_key is not None:
-        occupied_props = {
-            name: getattr(lateral_class, name, None)
-            for name in (
-                "g_correction_occupied",
-                "g_occupied",
-                "zpe_occupied",
-                "entropy_occupied",
-                "frequencies_occupied_ev",
-                "imaginary_occupied_ev",
-                "vib_indices_occupied",
-            )
-        }
-        unoccupied_props = {
-            name: getattr(lateral_class, name, None)
-            for name in (
-                "g_correction_unoccupied",
-                "g_unoccupied",
-                "zpe_unoccupied",
-                "entropy_unoccupied",
-                "frequencies_unoccupied_ev",
-                "imaginary_unoccupied_ev",
-                "vib_indices_unoccupied",
-            )
-        }
-        record = make_calculation_record(
-            kind=cache_kind,
-            cache_key=cache_key,
-            operation={
-                "label": f"adsorption:{adsorbate_site.reactant}",
-                "reactant_smiles": adsorbate_site.reactant,
-                "iso_class": int(adsorbate_site.iso_class),
-                "lateral_class": int(lateral_class.lateral_class),
-                "temperature_k": cache_parameters["temperature_k"],
-            },
-            parameters=cache_parameters,
-            inputs={
-                "reactant_smiles": adsorbate_site.reactant,
-                "iso_class": int(adsorbate_site.iso_class),
-                "lateral_class": int(lateral_class.lateral_class),
-            },
-            states={
-                "occupied": state_payload(
-                    atoms_occ, energy_ev=E_occ, properties=occupied_props,
-                ),
-                "unoccupied": state_payload(
-                    atoms_unocc, energy_ev=E_unocc, properties=unoccupied_props,
-                ),
-            },
-            reaction_graph=cache_graph,
-        )
-        write_calculation_record(
-            calculation_cache_root, cache_kind, cache_key, record,
+    if (
+        calculation_cache_root is not None
+        and cache_key is not None
+        and cache_graph is not None
+    ):
+        _write_adsorption_calculation_cache(
+            calculation_cache_root,
+            cache_key,
+            cache_graph,
+            cache_parameters,
+            cache_inputs,
+            cache_fingerprint_memo,
+            adsorbate_site,
+            lateral_class,
+            atoms_occupied=atoms_occ,
+            atoms_unoccupied=atoms_unocc,
+            energy_occupied=E_occ,
+            energy_unoccupied=E_unocc,
         )
     return E_occ, E_unocc

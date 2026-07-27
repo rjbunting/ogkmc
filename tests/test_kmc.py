@@ -17,6 +17,9 @@ from autokmc.kmc.engine import (
 )
 from autokmc.kmc.execute import execute_reaction
 from autokmc.kmc.expansion import (
+    SpeciesExpansionError,
+    _append_bond_reverse_indexes,
+    _append_diffusion_reverse_indexes,
     _rebuild_bond_reverse_indexes,
     expand_bond_sites_after_event,
     expand_bond_sites_for_new_species,
@@ -25,7 +28,7 @@ from autokmc.kmc.expansion import (
 from autokmc.kmc.sampling import _RateSegmentTree
 from autokmc.reactions.bond import _bond_energetics_cached, is_bond_applicable
 from autokmc.sites.bond import BondReactionLateral
-from autokmc.species.reactant import Reactant
+from autokmc.species.reactant import Reactant, ReactantDefinitionError
 from ase import Atoms
 
 
@@ -163,6 +166,50 @@ def test_rebuild_bond_reverse_indexes_keeps_existing_and_new_sites():
     assert G.graph["bond_clique_to_members"][new_clique] == [(new_brs, 0)]
     assert G.graph["bond_surface_node_to_members"][1] == [(old_brs, 0)]
     assert G.graph["bond_surface_node_to_members"][3] == [(new_brs, 0)]
+
+
+def test_expansion_reverse_indexes_append_without_rescanning_existing_sites():
+    clique_a = frozenset({1})
+    clique_b = frozenset({2})
+    site_a = SimpleNamespace(_member_cliques=[(clique_a,)])
+    site_b = SimpleNamespace(_member_cliques=[(clique_b,)])
+    diffusion = SimpleNamespace(
+        member_node_ids=[([10], [20])],
+        members=[(site_a, 0, site_b, 0)],
+    )
+    old_marker = object()
+    diffusion_cliques = {frozenset({9}): [old_marker]}
+    diffusion_surfaces = {9: [old_marker]}
+
+    _append_diffusion_reverse_indexes(
+        nx.Graph(),
+        diffusion_cliques,
+        diffusion_surfaces,
+        [diffusion],
+    )
+
+    assert diffusion_cliques[frozenset({9})] == [old_marker]
+    assert diffusion_cliques[clique_a] == [(diffusion, 0)]
+    assert diffusion_surfaces[2] == [(diffusion, 0)]
+
+    product_clique = frozenset({3})
+    bond = SimpleNamespace(
+        _member_cliques=[
+            ((clique_a,), (clique_b,), (product_clique,))
+        ]
+    )
+    bond_cliques = {frozenset({8}): [old_marker]}
+    bond_surfaces = {8: [old_marker]}
+
+    _append_bond_reverse_indexes(
+        bond_cliques,
+        bond_surfaces,
+        [bond],
+    )
+
+    assert bond_cliques[frozenset({8})] == [old_marker]
+    assert bond_cliques[product_clique] == [(bond, 0)]
+    assert bond_surfaces[1] == [(bond, 0)]
 
 
 def test_execute_reaction_rejects_stale_diffusion_state():
@@ -399,6 +446,32 @@ def test_rate_segment_tree_clamps_boundary_samples_to_real_leaves():
     assert tree.sample(-1.0) == 0
 
 
+def test_rate_segment_tree_never_selects_zero_leaf_after_roundoff():
+    tree = _RateSegmentTree(12)
+    tree.update(1, 0.7522904343850412)
+    tree.update(4, 9.709637175614937)
+
+    selected = tree.sample(float(np.nextafter(1.0, 0.0)))
+
+    assert selected == 4
+    assert tree._tree[tree._size + selected] > 0.0
+
+
+def test_rate_segment_tree_supports_linear_build_and_batched_updates():
+    tree = _RateSegmentTree(4)
+    tree.build([1.0, -2.0, 3.0, 4.0])
+
+    assert tree.total == pytest.approx(8.0)
+    assert tree.sample(0.0) == 0
+    assert tree.sample(0.99) == 3
+
+    tree.update_many([(0, 0.0), (1, 2.0), (3, -1.0)])
+
+    assert tree.total == pytest.approx(5.0)
+    assert tree.sample(0.0) == 1
+    assert tree.sample(0.99) == 2
+
+
 def test_kmc_package_exports_public_api():
     import autokmc.kmc as kmc
 
@@ -569,3 +642,232 @@ def test_runtime_bond_expansion_does_not_build_disabled_leaf_species(monkeypatch
     ) == []
     assert "[A]" not in G.graph["bond_registry"]["species"]
     assert "[B]" not in G.graph["bond_registry"]["species"]
+
+
+def test_runtime_species_build_retries_transient_failures(monkeypatch):
+    from autokmc.kmc import expansion
+
+    G = nx.Graph()
+    attempts = 0
+    reactant = SimpleNamespace(smiles="C")
+
+    def flaky_build(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise RuntimeError("calculator service unavailable")
+        return reactant
+
+    monkeypatch.setattr(expansion, "build_reactant", flaky_build)
+    monkeypatch.setattr(
+        expansion,
+        "find_adsorbate_sites",
+        lambda *args, **kwargs: [],
+    )
+
+    assert expand_bond_sites_for_new_species(
+        G,
+        "C",
+        calculator=object(),
+        include_dissociation=False,
+        include_coupling=False,
+    ) == []
+
+    registry = G.graph["bond_registry"]
+    assert attempts == 3
+    assert registry["species"]["C"] is reactant
+    assert registry["expansion_failures"]["C"]["build_reactant"][
+        "status"
+    ] == "recovered"
+    assert "C" in registry["expanded_species"]
+
+
+def test_runtime_species_build_exhaustion_is_explicit_and_retryable(monkeypatch):
+    from autokmc.kmc import expansion
+
+    G = nx.Graph()
+    attempts = 0
+
+    def unavailable(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        raise RuntimeError("calculator service unavailable")
+
+    monkeypatch.setattr(expansion, "build_reactant", unavailable)
+
+    with pytest.raises(SpeciesExpansionError, match="failed after 3 attempts"):
+        expand_bond_sites_for_new_species(
+            G,
+            "C",
+            calculator=object(),
+            include_dissociation=False,
+            include_coupling=False,
+        )
+
+    registry = G.graph["bond_registry"]
+    assert attempts == 3
+    assert "C" not in registry["species"]
+    assert "C" not in registry["expanded_species"]
+    assert registry["expansion_failures"]["C"]["build_reactant"][
+        "status"
+    ] == "retry_exhausted"
+
+
+def test_invalid_runtime_species_is_permanently_classified(monkeypatch):
+    from autokmc.kmc import expansion
+
+    G = nx.Graph()
+    attempts = 0
+
+    def invalid_definition(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        raise ReactantDefinitionError("invalid generated SMILES")
+
+    monkeypatch.setattr(expansion, "build_reactant", invalid_definition)
+
+    assert expand_bond_sites_for_new_species(
+        G,
+        "not-smiles",
+        calculator=None,
+        include_dissociation=False,
+        include_coupling=False,
+    ) == []
+
+    registry = G.graph["bond_registry"]
+    assert attempts == 1
+    assert registry["species"]["not-smiles"] is None
+    assert "not-smiles" in registry["expanded_species"]
+    assert registry["expansion_failures"]["not-smiles"]["build_reactant"][
+        "status"
+    ] == "permanent_invalid"
+
+
+def test_runtime_site_enumeration_can_recover_without_rebuilding_species(
+    monkeypatch,
+):
+    from autokmc.kmc import expansion
+
+    G = nx.Graph()
+    reactant = SimpleNamespace(smiles="C")
+    build_attempts = 0
+    site_attempts = 0
+
+    def build(*args, **kwargs):
+        nonlocal build_attempts
+        build_attempts += 1
+        return reactant
+
+    def unavailable_sites(*args, **kwargs):
+        nonlocal site_attempts
+        site_attempts += 1
+        raise OSError("temporary cache failure")
+
+    monkeypatch.setattr(expansion, "build_reactant", build)
+    monkeypatch.setattr(expansion, "find_adsorbate_sites", unavailable_sites)
+
+    with pytest.raises(SpeciesExpansionError, match="find_adsorbate_sites"):
+        expand_bond_sites_for_new_species(
+            G,
+            "C",
+            calculator=object(),
+            include_dissociation=False,
+            include_coupling=False,
+        )
+
+    registry = G.graph["bond_registry"]
+    assert registry["species"]["C"] is reactant
+    assert "C" not in registry["adsorbate_sites"]
+    assert "C" not in registry["expanded_species"]
+
+    monkeypatch.setattr(
+        expansion,
+        "find_adsorbate_sites",
+        lambda *args, **kwargs: [],
+    )
+    assert expand_bond_sites_for_new_species(
+        G,
+        "C",
+        calculator=object(),
+        include_dissociation=False,
+        include_coupling=False,
+    ) == []
+
+    assert build_attempts == 1
+    assert site_attempts == 3
+    assert registry["expansion_failures"]["C"]["find_adsorbate_sites"][
+        "status"
+    ] == "recovered"
+
+
+def test_runtime_bond_enumeration_failure_restores_existing_network(
+    monkeypatch,
+):
+    from autokmc.kmc import expansion
+
+    G = nx.Graph()
+    adsorbate_site = SimpleNamespace(member_node_ids=[[1]])
+    old_bond_site = SimpleNamespace(iso_class=0)
+    old_clique_index = {frozenset({1}): [(old_bond_site, 0)]}
+    old_surface_index = {1: [(old_bond_site, 0)]}
+    initialise_bond_registry(
+        G,
+        reactants={
+            "C": SimpleNamespace(smiles="C"),
+            "A": SimpleNamespace(smiles="A"),
+            "B": SimpleNamespace(smiles="B"),
+        },
+        adsorbate_sites={
+            "C": [adsorbate_site],
+            "A": [adsorbate_site],
+            "B": [adsorbate_site],
+        },
+        templates=[],
+        bond_sites=[old_bond_site],
+    )
+    G.graph["bond_clique_to_members"] = old_clique_index
+    G.graph["bond_surface_node_to_members"] = old_surface_index
+    template = SimpleNamespace(
+        smiles_a="A",
+        smiles_b="B",
+        smiles_c="C",
+        source="dissociation",
+    )
+    attempts = 0
+
+    monkeypatch.setattr(
+        expansion,
+        "derive_dissociation_templates",
+        lambda *args, **kwargs: [template],
+    )
+    monkeypatch.setattr(
+        expansion,
+        "derive_coupling_templates",
+        lambda *args, **kwargs: [],
+    )
+
+    def fail_after_partial_write(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        G.graph["bond_reaction_sites"] = [SimpleNamespace(iso_class=999)]
+        G.graph["bond_clique_to_members"] = {}
+        G.graph["bond_surface_node_to_members"] = {}
+        raise RuntimeError("temporary enumeration failure")
+
+    monkeypatch.setattr(expansion, "find_bond_sites", fail_after_partial_write)
+
+    with pytest.raises(SpeciesExpansionError, match="find_bond_sites"):
+        expand_bond_sites_for_new_species(
+            G,
+            "C",
+            calculator=None,
+            include_coupling=False,
+        )
+
+    registry = G.graph["bond_registry"]
+    assert attempts == 3
+    assert G.graph["bond_reaction_sites"] == [old_bond_site]
+    assert G.graph["bond_clique_to_members"] is old_clique_index
+    assert G.graph["bond_surface_node_to_members"] is old_surface_index
+    assert registry["templates"] == set()
+    assert "C" not in registry["expanded_species"]

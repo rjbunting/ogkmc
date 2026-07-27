@@ -69,6 +69,38 @@ def minimum_image_distances(vectors, cell, pbc) -> np.ndarray:
     return np.linalg.norm(mic, axis=-1)
 
 
+def unwrap_positions_about_reference(
+    positions,
+    cell,
+    pbc,
+    *,
+    reference=None,
+) -> np.ndarray:
+    """Map a compact group of positions into one image near *reference*.
+
+    When *reference* is omitted, the first position is used.  This is intended
+    for molecules, reacting fragments, and other local groups whose physical
+    extent is smaller than the applicable minimum-image range.  It must not be
+    used to unwrap an extended periodic structure.
+    """
+    pos = np.asarray(positions, dtype=float)
+    if pos.size == 0:
+        return pos.copy()
+    if pos.shape[-1] != 3:
+        raise ValueError(
+            "positions must have Cartesian coordinates along the final axis"
+        )
+
+    if reference is None:
+        ref = pos.reshape((-1, 3))[0]
+    else:
+        ref = np.asarray(reference, dtype=float)
+        if ref.shape != (3,):
+            raise ValueError("reference must be one Cartesian position")
+
+    return ref + minimum_image_vectors(pos - ref, cell, pbc)
+
+
 def wrap_positions_into_cell(
     positions,
     cell,
@@ -116,5 +148,6 @@ __all__ = [
     "minimum_image_distances",
     "minimum_image_vectors",
     "set_full_pbc_if_cell",
+    "unwrap_positions_about_reference",
     "wrap_positions_into_cell",
 ]

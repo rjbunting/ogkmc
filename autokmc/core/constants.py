@@ -42,6 +42,11 @@ RANDOM_SEED: int = 69
 #: same answer everywhere.
 NL_MULT_DEFAULT: float = 0.90
 
+#: Per-atom skin (Å) passed explicitly to ASE ``NeighborList``.  Keeping this
+#: value centralized prevents direct distance checks from drifting if ASE
+#: changes its constructor default.
+NEIGHBORLIST_SKIN: float = 0.30
+
 #: Co-bonding cutoff scale used by
 #: :func:`autokmc.sites.anchors._build_co_bond_graph`: two surface atoms can
 #: simultaneously bind a single adsorbate when their separation is at most
@@ -257,12 +262,12 @@ NEB_FMAX: float = 0.01
 #: Maximum optimiser steps for the NEB band relaxation.
 NEB_MAX_STEPS: int = 200
 
-#: Use climbing-image NEB (CI-NEB) so the highest-energy image converges
-#: directly onto the saddle point.
+#: After ordinary NEB convergence, refine the highest-energy image with
+#: climbing-image NEB (CI-NEB) so it converges onto the saddle point.
 NEB_CLIMB: bool = True
 
 #: NEB spring constant (eV / Å²).
-NEB_SPRING_K: float = 0.1
+NEB_SPRING_K: float = 5.0
 
 #: NEB initial-band interpolation method: ``"idpp"`` (image-dependent pair
 #: potential, ASE default for chemistry) or ``"linear"``.

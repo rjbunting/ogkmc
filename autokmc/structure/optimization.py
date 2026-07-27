@@ -7,8 +7,7 @@ import os
 from typing import Dict, Optional, Tuple
 
 from ase import Atoms
-from ase.calculators.emt import EMT
-from ase.optimize import LBFGS
+from ase.optimize import BFGS, FIRE, LBFGS, MDMin
 
 try:
     from ase.filters import ExpCellFilter
@@ -25,21 +24,45 @@ from autokmc.structure.builders import (
     _validate_crystal_structure,
 )
 from autokmc.core.pbc import set_full_pbc_if_cell
-from autokmc.io.calculators import acquire_calculator
+from autokmc.io.calculators import CalculatorConfigError, acquire_calculator
 from autokmc.structure.types import LatticeParams
+from autokmc.utils.optimizers import (
+    DEFAULT_OPTIMIZER,
+    REGULAR_OPTIMIZERS,
+    normalize_optimizer_name,
+)
+from autokmc.utils.telemetry import instrument
 
 
+def _optimizer_class(name: str):
+    canonical = normalize_optimizer_name(
+        name,
+        allowed=REGULAR_OPTIMIZERS,
+        setting="optimizer",
+    )
+    return {
+        "lbfgs": LBFGS,
+        "bfgs": BFGS,
+        "fire": FIRE,
+        "mdmin": MDMin,
+    }[canonical]
+
+
+@instrument("optimization.bulk")
 def optimise_bulk(
     symbol: str,
     crystal_structure: str = "fcc",
     lattice_constant: LatticeParams = None,
     calculator=None,
     fmax: float = 0.01,
+    optimizer: str = DEFAULT_OPTIMIZER,
     verbose: bool = True,
 ) -> Tuple[Atoms, Dict[str, float]]:
     """Relax a bulk unit cell and return the optimised Atoms and lattice params."""
     if calculator is None:
-        calculator = EMT()
+        raise CalculatorConfigError(
+            "optimise_bulk requires an explicit calculator"
+        )
 
     crystal_structure = crystal_structure.lower()
     _validate_crystal_structure(crystal_structure)
@@ -56,7 +79,8 @@ def optimise_bulk(
         bulk_atoms.calc = calc
 
         ecf = ExpCellFilter(bulk_atoms)
-        opt = LBFGS(ecf, logfile=os.devnull)  # type: ignore[arg-type]
+        optimizer_cls = _optimizer_class(optimizer)
+        opt = optimizer_cls(ecf, logfile=os.devnull)  # type: ignore[arg-type]
         opt.run(fmax=fmax)
 
         if not opt.converged():
@@ -79,15 +103,17 @@ def optimise_bulk(
     return bulk_atoms, lp_out
 
 
+@instrument("optimization.structure")
 def optimise_structure(
     atoms: Atoms,
     calculator=None,
     fmax: float = 0.05,
     steps: int = 1000,
     logfile: Optional[str] = None,
+    optimizer: str = DEFAULT_OPTIMIZER,
     verbose: bool = True,
 ) -> Atoms:
-    """Relax an ASE Atoms object with LBFGS and return an optimised copy."""
+    """Relax an ASE Atoms object with the selected ASE optimizer."""
     result = atoms.copy()
     set_full_pbc_if_cell(result)
 
@@ -109,10 +135,14 @@ def optimise_structure(
                         "the 'calculator' argument."
                     ) from deepcopy_exc
         else:
-            result.calc = EMT()
+            raise CalculatorConfigError(
+                "optimise_structure requires an explicit calculator or an "
+                "input Atoms object with an attached calculator"
+            )
 
     log = logfile if logfile is not None else os.devnull
-    opt = LBFGS(result, logfile=log)
+    optimizer_cls = _optimizer_class(optimizer)
+    opt = optimizer_cls(result, logfile=log)
     opt.run(fmax=fmax, steps=steps)
 
     if verbose:
@@ -138,6 +168,7 @@ def _resolve_lattice_params(
     lattice_constant: LatticeParams,
     calculator,
     fmax: float = 0.01,
+    optimizer: str = DEFAULT_OPTIMIZER,
     verbose: bool = True,
 ) -> Dict[str, float]:
     """Return a lattice-parameter dict, running bulk relaxation if needed."""
@@ -149,6 +180,7 @@ def _resolve_lattice_params(
         lattice_constant=None,
         calculator=calculator,
         fmax=fmax,
+        optimizer=optimizer,
         verbose=verbose,
     )
     return lp

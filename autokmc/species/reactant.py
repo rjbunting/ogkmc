@@ -8,7 +8,7 @@ surface as a multi-atom adsorbate.
 Pipeline
 --------
 1. Parse SMILES with RDKit and embed a 3-D conformer (ETKDGv3 + MMFF94).
-2. Optionally refine with an ASE calculator via L-BFGS and stamp the
+2. Optionally refine with an ASE calculator via the configured optimizer and stamp the
    relaxed total energy onto the :class:`Reactant`.
 3. Tag every atom as ``surface = 2`` (molecules will adsorb onto a
    surface; they are neither bulk nor surface themselves).
@@ -51,21 +51,37 @@ import networkx as nx
 from networkx.algorithms import isomorphism
 
 from ase import Atoms
-from ase.optimize import LBFGS
+from ase.optimize import BFGS, FIRE, LBFGS, MDMin
 
 from autokmc.core.graph import build_graph
 from autokmc.core.constants import NL_MULT_DEFAULT, RANDOM_SEED
 from autokmc.io.calculators import acquire_calculator
 from autokmc.species.smiles import smiles_to_dirname
 from autokmc.utils.logging import get_logger
+from autokmc.utils.optimizers import (
+    DEFAULT_OPTIMIZER,
+    REGULAR_OPTIMIZERS,
+    normalize_optimizer_name,
+)
 from autokmc.utils.rdkit_logging import silence_rdkit_warnings
 
 _log = get_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Public dataclass
+# Public errors and dataclass
 # ---------------------------------------------------------------------------
+
+class ReactantDefinitionError(ValueError):
+    """The supplied molecular definition cannot produce a reactant.
+
+    This exception is reserved for deterministic input/chemistry failures,
+    such as an invalid SMILES string or a molecule for which RDKit cannot
+    construct a 3-D conformer.  Calculator, optimisation, I/O, and runtime
+    failures deliberately use other exception types so callers can retry
+    them without permanently classifying the species as invalid.
+    """
+
 
 @dataclass
 class Reactant:
@@ -142,7 +158,12 @@ class Reactant:
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _smiles_to_atoms(smiles: str, *, add_hydrogens: bool = True) -> Atoms:
+def _smiles_to_atoms(
+    smiles: str,
+    *,
+    add_hydrogens: bool = True,
+    random_seed: int = RANDOM_SEED,
+) -> Atoms:
     """Convert a SMILES string to a 3-D :class:`~ase.Atoms` object.
 
     Uses RDKit ETKDGv3 for conformer embedding followed by MMFF94 force-field
@@ -157,6 +178,9 @@ def _smiles_to_atoms(smiles: str, *, add_hydrogens: bool = True) -> Atoms:
         (i.e. those with a non-zero implicit-H count); explicit-H atoms
         and atoms with closed valences (``[O]``, ``[Au]``, …) are left
         untouched.  Pass ``add_hydrogens=False`` to skip this entirely.
+    random_seed : int
+        Seed used by both the ETKDGv3 embedder and its random-coordinate
+        fallback.  Default :data:`~autokmc.core.constants.RANDOM_SEED`.
 
     Returns
     -------
@@ -175,7 +199,9 @@ def _smiles_to_atoms(smiles: str, *, add_hydrogens: bool = True) -> Atoms:
 
     mol = Chem.MolFromSmiles(smiles)
     if mol is None:
-        raise ValueError(f"RDKit could not parse SMILES: {smiles!r}")
+        raise ReactantDefinitionError(
+            f"RDKit could not parse SMILES: {smiles!r}"
+        )
 
     if add_hydrogens:
         # Only add Hs to atoms that *want* them — i.e. those with a
@@ -204,14 +230,14 @@ def _smiles_to_atoms(smiles: str, *, add_hydrogens: bool = True) -> Atoms:
             mol = Chem.AddHs(mol, onlyOnAtoms=only_explicit)
 
     params = AllChem.ETKDGv3()
-    params.randomSeed = RANDOM_SEED
+    params.randomSeed = int(random_seed)
     result = AllChem.EmbedMolecule(mol, params)
     if result == -1:
         fallback = AllChem.EmbedParameters()
-        fallback.randomSeed = RANDOM_SEED
+        fallback.randomSeed = int(random_seed)
         fallback.useRandomCoords = True
         if AllChem.EmbedMolecule(mol, fallback) == -1:
-            raise ValueError(
+            raise ReactantDefinitionError(
                 f"RDKit could not embed a 3D conformer for SMILES: {smiles!r}. "
                 "Both ETKDGv3 and the random fallback embedder failed. "
                 "Try a different SMILES representation or simplify the molecule."
@@ -229,9 +255,16 @@ def _smiles_to_atoms(smiles: str, *, add_hydrogens: bool = True) -> Atoms:
     return atoms
 
 
-def _optimise(atoms: Atoms, calculator, *, fmax: float = 0.05,
-               steps: int = 500, logfile: str = "/dev/null") -> None:
-    """Relax *atoms* in-place with *calculator* using L-BFGS.
+def _optimise(
+    atoms: Atoms,
+    calculator,
+    *,
+    fmax: float = 0.05,
+    steps: int = 500,
+    logfile: str = "/dev/null",
+    optimizer: str = DEFAULT_OPTIMIZER,
+) -> None:
+    """Relax *atoms* in-place with *calculator* using an ASE optimizer.
 
     Parameters
     ----------
@@ -244,10 +277,21 @@ def _optimise(atoms: Atoms, calculator, *, fmax: float = 0.05,
     steps : int
         Maximum optimisation steps.  Default 500.
     logfile : str
-        Path for the LBFGS log.  Default ``"/dev/null"`` (silent).
+        Path for the optimizer log.  Default ``"/dev/null"`` (silent).
     """
     atoms.calc = calculator
-    opt = LBFGS(atoms, logfile=logfile)
+    optimizer_name = normalize_optimizer_name(
+        optimizer,
+        allowed=REGULAR_OPTIMIZERS,
+        setting="optimizer",
+    )
+    optimizer_cls = {
+        "lbfgs": LBFGS,
+        "bfgs": BFGS,
+        "fire": FIRE,
+        "mdmin": MDMin,
+    }[optimizer_name]
+    opt = optimizer_cls(atoms, logfile=logfile)
     opt.run(fmax=fmax, steps=steps)
     if not opt.converged():
         raise RuntimeError(
@@ -414,7 +458,9 @@ def build_reactant(
     add_hydrogens: bool = True,
     fmax: float = 0.05,
     steps: int = 500,
+    optimizer: str = DEFAULT_OPTIMIZER,
     nl_mult: float = NL_MULT_DEFAULT,
+    random_seed: int = RANDOM_SEED,
     hull_tol: float = 0.1,
     free_energy_options=None,
     free_energy_temperature_k: float | None = None,
@@ -432,7 +478,7 @@ def build_reactant(
     smiles : str
         SMILES representation of the molecule, e.g. ``"[C-]#[O+]"`` for CO.
     calculator : ASE calculator or None
-        If provided, the geometry is refined with L-BFGS and a
+        If provided, the geometry is refined with the selected optimizer and a
         single-point energy is stored on :attr:`Reactant.energy`.  Any
         ASE-compatible calculator works (EMT, XTB, MACE, …).  If
         ``None``, the MMFF94-pre-relaxed RDKit geometry is used as-is and
@@ -446,6 +492,9 @@ def build_reactant(
     nl_mult : float
         Neighbour-list multiplier passed to :func:`~autokmc.core.graph.build_graph`.
         Default ``NL_MULT_DEFAULT`` (currently 0.90).
+    random_seed : int
+        Seed used for RDKit conformer embedding.  Default
+        :data:`~autokmc.core.constants.RANDOM_SEED`.
     hull_tol : float
         Tolerance passed to :func:`find_anchor_atoms`.  Default 0.1 Å.
 
@@ -469,14 +518,24 @@ def build_reactant(
     [[1, 2]]
     """
     # 1. SMILES → 3-D geometry
-    atoms = _smiles_to_atoms(smiles, add_hydrogens=add_hydrogens)
+    atoms = _smiles_to_atoms(
+        smiles,
+        add_hydrogens=add_hydrogens,
+        random_seed=random_seed,
+    )
 
     # 2. Optional ASE relaxation + energy
     energy = float("nan")
     if calculator is not None:
         with acquire_calculator(calculator, purpose="gas-phase reactant relaxation") as calc:
             if relax:
-                _optimise(atoms, calc, fmax=fmax, steps=steps)
+                _optimise(
+                    atoms,
+                    calc,
+                    fmax=fmax,
+                    steps=steps,
+                    optimizer=optimizer,
+                )
             atoms.calc = calc
             try:
                 energy = float(atoms.get_potential_energy())

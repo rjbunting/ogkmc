@@ -8,7 +8,6 @@ that leaves through a ``desorption`` event.
 
 from __future__ import annotations
 
-import csv
 import hashlib
 import json
 import os
@@ -20,12 +19,29 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
-from scipy.stats import chi2
-
+from autokmc.analysis.reporting import (
+    MECHANISM_FIELDS,
+    PRODUCT_RATE_FIELDS,
+    RATE_BLOCK_FIELDS,
+    build_mechanism_rows,
+    build_product_rate_rows,
+    build_rate_block_rows,
+    write_csv,
+)
 from autokmc.core.constants import (
-    PERSISTENCE_SCHEMA_VERSION,
     REACTIONS_FILENAME,
+    REACTIONS_DIR,
     RUN_MANIFEST_FILENAME,
+)
+from autokmc.io._files import write_json_atomic
+from autokmc.io.reaction_index import (
+    REACTION_INDEX_FILENAME,
+    load_reaction_index,
+    resolve_event_definition,
+)
+from autokmc.io.schemas import (
+    EVENT_SCHEMA_VERSION,
+    SUPPORTED_EVENT_SCHEMA_VERSIONS,
 )
 from autokmc.species.smiles import canonical_smiles
 
@@ -182,27 +198,7 @@ def _mechanism_steps(lineage: _Lineage, desorption: Mapping[str, Any]) -> list[s
 
 
 def _atomic_json(path: Path, payload: Mapping[str, Any]) -> None:
-    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, indent=2, sort_keys=True, allow_nan=False)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-    except Exception:
-        try:
-            os.unlink(temporary)
-        except FileNotFoundError:
-            pass
-        raise
-
-
-def _write_csv(path: Path, fieldnames: list[str], rows: Iterable[Mapping[str, Any]]) -> None:
-    with path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
+    write_json_atomic(path, payload, sort_keys=True)
 
 
 def analyze_run(
@@ -231,10 +227,11 @@ def analyze_run(
     events_path = run_path / manifest.get("files", {}).get("events", REACTIONS_FILENAME)
     if not events_path.is_file():
         raise AnalysisError(f"missing event log: {events_path}")
-    if str(manifest.get("event_schema_version")) != str(PERSISTENCE_SCHEMA_VERSION):
+    manifest_event_schema = str(manifest.get("event_schema_version") or "")
+    if manifest_event_schema not in SUPPORTED_EVENT_SCHEMA_VERSIONS:
         raise AnalysisError(
             "run manifest/event schema is not compatible with this analyzer: "
-            f"expected {PERSISTENCE_SCHEMA_VERSION!r}, got "
+            f"expected one of {sorted(SUPPORTED_EVENT_SCHEMA_VERSIONS)!r}, got "
             f"{manifest.get('event_schema_version')!r}"
         )
     if type(n_blocks) is not int or n_blocks < 0:
@@ -264,6 +261,9 @@ def analyze_run(
     )
     destination = staging.path
     product_events_path = destination / "product_events.jsonl"
+    definitions = load_reaction_index(
+        run_path / REACTIONS_DIR / REACTION_INDEX_FILENAME
+    )
 
     active: dict[tuple[str, str], _Lineage] = {}
     for index, state in enumerate(initial.get("occupied_surface_states", [])):
@@ -294,18 +294,33 @@ def analyze_run(
             event_time = float(event["time_s"])
             if t_end is not None and event_time > t_end:
                 break
-            if str(event.get("schema_version")) != str(PERSISTENCE_SCHEMA_VERSION):
+            event_schema = str(event.get("schema_version") or "")
+            if event_schema not in SUPPORTED_EVENT_SCHEMA_VERSIONS:
                 raise AnalysisError(
                     f"event line {line_number} has incompatible schema "
                     f"{event.get('schema_version')!r}"
                 )
+            try:
+                event = resolve_event_definition(
+                    event,
+                    definitions,
+                    require_definition=(event_schema == EVENT_SCHEMA_VERSION),
+                )
+            except ValueError as exc:
+                raise AnalysisError(
+                    f"event line {line_number} cannot resolve its reaction "
+                    f"definition: {exc}"
+                ) from exc
             n_events += 1
             last_time = max(last_time, event_time)
             if "inputs" not in event or "outputs" not in event:
                 raise AnalysisError(
                     f"event line {line_number} predates schema v2 and has no inputs/outputs"
                 )
-            event_id = f"event-{event.get('step', line_number)}-{line_number}"
+            event_id = str(
+                event.get("event_id")
+                or f"event-{event.get('step', line_number)}-{line_number}"
+            )
             step = int(event.get("step", line_number))
             surface_inputs = _surface(event["inputs"])
             surface_outputs = _surface(event["outputs"])
@@ -391,6 +406,7 @@ def analyze_run(
                 product_handle.write(
                     json.dumps(
                         {
+                            "source_event_id": event_id,
                             "step": step,
                             "time_s": event_time,
                             "product": product,
@@ -415,82 +431,35 @@ def analyze_run(
                 block = min(n_blocks - 1, max(0, int(fraction * n_blocks)))
                 block_counts[(str(item["product"]), block)] += 1
 
-    product_rows = []
-    for product, count in sorted(product_counts.items()):
-        rate = count / duration
-        # Exact two-sided 95% Garwood interval for a Poisson event count.
-        count_low = 0.0 if count == 0 else 0.5 * chi2.ppf(0.025, 2 * count)
-        count_high = 0.5 * chi2.ppf(0.975, 2 * (count + 1))
-        product_rows.append(
-            {
-                "product": product,
-                "count": count,
-                "start_time_s": t_start,
-                "end_time_s": t_end,
-                "duration_s": duration,
-                "rate_hz": rate,
-                "rate_ci95_low_hz": count_low / duration,
-                "rate_ci95_high_hz": count_high / duration,
-                "tof_per_surface_atom_s-1": (
-                    rate / n_surface_atoms if n_surface_atoms > 0 else None
-                ),
-            }
-        )
-    _write_csv(
-        destination / "product_rates.csv",
-        [
-            "product", "count", "start_time_s", "end_time_s", "duration_s",
-            "rate_hz", "rate_ci95_low_hz", "rate_ci95_high_hz",
-            "tof_per_surface_atom_s-1",
-        ],
-        product_rows,
+    product_rows = build_product_rate_rows(
+        product_counts,
+        start_time_s=t_start,
+        end_time_s=t_end,
+        duration_s=duration,
+        n_surface_atoms=n_surface_atoms,
     )
+    write_csv(destination / "product_rates.csv", PRODUCT_RATE_FIELDS, product_rows)
 
-    mechanism_rows = []
-    for (product, mechanism_id), count in sorted(mechanism_counts.items()):
-        total = product_counts[product]
-        mechanism_rows.append(
-            {
-                "product": product,
-                "mechanism_id": mechanism_id,
-                "count": count,
-                "fraction": count / total,
-                "rate_hz": count / duration,
-                "mechanism": json.dumps(mechanism_steps[(product, mechanism_id)]),
-            }
-        )
-    _write_csv(
-        destination / "mechanisms.csv",
-        ["product", "mechanism_id", "count", "fraction", "rate_hz", "mechanism"],
-        mechanism_rows,
+    mechanism_rows = build_mechanism_rows(
+        mechanism_counts,
+        product_counts=product_counts,
+        mechanism_steps=mechanism_steps,
+        duration_s=duration,
     )
+    write_csv(destination / "mechanisms.csv", MECHANISM_FIELDS, mechanism_rows)
 
-    block_rows = []
-    if n_blocks > 0:
-        width = duration / n_blocks
-        for product in sorted(product_counts):
-            for block in range(n_blocks):
-                count = block_counts[(product, block)]
-                block_rows.append(
-                    {
-                        "product": product,
-                        "block": block,
-                        "start_time_s": t_start + block * width,
-                        "end_time_s": t_start + (block + 1) * width,
-                        "count": count,
-                        "rate_hz": count / width,
-                    }
-                )
-    _write_csv(
-        destination / "rate_blocks.csv",
-        ["product", "block", "start_time_s", "end_time_s", "count", "rate_hz"],
-        block_rows,
+    block_rows = build_rate_block_rows(
+        block_counts,
+        products=product_counts,
+        start_time_s=t_start,
+        duration_s=duration,
+        n_blocks=n_blocks,
     )
-
+    write_csv(destination / "rate_blocks.csv", RATE_BLOCK_FIELDS, block_rows)
     summary = {
         "schema_version": "1",
         "run_dir": str(run_path),
-        "event_schema_version": PERSISTENCE_SCHEMA_VERSION,
+        "event_schema_version": manifest_event_schema,
         "feed_species": sorted(feed_species),
         "start_time_s": t_start,
         "end_time_s": t_end,

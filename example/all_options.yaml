@@ -1,0 +1,561 @@
+# Complete AutoKMC configuration reference
+#
+# This file contains every supported configuration key and is valid as written.
+# It uses a generated Cu(111) surface and ASE's EMT calculator so validation
+# does not require an external structure or machine-learned model.
+#
+# Values here are illustrative, not universal production settings. Adjust the
+# chemistry, structure dimensions, convergence thresholds, and sampling length
+# for the system being studied.
+#
+# Competing choices are left commented out. In particular, choose exactly one
+# structure mode and one calculator construction style.
+#
+# Validate before running:
+#   autokmc validate-config example/all_options.yaml
+#   autokmc preflight example/all_options.yaml
+#   autokmc preflight example/all_options.yaml --check-calculator
+#
+# YAML booleans must be true or false. Unknown or misspelled keys are rejected.
+
+# The configuration schema is versioned; the current version is the string "1".
+schema_version: "1"
+
+
+# ---------------------------------------------------------------------------
+# Shared scientific and algorithmic constants
+# ---------------------------------------------------------------------------
+# These are the runtime-tunable defaults shared across multiple workflow
+# stages. Channel-specific controls such as NEB images and optimizer thresholds
+# appear in their own sections below.
+constants:
+  # Multiplier applied to ASE natural covalent-radius cutoffs when constructing
+  # ordinary atomistic bonds:
+  #   bonded when d_ij <= multiplier * (r_cov_i + r_cov_j)
+  neighbor_list_multiplier: 0.90
+
+  # Multiplier for deciding whether two surface atoms can simultaneously bond
+  # one adsorbate anchor:
+  #   d_ij <= factor * (2*r_cov_ads + r_cov_i + r_cov_j)
+  # This covalent-radii factor directly controls which bridge, hollow, and
+  # higher-coordinate anchor cliques are geometrically feasible.
+  co_bond_factor: 0.90
+
+  # Target adsorbate-anchor bond-length multiplier used by calculator-free
+  # anchor positioning:
+  #   d_ideal = factor * (r_cov_ads + r_cov_surface)
+  anchor_bond_factor: 0.85
+
+  # Weight of the non-bonded 1/r^2 surface-repulsion term during anchor
+  # positioning. Zero disables that repulsion term.
+  anchor_repulsion_weight: 0.20
+
+  # Surface atoms farther than this many angstrom from the anchor-clique
+  # centroid are omitted from the repulsion sum. null includes all atoms.
+  site_repulsion_cutoff: 10.0
+
+  # Minimum rigid-body steric separation during whole-adsorbate placement:
+  #   R_min = factor * (r_cov_adsorbate + r_cov_surface)
+  adsorbate_contact_factor: 1.05
+
+  # Optional extra adsorbate lift along the outward surface normal, measured as
+  # a multiple of summed covalent radii. Zero uses the optimized anchor target
+  # without an additional lift.
+  adsorbate_standoff_factor: 0.0
+
+  # Number of rigid-body rotational starting orientations tried when placing
+  # an adsorbate. One disables the multi-start search.
+  adsorbate_rotational_restarts: 6
+
+  # Typical metal nearest-neighbor distance in angstrom used to select an
+  # automatic anchor isomorphism depth from molecular reach.
+  typical_neighbor_distance: 2.5
+
+  # Distance tolerance in angstrom for matching intramolecular anchor
+  # separations to surface anchor-pair separations.
+  adsorbate_bond_tolerance: 0.4
+
+  # Signed-distance tolerance in angstrom for rejecting anchor-clique
+  # centroids that lie inside a nanoparticle convex hull. Negative values put
+  # the rejection boundary inside the hull.
+  anchor_hull_tolerance: -0.2
+
+  # Fraction of unobstructed ray-disc samples required for a slab atom to be
+  # classified as exposed. Must be between zero and one.
+  raycast_coverage_threshold: 0.7
+
+  # Ray-casting disc resolution per axis. Ten gives approximately 78 rays per
+  # atom because only samples inside the circular disc are retained.
+  raycast_disc_samples: 10
+
+  # Maximum number of graph automorphisms examined when Kabsch-aligning two
+  # locally isomorphic surface environments.
+  kabsch_max_mappings: 6969
+
+  # Surface-graph depth used to classify lateral adsorbate environments.
+  # Zero counts only adsorbates sharing an anchor surface atom; one also counts
+  # adsorbates one surface bond away, and so on.
+  lateral_shells: 0
+
+
+# ---------------------------------------------------------------------------
+# Calculator-backed optimization algorithms
+# ---------------------------------------------------------------------------
+optimization:
+  # Used for ordinary relaxations: structures, gas-phase reactants, adsorption
+  # endpoints, NEB endpoints, and calculator-based stability pruning.
+  # Valid choices: lbfgs, bfgs, fire, mdmin.
+  optimizer: lbfgs
+
+  # Used only to optimize diffusion and bond-reaction NEB bands.
+  # Valid choices: bfgs, fire, mdmin. ASE does not recommend LBFGS for NEB.
+  neb_optimizer: bfgs
+
+
+# ---------------------------------------------------------------------------
+# Output files
+# ---------------------------------------------------------------------------
+output:
+  # Directory containing all files for this run.
+  dir: ./runs/all_options
+
+  # Append-only record of accepted KMC events, relative to output.dir.
+  reactions_filename: events.jsonl
+
+  # Human- and machine-readable cumulative run summary.
+  summary_filename: summary.json
+
+  # Reproducibility record containing resolved inputs and runtime metadata.
+  run_manifest_filename: run_manifest.json
+
+  # Extended-XYZ KMC trajectory.
+  trajectory_filename: kmc.extxyz
+
+  # Reuse completed calculations through the on-disk calculation database.
+  calculation_cache_enabled: true
+
+  # Calculation-database directory, relative to output.dir.
+  calculation_cache_dir: calculation_cache
+
+  # Export the calculation database to a portable JSON record array at the end.
+  isaac_export_enabled: false
+
+  # Portable database-export filename, relative to output.dir.
+  isaac_export_filename: isaac_records.json
+
+  # Write a trajectory frame every N KMC steps. Zero disables periodic frames;
+  # the final frame is still written.
+  trajectory_dump_every: 10
+
+  # CRITICAL | ERROR | WARNING | INFO | DEBUG
+  # DEBUG also enables detailed site and reaction-network diagnostics.
+  log_level: INFO
+
+
+# ---------------------------------------------------------------------------
+# Checkpointing and restart
+# ---------------------------------------------------------------------------
+checkpoint:
+  # Write checkpoints while the KMC calculation is running.
+  enabled: true
+
+  # null writes OUTPUT_DIR/checkpoint.pkl. An explicit path may also be used.
+  path: null
+
+  # Save a checkpoint every N KMC steps.
+  every_n_steps: 10
+
+  # FRESH RUN: leave this commented.
+  # RESUME: use the same output.dir and uncomment the checkpoint to load.
+  # kmc.n_steps then means additional steps for this invocation, not a final
+  # cumulative target. Resume restores the RNG state and reconciles the event
+  # log and trajectory with the checkpoint.
+  # resume_from: ./runs/all_options/checkpoint.pkl
+
+
+# ---------------------------------------------------------------------------
+# Catalyst structure
+# ---------------------------------------------------------------------------
+structure:
+  # surface | nanoparticle | file
+  #
+  # The active choice generates and relaxes a periodic surface. To use a
+  # nanoparticle, change this to nanoparticle, comment the surface-only fields,
+  # and uncomment the nanoparticle-only fields below. To pass an existing ASE-
+  # readable structure, change this to file, comment every generated-structure
+  # field, and uncomment the four file-only fields.
+  kind: surface
+
+  # FILE-ONLY OPTIONS (commented because kind is surface)
+  #
+  # Relative paths are resolved from this YAML file's directory. AutoKMC uses
+  # the selected frame exactly as supplied: it is neither rebuilt nor relaxed.
+  # The file should contain appropriate cell and periodic-boundary metadata.
+  # path: ./structures/catalyst.extxyz
+
+  # null lets ASE infer the format from the filename; otherwise use an ASE
+  # reader format such as extxyz, traj, xyz, or cif.
+  # format: null
+
+  # ASE frame index for a multi-frame file; -1 selects the last frame.
+  # index: -1
+
+  # null imports frozen_indices metadata and ASE FixAtoms constraints.
+  # [] explicitly clears imported frozen atoms; otherwise give unique,
+  # zero-based atom indices, for example [0, 1, 2, 3].
+  # frozen_indices: null
+
+  # GENERATED-STRUCTURE OPTIONS (used by surface and nanoparticle)
+  #
+  # A single element symbol or an alloy weight mapping such as
+  # {Cu: 0.75, Ni: 0.25}. Weights are normalized internally.
+  composition: Cu
+
+  # fcc | bcc | hcp
+  crystal_structure: fcc
+
+  # Lattice parameter a in angstrom. null requests calculator/reference
+  # handling; HCP may instead use a mapping such as {a: 2.95, c: 4.68}.
+  lattice_constant: 3.6
+
+  # Relaxation force threshold in eV/angstrom and maximum optimizer steps.
+  fmax: 0.05
+  max_steps: 1000
+
+  # Additional arguments passed to the selected builder. Keep this empty unless
+  # the argument is supported by that builder and is not already listed above.
+  # Surface examples include center_slab, orthogonalise, and composition_seed.
+  # Nanoparticle examples include vacuum, composition_seed, and logfile.
+  extra_kwargs: {}
+
+  # SURFACE-ONLY OPTIONS (active because kind is surface)
+  #
+  # Three-index surface orientation.
+  miller_index: [1, 1, 1]
+
+  # Minimum slab and vacuum thicknesses in angstrom.
+  min_slab_size: 8.0
+  min_vacuum_size: 12.0
+
+  # Target lateral cell dimensions in angstrom.
+  goal_x: 12.0
+  goal_y: 12.0
+
+  # Number of bottom atomic layers constrained during later calculations.
+  n_freeze_layers: 2
+
+  # Slab face(s) classified as exposed: top | bottom | both.
+  surface_side: top
+
+  # Multiplier applied to covalent radii when constructing the ray-casting
+  # discs used for slab surface classification. This is distinct from
+  # constants.co_bond_factor, which controls adsorbate anchor cliques.
+  surface_radius_factor: 1.0
+
+  # Multiplier applied to covalent radii when setting the tolerance used to
+  # classify nanoparticle convex-hull atoms.
+  nanoparticle_hull_tolerance_factor: 0.5
+
+  # NANOPARTICLE-ONLY OPTIONS (commented because kind is surface)
+  #
+  # Approximate Wulff-particle atom count. null uses an effective value of 600.
+  # n_atoms: 600
+
+  # null calculates relaxed facet energies with the configured calculator.
+  # An explicit mapping uses Miller-index keys and energies in eV/angstrom^2,
+  # for example {"111": 0.08, "100": 0.10, "110": 0.12}.
+  # surface_energies: null
+
+  # Facets, slab layers, and vacuum used when calculating surface energies.
+  # surface_energy_facets: [[1, 1, 1], [1, 0, 0], [1, 1, 0]]
+  # surface_energy_layers: 6
+  # surface_energy_vacuum: 10.0
+
+  # Optional facet-calculation overrides. null inherits structure.fmax and
+  # structure.max_steps, respectively.
+  # surface_energy_fmax: null
+  # surface_energy_max_steps: null
+
+
+# ---------------------------------------------------------------------------
+# Gas feed
+# ---------------------------------------------------------------------------
+# At least one reactant is required. Repeat the complete list item for each
+# distinct gas species; canonical duplicate SMILES are rejected.
+reactants:
+  - # RDKit-readable SMILES. This example is carbon monoxide.
+    smiles: "[C-]#[O+]"
+
+    # Add hydrogens implied by the SMILES before constructing the molecule.
+    add_hydrogens: false
+
+    # Relax the isolated molecule. false still evaluates a single-point energy.
+    relax_in_gas: true
+
+    # Species partial pressure in bar. null inherits free_energy.pressure_bar;
+    # an explicit value overrides it, and zero disables gas adsorption.
+    partial_pressure_bar: null
+
+    # Ideal-gas rotational symmetry number. null infers it from the final
+    # geometry; use an integer >= 1 only when an explicit override is needed.
+    symmetry_number: null
+
+    # Molecular spin S, not spin multiplicity. null inherits
+    # free_energy.default_spin (for example, triplet O2 has spin: 1.0).
+    spin: null
+
+    # null infers geometry. Explicit overrides are linear, nonlinear, or
+    # monatomic. "auto" is accepted as an alias, but null is recommended here.
+    geometry: null
+
+
+# ---------------------------------------------------------------------------
+# Energy/force calculator
+# ---------------------------------------------------------------------------
+calculator:
+  # A calculator is required; this template selects EMT explicitly.
+  # Configure exactly one of import_path or factory.
+  #
+  # ACTIVE STYLE: construct a calculator class from a dotted import path.
+  import_path: ase.calculators.emt.EMT
+
+  # Arguments passed to the imported calculator class.
+  kwargs: {}
+
+  # ALTERNATIVE STYLE: construct a calculator with a factory callable.
+  # Comment import_path and kwargs above before uncommenting these lines.
+  # factory: fairchem.core.FAIRChemCalculator.from_model_checkpoint
+  # factory_kwargs:
+  #   name_or_path: uma-s-1p2
+  #   task_name: oc20
+  #   device: cuda
+  #   # FAIR-Chem multi-GPU inference is internal to one calculator:
+  #   # workers: 4
+
+  # Number of independent calculator instances in the shared pool.
+  # Keep this at 1 when a calculator factory manages its own workers.
+  copies: 1
+
+  # Optional unique device strings, exactly one per copy. null performs no
+  # automatic device injection. For calculators that accept ordinal strings,
+  # an example two-copy value is ["cuda:0", "cuda:1"].
+  gpu_devices: null
+
+  # Constructor/factory argument that receives each gpu_devices entry.
+  gpu_device_arg: device
+
+  # Maximum concurrent calculator tasks; null defaults to copies and an
+  # explicit value must be between 1 and copies.
+  # Keep this at 1 when a calculator factory manages its own workers.
+  max_workers: 1
+
+
+# ---------------------------------------------------------------------------
+# Adsorption-site discovery
+# ---------------------------------------------------------------------------
+adsorbate_sites:
+  # Relax one representative of each candidate class and retain stable classes.
+  prune_stable_only: true
+
+  # Force threshold in eV/angstrom and optimizer step limit for pruning.
+  fmax: 0.05
+  max_steps: 500
+
+  # Maximum surface anchor-clique size. Four covers atop, bridge, three-fold,
+  # and four-fold sites. null restores unbounded enumeration and may be costly.
+  anchor_k_max: 4
+
+  # Local graph depth used to distinguish anchor environments. null selects a
+  # value automatically from molecular reach and
+  # constants.typical_neighbor_distance.
+  n_shells_anchor: null
+
+  # Local graph depth used to classify multi-anchor molecular placements.
+  pair_n_shells: 1
+
+  # Maximum allowed surface-graph path length between anchors in a
+  # multi-anchor placement.
+  max_pair_shells: 10
+
+
+# ---------------------------------------------------------------------------
+# Free-energy corrections and gas-feed pressure
+# ---------------------------------------------------------------------------
+free_energy:
+  # Run vibrational and ideal-gas free-energy corrections. This is disabled in
+  # the reference file to keep an exploratory run shorter.
+  enabled: false
+
+  # Feed-wide partial-pressure fallback, in bar, for reactants whose
+  # partial_pressure_bar is null. It applies even when enabled is false.
+  #
+  # This is NOT the thermodynamic standard-state pressure. Gas free energies
+  # and barriers remain referenced to a fixed 1 bar; the resolved p/p0 factor
+  # is applied separately to adsorption rates.
+  pressure_bar: 1.0
+
+  # Finite-difference displacement in angstrom for ASE vibrations.
+  vibration_displacement: 0.01
+
+  # Number of force evaluations per vibrational displacement: 2 or 4.
+  vibration_nfree: 2
+
+  # Include vibrational corrections for transition states.
+  include_ts_vibrations: true
+
+  # Non-negative low-frequency floor in eV used by thermochemistry.
+  min_frequency_ev: 0.0015
+
+  # Cartesian tolerance in angstrom for molecular symmetry inference.
+  symmetry_tolerance: 0.3
+
+  # Fallback molecular spin S for reactants whose spin is null.
+  default_spin: 0.0
+
+  # auto | linear | nonlinear | monatomic
+  default_geometry: auto
+
+  # Persistent ASE vibration-cache root. null uses OUTPUT_DIR/vib_cache.
+  cache_dir: null
+
+
+# ---------------------------------------------------------------------------
+# Kinetic Monte Carlo
+# ---------------------------------------------------------------------------
+kmc:
+  # Simulation temperature in kelvin.
+  temperature_k: 500.0
+
+  # Number of KMC events to execute in this invocation; zero is allowed.
+  n_steps: 100
+
+  # Non-negative transmission coefficient in the Eyring rate expression.
+  transmission_coefficient: 1.0
+
+  # Force threshold in eV/angstrom and optimizer step limit used for adsorption
+  # endpoint discovery during KMC.
+  fmax: 0.05
+  max_steps: 200
+
+  # Print concise progress every N events; zero disables progress messages.
+  log_every: 10
+
+  # Non-negative seed for reproducible fresh runs. Resume restores RNG state.
+  random_seed: 69
+
+  # Reclassify local environments after events to capture lateral interactions.
+  lateral_interactions: true
+
+
+# ---------------------------------------------------------------------------
+# Surface diffusion
+# ---------------------------------------------------------------------------
+diffusion:
+  # Enable diffusion event discovery and execution.
+  enabled: false
+
+  # Maximum locality for candidate endpoints. Zero is the strictest setting:
+  # endpoint anchor cliques must share a surface atom. One also permits cliques
+  # on adjacent surface atoms; zero does not disable diffusion.
+  max_hops: 0
+
+  # Local graph depth used to classify/deduplicate endpoint pairs. This is not
+  # the hop-distance limit.
+  n_shells_pair: 1
+
+  # Keep one preferred diffusion class per adsorption-site pair.
+  prune_by_adsorption_pair: true
+
+  # NEB convergence threshold in eV/angstrom and optimizer step limit.
+  fmax: 0.01
+  max_steps: 200
+
+  # Number of intermediate NEB images; endpoints are not included.
+  n_images: 10
+
+  # Enable climbing-image NEB.
+  climb: true
+
+  # NEB spring constant.
+  spring_k: 0.1
+
+  # linear | idpp
+  interpolation: linear
+
+  # Save every NEB image as an extended-XYZ path.
+  persist_neb_path: false
+
+
+# ---------------------------------------------------------------------------
+# Bond-changing reactions
+# ---------------------------------------------------------------------------
+bond:
+  # Enable coupling and/or dissociation event discovery and execution.
+  enabled: false
+
+  # Candidate locality. Zero requires the relevant adsorbate anchor cliques to
+  # share a surface atom; it does not disable bond events.
+  bond_max_hops: 0
+
+  # Unique subset of SINGLE, DOUBLE, TRIPLE, and AROMATIC RDKit bond types.
+  bond_types: [SINGLE, DOUBLE, TRIPLE]
+
+  # Include transformations of bonds that are members of rings.
+  include_ring_bonds: false
+
+  # Permit coupling between two instances of the same species.
+  include_homo_coupling: true
+
+  # Generate dissociation channels C -> A + B.
+  include_dissociation: true
+
+  # Generate coupling channels A + B -> C.
+  include_coupling: true
+
+  # Remove graph-isomorphic duplicate reaction classes.
+  deduplicate_iso: true
+
+  # Gas-product lift above the surface in angstrom for NEB endpoints.
+  gas_lift_height: 6.0
+
+  # Build fragment/coupling-product species implied by templates when those
+  # species are absent from the feed.
+  auto_build_leaf_species: true
+
+  # Local ego-graph depth for adsorption-triple classification.
+  pair_n_shells: 1
+
+  # Keep one preferred bond-reaction class per adsorption triple.
+  prune_by_triple: true
+
+  # Relax and reject unstable A+B endpoints using the configured calculator.
+  prune_with_calculator: true
+
+  # Endpoint-pruning force threshold in eV/angstrom and optimizer step limit.
+  prune_fmax: 0.05
+  prune_max_steps: 500
+
+  # Bond-reaction NEB threshold in eV/angstrom and optimizer step limit.
+  neb_fmax: 0.01
+  neb_max_steps: 200
+
+  # Number of intermediate NEB images; endpoints are not included.
+  neb_n_images: 10
+
+  # Enable climbing-image NEB.
+  neb_climb: true
+
+  # Bond-reaction NEB spring constant.
+  neb_spring_k: 0.1
+
+  # linear | idpp
+  neb_interpolation: idpp
+
+  # auto | greedy | hungarian | reactant_index
+  atom_matching: auto
+
+  # Number of alternative mappings tried by automatic atom matching.
+  matching_trials: 8
+
+  # Save every bond-reaction NEB image as an extended-XYZ path.
+  persist_neb_path: false

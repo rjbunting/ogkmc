@@ -8,12 +8,9 @@ from typing import Dict, Iterable, Mapping, Optional, Tuple
 import numpy as np
 from ase import Atoms
 from ase.build import surface as ase_surface
-from ase.calculators.emt import EMT
-from ase.optimize import LBFGS
-
 from autokmc.core.constants import RANDOM_SEED
 from autokmc.core.pbc import set_full_pbc_if_cell
-from autokmc.io.calculators import acquire_calculator
+from autokmc.io.calculators import CalculatorConfigError, acquire_calculator
 from autokmc.structure.builders import (
     _apply_composition,
     _build_primitive_cell,
@@ -26,6 +23,7 @@ from autokmc.structure.builders import (
 )
 from autokmc.structure.optimization import _resolve_lattice_params, optimise_structure
 from autokmc.structure.types import Composition, LatticeParams
+from autokmc.utils.optimizers import DEFAULT_OPTIMIZER
 
 try:
     from wulffpack import SingleCrystal as _SingleCrystal
@@ -70,6 +68,7 @@ def calculate_surface_energies(
     calculator=None,
     fmax: float = 0.05,
     max_steps: int = 300,
+    optimizer: str = DEFAULT_OPTIMIZER,
     verbose: bool = True,
 ) -> dict[tuple[int, int, int], float]:
     """Calculate relaxed slab surface energies for Wulff construction.
@@ -82,11 +81,13 @@ def calculate_surface_energies(
     _validate_crystal_structure(crystal_structure)
     primary = _primary_element(comp)
     if calculator is None:
-        calculator = EMT()
+        raise CalculatorConfigError(
+            "calculate_surface_energies requires an explicit calculator"
+        )
 
     lp = _resolve_lattice_params(
         primary, crystal_structure, lattice_constant, calculator,
-        fmax=fmax, verbose=verbose,
+        fmax=fmax, optimizer=optimizer, verbose=verbose,
     )
     bulk_atoms = _build_primitive_cell(primary, crystal_structure, lp)
     with acquire_calculator(calculator, purpose="bulk surface-energy relaxation") as calc:
@@ -96,6 +97,7 @@ def calculate_surface_energies(
             fmax=fmax,
             steps=max_steps,
             logfile=os.devnull,
+            optimizer=optimizer,
             verbose=False,
         )
         e_bulk_per_atom = float(bulk_relaxed.get_potential_energy()) / len(bulk_relaxed)
@@ -113,6 +115,7 @@ def calculate_surface_energies(
                 fmax=fmax,
                 steps=max_steps,
                 logfile=os.devnull,
+                optimizer=optimizer,
                 verbose=False,
             )
             e_slab = float(slab_relaxed.get_potential_energy())
@@ -147,6 +150,7 @@ def build_nanoparticle(
     max_steps: int = 1000,
     vacuum: float = 10.0,
     logfile: Optional[str] = None,
+    optimizer: str = DEFAULT_OPTIMIZER,
     verbose: bool = True,
 ) -> Atoms:
     """Build and optimise a Wulff-construction metal nanoparticle."""
@@ -161,12 +165,14 @@ def build_nanoparticle(
     _validate_crystal_structure(crystal_structure)
 
     if calculator is None:
-        calculator = EMT()
+        raise CalculatorConfigError(
+            "build_nanoparticle requires an explicit calculator"
+        )
 
     primary = _primary_element(comp)
     lp = _resolve_lattice_params(
         primary, crystal_structure, lattice_constant, calculator,
-        fmax=fmax, verbose=verbose,
+        fmax=fmax, optimizer=optimizer, verbose=verbose,
     )
     primitive = _build_primitive_cell(primary, crystal_structure, lp)
     se = normalise_surface_energies(surface_energies)
@@ -183,6 +189,7 @@ def build_nanoparticle(
             calculator           = calculator,
             fmax                 = fmax if surface_energy_fmax is None else surface_energy_fmax,
             max_steps            = max_steps if surface_energy_max_steps is None else surface_energy_max_steps,
+            optimizer            = optimizer,
             verbose              = verbose,
         )
 
@@ -242,6 +249,7 @@ def build_nanoparticle(
             fmax=fmax,
             steps=max_steps,
             logfile=logfile,
+            optimizer=optimizer,
             verbose=verbose,
         )
         atoms.calc = None

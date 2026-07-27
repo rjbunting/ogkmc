@@ -47,8 +47,8 @@ they share a single ``adsorption/<species>/`` folder.
 
 Each unique reaction is identified by ``(kind, species, iso_class,
 lateral_class)``.  Structures are written exactly **once** per that key; every
-subsequent event just appends a row to ``events.jsonl`` and updates the
-``reaction.json`` counters.
+subsequent event appends a row to ``events.jsonl``.  ``reaction.json`` counters
+are batched at checkpoint boundaries and writer close.
 """
 
 from __future__ import annotations
@@ -56,15 +56,14 @@ from __future__ import annotations
 import json
 import math
 import os
-import tempfile
 from pathlib import Path
-from typing import Any, TextIO
+from typing import Any, TextIO, cast
 
 from ase import Atoms
 from ase.io import write as ase_write
 
 from autokmc.core.constants import (
-    PERSISTENCE_SCHEMA_VERSION,
+    PERSISTENCE_SCHEMA_VERSION,  # noqa: F401 - legacy compatibility re-export
     REACTIONS_FILENAME,
     SUMMARY_FILENAME,         # noqa: F401  (re-exported for convenience)
     TRAJECTORY_FILENAME,      # noqa: F401  (re-exported for convenience)
@@ -72,34 +71,61 @@ from autokmc.core.constants import (
     REACTION_DESCRIPTION_FMT,
     BOND_DESCRIPTION_FMT,
     DIFFUSION_DESCRIPTION_FMT,
-    BOND_FOLDER_FMT,
-    DIFFUSION_FOLDER_FMT,
 )
-from autokmc.io.records import ReactionRecord
+from autokmc.io._files import (
+    atomic_output_path,
+    ensure_directory,
+    fsync_directory,
+    replace_path_atomic,
+    write_json_atomic,
+)
+from autokmc.io.event_log import (  # noqa: F401
+    EventLogCommit,
+    EventLogRecovery,
+    reconcile_event_log,
+)
 from autokmc.io.event_transitions import reaction_transition
+from autokmc.io.reaction_layout import (
+    diffusion_folder_name as _diffusion_folder_name,
+    kind_folder_name as _kind_folder_name,
+    kind_subdir as _kind_subdir,
+    reaction_smiles as _reaction_smiles,
+)
+from autokmc.io.reaction_index import (
+    REACTION_INDEX_FILENAME,
+    ReactionIndexWriter,
+    reaction_definition_from_document,
+    stable_event_id,
+    stable_reaction_id,
+)
+from autokmc.io.reaction_payloads import build_reaction_payload
+from autokmc.io.records import ReactionRecord
+from autokmc.io.schemas import (
+    EVENT_SCHEMA_VERSION,
+    REACTION_DOCUMENT_ARTIFACT_TYPE,
+    REACTION_DOCUMENT_SCHEMA_VERSION,
+)
 from autokmc.species.smiles import smiles_to_dirname as _smiles_to_dirname
 from autokmc.utils.logging import get_logger
+from autokmc.utils.telemetry import instrument
 
 _log = get_logger(__name__)
+
+UNCOMMITTED_REACTIONS_DIR = "uncommitted_reactions"
+DIAGNOSTICS_DIR = "diagnostics"
+INVALID_ADSORPTION_DIR = "invalid_adsorption"
+INVALID_DIFFUSION_DIR = "invalid_diffusion"
 
 
 def _atomic_json(path: Path, payload: Any) -> None:
     """Write one complete JSON document without exposing partial contents."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(_json_safe(payload), handle, indent=2, allow_nan=False)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-    except Exception:
-        try:
-            os.unlink(temporary)
-        except FileNotFoundError:
-            pass
-        raise
+    write_json_atomic(path, payload, transform=_json_safe)
+
+
+def _atomic_extxyz(path: Path, images: Atoms | list[Atoms]) -> None:
+    """Write structures atomically and durably before publishing their names."""
+    with atomic_output_path(path) as temporary:
+        ase_write(temporary, images, format="extxyz")
 
 
 # ---------------------------------------------------------------------------
@@ -135,68 +161,191 @@ def _safe_atoms_copy(atoms: Atoms) -> Atoms:
         snap.calc = None
     return snap
 
+
+def write_invalid_adsorption_diagnostic(
+    diagnostics_dir: str | Path,
+    site,
+    *,
+    reactant_smiles: str,
+    atoms_initial: Atoms,
+    atoms_optimized: Atoms | None,
+    invalid_reason: str,
+    details: dict[str, Any] | None = None,
+) -> Path:
+    """Persist one adsorption iso-class rejected by MLIP pruning.
+
+    These structures are diagnostic candidates rather than KMC reactions, so
+    they live outside the authoritative reaction tree under
+    ``diagnostics/invalid_adsorption/<species>/ads_isoX/``.
+    """
+    species = (
+        _smiles_to_dirname(reactant_smiles)
+        if reactant_smiles
+        else "unknown"
+    )
+    iso_class = int(site.iso_class)
+    folder = (
+        Path(diagnostics_dir)
+        / INVALID_ADSORPTION_DIR
+        / species
+        / f"ads_iso{iso_class}"
+    )
+    ensure_directory(folder)
+    _atomic_extxyz(
+        folder / "initial.extxyz",
+        _safe_atoms_copy(atoms_initial),
+    )
+    if atoms_optimized is not None:
+        _atomic_extxyz(
+            folder / "optimized.extxyz",
+            _safe_atoms_copy(atoms_optimized),
+        )
+    _atomic_json(
+        folder / "diagnostic.json",
+        {
+            "artifact_type": "autokmc-invalid-adsorption-diagnostic",
+            "schema_version": "1",
+            "kind": "adsorption",
+            "iso_class": iso_class,
+            "reactant_smiles": str(reactant_smiles),
+            "invalid_reason": str(invalid_reason),
+            "structures": {
+                "initial": "initial.extxyz",
+                "optimized": (
+                    "optimized.extxyz"
+                    if atoms_optimized is not None
+                    else None
+                ),
+            },
+            "details": dict(details or {}),
+        },
+    )
+    return folder
+
+
+def _read_discovery_step(path: Path) -> int | None:
+    """Return a persisted discovery step, preserving legacy metadata as unknown."""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, TypeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"cannot read reaction metadata {path}: {exc}") from exc
+
+    value = payload.get("discovery_step")
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(
+            f"reaction metadata {path} has invalid discovery_step={value!r}"
+        )
+    return value
+
+
+def _available_quarantine_path(destination: Path) -> Path:
+    """Choose a recovery path without replacing an earlier quarantined folder."""
+    if not destination.exists():
+        return destination
+    suffix = 1
+    while True:
+        candidate = destination.with_name(f"{destination.name}.{suffix}")
+        if not candidate.exists():
+            return candidate
+        suffix += 1
+
+
+def _quarantine_uncommitted_reaction_folders(
+    output_dir: Path,
+    reactions_root: Path,
+    *,
+    checkpoint_step: int,
+) -> list[Path]:
+    """Atomically move folders discovered after a resumed checkpoint.
+
+    The checkpoint and event log describe one committed prefix.  A process can
+    crash after materialising reactions found while advancing the next state
+    but before committing that state's checkpoint.  Such folders must not stay
+    under the authoritative ``reactions/`` tree when the older checkpoint is
+    resumed.
+    """
+    if checkpoint_step < 0:
+        raise ValueError("checkpoint_step must be non-negative")
+
+    quarantined: list[Path] = []
+    recovery_root = (
+        output_dir
+        / UNCOMMITTED_REACTIONS_DIR
+        / f"after_checkpoint_step_{checkpoint_step}"
+    )
+    invalid_diffusion_root = (
+        output_dir / DIAGNOSTICS_DIR / INVALID_DIFFUSION_DIR
+    )
+    roots = (
+        (reactions_root, Path()),
+        (
+            invalid_diffusion_root,
+            Path(DIAGNOSTICS_DIR) / INVALID_DIFFUSION_DIR,
+        ),
+    )
+    leaf_folders: list[tuple[Path, Path, Path]] = []
+    for root, recovery_prefix in roots:
+        pattern = "*/*/*" if root == reactions_root else "*/*"
+        leaf_folders.extend(
+            (path, root, recovery_prefix)
+            for path in root.glob(pattern)
+            if path.is_dir()
+        )
+    for folder, authoritative_root, recovery_prefix in sorted(leaf_folders):
+        metadata_path = folder / "reaction.json"
+        incomplete = not metadata_path.is_file()
+        discovery_step = (
+            None if incomplete else _read_discovery_step(metadata_path)
+        )
+        # Legacy reaction documents have no reliable discovery boundary.
+        # Retaining them is the only backward-compatible choice.  A leaf
+        # without reaction.json is different: folder creation and structure
+        # writes precede metadata publication, so it is an incomplete crash
+        # artifact and cannot be authoritative for any checkpoint.
+        if (
+            not incomplete
+            and (discovery_step is None or discovery_step <= checkpoint_step)
+        ):
+            continue
+
+        relative = folder.relative_to(authoritative_root)
+        destination = _available_quarantine_path(
+            recovery_root / recovery_prefix / relative
+        )
+        ensure_directory(destination.parent)
+        replace_path_atomic(folder, destination)
+        quarantined.append(destination)
+        if incomplete:
+            _log.warning(
+                "Moved incomplete reaction folder with no reaction.json "
+                "outside the authoritative hierarchy to %s",
+                destination,
+            )
+        else:
+            _log.warning(
+                "Moved uncommitted reaction folder discovered at step %d "
+                "past checkpoint step %d to %s",
+                discovery_step,
+                checkpoint_step,
+                destination,
+            )
+
+        # Leave the active hierarchy tidy without deleting any recovery data.
+        parent = folder.parent
+        while parent != authoritative_root:
+            try:
+                parent.rmdir()
+            except OSError:
+                break
+            fsync_directory(parent.parent)
+            parent = parent.parent
+    return quarantined
+
 # ---------------------------------------------------------------------------
 # ReactionWriter
 # ---------------------------------------------------------------------------
-
-#: Map ``reaction.kind`` → sub-folder name under ``reactions/``.  Adsorption
-#: and desorption are forward / reverse of the same lateral class so they
-#: share a single ``adsorption/`` folder; diffusion and bond reactions get
-#: their own.
-KIND_SUBDIR: dict[str, str] = {
-    "adsorption": "adsorption",
-    "desorption": "adsorption",
-    "diffusion":  "diffusion",
-    "bond":       "bond",
-}
-
-def _kind_subdir(kind: str) -> str:
-    return KIND_SUBDIR.get(str(kind), str(kind))
-
-
-def _reaction_folder_name(iso_class: int, lateral_class: int) -> str:
-    return f"iso{int(iso_class)}_lat{int(lateral_class)}"
-
-
-def _diffusion_folder_name(iso_class: int, lateral_class: int) -> str:
-    return DIFFUSION_FOLDER_FMT.format(iso=int(iso_class), lat=int(lateral_class))
-
-
-def _bond_folder_name(iso_class: int, lateral_class: int) -> str:
-    return BOND_FOLDER_FMT.format(iso=int(iso_class), lat=int(lateral_class))
-
-
-def _kind_folder_name(sub: str, iso: int, lat: int) -> str:
-    if sub == "diffusion":
-        return _diffusion_folder_name(iso, lat)
-    if sub == "bond":
-        return _bond_folder_name(iso, lat)
-    return _reaction_folder_name(iso, lat)
-
-
-def _reaction_smiles(reaction) -> str:
-    """Return a human-readable SMILES label for *reaction*.
-
-    Adsorption / diffusion sites carry ``site.reactant`` (a single SMILES);
-    bond reactions instead carry a ``site.template`` with three SMILES that
-    we render as ``"A+B↔C"``.
-    """
-    site = reaction.site
-    smiles = getattr(site, "reactant", None)
-    if smiles:
-        return str(smiles)
-    tpl = getattr(site, "template", None)
-    if tpl is not None:
-        return f"{tpl.smiles_a}+{tpl.smiles_b}↔{tpl.smiles_c}"
-    return ""
-
-
-def _reaction_relative_dir(kind: str, iso: int, lat: int, smiles: str = "") -> str:
-    """Return the reaction folder path used in JSON records."""
-    sub     = _kind_subdir(kind)
-    species = _smiles_to_dirname(smiles) if smiles else "unknown"
-    return f"{REACTIONS_DIR}/{sub}/{species}/{_kind_folder_name(sub, iso, lat)}"
-
 
 def _reaction_description(
     reaction,
@@ -434,8 +583,10 @@ class ReactionWriter:
     Each unique ``(kind, species, iso_class, lateral_class)`` tuple gets a
     folder under ``output_dir/reactions/<sub>/<species>/`` containing:
 
-    * ``occupied.extxyz``   — relaxed atoms behind ``E_occupied``.
-    * ``unoccupied.extxyz`` — relaxed atoms behind ``E_unoccupied``.
+    * ``*_initial.extxyz``  — endpoint structures before relaxation.
+    * endpoint ``.extxyz`` files — relaxed structures behind the energies.
+    * ``neb_path_initial.extxyz`` — optional interpolated diffusion/bond band.
+    * ``neb_path.extxyz`` — optional optimized diffusion/bond band.
     * ``reaction.json``     — description + energies + ΔE / barrier / rate
       / fired-event count.
 
@@ -444,8 +595,10 @@ class ReactionWriter:
 
     The folder is materialised lazily — it is written the **first time**
     a reaction with that key is fired, then re-used by every subsequent
-    firing of either direction.  ``reaction.json`` is updated in-place
-    (counts, last_step) on every event; the .extxyz files are written once.
+    firing of either direction.  Event rows are appended immediately, while
+    ``reaction.json`` statistics are batched and atomically flushed at a
+    checkpoint boundary or when the writer closes.  The .extxyz files are
+    written once.
     """
 
     def __init__(
@@ -457,51 +610,217 @@ class ReactionWriter:
         calculator_meta: dict[str, Any] | None = None,
         append: bool = False,
         run_id: str | None = None,
+        checkpoint_step: int | None = None,
+        event_recovery: EventLogRecovery | None = None,
     ):
         self.output_dir = Path(output_dir)
-        self.output_dir.mkdir(parents=True, exist_ok=True)
+        ensure_directory(self.output_dir)
         self.reactions_root = self.output_dir / reactions_dir
-        self.reactions_root.mkdir(parents=True, exist_ok=True)
+        ensure_directory(self.reactions_root)
+        self.invalid_diffusion_root = (
+            self.output_dir / DIAGNOSTICS_DIR / INVALID_DIFFUSION_DIR
+        )
 
         self._jsonl_path: Path = self.output_dir / reactions_filename
-        mode = "a" if append else "w"
-        self._fp: TextIO | None = self._jsonl_path.open(mode, encoding="utf-8")
         self._calc_meta: dict[str, Any] = dict(calculator_meta or {})
         self.run_id = None if run_id is None else str(run_id)
         self._n_written: int = 0
 
         # Per (sub, species, iso, lat) bookkeeping for reaction.json files.
         self._folder_meta: dict[tuple[str, str, int, int], dict[str, Any]] = {}
+        self._folder_paths: dict[tuple[str, str, int, int], Path] = {}
+        self._discovery_steps: dict[tuple[str, str, int, int], int] = {}
+        self._pending_payloads: dict[tuple[str, str, int, int], dict[str, Any]] = {}
+        self._reaction_definitions: dict[str, dict[str, Any]] = {}
+        self._index: ReactionIndexWriter | None = None
+        if append and checkpoint_step is not None:
+            _quarantine_uncommitted_reaction_folders(
+                self.output_dir,
+                self.reactions_root,
+                checkpoint_step=int(checkpoint_step),
+            )
+
+        file_existed = self._jsonl_path.is_file()
+        mode = "a" if append else "w"
+        self._fp: TextIO | None = cast(
+            TextIO,
+            self._jsonl_path.open(mode, encoding="utf-8"),
+        )
+        # New/truncated event files and newly appended rows must be synced
+        # before their byte prefix can be published in a checkpoint.
+        self._events_dirty = not append or not file_existed
+        self._event_directory_dirty = not file_existed
         if append:
-            self._restore_existing_state()
+            self._restore_existing_state(event_recovery=event_recovery)
+        self._index = ReactionIndexWriter(
+            self.reactions_root / REACTION_INDEX_FILENAME,
+            run_id=self.run_id,
+            initial_entries=self._reaction_definitions.values(),
+        )
 
-    def _restore_existing_state(self) -> None:
+    def _restore_existing_state(
+        self,
+        *,
+        event_recovery: EventLogRecovery | None = None,
+    ) -> None:
         """Restore counters for an append-mode checkpoint continuation."""
-        try:
-            with self._jsonl_path.open("r", encoding="utf-8") as handle:
-                self._n_written = sum(1 for line in handle if line.strip())
-        except OSError:
-            self._n_written = 0
-
-        for path in self.reactions_root.glob("*/*/*/reaction.json"):
+        restored_payloads: dict[
+            tuple[str, str, int, int],
+            dict[str, Any],
+        ] = {}
+        metadata_paths = [
+            *((path, False) for path in self.reactions_root.glob("*/*/*/reaction.json")),
+            *((path, True) for path in self.invalid_diffusion_root.glob("*/*/reaction.json")),
+        ]
+        for path, diagnostic_invalid in metadata_paths:
             try:
-                relative = path.relative_to(self.reactions_root)
-                sub, species = relative.parts[:2]
+                if diagnostic_invalid:
+                    relative = path.relative_to(self.invalid_diffusion_root)
+                    species = relative.parts[0]
+                    sub = "diffusion_invalid"
+                else:
+                    relative = path.relative_to(self.reactions_root)
+                    sub, species = relative.parts[:2]
                 payload = json.loads(path.read_text(encoding="utf-8"))
                 key = (
-                    str(sub),
+                    (
+                        "diffusion_invalid"
+                        if (
+                            diagnostic_invalid
+                            or (sub == "diffusion" and payload.get("valid") is False)
+                        )
+                        else str(sub)
+                    ),
                     str(species),
                     int(payload["iso_class"]),
                     int(payload["lateral_class"]),
                 )
-                stats = payload.get("stats") or {}
                 self._folder_meta[key] = {
-                    "count": int(stats.get("count", 0) or 0),
-                    "first_step": stats.get("first_step"),
-                    "last_step": stats.get("last_step"),
+                    "count": 0,
+                    "first_step": None,
+                    "last_step": None,
                 }
+                self._folder_paths[key] = path.parent
+                restored_payloads[key] = payload
+                discovery_step = payload.get("discovery_step")
+                self._discovery_steps[key] = (
+                    0 if discovery_step is None else int(discovery_step)
+                )
             except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
                 _log.warning("Ignoring unreadable reaction metadata during resume: %s", path)
+
+        last_event_by_key: dict[tuple[str, str, int, int], dict[str, Any]] = {}
+        rate_bases_by_key: dict[tuple[str, str, int, int], set[str]] = {}
+        if event_recovery is not None:
+            self._n_written = int(event_recovery.count)
+            for key, recovered in event_recovery.reaction_states.items():
+                meta = self._folder_meta.get(key)
+                if meta is None:
+                    event = recovered.last_event or {}
+                    _log.warning(
+                        "Recovered event refers to a missing reaction folder: %s",
+                        event.get("reaction_dir"),
+                    )
+                    continue
+                meta.update({
+                    "count": int(recovered.count),
+                    "first_step": recovered.first_step,
+                    "last_step": recovered.last_step,
+                })
+                rate_bases_by_key[key] = set(recovered.rate_energy_bases)
+                if recovered.last_event is not None:
+                    last_event_by_key[key] = recovered.last_event
+        else:
+            try:
+                with self._jsonl_path.open("r", encoding="utf-8") as handle:
+                    for line_number, line in enumerate(handle, start=1):
+                        if not line.strip():
+                            continue
+                        try:
+                            event = json.loads(line)
+                            key = (
+                                _kind_subdir(str(event["kind"])),
+                                _smiles_to_dirname(str(event["reactant_smiles"])),
+                                int(event["iso_class"]),
+                                int(event["lateral_class"]),
+                            )
+                        except (ValueError, TypeError, KeyError, json.JSONDecodeError):
+                            _log.warning(
+                                "Ignoring invalid event line %d while restoring reaction stats",
+                                line_number,
+                            )
+                            continue
+                        self._n_written += 1
+                        meta = self._folder_meta.get(key)
+                        if meta is None:
+                            _log.warning(
+                                "Event line %d refers to a missing reaction folder: %s",
+                                line_number,
+                                event.get("reaction_dir"),
+                            )
+                            continue
+                        step = int(event["step"])
+                        meta["count"] += 1
+                        if meta["first_step"] is None:
+                            meta["first_step"] = step
+                        meta["last_step"] = step
+                        basis = event.get("rate_energy_basis")
+                        if basis:
+                            rate_bases_by_key.setdefault(key, set()).add(str(basis))
+                        last_event_by_key[key] = event
+            except OSError:
+                self._n_written = 0
+
+        # A crash can leave some reaction.json files ahead of the checkpoint
+        # even after events.jsonl is truncated.  Rebuild their statistics and
+        # last-event fields from the reconciled source of truth.
+        for key in self._folder_paths:
+            payload = restored_payloads.get(key)
+            if payload is None:
+                continue
+            recovered_stats = dict(self._folder_meta[key])
+            recovered_event = last_event_by_key.get(key)
+            recovered_last_event = None
+            recovered_description = payload.get("description")
+            recovered_rate_bases = sorted(rate_bases_by_key.get(key, set()))
+            if recovered_event is None:
+                recovered_last_event = None
+            else:
+                if recovered_event.get("description") is not None:
+                    recovered_description = recovered_event["description"]
+                recovered_last_event = {
+                    "kind": str(recovered_event["kind"]),
+                    "delta_e_ev": recovered_event.get(
+                        "rate_delta_ev",
+                        recovered_event.get("delta_e_ev"),
+                    ),
+                    "barrier_ev": recovered_event.get(
+                        "rate_barrier_ev",
+                        recovered_event.get("barrier_ev"),
+                    ),
+                    "rate_hz": recovered_event.get("rate_hz"),
+                    "step": int(recovered_event["step"]),
+                }
+                if key[0] in {"diffusion", "bond"}:
+                    recovered_last_event["direction"] = recovered_event.get("direction")
+            changed = (
+                payload.get("stats") != recovered_stats
+                or payload.get("last_event") != recovered_last_event
+                or payload.get("description") != recovered_description
+                or payload.get("rate_energy_bases", []) != recovered_rate_bases
+            )
+            payload["stats"] = recovered_stats
+            payload["last_event"] = recovered_last_event
+            payload["description"] = recovered_description
+            payload["rate_energy_bases"] = recovered_rate_bases
+            if changed:
+                self._pending_payloads[key] = payload
+            definition = reaction_definition_from_document(
+                payload,
+                folder=self._folder_paths[key].relative_to(self.output_dir),
+                run_id=self.run_id,
+            )
+            self._reaction_definitions[str(definition["reaction_id"])] = definition
 
     # ------------------------------------------------------------------
     @property
@@ -516,8 +835,34 @@ class ReactionWriter:
     def n_unique_reactions(self) -> int:
         return len(self._folder_meta)
 
+    @property
+    def n_valid_reactions(self) -> int:
+        if self._index is not None:
+            return self._index.n_valid
+        return sum(key[0] != "diffusion_invalid" for key in self._folder_meta)
+
+    @property
+    def n_invalid_reactions(self) -> int:
+        if self._index is not None:
+            return self._index.n_invalid
+        return sum(key[0] == "diffusion_invalid" for key in self._folder_meta)
+
+    @property
+    def reaction_index_path(self) -> Path:
+        return self.reactions_root / REACTION_INDEX_FILENAME
+
+    @property
+    def reaction_definitions(self) -> tuple[dict[str, Any], ...]:
+        """Return snapshots of all persisted definitions for summary seeding."""
+        definitions = (
+            self._index.entries.values()
+            if self._index is not None
+            else self._reaction_definitions.values()
+        )
+        return tuple(dict(definition) for definition in definitions)
+
     # ------------------------------------------------------------------
-    def _ensure_reaction_folder(self, reaction) -> Path:
+    def _ensure_reaction_folder(self, reaction, *, discovery_step: int) -> Path:
         """Create + populate the per-lateral-class folder if not yet done.
 
         Folders are nested as::
@@ -540,17 +885,30 @@ class ReactionWriter:
         folder = sub_root / species / _kind_folder_name(sub, iso, lat)
 
         if key in self._folder_meta:
+            self._folder_paths.setdefault(key, folder)
             return folder
 
-        folder.mkdir(parents=True, exist_ok=True)
+        ensure_directory(folder)
 
         lc = reaction.lateral_class
         if sub == "diffusion":
+            atoms_a_initial = getattr(lc, "atoms_a_initial", None)
+            atoms_b_initial = getattr(lc, "atoms_b_initial", None)
             atoms_a  = getattr(lc, "atoms_a",  None)
             atoms_b  = getattr(lc, "atoms_b",  None)
             atoms_ts = getattr(lc, "atoms_ts", None)
+            if atoms_a_initial is not None:
+                _atomic_extxyz(
+                    folder / "state_a_initial.extxyz",
+                    _safe_atoms_copy(atoms_a_initial),
+                )
+            if atoms_b_initial is not None:
+                _atomic_extxyz(
+                    folder / "state_b_initial.extxyz",
+                    _safe_atoms_copy(atoms_b_initial),
+                )
             if atoms_a is not None:
-                ase_write(folder / "state_a.extxyz", _safe_atoms_copy(atoms_a), format="extxyz")
+                _atomic_extxyz(folder / "state_a.extxyz", _safe_atoms_copy(atoms_a))
             else:
                 _log.warning(
                     "ReactionWriter: diffusion lateral_class iso=%d lat=%d "
@@ -558,7 +916,7 @@ class ReactionWriter:
                     iso, lat,
                 )
             if atoms_b is not None:
-                ase_write(folder / "state_b.extxyz", _safe_atoms_copy(atoms_b), format="extxyz")
+                _atomic_extxyz(folder / "state_b.extxyz", _safe_atoms_copy(atoms_b))
             else:
                 _log.warning(
                     "ReactionWriter: diffusion lateral_class iso=%d lat=%d "
@@ -566,7 +924,7 @@ class ReactionWriter:
                     iso, lat,
                 )
             if atoms_ts is not None:
-                ase_write(folder / "ts.extxyz", _safe_atoms_copy(atoms_ts), format="extxyz")
+                _atomic_extxyz(folder / "ts.extxyz", _safe_atoms_copy(atoms_ts))
             else:
                 _log.warning(
                     "ReactionWriter: diffusion lateral_class iso=%d lat=%d "
@@ -578,17 +936,38 @@ class ReactionWriter:
             # only when persist_neb_path=True.
             atoms_neb_path = getattr(lc, "atoms_neb_path", None)
             if atoms_neb_path:
-                ase_write(
+                _atomic_extxyz(
                     folder / "neb_path.extxyz",
                     [_safe_atoms_copy(im) for im in atoms_neb_path],
-                    format="extxyz",
+                )
+            atoms_neb_path_initial = getattr(
+                lc,
+                "atoms_neb_path_initial",
+                None,
+            )
+            if atoms_neb_path_initial:
+                _atomic_extxyz(
+                    folder / "neb_path_initial.extxyz",
+                    [_safe_atoms_copy(im) for im in atoms_neb_path_initial],
                 )
         elif sub == "bond":
+            atoms_ab_initial = getattr(lc, "atoms_ab_initial", None)
+            atoms_c_initial = getattr(lc, "atoms_c_initial", None)
             atoms_ab = getattr(lc, "atoms_ab", None)
             atoms_c  = getattr(lc, "atoms_c",  None)
             atoms_ts = getattr(lc, "atoms_ts", None)
+            if atoms_ab_initial is not None:
+                _atomic_extxyz(
+                    folder / "state_ab_initial.extxyz",
+                    _safe_atoms_copy(atoms_ab_initial),
+                )
+            if atoms_c_initial is not None:
+                _atomic_extxyz(
+                    folder / "state_c_initial.extxyz",
+                    _safe_atoms_copy(atoms_c_initial),
+                )
             if atoms_ab is not None:
-                ase_write(folder / "state_ab.extxyz", _safe_atoms_copy(atoms_ab), format="extxyz")
+                _atomic_extxyz(folder / "state_ab.extxyz", _safe_atoms_copy(atoms_ab))
             else:
                 _log.warning(
                     "ReactionWriter: bond lateral_class iso=%d lat=%d "
@@ -596,7 +975,7 @@ class ReactionWriter:
                     iso, lat,
                 )
             if atoms_c is not None:
-                ase_write(folder / "state_c.extxyz", _safe_atoms_copy(atoms_c), format="extxyz")
+                _atomic_extxyz(folder / "state_c.extxyz", _safe_atoms_copy(atoms_c))
             else:
                 _log.warning(
                     "ReactionWriter: bond lateral_class iso=%d lat=%d "
@@ -604,7 +983,7 @@ class ReactionWriter:
                     iso, lat,
                 )
             if atoms_ts is not None:
-                ase_write(folder / "ts.extxyz", _safe_atoms_copy(atoms_ts), format="extxyz")
+                _atomic_extxyz(folder / "ts.extxyz", _safe_atoms_copy(atoms_ts))
             else:
                 _log.warning(
                     "ReactionWriter: bond lateral_class iso=%d lat=%d "
@@ -613,17 +992,41 @@ class ReactionWriter:
                 )
             atoms_neb_path = getattr(lc, "atoms_neb_path", None)
             if atoms_neb_path:
-                ase_write(
+                _atomic_extxyz(
                     folder / "neb_path.extxyz",
                     [_safe_atoms_copy(im) for im in atoms_neb_path],
-                    format="extxyz",
+                )
+            atoms_neb_path_initial = getattr(
+                lc,
+                "atoms_neb_path_initial",
+                None,
+            )
+            if atoms_neb_path_initial:
+                _atomic_extxyz(
+                    folder / "neb_path_initial.extxyz",
+                    [_safe_atoms_copy(im) for im in atoms_neb_path_initial],
                 )
         else:
             # Stamped onto the lateral class by check_site_stability().
+            atoms_occ_initial = getattr(lc, "atoms_occupied_initial", None)
+            atoms_unocc_initial = getattr(lc, "atoms_unoccupied_initial", None)
             atoms_occ   = getattr(lc, "atoms_occupied",   None)
             atoms_unocc = getattr(lc, "atoms_unoccupied", None)
+            if atoms_occ_initial is not None:
+                _atomic_extxyz(
+                    folder / "occupied_initial.extxyz",
+                    _safe_atoms_copy(atoms_occ_initial),
+                )
+            if atoms_unocc_initial is not None:
+                _atomic_extxyz(
+                    folder / "unoccupied_initial.extxyz",
+                    _safe_atoms_copy(atoms_unocc_initial),
+                )
             if atoms_occ is not None:
-                ase_write(folder / "occupied.extxyz",   _safe_atoms_copy(atoms_occ),   format="extxyz")
+                _atomic_extxyz(
+                    folder / "occupied.extxyz",
+                    _safe_atoms_copy(atoms_occ),
+                )
             else:
                 _log.warning(
                     "ReactionWriter: lateral_class iso=%d lat=%d has no "
@@ -631,7 +1034,10 @@ class ReactionWriter:
                     iso, lat,
                 )
             if atoms_unocc is not None:
-                ase_write(folder / "unoccupied.extxyz", _safe_atoms_copy(atoms_unocc), format="extxyz")
+                _atomic_extxyz(
+                    folder / "unoccupied.extxyz",
+                    _safe_atoms_copy(atoms_unocc),
+                )
             else:
                 _log.warning(
                     "ReactionWriter: lateral_class iso=%d lat=%d has no "
@@ -644,6 +1050,16 @@ class ReactionWriter:
             "first_step": None,
             "last_step":  None,
         }
+        self._folder_paths[key] = folder
+        existing_discovery_step = None
+        metadata_path = folder / "reaction.json"
+        if metadata_path.is_file():
+            existing_discovery_step = _read_discovery_step(metadata_path)
+        self._discovery_steps[key] = (
+            int(discovery_step)
+            if existing_discovery_step is None
+            else existing_discovery_step
+        )
         return folder
 
     # ------------------------------------------------------------------
@@ -656,7 +1072,8 @@ class ReactionWriter:
         gas_free_energies: dict[str, float] | None,
         *,
         fired: bool,
-    ) -> None:
+        defer: bool = False,
+    ) -> dict[str, Any]:
         iso     = int(reaction.site.iso_class)
         lat     = int(reaction.lateral_class.lateral_class)
         sub     = _kind_subdir(getattr(reaction, "kind", "adsorption"))
@@ -669,296 +1086,92 @@ class ReactionWriter:
             meta["last_step"] = int(step)
 
         smiles = _reaction_smiles(reaction)
-        lc = reaction.lateral_class
-
-        if sub == "diffusion":
-            # Barriers use the same effective TS as the KMC engine.
-            # e_ts_eff = max(e_ts, max(e_a, e_b) + EA_MIN) so that both
-            # forward and reverse barriers are derived from the same TS level,
-            # preserving detailed balance (Ea_fwd − Ea_rev = E_b − E_a).
-            # Raw NEB energies are also persisted for auditability.
-            from autokmc.reactions.rates import EA_MIN as _EA_MIN
-            e_a  = getattr(lc, "energy_a",  None)
-            e_b  = getattr(lc, "energy_b",  None)
-            e_ts = getattr(lc, "energy_ts", None)
-            if e_a is not None and e_b is not None and e_ts is not None:
-                _e_a  = float(e_a)
-                _e_b  = float(e_b)
-                _e_ts = float(e_ts)
-                e_ts_eff   = max(_e_ts, max(_e_a, _e_b) + _EA_MIN)
-                ea_fwd_raw = _e_ts    - _e_a
-                ea_rev_raw = _e_ts    - _e_b
-                ea_fwd_kmc = max(_EA_MIN, e_ts_eff - _e_a)
-                ea_rev_kmc = max(_EA_MIN, e_ts_eff - _e_b)
-            else:
-                e_ts_eff = ea_fwd_raw = ea_fwd_kmc = None
-                ea_rev_raw = ea_rev_kmc = None
-
-            payload = {
-                "schema_version":   PERSISTENCE_SCHEMA_VERSION,
-                "kind":             "diffusion",
-                "iso_class":        iso,
-                "lateral_class":    lat,
-                "reactant_smiles":  smiles,
-                "kind_directions":  ["a_to_b", "b_to_a"],
-                "description":      _reaction_description(reaction, smiles),
-                "energies_ev": {
-                    "state_a":        None if e_a      is None else float(e_a),
-                    "state_b":        None if e_b      is None else float(e_b),
-                    "transition_raw": None if e_ts     is None else float(e_ts),
-                    "transition_eff": None if e_ts_eff is None else float(e_ts_eff),
-                },
-                "free_energies_ev": {
-                    "g_a":  None if getattr(lc, "g_a",  None) is None else float(lc.g_a),
-                    "g_b":  None if getattr(lc, "g_b",  None) is None else float(lc.g_b),
-                    "g_ts": None if getattr(lc, "g_ts", None) is None else float(lc.g_ts),
-                },
-                "vibrations": {
-                    "state_a": {
-                        "real_ev":          list(getattr(lc, "frequencies_a_ev",  []) or []),
-                        "imag_ev":          list(getattr(lc, "imaginary_a_ev",    []) or []),
-                        "zpe_ev":           getattr(lc, "zpe_a",     None),
-                        "entropy_ev_per_k": getattr(lc, "entropy_a", None),
-                    },
-                    "state_b": {
-                        "real_ev":          list(getattr(lc, "frequencies_b_ev",  []) or []),
-                        "imag_ev":          list(getattr(lc, "imaginary_b_ev",    []) or []),
-                        "zpe_ev":           getattr(lc, "zpe_b",     None),
-                        "entropy_ev_per_k": getattr(lc, "entropy_b", None),
-                    },
-                    "transition": {
-                        "real_ev":          list(getattr(lc, "frequencies_ts_ev", []) or []),
-                        "imag_ev":          list(getattr(lc, "imaginary_ts_ev",   []) or []),
-                        "zpe_ev":           getattr(lc, "zpe_ts",     None),
-                        "entropy_ev_per_k": getattr(lc, "entropy_ts", None),
-                    },
-                },
-                "barriers_ev": {
-                    "forward_raw": ea_fwd_raw,
-                    "forward_kmc": ea_fwd_kmc,
-                    "reverse_raw": ea_rev_raw,
-                    "reverse_kmc": ea_rev_kmc,
-                    "ea_min_floor": _EA_MIN,
-                },
-                "last_event": (
-                    {
-                        "kind":       str(reaction.kind),
-                        "direction":  getattr(reaction, "direction", None),
-                        "delta_e_ev": float(reaction.delta_e),
-                        "barrier_ev": float(reaction.barrier),
-                        "rate_hz":    float(reaction.rate),
-                        "step":       int(step),
-                    }
-                    if fired else None
-                ),
-                "stats": {
-                    "count":      int(meta["count"]),
-                    "first_step": meta["first_step"],
-                    "last_step":  meta["last_step"],
-                },
-                "atoms": {
-                    "state_a":    "state_a.extxyz",
-                    "state_b":    "state_b.extxyz",
-                    "transition": "ts.extxyz",
-                    "neb_path":   ("neb_path.extxyz"
-                                   if getattr(lc, "atoms_neb_path", None)
-                                   else None),
-                },
-                "calculator": dict(self._calc_meta),
-            }
-        elif sub == "bond":
-            from autokmc.reactions.rates import EA_MIN as _EA_MIN
-            tpl = getattr(reaction.site, "template", None)
-            e_ab = getattr(lc, "energy_ab", None)
-            e_c  = getattr(lc, "energy_c",  None)
-            e_ts = getattr(lc, "energy_ts", None)
-            if e_ab is not None and e_c is not None and e_ts is not None:
-                _e_ab = float(e_ab)
-                _e_c  = float(e_c)
-                _e_ts = float(e_ts)
-                e_ts_eff      = max(_e_ts, max(_e_ab, _e_c) + _EA_MIN)
-                ea_couple_raw = _e_ts    - _e_ab
-                ea_dissoc_raw = _e_ts    - _e_c
-                ea_couple_kmc = max(_EA_MIN, e_ts_eff - _e_ab)
-                ea_dissoc_kmc = max(_EA_MIN, e_ts_eff - _e_c)
-            else:
-                e_ts_eff = ea_couple_raw = ea_couple_kmc = None
-                ea_dissoc_raw = ea_dissoc_kmc = None
-
-            payload = {
-                "schema_version":  PERSISTENCE_SCHEMA_VERSION,
-                "kind":            "bond",
-                "iso_class":       iso,
-                "lateral_class":   lat,
-                "reactant_smiles": smiles,
-                "template": (
-                    {
-                        "smiles_a": tpl.smiles_a,
-                        "smiles_b": tpl.smiles_b,
-                        "smiles_c": tpl.smiles_c,
-                        "bond_type": getattr(tpl, "bond_type", None),
-                        "source":    getattr(tpl, "source", None),
-                    }
-                    if tpl is not None else None
-                ),
-                "kind_directions": ["couple", "dissoc"],
-                "description": BOND_DESCRIPTION_FMT.format(
-                    smiles_a  = getattr(tpl, "smiles_a", ""),
-                    smiles_b  = getattr(tpl, "smiles_b", ""),
-                    smiles_c  = getattr(tpl, "smiles_c", ""),
-                    iso       = iso,
-                    member    = reaction.member_index,
-                    lateral   = lat,
-                    direction = getattr(reaction, "direction", ""),
-                    delta_e   = float(reaction.delta_e),
-                    barrier   = float(reaction.barrier),
-                    rate      = float(reaction.rate),
-                ),
-                "energies_ev": {
-                    "state_ab":       None if e_ab     is None else float(e_ab),
-                    "state_c":        None if e_c      is None else float(e_c),
-                    "transition_raw": None if e_ts     is None else float(e_ts),
-                    "transition_eff": None if e_ts_eff is None else float(e_ts_eff),
-                },
-                "free_energies_ev": {
-                    "g_ab": None if getattr(lc, "g_ab", None) is None else float(lc.g_ab),
-                    "g_c":  None if getattr(lc, "g_c",  None) is None else float(lc.g_c),
-                    "g_ts": None if getattr(lc, "g_ts", None) is None else float(lc.g_ts),
-                },
-                "vibrations": {
-                    "state_ab": {
-                        "real_ev":          list(getattr(lc, "frequencies_ab_ev", []) or []),
-                        "imag_ev":          list(getattr(lc, "imaginary_ab_ev",   []) or []),
-                        "zpe_ev":           getattr(lc, "zpe_ab",     None),
-                        "entropy_ev_per_k": getattr(lc, "entropy_ab", None),
-                    },
-                    "state_c": {
-                        "real_ev":          list(getattr(lc, "frequencies_c_ev", []) or []),
-                        "imag_ev":          list(getattr(lc, "imaginary_c_ev",   []) or []),
-                        "zpe_ev":           getattr(lc, "zpe_c",     None),
-                        "entropy_ev_per_k": getattr(lc, "entropy_c", None),
-                    },
-                    "transition": {
-                        "real_ev":          list(getattr(lc, "frequencies_ts_ev", []) or []),
-                        "imag_ev":          list(getattr(lc, "imaginary_ts_ev",   []) or []),
-                        "zpe_ev":           getattr(lc, "zpe_ts",     None),
-                        "entropy_ev_per_k": getattr(lc, "entropy_ts", None),
-                    },
-                },
-                "atom_matching": {
-                    "method": getattr(lc, "atom_matching_method", None),
-                    "atom_mapping": list(getattr(lc, "atom_mapping", []) or []),
-                    "diagnostics": dict(getattr(lc, "matching_diagnostics", {}) or {}),
-                },
-                "barriers_ev": {
-                    "couple_raw": ea_couple_raw,
-                    "couple_kmc": ea_couple_kmc,
-                    "dissoc_raw": ea_dissoc_raw,
-                    "dissoc_kmc": ea_dissoc_kmc,
-                    "ea_min_floor": _EA_MIN,
-                },
-                "last_event": (
-                    {
-                        "kind":       str(reaction.kind),
-                        "direction":  getattr(reaction, "direction", None),
-                        "delta_e_ev": float(reaction.delta_e),
-                        "barrier_ev": float(reaction.barrier),
-                        "rate_hz":    float(reaction.rate),
-                        "step":       int(step),
-                    }
-                    if fired else None
-                ),
-                "stats": {
-                    "count":      int(meta["count"]),
-                    "first_step": meta["first_step"],
-                    "last_step":  meta["last_step"],
-                },
-                "atoms": {
-                    "state_ab":   "state_ab.extxyz",
-                    "state_c":    "state_c.extxyz",
-                    "transition": "ts.extxyz",
-                    "neb_path":   ("neb_path.extxyz"
-                                   if getattr(lc, "atoms_neb_path", None)
-                                   else None),
-                },
-                "calculator": dict(self._calc_meta),
-            }
+        payload = build_reaction_payload(
+            reaction,
+            subdir=sub,
+            iso_class=iso,
+            lateral_class=lat,
+            discovery_step=self._discovery_steps[(sub, species, iso, lat)],
+            smiles=smiles,
+            description=_reaction_description(reaction, smiles),
+            step=step,
+            fired=fired,
+            stats=meta,
+            calculator_meta=self._calc_meta,
+            run_id=self.run_id,
+            gas_energies=gas_energies,
+            gas_free_energies=gas_free_energies,
+        )
+        key = (sub, species, iso, lat)
+        if defer:
+            self._pending_payloads[key] = payload
         else:
-            e_gas  = float((gas_energies or {}).get(smiles, float("nan")))
-            g_gas  = (
-                None
-                if gas_free_energies is None or smiles not in gas_free_energies
-                else float(gas_free_energies[smiles])
-            )
-            e_occ   = getattr(lc, "energy_occupied",   None)
-            e_unocc = getattr(lc, "energy_unoccupied", None)
-            g_occ   = getattr(lc, "g_occupied",        None)
-            g_unocc = getattr(lc, "g_unoccupied",      None)
+            _atomic_json(folder / "reaction.json", payload)
+        definition = reaction_definition_from_document(
+            payload,
+            folder=folder.relative_to(self.output_dir),
+            run_id=self.run_id,
+        )
+        reaction_id = str(definition["reaction_id"])
+        self._reaction_definitions[reaction_id] = definition
+        if self._index is not None:
+            self._index.register(definition)
+        return payload
 
-            payload = {
-                "schema_version":   PERSISTENCE_SCHEMA_VERSION,
-                "kind":             "adsorption",
-                "iso_class":        iso,
-                "lateral_class":    lat,
-                "reactant_smiles":  smiles,
-                "kind_directions":  ["adsorption", "desorption"],
-                "description":      REACTION_DESCRIPTION_FMT.format(
-                    kind     = reaction.kind,
-                    smiles   = smiles,
-                    iso      = iso,
-                    member   = reaction.member_index,
-                    lateral  = lat,
-                    delta_e  = float(reaction.delta_e),
-                    barrier  = float(reaction.barrier),
-                    rate     = float(reaction.rate),
-                ),
-                "energies_ev": {
-                    "occupied":   None if e_occ   is None else float(e_occ),
-                    "unoccupied": None if e_unocc is None else float(e_unocc),
-                    "gas_phase":  e_gas,
-                },
-                "free_energies_ev": {
-                    "g_occupied":   None if g_occ   is None else float(g_occ),
-                    "g_unoccupied": None if g_unocc is None else float(g_unocc),
-                    "g_gas":        g_gas,
-                },
-                "vibrations": {
-                    "occupied": {
-                        "real_ev":          list(getattr(lc, "frequencies_occupied_ev",   []) or []),
-                        "imag_ev":          list(getattr(lc, "imaginary_occupied_ev",     []) or []),
-                        "zpe_ev":           getattr(lc, "zpe_occupied",     None),
-                        "entropy_ev_per_k": getattr(lc, "entropy_occupied", None),
-                    },
-                    "unoccupied": {
-                        "real_ev":          list(getattr(lc, "frequencies_unoccupied_ev", []) or []),
-                        "imag_ev":          list(getattr(lc, "imaginary_unoccupied_ev",   []) or []),
-                        "zpe_ev":           getattr(lc, "zpe_unoccupied",     None),
-                        "entropy_ev_per_k": getattr(lc, "entropy_unoccupied", None),
-                    },
-                },
-                "last_event": (
-                    {
-                        "kind":       str(reaction.kind),
-                        "delta_e_ev": float(reaction.delta_e),
-                        "barrier_ev": float(reaction.barrier),
-                        "rate_hz":    float(reaction.rate),
-                        "step":       int(step),
-                    }
-                    if fired else None
-                ),
-                "stats": {
-                    "count":      int(meta["count"]),
-                    "first_step": meta["first_step"],
-                    "last_step":  meta["last_step"],
-                },
-                "atoms": {
-                    "occupied":   "occupied.extxyz",
-                    "unoccupied": "unoccupied.extxyz",
-                },
-                "calculator": dict(self._calc_meta),
-            }
-        payload["run_id"] = self.run_id
-        _atomic_json(folder / "reaction.json", payload)
+    def _queue_event_metadata(
+        self,
+        event: dict[str, Any],
+    ) -> None:
+        """Update only dynamic reaction.json fields after a firing."""
+        iso = int(event["iso_class"])
+        lat = int(event["lateral_class"])
+        sub = _kind_subdir(str(event["kind"]))
+        species = _smiles_to_dirname(str(event["reactant_smiles"]))
+        key = (sub, species, iso, lat)
+        meta = self._folder_meta[key]
+        step = int(event["step"])
+        meta["count"] += 1
+        if meta["first_step"] is None:
+            meta["first_step"] = step
+        meta["last_step"] = step
+
+        payload = self._pending_payloads.get(key)
+        if payload is None:
+            path = self._folder_paths[key] / "reaction.json"
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["stats"] = dict(meta)
+        rate_energy_bases = {
+            str(value)
+            for value in payload.get("rate_energy_bases", [])
+            if value
+        }
+        if event.get("rate_energy_basis"):
+            rate_energy_bases.add(str(event["rate_energy_basis"]))
+        payload["rate_energy_bases"] = sorted(rate_energy_bases)
+        if event.get("description") is not None:
+            payload["description"] = event["description"]
+        last_event = {
+            "kind": str(event["kind"]),
+            "delta_e_ev": event.get("rate_delta_ev", event.get("delta_e_ev")),
+            "barrier_ev": event.get(
+                "rate_barrier_ev",
+                event.get("barrier_ev"),
+            ),
+            "rate_hz": event.get("rate_hz"),
+            "step": step,
+        }
+        if sub in {"diffusion", "bond"}:
+            last_event["direction"] = event.get("direction")
+        payload["last_event"] = last_event
+        self._pending_payloads[key] = payload
+        if self._index is not None:
+            self._index.update_stats(
+                str(event["reaction_id"]),
+                count=int(meta["count"]),
+                first_step=meta["first_step"],
+                last_step=meta["last_step"],
+                rate_energy_basis=event.get("rate_energy_basis"),
+            )
 
     # ------------------------------------------------------------------
     def ensure_reaction(
@@ -988,20 +1201,25 @@ class ReactionWriter:
         key     = (sub, species, iso, lat)
         if key in self._folder_meta:
             return self.reactions_root / sub / species / _kind_folder_name(sub, iso, lat)
-        folder = self._ensure_reaction_folder(reaction)
+        folder = self._ensure_reaction_folder(
+            reaction,
+            discovery_step=int(step),
+        )
         self._write_reaction_json(
             folder, reaction, step, gas_energies, gas_free_energies, fired=False,
         )
         return folder
 
     # ------------------------------------------------------------------
-    def write_invalid_diffusion(self, ds, lc) -> Path:
+    def write_invalid_diffusion(self, ds, lc, *, step: int = 0) -> Path:
         """Write an on-disk record for a diffusion lateral class that failed NEB.
 
-        Creates ``reactions/diffusion/<species>/diff_iso{X}_lat{Y}/`` and
-        writes a ``reaction.json`` with ``"valid": false`` and the failure
-        reason.  Any partial atoms already stored on *lc* are written as
-        ``state_a.extxyz`` / ``state_b.extxyz`` for post-mortem inspection.
+        Creates
+        ``diagnostics/invalid_diffusion/<species>/diff_iso{X}_lat{Y}/`` so
+        failed candidates do not appear in the authoritative reaction network.
+        A compact invalid entry is still included in ``reactions/index.jsonl``.
+        Any partial atoms stored on *lc* remain available for post-mortem
+        inspection.
 
         Idempotent — a second call for the same ``(iso, lat, species)`` is
         a no-op.
@@ -1011,43 +1229,139 @@ class ReactionWriter:
         smiles  = getattr(ds, "reactant", "")
         species = _smiles_to_dirname(smiles) if smiles else "unknown"
         key     = ("diffusion_invalid", species, iso, lat)
-        sub_root = self.reactions_root / "diffusion"
-        folder   = sub_root / species / _diffusion_folder_name(iso, lat)
+        folder = (
+            self.invalid_diffusion_root
+            / species
+            / _diffusion_folder_name(iso, lat)
+        )
 
         if key in self._folder_meta:
-            return folder
+            return self._folder_paths.get(key, folder)
 
-        folder.mkdir(parents=True, exist_ok=True)
+        ensure_directory(folder)
 
         atoms_a  = getattr(lc, "atoms_a",  None)
         atoms_b  = getattr(lc, "atoms_b",  None)
         atoms_ts = getattr(lc, "atoms_ts", None)
+        atoms_a_initial = getattr(lc, "atoms_a_initial", None)
+        atoms_b_initial = getattr(lc, "atoms_b_initial", None)
+        if atoms_a_initial is not None:
+            _atomic_extxyz(
+                folder / "state_a_initial.extxyz",
+                _safe_atoms_copy(atoms_a_initial),
+            )
+        if atoms_b_initial is not None:
+            _atomic_extxyz(
+                folder / "state_b_initial.extxyz",
+                _safe_atoms_copy(atoms_b_initial),
+            )
         if atoms_a is not None:
-            ase_write(folder / "state_a.extxyz", _safe_atoms_copy(atoms_a), format="extxyz")
+            _atomic_extxyz(folder / "state_a.extxyz", _safe_atoms_copy(atoms_a))
         if atoms_b is not None:
-            ase_write(folder / "state_b.extxyz", _safe_atoms_copy(atoms_b), format="extxyz")
+            _atomic_extxyz(folder / "state_b.extxyz", _safe_atoms_copy(atoms_b))
         if atoms_ts is not None:
-            ase_write(folder / "ts.extxyz", _safe_atoms_copy(atoms_ts), format="extxyz")
+            _atomic_extxyz(folder / "ts.extxyz", _safe_atoms_copy(atoms_ts))
+        atoms_neb_path_initial = getattr(lc, "atoms_neb_path_initial", None)
+        if atoms_neb_path_initial:
+            _atomic_extxyz(
+                folder / "neb_path_initial.extxyz",
+                [_safe_atoms_copy(image) for image in atoms_neb_path_initial],
+            )
+        atoms_neb_path = getattr(lc, "atoms_neb_path", None)
+        if atoms_neb_path:
+            _atomic_extxyz(
+                folder / "neb_path.extxyz",
+                [_safe_atoms_copy(image) for image in atoms_neb_path],
+            )
 
+        metadata_path = folder / "reaction.json"
+        existing_discovery_step = (
+            _read_discovery_step(metadata_path)
+            if metadata_path.is_file()
+            else None
+        )
+        discovery_step = (
+            int(step)
+            if existing_discovery_step is None
+            else existing_discovery_step
+        )
         payload = {
-            "schema_version":  PERSISTENCE_SCHEMA_VERSION,
+            "artifact_type": REACTION_DOCUMENT_ARTIFACT_TYPE,
+            "schema_version": REACTION_DOCUMENT_SCHEMA_VERSION,
             "kind":            "diffusion",
+            "discovery_step":  discovery_step,
             "iso_class":       iso,
             "lateral_class":   lat,
             "reactant_smiles": smiles,
             "valid":           False,
             "invalid_reason":  getattr(lc, "invalid_reason", None),
+            "kind_directions": ["a_to_b", "b_to_a"],
+            "description": (
+                "Invalid diffusion candidate"
+                if getattr(lc, "invalid_reason", None) is None
+                else f"Invalid diffusion candidate: {lc.invalid_reason}"
+            ),
+            "template": {"species": smiles},
+            "gas_product": False,
+            "rate_energy_bases": [],
+            "stats": {"count": 0, "first_step": None, "last_step": None},
             "energies_ev": {
                 "state_a":   None if getattr(lc, "energy_a",  None) is None else float(lc.energy_a),
                 "state_b":   None if getattr(lc, "energy_b",  None) is None else float(lc.energy_b),
                 "transition": None if getattr(lc, "energy_ts", None) is None else float(lc.energy_ts),
             },
+            "atoms": {
+                "state_a_initial": (
+                    "state_a_initial.extxyz"
+                    if atoms_a_initial is not None
+                    else None
+                ),
+                "state_b_initial": (
+                    "state_b_initial.extxyz"
+                    if atoms_b_initial is not None
+                    else None
+                ),
+                "state_a": (
+                    "state_a.extxyz" if atoms_a is not None else None
+                ),
+                "state_b": (
+                    "state_b.extxyz" if atoms_b is not None else None
+                ),
+                "transition": (
+                    "ts.extxyz" if atoms_ts is not None else None
+                ),
+                "neb_path_initial": (
+                    "neb_path_initial.extxyz"
+                    if atoms_neb_path_initial
+                    else None
+                ),
+                "neb_path": (
+                    "neb_path.extxyz" if atoms_neb_path else None
+                ),
+            },
             "calculator": dict(self._calc_meta),
         }
         payload["run_id"] = self.run_id
-        _atomic_json(folder / "reaction.json", payload)
+        payload["reaction_id"] = stable_reaction_id(
+            "diffusion",
+            smiles,
+            iso,
+            lat,
+        )
+        _atomic_json(metadata_path, payload)
 
         self._folder_meta[key] = {"count": 0, "first_step": None, "last_step": None}
+        self._folder_paths[key] = folder
+        self._discovery_steps[key] = discovery_step
+        definition = reaction_definition_from_document(
+            payload,
+            folder=folder.relative_to(self.output_dir),
+            run_id=self.run_id,
+        )
+        reaction_id = str(definition["reaction_id"])
+        self._reaction_definitions[reaction_id] = definition
+        if self._index is not None:
+            self._index.register(definition)
         _log.info(
             "ReactionWriter: wrote invalid diffusion folder "
             "species=%s iso=%d lat=%d  reason=%s",
@@ -1077,9 +1391,11 @@ class ReactionWriter:
         transition = dict(transition or reaction_transition(reaction))
 
         smiles = _reaction_smiles(reaction)
-        folder = self._ensure_reaction_folder(reaction)
-        self._write_reaction_json(
-            folder, reaction, step, gas_energies, gas_free_energies, fired=True,
+        folder = self.ensure_reaction(
+            reaction,
+            step=step,
+            gas_energies=gas_energies,
+            gas_free_energies=gas_free_energies,
         )
 
         rate_delta_ev = _finite_float(getattr(reaction, "delta_e", None))
@@ -1112,9 +1428,17 @@ class ReactionWriter:
             barrier_ev=rate_barrier_ev,
             energy_basis=rate_energy_basis,
         )
+        reaction_id = stable_reaction_id(
+            str(reaction.kind),
+            str(smiles),
+            int(reaction.site.iso_class),
+            int(reaction.lateral_class.lateral_class),
+        )
 
         rec = ReactionRecord(
-            schema_version  = PERSISTENCE_SCHEMA_VERSION,
+            schema_version  = EVENT_SCHEMA_VERSION,
+            event_id        = stable_event_id(self.run_id, int(step)),
+            reaction_id     = reaction_id,
             step            = int(step),
             time_s          = float(time_s),
             tau_s           = float(tau_s),
@@ -1141,16 +1465,66 @@ class ReactionWriter:
             rate_barrier_ev   = rate_barrier_ev,
         )
 
-        self._fp.write(json.dumps(rec.to_jsonable()) + "\n")
-        self._fp.flush()
+        event_payload = rec.to_jsonable(include_static=False)
+        self._append_event(event_payload)
         self._n_written += 1
+        # Static structures, energetics, vibration arrays, and calculator
+        # metadata were built when the folder was discovered.  Only counters
+        # and the last fired direction change per event.
+        self._queue_event_metadata(rec.to_jsonable(include_static=True))
         return rec
+
+    # ------------------------------------------------------------------
+    @instrument("persistence.event_append")
+    def _append_event(self, payload: dict[str, Any]) -> None:
+        """Buffer one event row until the next durable checkpoint boundary."""
+        if self._fp is None:
+            raise RuntimeError("ReactionWriter has been closed")
+        self._fp.write(json.dumps(payload) + "\n")
+        self._events_dirty = True
+
+    @instrument("persistence.metadata_flush")
+    def flush_reaction_stats(self) -> None:
+        """Atomically publish all batched reaction.json updates."""
+        for key, payload in list(self._pending_payloads.items()):
+            folder = self._folder_paths.get(key)
+            if folder is None:
+                continue
+            _atomic_json(folder / "reaction.json", payload)
+            self._pending_payloads.pop(key, None)
+
+    @instrument("persistence.event_sync")
+    def sync_for_checkpoint(self) -> EventLogCommit:
+        """Durably sync events and batched metadata before a checkpoint."""
+        if self._fp is None:
+            raise RuntimeError("ReactionWriter has been closed")
+        if self._events_dirty:
+            self._fp.flush()
+            os.fsync(self._fp.fileno())
+            if self._event_directory_dirty:
+                fsync_directory(self._jsonl_path.parent)
+                self._event_directory_dirty = False
+            self._events_dirty = False
+        if self._pending_payloads:
+            self.flush_reaction_stats()
+        if self._index is not None:
+            self._index.sync()
+        return EventLogCommit(
+            count=self._n_written,
+            offset=os.fstat(self._fp.fileno()).st_size,
+        )
 
     # ------------------------------------------------------------------
     def close(self) -> None:
         if self._fp is not None:
-            self._fp.close()
-            self._fp = None
+            try:
+                self.sync_for_checkpoint()
+            finally:
+                self._fp.close()
+                self._fp = None
+        if self._index is not None:
+            self._index.close()
+            self._index = None
 
     def __enter__(self):  # pragma: no cover
         return self

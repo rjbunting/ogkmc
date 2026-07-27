@@ -36,6 +36,12 @@ from autokmc.structure.nanoparticle import (
     calculate_surface_energies,
     normalise_surface_energies,
 )
+from autokmc.structure.loading import (
+    StructureInputError,
+    load_structure_file,
+    resolve_frozen_indices,
+    resolve_structure_path,
+)
 from autokmc.structure.slab import (
     _get_bottom_layer_indices,
     _orthogonalise_slab,
@@ -56,6 +62,10 @@ __all__ = [
     "calculate_surface_energies",
     "normalise_surface_energies",
     "build_surface",
+    "StructureInputError",
+    "load_structure_file",
+    "resolve_frozen_indices",
+    "resolve_structure_path",
     "optimise_bulk",
     "optimise_structure",
     "find_surface_atoms",
