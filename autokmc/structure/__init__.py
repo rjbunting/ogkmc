@@ -27,6 +27,7 @@ from autokmc.structure.builders import (
     _validate_crystal_structure,
 )
 from autokmc.structure.optimization import (
+    StructureOptimisationError,
     _resolve_lattice_params,
     optimise_bulk,
     optimise_structure,
@@ -63,6 +64,7 @@ __all__ = [
     "normalise_surface_energies",
     "build_surface",
     "StructureInputError",
+    "StructureOptimisationError",
     "load_structure_file",
     "resolve_frozen_indices",
     "resolve_structure_path",

@@ -18,6 +18,7 @@ from autokmc.io.performance import (
 from autokmc.io.persistence import (
     DIAGNOSTICS_DIR,
     INVALID_ADSORPTION_DIR,
+    INVALID_BOND_DIR,
     INVALID_DIFFUSION_DIR,
 )
 from autokmc.io.run_manifest import (
@@ -150,6 +151,9 @@ def _output_paths(
         ),
         "invalid_diffusion": str(
             identity.output_dir / DIAGNOSTICS_DIR / INVALID_DIFFUSION_DIR
+        ),
+        "invalid_bond": str(
+            identity.output_dir / DIAGNOSTICS_DIR / INVALID_BOND_DIR
         ),
         "n_unique_reactions": sinks.reactions.n_unique_reactions,
         "checkpoint": checkpoint_path,

@@ -661,6 +661,11 @@ def configured_artifact_descriptors(
             "type": "invalid-diffusion-diagnostics-directory",
             "schema_version": REACTION_DOCUMENT_SCHEMA_VERSION,
         },
+        "invalid_bond": {
+            "path": root / "diagnostics" / "invalid_bond",
+            "type": "invalid-bond-diagnostics-directory",
+            "schema_version": REACTION_DOCUMENT_SCHEMA_VERSION,
+        },
     }
 
 
@@ -861,7 +866,10 @@ def discover_quarantine_locations(
         for path in quarantine_root.glob("after_checkpoint_step_*/*/*/*")
         if path.is_dir()
         and path.relative_to(quarantine_root).parts[1:3]
-        != ("diagnostics", "invalid_diffusion")
+        not in {
+            ("diagnostics", "invalid_diffusion"),
+            ("diagnostics", "invalid_bond"),
+        }
     }
     invalid_diffusion_leaves = {
         path
@@ -870,7 +878,16 @@ def discover_quarantine_locations(
         )
         if path.is_dir()
     }
-    leaves = sorted(regular_leaves | invalid_diffusion_leaves)
+    invalid_bond_leaves = {
+        path
+        for path in quarantine_root.glob(
+            "after_checkpoint_step_*/diagnostics/invalid_bond/*/*"
+        )
+        if path.is_dir()
+    }
+    leaves = sorted(
+        regular_leaves | invalid_diffusion_leaves | invalid_bond_leaves
+    )
     return [_display_path(path, root) for path in leaves[: max(0, maximum)]]
 
 

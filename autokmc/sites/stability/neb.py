@@ -29,6 +29,7 @@ from ase.geometry import find_mic
 from ase.optimize import BFGS, FIRE, MDMin
 
 from autokmc.io.calculators import (
+    CalculatorConfigError,
     CalculatorPool,
     acquire_calculator,
     calculator_batch_active,
@@ -586,6 +587,7 @@ def run_neb(
     capture_path: bool = False,
     initial_path: Sequence[Atoms] | None = None,
     initial_path_callback: Callable[[list[Atoms]], None] | None = None,
+    failure_path_callback: Callable[[list[Atoms]], None] | None = None,
     band_factory=None,
     logfile_factory=None,
 ) -> NEBRunResult:
@@ -596,7 +598,10 @@ def run_neb(
     mechanical optimisation step.  When ``climb`` is requested, the ordinary
     NEB is converged first and the same band is then converged again after
     enabling its climbing image.  ``max_steps`` applies independently to each
-    stage, while ``optimizer_steps`` reports their combined step count.
+    stage, while ``optimizer_steps`` reports their combined step count.  If an
+    optimizer, calculator, or convergence check raises after band construction,
+    *failure_path_callback* receives a calculator-detached snapshot of the
+    last-known full band before the exception is re-raised.
     """
     build_band = band_factory or make_neb_band
     select_logfile = logfile_factory or neb_optimizer_logfile
@@ -626,11 +631,21 @@ def run_neb(
         }
         if initial_path is not None:
             band_kwargs["initial_path"] = initial_path
-        neb, images = build_band(
-            atoms_initial,
-            atoms_final,
-            **band_kwargs,
-        )
+        try:
+            neb, images = build_band(
+                atoms_initial,
+                atoms_final,
+                **band_kwargs,
+            )
+        except CalculatorConfigError:
+            raise
+        except Exception as exc:
+            if isinstance(exc, not_converged_error):
+                raise
+            raise not_converged_error(
+                "NEB band construction failed: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
         try:
             if initial_path_callback is not None:
                 initial_snapshot_path = []
@@ -707,6 +722,26 @@ def run_neb(
                 path_energies=path_energies,
                 path_images=path_images,
             )
+        except Exception as exc:
+            if failure_path_callback is not None:
+                failed_path = []
+                for image in images:
+                    snapshot = image.copy()
+                    snapshot.calc = None
+                    failed_path.append(snapshot)
+                try:
+                    failure_path_callback(failed_path)
+                except Exception as callback_exc:
+                    _log.warning(
+                        "Could not retain failed NEB path for diagnostics: %s",
+                        callback_exc,
+                    )
+            if isinstance(exc, (CalculatorConfigError, not_converged_error)):
+                raise
+            raise not_converged_error(
+                "NEB optimization failed: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
         finally:
             for image in images:
                 image.calc = None

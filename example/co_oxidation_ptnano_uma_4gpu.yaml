@@ -48,20 +48,22 @@ reactants:
 # catalysis. The first run needs fairchem-core installed and Hugging Face access
 # to facebook/UMA, either through huggingface-cli login or HF_TOKEN.
 #
-# FAIR-Chem owns the four-GPU distribution through its ``workers`` argument.
-# AutoKMC therefore keeps one calculator instance and one calculator task slot.
-# Setting copies/max_workers to four would instead construct four models in one
-# Python process; identical ``device: cuda`` values would all target the same
-# default logical GPU rather than assigning one AutoKMC thread per GPU.
+# Build one independent UMA predictor per GPU. FAIR-Chem accepts ``cuda`` for a
+# single predictor, so AutoKMC's helper selects each requested ordinal while
+# constructing it and verifies the resolved device before the run starts.
 calculator:
-  factory: fairchem.core.FAIRChemCalculator.from_model_checkpoint
+  factory: fairchem.core.FAIRChemCalculator
   factory_kwargs:
-    name_or_path: uma-s-1p2
+    predict_unit:
+      factory: autokmc.io.fairchem.get_predict_unit_on_device
+      factory_kwargs:
+        name_or_path: uma-s-1p2
+        device: cuda
     task_name: oc20
-    device: cuda
-    workers: 4
-  copies: 1
-  max_workers: 1
+  copies: 4
+  gpu_devices: [cuda:0, cuda:1, cuda:2, cuda:3]
+  gpu_device_arg: predict_unit.factory_kwargs.device
+  max_workers: 4
 
 adsorbate_sites:
   prune_stable_only: true

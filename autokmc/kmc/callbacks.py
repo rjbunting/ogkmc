@@ -28,6 +28,14 @@ class CalculatorPoolLike(Protocol):
 
 
 class ReactionWriterLike(Protocol):
+    def write_invalid_adsorption(
+        self,
+        site,
+        lateral_class,
+        *,
+        step: int = 0,
+    ): ...
+
     def ensure_reaction(
         self,
         reaction,
@@ -38,6 +46,14 @@ class ReactionWriterLike(Protocol):
     ): ...
 
     def write_invalid_diffusion(
+        self,
+        site,
+        lateral_class,
+        *,
+        step: int = 0,
+    ): ...
+
+    def write_invalid_bond(
         self,
         site,
         lateral_class,

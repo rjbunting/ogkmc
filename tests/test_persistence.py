@@ -1028,6 +1028,7 @@ def test_invalid_diffusion_record_tolerates_missing_energies(tmp_path):
         atoms_a_initial=atoms.copy(),
         atoms_b_initial=atoms.copy(),
         atoms_neb_path_initial=[atoms.copy(), atoms.copy()],
+        atoms_neb_path=[atoms.copy(), atoms.copy()],
     )
 
     w = ReactionWriter(tmp_path)
@@ -1052,14 +1053,103 @@ def test_invalid_diffusion_record_tolerates_missing_energies(tmp_path):
     assert (folder / "state_a_initial.extxyz").is_file()
     assert (folder / "state_b_initial.extxyz").is_file()
     assert (folder / "neb_path_initial.extxyz").is_file()
+    assert (folder / "neb_path.extxyz").is_file()
     assert payload["atoms"]["state_a_initial"] == "state_a_initial.extxyz"
     assert payload["atoms"]["state_b_initial"] == "state_b_initial.extxyz"
     assert payload["atoms"]["neb_path_initial"] == "neb_path_initial.extxyz"
+    assert payload["atoms"]["neb_path"] == "neb_path.extxyz"
     definitions = load_reaction_index(tmp_path / "reactions" / "index.jsonl")
     definition = definitions[payload["reaction_id"]]
     assert definition["valid"] is False
     assert definition["folder"] == (
         "diagnostics/invalid_diffusion/(O)/diff_iso1_lat2"
+    )
+
+
+def test_invalid_adsorption_record_writes_last_known_endpoint(tmp_path):
+    initial = Atoms("H", positions=[[0.0, 0.0, 0.0]])
+    failed = Atoms("H", positions=[[1.5, 0.0, 0.0]])
+    site = SimpleNamespace(iso_class=2, reactant="[H]")
+    lateral = SimpleNamespace(
+        lateral_class=3,
+        invalid_reason="OptimisationFailedError: forced failure",
+        atoms_occupied_initial=initial,
+        atoms_occupied=failed,
+        atoms_unoccupied_initial=None,
+        atoms_unoccupied=None,
+        energy_occupied=None,
+        energy_unoccupied=None,
+    )
+
+    writer = ReactionWriter(tmp_path)
+    folder = writer.write_invalid_adsorption(site, lateral, step=6)
+    writer.close()
+
+    assert folder == (
+        tmp_path
+        / "diagnostics"
+        / "invalid_adsorption"
+        / "(H)"
+        / "ads_iso2_lat3"
+    )
+    assert (folder / "occupied_initial.extxyz").is_file()
+    assert (folder / "occupied.extxyz").is_file()
+    restored = ase_read(folder / "occupied.extxyz")
+    assert restored.positions[0, 0] == pytest.approx(1.5)
+    payload = json.loads((folder / "diagnostic.json").read_text())
+    assert payload["discovery_step"] == 6
+    assert payload["structures"]["occupied"] == "occupied.extxyz"
+
+
+def test_invalid_bond_record_writes_failed_endpoint_and_neb_paths(tmp_path):
+    atoms = Atoms("H", positions=[[0.0, 0.0, 0.0]])
+    template = SimpleNamespace(
+        smiles_a="[H]",
+        smiles_b="[H]",
+        smiles_c="[H][H]",
+        bond_type="SINGLE",
+        source="coupling",
+    )
+    site = SimpleNamespace(
+        iso_class=3,
+        template=template,
+        gas_product=False,
+    )
+    lateral = SimpleNamespace(
+        lateral_class=4,
+        invalid_reason="BondNEBNotConvergedError: forced failure",
+        atoms_ab_initial=atoms.copy(),
+        atoms_c_initial=atoms.copy(),
+        atoms_ab=atoms.copy(),
+        atoms_c=atoms.copy(),
+        atoms_neb_path_initial=[atoms.copy(), atoms.copy(), atoms.copy()],
+        atoms_neb_path=[atoms.copy(), atoms.copy(), atoms.copy()],
+    )
+
+    writer = ReactionWriter(tmp_path)
+    folder = writer.write_invalid_bond(site, lateral, step=9)
+    writer.close()
+
+    assert folder.parent.parent == tmp_path / "diagnostics" / "invalid_bond"
+    assert folder.name == "bond_iso3_lat4"
+    for filename in (
+        "state_ab_initial.extxyz",
+        "state_c_initial.extxyz",
+        "state_ab.extxyz",
+        "state_c.extxyz",
+        "neb_path_initial.extxyz",
+        "neb_path.extxyz",
+        "reaction.json",
+    ):
+        assert (folder / filename).is_file()
+    payload = json.loads((folder / "reaction.json").read_text())
+    assert payload["kind"] == "bond"
+    assert payload["valid"] is False
+    assert payload["discovery_step"] == 9
+    assert payload["atoms"]["neb_path"] == "neb_path.extxyz"
+    definitions = load_reaction_index(tmp_path / "reactions" / "index.jsonl")
+    assert definitions[payload["reaction_id"]]["folder"].startswith(
+        "diagnostics/invalid_bond/"
     )
 
 

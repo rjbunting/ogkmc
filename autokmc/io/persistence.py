@@ -115,6 +115,7 @@ UNCOMMITTED_REACTIONS_DIR = "uncommitted_reactions"
 DIAGNOSTICS_DIR = "diagnostics"
 INVALID_ADSORPTION_DIR = "invalid_adsorption"
 INVALID_DIFFUSION_DIR = "invalid_diffusion"
+INVALID_BOND_DIR = "invalid_bond"
 
 
 def _atomic_json(path: Path, payload: Any) -> None:
@@ -278,11 +279,16 @@ def _quarantine_uncommitted_reaction_folders(
     invalid_diffusion_root = (
         output_dir / DIAGNOSTICS_DIR / INVALID_DIFFUSION_DIR
     )
+    invalid_bond_root = output_dir / DIAGNOSTICS_DIR / INVALID_BOND_DIR
     roots = (
         (reactions_root, Path()),
         (
             invalid_diffusion_root,
             Path(DIAGNOSTICS_DIR) / INVALID_DIFFUSION_DIR,
+        ),
+        (
+            invalid_bond_root,
+            Path(DIAGNOSTICS_DIR) / INVALID_BOND_DIR,
         ),
     )
     leaf_folders: list[tuple[Path, Path, Path]] = []
@@ -620,6 +626,12 @@ class ReactionWriter:
         self.invalid_diffusion_root = (
             self.output_dir / DIAGNOSTICS_DIR / INVALID_DIFFUSION_DIR
         )
+        self.invalid_adsorption_root = (
+            self.output_dir / DIAGNOSTICS_DIR / INVALID_ADSORPTION_DIR
+        )
+        self.invalid_bond_root = (
+            self.output_dir / DIAGNOSTICS_DIR / INVALID_BOND_DIR
+        )
 
         self._jsonl_path: Path = self.output_dir / reactions_filename
         self._calc_meta: dict[str, Any] = dict(calculator_meta or {})
@@ -669,28 +681,43 @@ class ReactionWriter:
             dict[str, Any],
         ] = {}
         metadata_paths = [
-            *((path, False) for path in self.reactions_root.glob("*/*/*/reaction.json")),
-            *((path, True) for path in self.invalid_diffusion_root.glob("*/*/reaction.json")),
+            *((path, None) for path in self.reactions_root.glob("*/*/*/reaction.json")),
+            *(
+                (path, "diffusion_invalid")
+                for path in self.invalid_diffusion_root.glob("*/*/reaction.json")
+            ),
+            *(
+                (path, "bond_invalid")
+                for path in self.invalid_bond_root.glob("*/*/reaction.json")
+            ),
         ]
         for path, diagnostic_invalid in metadata_paths:
             try:
                 if diagnostic_invalid:
-                    relative = path.relative_to(self.invalid_diffusion_root)
+                    diagnostic_root = (
+                        self.invalid_diffusion_root
+                        if diagnostic_invalid == "diffusion_invalid"
+                        else self.invalid_bond_root
+                    )
+                    relative = path.relative_to(diagnostic_root)
                     species = relative.parts[0]
-                    sub = "diffusion_invalid"
+                    sub = diagnostic_invalid
                 else:
                     relative = path.relative_to(self.reactions_root)
                     sub, species = relative.parts[:2]
                 payload = json.loads(path.read_text(encoding="utf-8"))
-                key = (
-                    (
-                        "diffusion_invalid"
-                        if (
-                            diagnostic_invalid
-                            or (sub == "diffusion" and payload.get("valid") is False)
-                        )
+                restored_sub = (
+                    str(diagnostic_invalid)
+                    if diagnostic_invalid
+                    else (
+                        f"{sub}_invalid"
+                        if sub in {"diffusion", "bond"}
+                        and payload.get("valid") is False
                         else str(sub)
-                    ),
+                    )
+                )
+                key = (
+                    restored_sub,
                     str(species),
                     int(payload["iso_class"]),
                     int(payload["lateral_class"]),
@@ -1211,6 +1238,88 @@ class ReactionWriter:
         return folder
 
     # ------------------------------------------------------------------
+    def write_invalid_adsorption(self, site, lc, *, step: int = 0) -> Path:
+        """Write last-known structures for a failed adsorption lateral class."""
+        iso = int(site.iso_class)
+        lat = int(lc.lateral_class)
+        smiles = str(getattr(site, "reactant", ""))
+        species = _smiles_to_dirname(smiles) if smiles else "unknown"
+        key = ("adsorption_invalid", species, iso, lat)
+        folder = (
+            self.invalid_adsorption_root
+            / species
+            / f"ads_iso{iso}_lat{lat}"
+        )
+        if key in self._folder_meta:
+            return self._folder_paths.get(key, folder)
+
+        ensure_directory(folder)
+        structure_specs = (
+            (
+                "occupied_initial",
+                "occupied_initial.extxyz",
+                getattr(lc, "atoms_occupied_initial", None),
+            ),
+            (
+                "occupied",
+                "occupied.extxyz",
+                getattr(lc, "atoms_occupied", None),
+            ),
+            (
+                "unoccupied_initial",
+                "unoccupied_initial.extxyz",
+                getattr(lc, "atoms_unoccupied_initial", None),
+            ),
+            (
+                "unoccupied",
+                "unoccupied.extxyz",
+                getattr(lc, "atoms_unoccupied", None),
+            ),
+        )
+        atom_assets: dict[str, str | None] = {}
+        for key_name, filename, atoms in structure_specs:
+            if atoms is not None:
+                _atomic_extxyz(folder / filename, _safe_atoms_copy(atoms))
+                atom_assets[key_name] = filename
+            else:
+                atom_assets[key_name] = None
+
+        payload = {
+            "artifact_type": "autokmc-invalid-adsorption-lateral-diagnostic",
+            "schema_version": "1",
+            "kind": "adsorption",
+            "discovery_step": int(step),
+            "iso_class": iso,
+            "lateral_class": lat,
+            "reactant_smiles": smiles,
+            "invalid_reason": getattr(lc, "invalid_reason", None),
+            "structures": atom_assets,
+            "energies_ev": {
+                "occupied": (
+                    None
+                    if getattr(lc, "energy_occupied", None) is None
+                    else float(lc.energy_occupied)
+                ),
+                "unoccupied": (
+                    None
+                    if getattr(lc, "energy_unoccupied", None) is None
+                    else float(lc.energy_unoccupied)
+                ),
+            },
+            "calculator": dict(self._calc_meta),
+            "run_id": self.run_id,
+        }
+        _atomic_json(folder / "diagnostic.json", payload)
+        self._folder_meta[key] = {
+            "count": 0,
+            "first_step": None,
+            "last_step": None,
+        }
+        self._folder_paths[key] = folder
+        self._discovery_steps[key] = int(step)
+        return folder
+
+    # ------------------------------------------------------------------
     def write_invalid_diffusion(self, ds, lc, *, step: int = 0) -> Path:
         """Write an on-disk record for a diffusion lateral class that failed NEB.
 
@@ -1366,6 +1475,149 @@ class ReactionWriter:
             "ReactionWriter: wrote invalid diffusion folder "
             "species=%s iso=%d lat=%d  reason=%s",
             species, iso, lat, getattr(lc, "invalid_reason", None),
+        )
+        return folder
+
+    # ------------------------------------------------------------------
+    def write_invalid_bond(self, brs, lc, *, step: int = 0) -> Path:
+        """Write endpoint and NEB diagnostics for an invalid bond candidate."""
+        iso = int(brs.iso_class)
+        lat = int(lc.lateral_class)
+        template = brs.template
+        smiles = (
+            f"{template.smiles_a}+{template.smiles_b}"
+            f"↔{template.smiles_c}"
+        )
+        species = _smiles_to_dirname(smiles) if smiles else "unknown"
+        key = ("bond_invalid", species, iso, lat)
+        folder = (
+            self.invalid_bond_root
+            / species
+            / _kind_folder_name("bond", iso, lat)
+        )
+        if key in self._folder_meta:
+            return self._folder_paths.get(key, folder)
+
+        ensure_directory(folder)
+        structure_specs = (
+            ("state_ab_initial", "state_ab_initial.extxyz", getattr(lc, "atoms_ab_initial", None)),
+            ("state_c_initial", "state_c_initial.extxyz", getattr(lc, "atoms_c_initial", None)),
+            ("state_ab", "state_ab.extxyz", getattr(lc, "atoms_ab", None)),
+            ("state_c", "state_c.extxyz", getattr(lc, "atoms_c", None)),
+            ("transition", "ts.extxyz", getattr(lc, "atoms_ts", None)),
+        )
+        atom_assets: dict[str, str | None] = {}
+        for key_name, filename, atoms in structure_specs:
+            if atoms is not None:
+                _atomic_extxyz(folder / filename, _safe_atoms_copy(atoms))
+                atom_assets[key_name] = filename
+            else:
+                atom_assets[key_name] = None
+
+        for key_name, filename, attribute in (
+            ("neb_path_initial", "neb_path_initial.extxyz", "atoms_neb_path_initial"),
+            ("neb_path", "neb_path.extxyz", "atoms_neb_path"),
+        ):
+            images = getattr(lc, attribute, None)
+            if images:
+                _atomic_extxyz(
+                    folder / filename,
+                    [_safe_atoms_copy(image) for image in images],
+                )
+                atom_assets[key_name] = filename
+            else:
+                atom_assets[key_name] = None
+
+        metadata_path = folder / "reaction.json"
+        existing_discovery_step = (
+            _read_discovery_step(metadata_path)
+            if metadata_path.is_file()
+            else None
+        )
+        discovery_step = (
+            int(step)
+            if existing_discovery_step is None
+            else existing_discovery_step
+        )
+        payload = {
+            "artifact_type": REACTION_DOCUMENT_ARTIFACT_TYPE,
+            "schema_version": REACTION_DOCUMENT_SCHEMA_VERSION,
+            "kind": "bond",
+            "discovery_step": discovery_step,
+            "iso_class": iso,
+            "lateral_class": lat,
+            "reactant_smiles": smiles,
+            "valid": False,
+            "invalid_reason": getattr(lc, "invalid_reason", None),
+            "kind_directions": ["couple", "dissoc"],
+            "description": (
+                "Invalid bond candidate"
+                if getattr(lc, "invalid_reason", None) is None
+                else f"Invalid bond candidate: {lc.invalid_reason}"
+            ),
+            "template": {
+                "smiles_a": template.smiles_a,
+                "smiles_b": template.smiles_b,
+                "smiles_c": template.smiles_c,
+                "bond_type": getattr(template, "bond_type", None),
+                "source": getattr(template, "source", None),
+            },
+            "gas_product": bool(getattr(brs, "gas_product", False)),
+            "rate_energy_bases": [],
+            "stats": {"count": 0, "first_step": None, "last_step": None},
+            "energies_ev": {
+                "state_ab": (
+                    None
+                    if getattr(lc, "energy_ab", None) is None
+                    else float(lc.energy_ab)
+                ),
+                "state_c": (
+                    None
+                    if getattr(lc, "energy_c", None) is None
+                    else float(lc.energy_c)
+                ),
+                "transition_raw": (
+                    None
+                    if getattr(lc, "energy_ts", None) is None
+                    else float(lc.energy_ts)
+                ),
+                "transition_eff": None,
+            },
+            "atoms": atom_assets,
+            "calculator": dict(self._calc_meta),
+            "run_id": self.run_id,
+        }
+        payload["reaction_id"] = stable_reaction_id(
+            "bond",
+            smiles,
+            iso,
+            lat,
+        )
+        _atomic_json(metadata_path, payload)
+
+        self._folder_meta[key] = {
+            "count": 0,
+            "first_step": None,
+            "last_step": None,
+        }
+        self._folder_paths[key] = folder
+        self._discovery_steps[key] = discovery_step
+        definition = reaction_definition_from_document(
+            payload,
+            folder=folder.relative_to(self.output_dir),
+            run_id=self.run_id,
+        )
+        reaction_id = str(definition["reaction_id"])
+        self._reaction_definitions[reaction_id] = definition
+        if self._index is not None:
+            self._index.register(definition)
+        _log.info(
+            "ReactionWriter: wrote invalid bond folder "
+            "species=%s iso=%d lat=%d reason=%s",
+            species,
+            iso,
+            lat,
+            getattr(lc, "invalid_reason", None),
         )
         return folder
 

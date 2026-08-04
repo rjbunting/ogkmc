@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -250,6 +252,98 @@ def test_build_calculator_pool_with_nested_factory_and_dotted_gpu_arg():
         assert c0.predictor.device == "cuda:0"
         assert c1.predictor.device == "cuda:1"
         assert c0.task_name == "oc20"
+
+
+def test_build_fairchem_predictors_on_distinct_cuda_devices(monkeypatch):
+    class FakeDevice:
+        def __init__(self, value):
+            text = str(value)
+            device_type, separator, index = text.partition(":")
+            self.type = device_type
+            self.index = int(index) if separator else None
+
+        def __str__(self):
+            if self.index is None:
+                return self.type
+            return f"{self.type}:{self.index}"
+
+    class FakeCuda:
+        current = 0
+
+        @staticmethod
+        def is_available():
+            return True
+
+        @staticmethod
+        def device_count():
+            return 4
+
+        def device(self, index):
+            cuda = self
+
+            class DeviceContext:
+                def __enter__(self):
+                    self.previous = cuda.current
+                    cuda.current = int(index)
+
+                def __exit__(self, exc_type, exc, traceback):
+                    cuda.current = self.previous
+
+            return DeviceContext()
+
+    fake_cuda = FakeCuda()
+    calls = []
+
+    def get_predict_unit(name_or_path, *, device, workers, **kwargs):
+        calls.append((name_or_path, device, workers, fake_cuda.current, kwargs))
+        return SimpleNamespace(device=f"cuda:{fake_cuda.current}")
+
+    fake_torch = ModuleType("torch")
+    fake_torch.device = FakeDevice
+    fake_torch.cuda = fake_cuda
+    fake_pretrained = SimpleNamespace(get_predict_unit=get_predict_unit)
+    fake_core = ModuleType("fairchem.core")
+    fake_core.pretrained_mlip = fake_pretrained
+    fake_core.FAIRChemCalculator = SimpleNamespace
+    fake_fairchem = ModuleType("fairchem")
+    fake_fairchem.core = fake_core
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    monkeypatch.setitem(sys.modules, "fairchem", fake_fairchem)
+    monkeypatch.setitem(sys.modules, "fairchem.core", fake_core)
+
+    pool = build_calculator(
+        CalculatorCfg(
+            factory="fairchem.core.FAIRChemCalculator",
+            factory_kwargs={
+                "predict_unit": {
+                    "factory": "autokmc.io.fairchem.get_predict_unit_on_device",
+                    "factory_kwargs": {
+                        "name_or_path": "uma-s-1p2",
+                        "device": "cuda",
+                    },
+                },
+                "task_name": "oc20",
+            },
+            copies=4,
+            gpu_devices=["cuda:0", "cuda:1", "cuda:2", "cuda:3"],
+            gpu_device_arg="predict_unit.factory_kwargs.device",
+            max_workers=4,
+        )
+    )
+
+    assert [calc.predict_unit.device for calc in pool.calculators] == [
+        "cuda:0",
+        "cuda:1",
+        "cuda:2",
+        "cuda:3",
+    ]
+    assert [(call[1], call[2], call[3]) for call in calls] == [
+        ("cuda", 1, 0),
+        ("cuda", 1, 1),
+        ("cuda", 1, 2),
+        ("cuda", 1, 3),
+    ]
+    assert all(calc.task_name == "oc20" for calc in pool.calculators)
 
 
 def test_built_calculator_identity_retains_factory_alias_and_arguments(

@@ -34,6 +34,30 @@ from autokmc.utils.optimizers import (
 from autokmc.utils.telemetry import instrument
 
 
+class StructureOptimisationError(RuntimeError):
+    """Structure relaxation failed while retaining its last geometry.
+
+    ``atoms`` is a calculator-detached snapshot taken after the last completed
+    optimizer update.  Callers can therefore persist the failed geometry
+    without relying on the optimizer returning normally.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        atoms: Atoms,
+        *,
+        converged: bool | None,
+        steps: int,
+    ) -> None:
+        super().__init__(message)
+        snapshot = atoms.copy()
+        snapshot.calc = None
+        self.atoms = snapshot
+        self.converged = converged
+        self.steps = int(steps)
+
+
 def _optimizer_class(name: str):
     canonical = normalize_optimizer_name(
         name,
@@ -143,7 +167,19 @@ def optimise_structure(
     log = logfile if logfile is not None else os.devnull
     optimizer_cls = _optimizer_class(optimizer)
     opt = optimizer_cls(result, logfile=log)
-    opt.run(fmax=fmax, steps=steps)
+    try:
+        opt.run(fmax=fmax, steps=steps)
+    except CalculatorConfigError:
+        raise
+    except Exception as exc:
+        completed_steps = int(opt.get_number_of_steps())
+        raise StructureOptimisationError(
+            "optimise_structure failed after "
+            f"{completed_steps} steps: {type(exc).__name__}: {exc}",
+            result,
+            converged=None,
+            steps=completed_steps,
+        ) from exc
 
     if verbose:
         e = result.get_potential_energy()
@@ -154,9 +190,13 @@ def optimise_structure(
         )
 
     if not opt.converged():
-        raise RuntimeError(
+        completed_steps = int(opt.get_number_of_steps())
+        raise StructureOptimisationError(
             f"optimise_structure did not converge within {steps} steps "
-            f"(fmax={fmax} eV/Å)"
+            f"(fmax={fmax} eV/Å)",
+            result,
+            converged=False,
+            steps=completed_steps,
         )
 
     return result

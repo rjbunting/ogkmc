@@ -1093,7 +1093,10 @@ def check_site_stability(
     AdsorbateDissociationError
         An adsorbate bond changed during either relaxation.
     """
-    from autokmc.structure import optimise_structure  # local import avoids circular
+    from autokmc.structure import (  # local import avoids circular
+        StructureOptimisationError,
+        optimise_structure,
+    )
 
     if member_index < 0 or member_index >= len(adsorbate_site.member_node_ids):
         raise IndexError(
@@ -1350,14 +1353,33 @@ def check_site_stability(
         with acquire_calculator(
             calculator, purpose=f"adsorption {state} relaxation"
         ) as calc:
-            atoms_opt = optimise_structure(
-                atoms_init,
-                calculator = calc,
-                fmax       = fmax,
-                steps      = max_steps,
-                optimizer  = optimizer,
-                verbose    = verbose,
+            try:
+                atoms_opt = optimise_structure(
+                    atoms_init,
+                    calculator = calc,
+                    fmax       = fmax,
+                    steps      = max_steps,
+                    optimizer  = optimizer,
+                    verbose    = verbose,
+                )
+            except StructureOptimisationError as exc:
+                failed_attribute = (
+                    "atoms_occupied" if include_self else "atoms_unoccupied"
+                )
+                setattr(lateral_class, failed_attribute, exc.atoms)
+                wrapped = OptimisationFailedError(
+                    f"[{state}] structure optimization failed: {exc}"
+                )
+                wrapped.atoms = exc.atoms
+                wrapped.state_label = state
+                raise wrapped from exc
+
+            failed_attribute = (
+                "atoms_occupied" if include_self else "atoms_unoccupied"
             )
+            last_snapshot = atoms_opt.copy()
+            last_snapshot.calc = None
+            setattr(lateral_class, failed_attribute, last_snapshot)
 
             # Convergence guard — optimise_structure issues a RuntimeWarning but
             # we want to raise an actionable error for the stability workflow.
@@ -1418,15 +1440,16 @@ def check_site_stability(
         # was absent from G at call time.
         return energy, atoms_opt, n_slab, n_lat, n_self_actual
 
-    E_occ,   atoms_occ,   _n_slab_occ,   _n_lat_occ,   _n_self_occ   = _relax_and_check(include_self=True)
-    E_unocc, atoms_unocc, _n_slab_unocc, _n_lat_unocc, _n_self_unocc = _relax_and_check(include_self=False)
-
-    lateral_class.energy_occupied   = E_occ
+    E_occ, atoms_occ, _n_slab_occ, _n_lat_occ, _n_self_occ = (
+        _relax_and_check(include_self=True)
+    )
+    lateral_class.energy_occupied = E_occ
+    lateral_class.atoms_occupied = atoms_occ
+    E_unocc, atoms_unocc, _n_slab_unocc, _n_lat_unocc, _n_self_unocc = (
+        _relax_and_check(include_self=False)
+    )
     lateral_class.energy_unoccupied = E_unocc
-    # Persisted later by autokmc.io.persistence.ReactionWriter as
-    # reactions/iso{N}_lat{M}/{occupied,unoccupied}.extxyz.
-    lateral_class.atoms_occupied    = atoms_occ
-    lateral_class.atoms_unoccupied  = atoms_unocc
+    lateral_class.atoms_unoccupied = atoms_unocc
 
     _apply_adsorption_thermochemistry(
         lateral_class,

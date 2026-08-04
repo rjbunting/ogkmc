@@ -208,20 +208,33 @@ def test_all_options_template_lists_every_shared_constant():
         "co_oxidation_ptnano_uma_4gpu.yaml",
     ],
 )
-def test_uma_four_gpu_examples_delegate_parallelism_to_fairchem(filename):
+def test_uma_four_gpu_examples_assign_one_predictor_per_device(filename):
     pytest.importorskip("yaml")
     path = Path(__file__).parents[1] / "example" / filename
 
     cfg = load_config(path)
 
-    assert cfg.calculator.factory == (
-        "fairchem.core.FAIRChemCalculator.from_model_checkpoint"
+    assert cfg.calculator.factory == "fairchem.core.FAIRChemCalculator"
+    predictor = cfg.calculator.factory_kwargs["predict_unit"]
+    assert predictor["factory"] == (
+        "autokmc.io.fairchem.get_predict_unit_on_device"
     )
-    assert cfg.calculator.factory_kwargs["device"] == "cuda"
-    assert cfg.calculator.factory_kwargs["workers"] == 4
-    assert cfg.calculator.copies == 1
-    assert cfg.calculator.max_workers == 1
-    assert cfg.calculator.gpu_devices is None
+    assert predictor["factory_kwargs"] == {
+        "name_or_path": "uma-s-1p2",
+        "device": "cuda",
+    }
+    assert cfg.calculator.factory_kwargs["task_name"] == "oc20"
+    assert cfg.calculator.copies == 4
+    assert cfg.calculator.max_workers == 4
+    assert cfg.calculator.gpu_devices == [
+        "cuda:0",
+        "cuda:1",
+        "cuda:2",
+        "cuda:3",
+    ]
+    assert cfg.calculator.gpu_device_arg == (
+        "predict_unit.factory_kwargs.device"
+    )
 
 
 def test_load_toml_ok(tmp_path):

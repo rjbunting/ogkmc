@@ -190,14 +190,18 @@ or:
 
 ```yaml
 calculator:
-  factory: fairchem.core.FAIRChemCalculator.from_model_checkpoint
+  factory: fairchem.core.FAIRChemCalculator
   factory_kwargs:
-    name_or_path: uma-s-1p2
+    predict_unit:
+      factory: autokmc.io.fairchem.get_predict_unit_on_device
+      factory_kwargs:
+        name_or_path: uma-s-1p2
+        device: cuda
     task_name: oc20
-    device: cuda
-    workers: 4
-  copies: 1
-  max_workers: 1
+  copies: 4
+  gpu_devices: [cuda:0, cuda:1, cuda:2, cuda:3]
+  gpu_device_arg: predict_unit.factory_kwargs.device
+  max_workers: 4
 ```
 
 | Key | Default | Meaning |
@@ -214,11 +218,13 @@ calculator:
 These settings expose two distinct levels of concurrency. `copies` and
 `max_workers` create independent calculator objects and schedule concurrent
 AutoKMC tasks. Calculator-specific factory arguments control any parallelism
-inside one calculator. In particular, FAIR-Chem UMA multi-GPU inference uses
-`factory_kwargs.workers`; keep `copies: 1` and `max_workers: 1` so FAIR-Chem
-can place its workers across the visible GPUs. Multiple AutoKMC threads given
-the same `device: cuda` value remain in one Python process and do not acquire
-distinct GPU assignments from the launcher.
+inside one calculator. For independent FAIR-Chem UMA work, configure one copy
+per GPU and inject each ordinal into the nested
+`get_predict_unit_on_device` factory as shown above. The helper selects that
+ordinal while constructing FAIR-Chem's `device: cuda` predictor and verifies
+the resolved device. FAIR-Chem's own `workers` option instead distributes one
+predictor calculation internally; do not combine it with per-GPU AutoKMC
+copies.
 
 Every configuration must set exactly one of `calculator.import_path` or
 `calculator.factory`. Omitting both is a validation error. EMT is used only
@@ -276,7 +282,7 @@ cache or resume contract being able to detect it.
 | `climb` | `true` | Refine the converged ordinary NEB with a climbing image. |
 | `spring_k` | `5.0` eV/Å² | NEB spring constant used for both optimization stages. |
 | `interpolation` | `linear` | `linear` or `idpp`. |
-| `persist_neb_path` | `false` | Save both the initial interpolated and final optimized image sequences as `.extxyz`. |
+| `persist_neb_path` | `false` | Save both image sequences for successful runs; failed NEBs retain their initial and last-known bands automatically. |
 
 ## `bond`
 
@@ -305,7 +311,7 @@ cache or resume contract being able to detect it.
 | `neb_interpolation` | `idpp` | `linear` or `idpp`. |
 | `atom_matching` | `auto` | `auto`, `greedy`, `hungarian`, or `reactant_index`. |
 | `matching_trials` | `8` | Number of mapping trials used by automatic matching. |
-| `persist_neb_path` | `false` | Save both the initial interpolated and final optimized bond NEB paths. |
+| `persist_neb_path` | `false` | Save both bond NEB paths for successful runs; failed NEBs retain them automatically. |
 
 When lateral interactions are enabled, diffusion and bond channels
 automatically retain the optimized no-neighbour NEB band as an internal

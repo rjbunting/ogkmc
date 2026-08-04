@@ -240,23 +240,28 @@ For a factory-style calculator:
 
 ```yaml
 calculator:
-  factory: fairchem.core.FAIRChemCalculator.from_model_checkpoint
+  factory: fairchem.core.FAIRChemCalculator
   factory_kwargs:
-    name_or_path: uma-s-1p2
+    predict_unit:
+      factory: autokmc.io.fairchem.get_predict_unit_on_device
+      factory_kwargs:
+        name_or_path: uma-s-1p2
+        device: cuda
     task_name: oc20
-    device: cuda
-    workers: 4
-  copies: 1
-  max_workers: 1
+  copies: 4
+  gpu_devices: [cuda:0, cuda:1, cuda:2, cuda:3]
+  gpu_device_arg: predict_unit.factory_kwargs.device
+  max_workers: 4
 ```
 
 `copies` creates a calculator pool. This is useful for independent relaxation
 or NEB tasks when the calculator and hardware can support parallel work.
-For FAIR-Chem UMA multi-GPU inference, keep a single AutoKMC calculator copy
-and pass the GPU count as `factory_kwargs.workers`. FAIR-Chem then owns GPU
-placement for that predictor. AutoKMC's `copies` and `max_workers` control
-concurrent AutoKMC calculator tasks; they do not assign its threads to separate
-GPUs.
+The UMA example above creates one predictor per GPU so AutoKMC can run four
+independent calculator tasks concurrently. FAIR-Chem's single-worker predictor
+accepts `device: cuda`; `get_predict_unit_on_device` selects each configured
+ordinal during construction and verifies that the predictor retained it.
+FAIR-Chem's own `workers` option instead distributes one predictor calculation
+internally and is a separate parallelism strategy.
 
 ### Diffusion
 
@@ -377,10 +382,11 @@ Important files:
 - `kmc.extxyz`: trajectory snapshots with graph node/species/site identities
   and a per-atom frozen mask at the configured cadence, plus a guaranteed
   nonduplicate final frame.
-- `diagnostics/invalid_adsorption/`: initial and, when available, optimized
-  structures for adsorption candidates pruned by the MLIP.
-- `diagnostics/invalid_diffusion/`: failed diffusion candidates kept outside
-  the authoritative reaction network.
+- `diagnostics/invalid_adsorption/`: initial and last-known optimized structures
+  for adsorption candidates pruned by the MLIP.
+- `diagnostics/invalid_diffusion/`: failed diffusion endpoints and NEB bands
+  kept outside the authoritative reaction network.
+- `diagnostics/invalid_bond/`: failed bond-reaction endpoints and NEB bands.
 - `isaac_records.json`: optional ISAAC AI-ready scientific record bundle.
 - `checkpoint.pkl`: restart state when checkpointing is enabled.
 
@@ -427,6 +433,9 @@ calculator metadata, and references to the structures written in that folder.
 The `*_initial.extxyz` endpoint files are the structures before relaxation.
 For diffusion and bond reactions, `neb_path_initial.extxyz` is the interpolated
 band before NEB optimization and `neb_path.extxyz` is the optimized band.
+Failed diffusion and bond candidates retain both files automatically, even
+when `persist_neb_path` is false, with the latter containing the last-known
+band at the point of failure.
 
 ## Post-Processing Events
 

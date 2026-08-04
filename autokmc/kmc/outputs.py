@@ -7,6 +7,8 @@ from collections.abc import Iterable
 from autokmc.io.event_transitions import reaction_transition
 from autokmc.io.reaction_index import stable_event_id
 from autokmc.kmc.models import KMCChannels, KMCObservers, KMCRuntime, KMCSettings, KMCSystem
+from autokmc.sites.adsorbate import AdsorbateSite
+from autokmc.sites.bond import BondReactionSite
 from autokmc.kmc.restart import capture_rng_state, reactants_for_checkpoint
 from autokmc.sites.diffusion import DiffusionSite
 
@@ -76,6 +78,52 @@ class KMCOutputManager:
                     if callable(discover_invalid):
                         discover_invalid(site, lateral_class)
 
+    def persist_invalid_adsorption_sites(
+        self,
+        sites: Iterable[AdsorbateSite],
+        *,
+        step: int,
+    ) -> None:
+        """Persist failed occupied/unoccupied relaxations for diagnostics."""
+        writer = self.observers.reaction_writer
+        for site in sites:
+            for lateral_class in site.lateral_classes:
+                if lateral_class.stable is False:
+                    write_invalid = getattr(
+                        writer,
+                        "write_invalid_adsorption",
+                        None,
+                    )
+                    if callable(write_invalid):
+                        write_invalid(site, lateral_class, step=step)
+
+    def persist_invalid_bond_sites(
+        self,
+        sites: Iterable[BondReactionSite],
+        *,
+        step: int,
+    ) -> None:
+        """Persist failed bond endpoint/NEB calculations for diagnostics."""
+        writer = self.observers.reaction_writer
+        collector = self.observers.summary_collector
+        for site in sites:
+            for lateral_class in site.lateral_classes:
+                seed_only = bool(
+                    getattr(lateral_class, "_seed_only", False)
+                    and not getattr(lateral_class, "members", None)
+                )
+                if lateral_class.stable is False and not seed_only:
+                    write_invalid = getattr(writer, "write_invalid_bond", None)
+                    if callable(write_invalid):
+                        write_invalid(site, lateral_class, step=step)
+                    discover_invalid = getattr(
+                        collector,
+                        "discover_invalid_bond",
+                        None,
+                    )
+                    if callable(discover_invalid):
+                        discover_invalid(site, lateral_class)
+
     def initialise(self) -> None:
         """Materialise discovered reactions and the optional initial frame."""
         collector = self.observers.summary_collector
@@ -96,6 +144,14 @@ class KMCOutputManager:
         )
         self.persist_invalid_diffusion_sites(
             self.channels.diffusion_sites,
+            step=self.runtime.start_step,
+        )
+        self.persist_invalid_adsorption_sites(
+            self.system.adsorbate_sites,
+            step=self.runtime.start_step,
+        )
+        self.persist_invalid_bond_sites(
+            self.channels.bond_sites,
             step=self.runtime.start_step,
         )
 
@@ -208,6 +264,14 @@ class KMCOutputManager:
         self.persist_reactions(reactions, step=step)
         self.persist_invalid_diffusion_sites(
             invalid_diffusion_sites,
+            step=step,
+        )
+        self.persist_invalid_adsorption_sites(
+            self.system.adsorbate_sites,
+            step=step,
+        )
+        self.persist_invalid_bond_sites(
+            self.channels.bond_sites,
             step=step,
         )
 

@@ -19,6 +19,7 @@ RUN_DIR/
   diagnostics/
     invalid_adsorption/
     invalid_diffusion/
+    invalid_bond/
   analysis/                      # after `autokmc analyze`
 ```
 
@@ -141,7 +142,9 @@ cumulative firing statistics. The `.extxyz` files preserve the structures
 behind those values. Its immutable `discovery_step` records when the folder
 first became part of the discovered network.
 Endpoint files ending in `_initial.extxyz` contain the exact structures passed
-to relaxation. When `persist_neb_path` is enabled,
+to relaxation. When an optimization fails, its corresponding non-`_initial`
+endpoint file contains the last-known atomic geometry. When
+`persist_neb_path` is enabled,
 `neb_path_initial.extxyz` contains the interpolated band before NEB
 optimization and `neb_path.extxyz` contains the optimized band.
 
@@ -152,12 +155,15 @@ definition. Invalid diffusion candidates are excluded from the authoritative
 reaction tree and written under
 `diagnostics/invalid_diffusion/<species>/diff_isoX_latY/`; their invalid index
 entries remain available for discovery accounting and diagnostics.
-Those folders retain any available initial and optimized endpoints, plus the
-initial and optimized NEB paths when path persistence is enabled.
+Invalid bond candidates are handled analogously under
+`diagnostics/invalid_bond/<process>/bond_isoX_latY/`.
+Failure folders retain every available initial, converged, or last-known
+endpoint and automatically retain both the initial and final NEB bands,
+regardless of the successful-run `persist_neb_path` setting.
 
 Adsorption candidates rejected during MLIP pruning are written under
 `diagnostics/invalid_adsorption/<species>/ads_isoX/`. Each folder contains
-`initial.extxyz`, `optimized.extxyz` when relaxation produced a structure, and
+`initial.extxyz`, `optimized.extxyz` whenever relaxation started, and
 `diagnostic.json` with the rejection reason and relevant force, energy, or
 connectivity details.
 

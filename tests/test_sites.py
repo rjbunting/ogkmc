@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 from ase import Atoms
 from ase.calculators.singlepoint import SinglePointCalculator
+from ase.io import read as ase_read
 
 from autokmc.sites.anchors import (
     _enumerate_cliques,
@@ -1158,6 +1159,76 @@ def test_adsorbate_pruning_persists_mlip_rejected_structures(
         "optimized": "optimized.extxyz",
     }
     assert payload["details"]["max_force_ev_per_ang"] > 0.05
+
+
+def test_adsorbate_pruning_persists_last_geometry_when_optimizer_raises(
+    tmp_path,
+    monkeypatch,
+):
+    from autokmc.structure import StructureOptimisationError
+
+    graph = nx.Graph()
+    graph.graph["cell"] = np.eye(3) * 10.0
+    graph.graph["pbc"] = np.array([True, True, True])
+    graph.add_node(
+        0,
+        type="surface",
+        element="Pt",
+        position=np.array([0.0, 0.0, 0.0]),
+        index=0,
+    )
+    site = AdsorbateSite(
+        reactant="[O]",
+        n_atoms=1,
+        atom_cliques=[frozenset({0})],
+        positions=np.array([[0.0, 0.0, 1.8]]),
+        iso_class=0,
+        members=[[frozenset({0})]],
+        member_node_ids=[],
+    )
+    reactant = SimpleNamespace(
+        smiles="[O]",
+        atoms=Atoms("O", positions=[[0.0, 0.0, 0.0]]),
+        graph=nx.Graph(),
+    )
+    reactant.graph.add_node(0, element="O")
+
+    def fail_optimise_structure(atoms, **_kwargs):
+        failed = atoms.copy()
+        failed.positions[-1, 2] = 3.25
+        raise StructureOptimisationError(
+            "forced failure",
+            failed,
+            converged=None,
+            steps=7,
+        )
+
+    monkeypatch.setattr(
+        "autokmc.structure.optimise_structure",
+        fail_optimise_structure,
+    )
+
+    stable = prune_unstable_adsorbate_sites(
+        graph,
+        [site],
+        reactant,
+        calculator=object(),
+        diagnostics_dir=tmp_path / "diagnostics",
+    )
+
+    assert stable == []
+    folder = (
+        tmp_path
+        / "diagnostics"
+        / "invalid_adsorption"
+        / "(O)"
+        / "ads_iso0"
+    )
+    optimized = ase_read(folder / "optimized.extxyz")
+    assert optimized.positions[-1, 2] == pytest.approx(3.25)
+    payload = json.loads((folder / "diagnostic.json").read_text())
+    assert payload["invalid_reason"] == "relaxation_failed"
+    assert payload["details"]["optimizer_steps"] == 7
 
 
 def test_adsorbate_pruning_projects_relaxed_adsorbate_back_to_graph_frame(monkeypatch):

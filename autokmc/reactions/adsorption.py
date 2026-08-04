@@ -482,6 +482,7 @@ def get_applicable_reaction_for_member(
                     )
                 except SiteStabilityError as exc:
                     lc.stable = False
+                    lc.invalid_reason = f"{type(exc).__name__}: {exc}"
                     if verbose:
                         print(
                             f"  ✗  iso={site.iso_class} m={index} "

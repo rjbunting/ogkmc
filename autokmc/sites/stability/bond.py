@@ -1234,8 +1234,9 @@ def _relax_bond_endpoint(
     :func:`_check_intended_coordination_stable` so that group's atoms
     sit at indices ``n_slab + lat_offset + j``.
     """
-    from autokmc.structure import optimise_structure
+    from autokmc.structure import StructureOptimisationError, optimise_structure
 
+    atoms_opt: Atoms | None = None
     try:
         with acquire_calculator(
             calculator, purpose=f"bond {state_label} relaxation"
@@ -1289,11 +1290,23 @@ def _relax_bond_endpoint(
             atoms_opt.calc = None
         return atoms_opt, energy
 
+    except StructureOptimisationError as exc:
+        wrapped = BondEndpointStabilityError(
+            f"Endpoint '{state_label}' relaxation failed: {exc}"
+        )
+        wrapped.atoms = exc.atoms
+        wrapped.state_label = state_label
+        raise wrapped from exc
     except (SurfaceConnectivityError, AdsorbateDissociationError,
             OptimisationFailedError) as exc:
-        raise BondEndpointStabilityError(
+        wrapped = BondEndpointStabilityError(
             f"Endpoint '{state_label}' relaxation failed: {exc}"
-        ) from exc
+        )
+        if atoms_opt is not None:
+            wrapped.atoms = atoms_opt.copy()
+            wrapped.atoms.calc = None
+        wrapped.state_label = state_label
+        raise wrapped from exc
 
 
 # ---------------------------------------------------------------------------
@@ -2103,28 +2116,34 @@ def check_bond_site_stability(
         (self_a, a_ordered, n_lat),
         (self_b, b_ordered, n_lat + n_a),
     ]
-    atoms_ab_opt, E_ab = _relax_bond_endpoint(
-        atoms_ab_init,
-        calculator      = calculator,
-        fmax            = fmax,
-        max_steps       = max_steps,
-        optimizer       = optimizer,
-        frozen_indices  = frozen_indices,
-        nl_mult         = nl_mult,
-        n_slab          = n_slab,
-        n_lat           = n_lat,
-        n_react         = n_react,
-        G               = G,
-        self_groups     = self_groups_ab,
-        state_label     = "endpoint_ab",
-        verbose         = verbose,
-    )
+    try:
+        atoms_ab_opt, E_ab = _relax_bond_endpoint(
+            atoms_ab_init,
+            calculator      = calculator,
+            fmax            = fmax,
+            max_steps       = max_steps,
+            optimizer       = optimizer,
+            frozen_indices  = frozen_indices,
+            nl_mult         = nl_mult,
+            n_slab          = n_slab,
+            n_lat           = n_lat,
+            n_react         = n_react,
+            G               = G,
+            self_groups     = self_groups_ab,
+            state_label     = "endpoint_ab",
+            verbose         = verbose,
+        )
+    except BondEndpointStabilityError as exc:
+        failed_atoms = getattr(exc, "atoms", None)
+        if failed_atoms is not None:
+            lc.atoms_ab = failed_atoms
+        raise
     lc.energy_ab = E_ab
     lc.atoms_ab  = atoms_ab_opt
 
     # ── 2. C endpoint ───────────────────────────────────────────────────
     if gas_product:
-        from autokmc.structure import optimise_structure
+        from autokmc.structure import StructureOptimisationError, optimise_structure
 
         gas_reactant = getattr(brs, "gas_reactant", None)
         gas_energy = getattr(gas_reactant, "energy", float("nan"))
@@ -2141,20 +2160,30 @@ def check_bond_site_stability(
             atoms_empty_init.set_constraint(
                 FixAtoms(indices=[i for i in frozen_indices if i < len(atoms_empty_init)])
             )
-        with acquire_calculator(
-            calculator, purpose="bond gas-product empty-slab relaxation"
-        ) as calc:
-            atoms_empty_opt = optimise_structure(
-                atoms_empty_init,
-                calculator=calc,
-                fmax=fmax,
-                steps=max_steps,
-                optimizer=optimizer,
-                verbose=verbose,
+        try:
+            with acquire_calculator(
+                calculator, purpose="bond gas-product empty-slab relaxation"
+            ) as calc:
+                atoms_empty_opt = optimise_structure(
+                    atoms_empty_init,
+                    calculator=calc,
+                    fmax=fmax,
+                    steps=max_steps,
+                    optimizer=optimizer,
+                    verbose=verbose,
+                )
+                E_empty = float(atoms_empty_opt.get_potential_energy())
+                atoms_empty_opt.set_pbc(atoms_empty_init.get_pbc())
+                atoms_empty_opt.calc = None
+        except StructureOptimisationError as exc:
+            lc.atoms_c = exc.atoms
+            wrapped = BondEndpointStabilityError(
+                "Endpoint 'endpoint_c' empty-slab relaxation failed: "
+                f"{exc}"
             )
-            E_empty = float(atoms_empty_opt.get_potential_energy())
-            atoms_empty_opt.set_pbc(atoms_empty_init.get_pbc())
-            atoms_empty_opt.calc = None
+            wrapped.atoms = exc.atoms
+            wrapped.state_label = "endpoint_c"
+            raise wrapped from exc
         E_c = E_empty + float(gas_energy)
         atoms_c_opt, gas_mapping_diag = _gas_product_neb_endpoint(
             atoms_empty=atoms_empty_opt,
@@ -2235,22 +2264,28 @@ def check_bond_site_stability(
 
         # C endpoint has a single occupied group (C's atoms in matched order).
         self_groups_c = [(self_c, react_nodes_c, n_lat)]
-        atoms_c_opt, E_c = _relax_bond_endpoint(
-            atoms_c_init,
-            calculator      = calculator,
-            fmax            = fmax,
-            max_steps       = max_steps,
-            optimizer       = optimizer,
-            frozen_indices  = frozen_indices,
-            nl_mult         = nl_mult,
-            n_slab          = n_slab,
-            n_lat           = n_lat,
-            n_react         = n_react,
-            G               = G,
-            self_groups     = self_groups_c,
-            state_label     = "endpoint_c",
-            verbose         = verbose,
-        )
+        try:
+            atoms_c_opt, E_c = _relax_bond_endpoint(
+                atoms_c_init,
+                calculator      = calculator,
+                fmax            = fmax,
+                max_steps       = max_steps,
+                optimizer       = optimizer,
+                frozen_indices  = frozen_indices,
+                nl_mult         = nl_mult,
+                n_slab          = n_slab,
+                n_lat           = n_lat,
+                n_react         = n_react,
+                G               = G,
+                self_groups     = self_groups_c,
+                state_label     = "endpoint_c",
+                verbose         = verbose,
+            )
+        except BondEndpointStabilityError as exc:
+            failed_atoms = getattr(exc, "atoms", None)
+            if failed_atoms is not None:
+                lc.atoms_c = failed_atoms
+            raise
     lc.energy_c = E_c
     lc.atoms_c  = atoms_c_opt
 
@@ -2306,18 +2341,23 @@ def check_bond_site_stability(
         verbose=verbose,
         not_converged_error=BondNEBNotConvergedError,
         persist_path=persist_neb_path,
-        capture_path=capture_neb_path,
+        # Always retain a temporary completed band so post-NEB failures can be
+        # diagnosed.  Successful non-persistent runs clear it below.
+        capture_path=True,
         initial_path=projected_seed_path,
         initial_path_callback=(
-            (
-                lambda images: setattr(
-                    lc,
-                    "atoms_neb_path_initial",
-                    images,
-                )
+            lambda images: setattr(
+                lc,
+                "atoms_neb_path_initial",
+                images,
             )
-            if persist_neb_path
-            else None
+        ),
+        failure_path_callback=(
+            lambda images: setattr(
+                lc,
+                "atoms_neb_path",
+                images,
+            )
         ),
         band_factory=_make_neb_band,
         logfile_factory=_neb_optimizer_logfile,
@@ -2328,6 +2368,10 @@ def check_bond_site_stability(
 
     lc.energy_ts = E_ts
     lc.atoms_ts = atoms_ts
+    # Keep the final path attached until all validation and thermochemistry
+    # steps succeed.  Failed candidates are then self-contained diagnostics.
+    lc.neb_path_energies = neb_result.path_energies
+    lc.atoms_neb_path = neb_result.path_images
     if capture_neb_path and neb_result.path_images:
         lc._warm_start_neb_path = [
             image.copy() for image in neb_result.path_images
@@ -2338,9 +2382,6 @@ def check_bond_site_stability(
             neb_result.path_energies or []
         )
         lc._warm_start_member_index = int(member_index)
-    if persist_neb_path:
-        lc.neb_path_energies = neb_result.path_energies
-        lc.atoms_neb_path = neb_result.path_images
 
     _check_bond_ts_validity(
         atoms_ts, atoms_ab_opt, atoms_c_opt,
@@ -2374,6 +2415,10 @@ def check_bond_site_stability(
         vib_cache_root=vib_cache_root,
     )
 
+    if not persist_neb_path:
+        lc.atoms_neb_path_initial = None
+        lc.atoms_neb_path = None
+        lc.neb_path_energies = None
     lc.stable = True
     if verbose:
         print(

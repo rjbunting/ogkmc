@@ -196,6 +196,21 @@ class ReactionSummary:
 		self.note_discovered(reaction_id, valid=False)
 		return reaction_id
 
+	def discover_invalid_bond(self, site, lateral_class) -> str:
+		template = site.template
+		smiles = (
+			f"{template.smiles_a}+{template.smiles_b}"
+			f"↔{template.smiles_c}"
+		)
+		reaction_id = stable_reaction_id(
+			"bond",
+			smiles,
+			int(site.iso_class),
+			int(lateral_class.lateral_class),
+		)
+		self.note_discovered(reaction_id, valid=False)
+		return reaction_id
+
 	def _add_values(
 		self,
 		key: tuple,

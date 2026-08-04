@@ -664,8 +664,12 @@ def _relax_endpoint(
     Wraps every underlying :class:`SiteStabilityError` subclass into an
     :class:`EndpointStabilityError` with ``__cause__`` preserved.
     """
-    from autokmc.structure import optimise_structure  # local: avoid cycle
+    from autokmc.structure import (  # local: avoid cycle
+        StructureOptimisationError,
+        optimise_structure,
+    )
 
+    atoms_opt: Atoms | None = None
     try:
         with acquire_calculator(
             calculator, purpose=f"diffusion {state_label} relaxation"
@@ -718,11 +722,23 @@ def _relax_endpoint(
             atoms_opt.calc = None
         return atoms_opt, energy
 
+    except StructureOptimisationError as exc:
+        wrapped = EndpointStabilityError(
+            f"Endpoint '{state_label}' relaxation failed: {exc}"
+        )
+        wrapped.atoms = exc.atoms
+        wrapped.state_label = state_label
+        raise wrapped from exc
     except (SurfaceConnectivityError, AdsorbateDissociationError,
             OptimisationFailedError) as exc:
-        raise EndpointStabilityError(
+        wrapped = EndpointStabilityError(
             f"Endpoint '{state_label}' relaxation failed: {exc}"
-        ) from exc
+        )
+        if atoms_opt is not None:
+            wrapped.atoms = atoms_opt.copy()
+            wrapped.atoms.calc = None
+        wrapped.state_label = state_label
+        raise wrapped from exc
 
 
 # ---------------------------------------------------------------------------
@@ -1438,23 +1454,29 @@ def check_diffusion_stability(
             f"(slab={n_slab}, lat={n_lat}, mig={n_mig})"
         )
 
-    atoms_a_opt, E_a = _relax_endpoint(
-        atoms_a_init,
-        calculator      = calculator,
-        fmax            = fmax,
-        max_steps       = max_steps,
-        optimizer       = optimizer,
-        frozen_indices  = frozen_indices,
-        nl_mult         = nl_mult,
-        n_slab          = n_slab,
-        n_lat           = n_lat,
-        n_mig           = n_mig,
-        G               = G,
-        self_node_ids   = self_a,
-        self_node_order = mig_node_order_a,
-        state_label     = "endpoint_a",
-        verbose         = verbose,
-    )
+    try:
+        atoms_a_opt, E_a = _relax_endpoint(
+            atoms_a_init,
+            calculator      = calculator,
+            fmax            = fmax,
+            max_steps       = max_steps,
+            optimizer       = optimizer,
+            frozen_indices  = frozen_indices,
+            nl_mult         = nl_mult,
+            n_slab          = n_slab,
+            n_lat           = n_lat,
+            n_mig           = n_mig,
+            G               = G,
+            self_node_ids   = self_a,
+            self_node_order = mig_node_order_a,
+            state_label     = "endpoint_a",
+            verbose         = verbose,
+        )
+    except EndpointStabilityError as exc:
+        failed_atoms = getattr(exc, "atoms", None)
+        if failed_atoms is not None:
+            lateral_class.atoms_a = failed_atoms
+        raise
     # Store A immediately so it survives any later exception.
     lateral_class.energy_a = E_a
     lateral_class.atoms_a  = atoms_a_opt
@@ -1479,23 +1501,29 @@ def check_diffusion_stability(
             f"(slab={n_slab}, lat={n_lat}, mig={n_mig})"
         )
 
-    atoms_b_opt, E_b = _relax_endpoint(
-        atoms_b_init,
-        calculator      = calculator,
-        fmax            = fmax,
-        max_steps       = max_steps,
-        optimizer       = optimizer,
-        frozen_indices  = frozen_indices,
-        nl_mult         = nl_mult,
-        n_slab          = n_slab,
-        n_lat           = n_lat,
-        n_mig           = n_mig,
-        G               = G,
-        self_node_ids   = self_b,
-        self_node_order = mig_node_order_b,
-        state_label     = "endpoint_b",
-        verbose         = verbose,
-    )
+    try:
+        atoms_b_opt, E_b = _relax_endpoint(
+            atoms_b_init,
+            calculator      = calculator,
+            fmax            = fmax,
+            max_steps       = max_steps,
+            optimizer       = optimizer,
+            frozen_indices  = frozen_indices,
+            nl_mult         = nl_mult,
+            n_slab          = n_slab,
+            n_lat           = n_lat,
+            n_mig           = n_mig,
+            G               = G,
+            self_node_ids   = self_b,
+            self_node_order = mig_node_order_b,
+            state_label     = "endpoint_b",
+            verbose         = verbose,
+        )
+    except EndpointStabilityError as exc:
+        failed_atoms = getattr(exc, "atoms", None)
+        if failed_atoms is not None:
+            lateral_class.atoms_b = failed_atoms
+        raise
     # Store B immediately so it survives any later exception.
     lateral_class.energy_b = E_b
     lateral_class.atoms_b  = atoms_b_opt
@@ -1552,18 +1580,24 @@ def check_diffusion_stability(
         verbose=verbose,
         not_converged_error=NEBNotConvergedError,
         persist_path=persist_neb_path,
-        capture_path=capture_neb_path,
+        # Always snapshot the completed band long enough to retain it if TS
+        # validation or thermochemistry fails.  Successful non-persistent runs
+        # clear the public snapshots below.
+        capture_path=True,
         initial_path=projected_seed_path,
         initial_path_callback=(
-            (
-                lambda images: setattr(
-                    lateral_class,
-                    "atoms_neb_path_initial",
-                    images,
-                )
+            lambda images: setattr(
+                lateral_class,
+                "atoms_neb_path_initial",
+                images,
             )
-            if persist_neb_path
-            else None
+        ),
+        failure_path_callback=(
+            lambda images: setattr(
+                lateral_class,
+                "atoms_neb_path",
+                images,
+            )
         ),
         band_factory=_make_neb_band,
         logfile_factory=_neb_optimizer_logfile,
@@ -1576,6 +1610,10 @@ def check_diffusion_stability(
     # channel-specific validity check below rejects the transition state.
     lateral_class.energy_ts = E_ts
     lateral_class.atoms_ts = atoms_ts
+    # Keep the final path public until all post-NEB checks succeed.  An
+    # exception leaves it attached for invalid-candidate persistence.
+    lateral_class.neb_path_energies = neb_result.path_energies
+    lateral_class.atoms_neb_path = neb_result.path_images
     if capture_neb_path and neb_result.path_images:
         lateral_class._warm_start_neb_path = [
             image.copy() for image in neb_result.path_images
@@ -1586,9 +1624,6 @@ def check_diffusion_stability(
             neb_result.path_energies or []
         )
         lateral_class._warm_start_member_index = int(member_index)
-    if persist_neb_path:
-        lateral_class.neb_path_energies = neb_result.path_energies
-        lateral_class.atoms_neb_path = neb_result.path_images
 
     _check_ts_validity(
         atoms_ts, atoms_a_opt, atoms_b_opt,
@@ -1620,6 +1655,10 @@ def check_diffusion_stability(
         temperature_k=free_energy_temperature_k,
         vib_cache_root=vib_cache_root,
     )
+    if not persist_neb_path:
+        lateral_class.atoms_neb_path_initial = None
+        lateral_class.atoms_neb_path = None
+        lateral_class.neb_path_energies = None
     # ── 6. Mark stable only after all requested thermochemistry succeeds ──
     lateral_class.stable = True
     if verbose:

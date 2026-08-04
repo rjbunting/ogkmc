@@ -324,29 +324,32 @@ calculator:
 
   # ALTERNATIVE STYLE: construct a calculator with a factory callable.
   # Comment import_path and kwargs above before uncommenting these lines.
-  # factory: fairchem.core.FAIRChemCalculator.from_model_checkpoint
+  # factory: fairchem.core.FAIRChemCalculator
   # factory_kwargs:
-  #   name_or_path: uma-s-1p2
+  #   predict_unit:
+  #     factory: autokmc.io.fairchem.get_predict_unit_on_device
+  #     factory_kwargs:
+  #       name_or_path: uma-s-1p2
+  #       device: cuda
   #   task_name: oc20
-  #   device: cuda
-  #   # FAIR-Chem multi-GPU inference is internal to one calculator:
-  #   # workers: 4
 
   # Number of independent calculator instances in the shared pool.
-  # Keep this at 1 when a calculator factory manages its own workers.
+  # For four independent UMA workers, set this to 4 and configure the four
+  # gpu_devices plus the nested gpu_device_arg shown below.
   copies: 1
 
   # Optional unique device strings, exactly one per copy. null performs no
   # automatic device injection. For calculators that accept ordinal strings,
-  # an example two-copy value is ["cuda:0", "cuda:1"].
+  # an example four-copy value is ["cuda:0", "cuda:1", "cuda:2", "cuda:3"].
   gpu_devices: null
 
   # Constructor/factory argument that receives each gpu_devices entry.
+  # The UMA helper path is predict_unit.factory_kwargs.device.
   gpu_device_arg: device
 
   # Maximum concurrent calculator tasks; null defaults to copies and an
   # explicit value must be between 1 and copies.
-  # Keep this at 1 when a calculator factory manages its own workers.
+  # Set this to 4 with four independent UMA copies.
   max_workers: 1
 
 

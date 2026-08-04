@@ -216,6 +216,9 @@ class AdsorbateSiteLateral:
     #: Atom indices in ``atoms_occupied`` that were displaced (for audit).
     vib_indices_occupied      : list = field(default_factory=list)
     vib_indices_unoccupied    : list = field(default_factory=list)
+    # Appended after the established init fields for checkpoint/positional
+    # constructor compatibility.
+    invalid_reason            : str | None = None
     # Runtime indexes/caches used by lateral classification and rate building.
     # They remain lazily attached so old checkpoints retain their exact state,
     # but are explicit to type checkers and readers.
@@ -1688,7 +1691,10 @@ def prune_unstable_adsorbate_sites(
         Only the stable iso-classes, in their original order.  The
         ``iso_class`` integer labels are **not** renumbered.
     """
-    from autokmc.structure import optimise_structure  # avoid circular at module level
+    from autokmc.structure import (  # avoid circular at module level
+        StructureOptimisationError,
+        optimise_structure,
+    )
     from autokmc.core.graph import build_graph
     from autokmc.io.persistence import write_invalid_adsorption_diagnostic
 
@@ -1777,6 +1783,17 @@ def prune_unstable_adsorbate_sites(
         except Exception as exc:
             if isinstance(exc, CalculatorConfigError):
                 raise
+            failed_atoms = (
+                exc.atoms
+                if isinstance(exc, StructureOptimisationError)
+                else None
+            )
+            invalid_reason = (
+                "not_converged"
+                if isinstance(exc, StructureOptimisationError)
+                and exc.converged is False
+                else "relaxation_failed"
+            )
             _log.debug(
                 "prune_unstable_adsorbate_sites: iso_class=%d relaxation raised %s",
                 ms.iso_class, exc,
@@ -1786,9 +1803,14 @@ def prune_unstable_adsorbate_sites(
             _persist_invalid(
                 ms,
                 atoms_init,
-                None,
-                "relaxation_failed",
+                failed_atoms,
+                invalid_reason,
                 error=f"{type(exc).__name__}: {exc}",
+                optimizer_steps=(
+                    exc.steps
+                    if isinstance(exc, StructureOptimisationError)
+                    else None
+                ),
             )
             n_pruned += 1
             _remove_iso_class_nodes(G, ms)

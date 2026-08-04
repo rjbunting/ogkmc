@@ -151,6 +151,7 @@ def test_shared_neb_stops_when_preclimb_stage_does_not_converge(monkeypatch):
     neb = SimpleNamespace(climb=False)
     optimizer_climb_states = []
     initial_paths = []
+    failed_paths = []
 
     class NonConvergedOptimizer:
         def __init__(self, stage_neb, *, logfile):
@@ -161,6 +162,7 @@ def test_shared_neb_stops_when_preclimb_stage_does_not_converge(monkeypatch):
         def run(self, *, fmax, steps):
             assert fmax == pytest.approx(0.05)
             assert steps == 20
+            images[1].positions[0, 0] = 0.75
 
         def converged(self) -> bool:
             return False
@@ -205,12 +207,16 @@ def test_shared_neb_stops_when_preclimb_stage_does_not_converge(monkeypatch):
             verbose=False,
             not_converged_error=RuntimeError,
             initial_path_callback=initial_paths.append,
+            failure_path_callback=failed_paths.append,
             band_factory=legacy_band_factory,
         )
 
     assert optimizer_climb_states == [False]
     assert len(initial_paths) == 1
     assert all(image.calc is None for image in initial_paths[0])
+    assert len(failed_paths) == 1
+    assert all(image.calc is None for image in failed_paths[0])
+    assert failed_paths[0][1].positions[0, 0] == pytest.approx(0.75)
     assert neb.climb is False
     assert all(image.calc is None for image in images)
 
@@ -416,6 +422,87 @@ def test_run_neb_can_capture_path_without_public_persistence(monkeypatch):
     assert result.path_images is not None
     assert len(result.path_images) == 3
     assert all(image.calc is None for image in result.path_images)
+
+
+def test_diffusion_endpoint_failure_retains_last_geometry(monkeypatch):
+    from autokmc.structure import StructureOptimisationError
+
+    def fail_optimisation(atoms, **_kwargs):
+        failed = atoms.copy()
+        failed.positions[0, 0] = 2.0
+        raise StructureOptimisationError(
+            "forced endpoint failure",
+            failed,
+            converged=False,
+            steps=5,
+        )
+
+    monkeypatch.setattr(
+        "autokmc.structure.optimise_structure",
+        fail_optimisation,
+    )
+    with pytest.raises(diffusion_module.EndpointStabilityError) as caught:
+        diffusion_module._relax_endpoint(
+            Atoms("H", positions=[[0.0, 0.0, 0.0]]),
+            calculator=object(),
+            fmax=0.05,
+            max_steps=5,
+            optimizer="lbfgs",
+            frozen_indices=None,
+            nl_mult=1.0,
+            n_slab=0,
+            n_lat=0,
+            n_mig=1,
+            G=nx.Graph(),
+            self_node_ids=frozenset(),
+            self_node_order=[],
+            state_label="endpoint_a",
+            verbose=False,
+        )
+
+    assert caught.value.state_label == "endpoint_a"
+    assert caught.value.atoms.calc is None
+    assert caught.value.atoms.positions[0, 0] == pytest.approx(2.0)
+
+
+def test_bond_endpoint_failure_retains_last_geometry(monkeypatch):
+    from autokmc.structure import StructureOptimisationError
+
+    def fail_optimisation(atoms, **_kwargs):
+        failed = atoms.copy()
+        failed.positions[0, 0] = 3.0
+        raise StructureOptimisationError(
+            "forced endpoint failure",
+            failed,
+            converged=None,
+            steps=2,
+        )
+
+    monkeypatch.setattr(
+        "autokmc.structure.optimise_structure",
+        fail_optimisation,
+    )
+    with pytest.raises(bond_module.BondEndpointStabilityError) as caught:
+        bond_module._relax_bond_endpoint(
+            Atoms("H", positions=[[0.0, 0.0, 0.0]]),
+            calculator=object(),
+            fmax=0.05,
+            max_steps=5,
+            optimizer="lbfgs",
+            frozen_indices=None,
+            nl_mult=1.0,
+            n_slab=0,
+            n_lat=0,
+            n_react=1,
+            G=nx.Graph(),
+            self_groups=[],
+            state_label="endpoint_ab",
+            verbose=False,
+        )
+
+    assert caught.value.state_label == "endpoint_ab"
+    assert caught.value.atoms.calc is None
+    assert caught.value.atoms.positions[0, 0] == pytest.approx(3.0)
 
 
 def test_project_neb_path_transfers_bare_curvature_with_mic():

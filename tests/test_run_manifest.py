@@ -226,6 +226,7 @@ def test_manifest_exists_while_preparing_and_tracks_failure(tmp_path):
     assert payload["artifacts"]["reaction_index"]["status"] == "missing"
     assert payload["artifacts"]["invalid_adsorption"]["status"] == "missing"
     assert payload["artifacts"]["invalid_diffusion"]["status"] == "missing"
+    assert payload["artifacts"]["invalid_bond"]["status"] == "missing"
 
 
 def test_artifact_inventory_hashes_files_and_summarizes_directories(tmp_path):
@@ -286,11 +287,22 @@ def test_quarantine_discovery_reports_invalid_diffusion_leaves(tmp_path):
         / "diff_iso0_lat2"
     )
     invalid_b = invalid_a.with_name("diff_iso0_lat3")
-    for leaf in (regular, invalid_a, invalid_b):
+    invalid_bond = (
+        quarantine
+        / "diagnostics"
+        / "invalid_bond"
+        / "(H)+(H)~(H)(H)"
+        / "bond_iso1_lat0"
+    )
+    for leaf in (regular, invalid_a, invalid_b, invalid_bond):
         leaf.mkdir(parents=True)
 
     assert discover_quarantine_locations(tmp_path) == [
         "uncommitted_reactions/after_checkpoint_step_4/adsorption/(O)/iso0_lat1",
+        (
+            "uncommitted_reactions/after_checkpoint_step_4/diagnostics/"
+            "invalid_bond/(H)+(H)~(H)(H)/bond_iso1_lat0"
+        ),
         (
             "uncommitted_reactions/after_checkpoint_step_4/diagnostics/"
             "invalid_diffusion/(O)/diff_iso0_lat2"
