@@ -84,6 +84,7 @@ slab surface classification.
 optimization:
   optimizer: lbfgs
   neb_optimizer: bfgs
+  neb_band_eval: images
 ```
 
 `optimizer` controls calculator-backed ordinary relaxations, including
@@ -96,6 +97,35 @@ the climbing-image refinement when enabled. Valid values are `bfgs`, `fire`,
 and `mdmin`. `lbfgs` is intentionally excluded because ASE does not recommend
 it for NEB. Defaults preserve the previous behavior: `lbfgs` for ordinary
 relaxations and `bfgs` for NEB.
+
+`neb_band_eval` controls how the NEB band's images are evaluated on each
+optimizer step. `images` (the default, and the previous behavior) issues one
+calculator call per image — serially with a shared calculator, or as pooled
+threads when a multi-worker calculator pool is configured. `batched`
+evaluates the whole band in a single stacked model forward per step when the
+calculator supports it, which lets a GPU MLIP amortize dispatch and
+host-device overhead across the band. The NEB physics, optimizer, and
+constraint handling are unchanged — only the force-evaluation access pattern
+differs — and unsupported calculators fall back to `images` with a logged
+warning.
+
+**When to use `batched`.** It helps when the calculator is a GPU machine-learned
+potential and the barriers are real (multi-step NEBs). On UMA (`uma-s-1p2`) it
+gives roughly 10x faster barriers with the barrier value unchanged to within
+model round-off. It does nothing useful for near-instant CPU calculators such as
+EMT. When a run is left on the `images` default but the calculator would support
+batching, a one-time `INFO` hint is logged suggesting the flag.
+
+**Which calculators batch.** FAIR-Chem calculators (UMA and its sibling
+checkpoints) are batched automatically. Any other calculator is batched if it
+exposes an `evaluate_band(images)` method returning one `(energy, forces)` pair
+per image; otherwise the run falls back to `images`. To add a new model, either
+give its calculator an `evaluate_band` method (the `CallableBandEvaluator` path)
+or add a small evaluator class in `autokmc/sites/stability/band_eval.py` next to
+`FairChemBandEvaluator`. The evaluator returns *raw* model forces per image;
+`FixAtoms` and all NEB projections are applied afterward by the unchanged ASE
+path, so a new backend only has to answer "energy and forces for these
+structures in one call."
 
 ## `structure`
 

@@ -28,11 +28,21 @@ from ase.constraints import FixAtoms
 from ase.geometry import find_mic
 from ase.optimize import BFGS, FIRE, MDMin
 
+from autokmc.core.constants import (
+    NEB_BAND_EVAL as DEFAULT_NEB_BAND_EVAL,
+    NEB_BAND_EVALS,
+)
 from autokmc.io.calculators import (
     CalculatorConfigError,
     CalculatorPool,
     acquire_calculator,
     calculator_batch_active,
+    primary_calculator,
+)
+from autokmc.sites.stability.band_eval import (
+    BandEvaluator,
+    BandImageCalculator,
+    resolve_band_evaluator,
 )
 from autokmc.utils.logging import get_logger
 from autokmc.utils.optimizers import (
@@ -68,6 +78,63 @@ except ImportError:  # pragma: no cover
         _idpp_interpolate = None
 
 _log = get_logger(__name__)
+
+_default_band_eval = DEFAULT_NEB_BAND_EVAL
+
+#: Set once the first time a batchable calculator is seen under the ``images``
+#: default, so the "you could turn on batching" hint is logged a single time
+#: per process rather than on every barrier.
+_batched_hint_emitted = False
+
+
+def _maybe_hint_batched_available(calculator: Any) -> None:
+    """Log a one-time hint if this calculator could use batched NEB.
+
+    Fires only under the ``images`` default: many runs use a FAIR-Chem/UMA
+    calculator that supports whole-band batching but never flip the flag
+    because the default is silent.  Never raises: a hint must not affect a run.
+    """
+    global _batched_hint_emitted
+    if _batched_hint_emitted:
+        return
+    try:
+        probe = primary_calculator(calculator)
+        if resolve_band_evaluator(probe) is not None:
+            _batched_hint_emitted = True
+            _log.info(
+                "Calculator %s supports batched NEB evaluation. Set "
+                "optimization.neb_band_eval: batched for roughly 10x faster "
+                "barriers with identical results.",
+                type(probe).__name__,
+            )
+    except Exception:  # pragma: no cover - a hint must never break a run
+        pass
+
+
+def normalize_band_eval(value: str) -> str:
+    """Return a canonical band-eval mode or raise a useful error."""
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(
+            f"neb_band_eval must be a non-empty string, got {value!r}"
+        )
+    name = value.strip().lower()
+    if name not in NEB_BAND_EVALS:
+        choices = ", ".join(sorted(NEB_BAND_EVALS))
+        raise ValueError(
+            f"neb_band_eval must be one of {choices}; got {value!r}"
+        )
+    return name
+
+
+def set_default_neb_band_eval(value: str) -> None:
+    """Set the process-wide default band evaluation mode (from config)."""
+    global _default_band_eval
+    _default_band_eval = normalize_band_eval(value)
+
+
+def default_neb_band_eval() -> str:
+    """Return the process-wide default band evaluation mode."""
+    return _default_band_eval
 
 
 @dataclass(frozen=True)
@@ -221,6 +288,59 @@ class _ExceptionSafeParallelNEB(NEB):
             return super().get_forces()
         finally:
             self.parallel = True
+
+
+class _BatchedBandNEB(NEB):
+    """NEB whose images are evaluated in one batched model call per step.
+
+    The band's tangent/spring/climbing math and the optimizer are untouched
+    ASE code: before ASE assembles the band, every image is evaluated by a
+    single ``BandEvaluator.evaluate_band`` call and the results are primed
+    into per-image cache facades, so ASE's per-image queries are served from
+    the batch.  Endpoints never move, so they join the batch only on the
+    first evaluation.  Constraint handling is identical to the serial path —
+    the batch carries raw model forces and ASE applies ``FixAtoms``
+    projections per image.
+    """
+
+    def __init__(self, *args, band_evaluator: BandEvaluator, **kwargs):
+        super().__init__(*args, parallel=False, **kwargs)
+        self._band_evaluator = band_evaluator
+        self._endpoints_evaluated = False
+
+    def _prefetch_band(self) -> None:
+        if self._endpoints_evaluated:
+            targets = list(self.images[1:-1])
+        else:
+            targets = list(self.images)
+        if not targets:
+            return
+        if any(
+            not isinstance(image.calc, BandImageCalculator)
+            for image in targets
+        ):
+            # Foreign per-image calculators are attached (e.g. ASE's IDPP
+            # interpolation temporarily swaps them in) — evaluate normally.
+            return
+        # ASE optimizers issue several ``get_forces`` per step and lean on
+        # calculator caching to make the repeats free; batch only the images
+        # whose geometry actually changed since their cached evaluation.
+        targets = [
+            image
+            for image in targets
+            if not image.calc.has_result_for(image)
+        ]
+        if not targets:
+            self._endpoints_evaluated = True
+            return
+        results = self._band_evaluator.evaluate_band(targets)
+        for image, (energy, forces) in zip(targets, results):
+            image.calc.store(image, energy, forces)
+        self._endpoints_evaluated = True
+
+    def get_forces(self):
+        self._prefetch_band()
+        return super().get_forces()
 
 
 def neb_optimizer_logfile(verbose: bool) -> str:
@@ -407,6 +527,7 @@ def make_neb_band(
     calculator,
     frozen_indices: list[int] | None,
     initial_path: Sequence[Atoms] | None = None,
+    band_eval: str = DEFAULT_NEB_BAND_EVAL,
 ) -> tuple[Any, list[Atoms]]:
     """Build an ASE NEB band with one shared, non-deepcopyable calculator.
 
@@ -487,13 +608,33 @@ def make_neb_band(
         for image in images:
             image.set_constraint(FixAtoms(indices=list(frozen_indices)))
 
+    band_evaluator: BandEvaluator | None = None
+    if normalize_band_eval(band_eval) == "batched":
+        if isinstance(calculator, CalculatorPool):
+            _log.warning(
+                "Batched NEB band evaluation needs a concrete calculator, "
+                "not a CalculatorPool; falling back to per-image evaluation."
+            )
+        else:
+            band_evaluator = resolve_band_evaluator(calculator)
+            if band_evaluator is None:
+                _log.warning(
+                    "Calculator %s does not support batched band "
+                    "evaluation; falling back to per-image NEB evaluation.",
+                    type(calculator).__name__,
+                )
+
     parallel_images = (
-        isinstance(calculator, CalculatorPool)
+        band_evaluator is None
+        and isinstance(calculator, CalculatorPool)
         and len(calculator) > 1
         and int(getattr(calculator, "max_workers", len(calculator)) or len(calculator)) > 1
         and not calculator_batch_active()
     )
-    if parallel_images:
+    if band_evaluator is not None:
+        for image in images:
+            image.calc = BandImageCalculator(calculator)
+    elif parallel_images:
         scheduler = _NEBPoolScheduler(calculator)
         for image in images:
             image.calc = _PooledNEBCalculator(scheduler)
@@ -505,9 +646,17 @@ def make_neb_band(
         "k": float(spring_k),
         "climb": bool(climb),
         "method": "improvedtangent",
-        "allow_shared_calculator": not parallel_images,
+        "allow_shared_calculator": (
+            band_evaluator is None and not parallel_images
+        ),
     }
-    if parallel_images:
+    if band_evaluator is not None:
+        neb = _BatchedBandNEB(
+            images,
+            band_evaluator=band_evaluator,
+            **neb_kwargs,
+        )
+    elif parallel_images:
         neb = _ExceptionSafeParallelNEB(
             images,
             image_max_workers=scheduler.max_workers,
@@ -590,6 +739,7 @@ def run_neb(
     failure_path_callback: Callable[[list[Atoms]], None] | None = None,
     band_factory=None,
     logfile_factory=None,
+    band_eval: str | None = None,
 ) -> NEBRunResult:
     """Optimise one NEB band and return a calculator-detached result.
 
@@ -605,8 +755,14 @@ def run_neb(
     """
     build_band = band_factory or make_neb_band
     select_logfile = logfile_factory or neb_optimizer_logfile
+    band_eval_mode = normalize_band_eval(
+        band_eval if band_eval is not None else default_neb_band_eval()
+    )
+    if band_eval_mode == "images":
+        _maybe_hint_batched_available(calculator)
     use_parallel_pool = (
-        isinstance(calculator, CalculatorPool)
+        band_eval_mode != "batched"
+        and isinstance(calculator, CalculatorPool)
         and len(calculator) > 1
         and int(getattr(calculator, "max_workers", len(calculator)) or len(calculator)) > 1
         and not calculator_batch_active()
@@ -631,6 +787,8 @@ def run_neb(
         }
         if initial_path is not None:
             band_kwargs["initial_path"] = initial_path
+        if band_factory is None:
+            band_kwargs["band_eval"] = band_eval_mode
         try:
             neb, images = build_band(
                 atoms_initial,
@@ -793,11 +951,16 @@ def __getattr__(name: str) -> Any:
 
 
 __all__ = [
+    "DEFAULT_NEB_BAND_EVAL",
+    "NEB_BAND_EVALS",
     "NEBRunResult",
+    "default_neb_band_eval",
     "make_neb_band",
     "neb_optimizer_logfile",
+    "normalize_band_eval",
     "project_neb_path",
     "run_neb",
+    "set_default_neb_band_eval",
     # Legacy facade exports.
     "NEBNotConvergedError",
     "TransitionStateInvalidError",

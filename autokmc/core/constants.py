@@ -273,6 +273,15 @@ NEB_SPRING_K: float = 5.0
 #: potential, ASE default for chemistry) or ``"linear"``.
 NEB_INTERPOLATION: str = "linear"
 
+#: How NEB band images are evaluated each optimizer step: ``"images"``
+#: (per-image calculator calls — serial with a shared calculator, or pooled
+#: threads on a multi-worker CalculatorPool) or ``"batched"`` (the whole band
+#: in one stacked model forward, when the calculator supports it; falls back
+#: to ``"images"`` otherwise).  Physics is identical either way — only the
+#: force-evaluation access pattern changes.
+NEB_BAND_EVALS: frozenset[str] = frozenset({"images", "batched"})
+NEB_BAND_EVAL: str = "images"
+
 #: When ``True`` (default), :func:`autokmc.sites.diffusion.find_diffusion_sites`
 #: keeps only **one** :class:`~autokmc.sites.diffusion.DiffusionSite` per
 #: unordered pair of adsorption iso-classes — the one whose ego-graph has the

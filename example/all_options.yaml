@@ -111,6 +111,12 @@ optimization:
   # Valid choices: bfgs, fire, mdmin. ASE does not recommend LBFGS for NEB.
   neb_optimizer: bfgs
 
+  # How NEB band images are evaluated each optimizer step. "images" (default)
+  # calls the calculator once per image; "batched" evaluates the whole band in
+  # one model forward when the calculator supports it (FAIR-Chem/UMA, or any
+  # calculator exposing evaluate_band). Same barriers, fewer GPU calls.
+  neb_band_eval: images
+
 
 # ---------------------------------------------------------------------------
 # Output files

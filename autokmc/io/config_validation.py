@@ -6,6 +6,7 @@ import math
 from pathlib import Path, PureWindowsPath
 from typing import Any, NoReturn
 
+from autokmc.core.constants import NEB_BAND_EVALS
 from autokmc.utils.optimizers import NEB_OPTIMIZERS, REGULAR_OPTIMIZERS
 
 
@@ -275,6 +276,16 @@ class _Validator:
             self.fail(
                 "optimization.neb_optimizer must be one of "
                 f"{choices}; got {cfg.neb_optimizer!r}"
+            )
+        neb_band_eval = self.string(
+            cfg.neb_band_eval,
+            "optimization.neb_band_eval",
+        ).lower()
+        if neb_band_eval not in NEB_BAND_EVALS:
+            choices = ", ".join(sorted(NEB_BAND_EVALS))
+            self.fail(
+                "optimization.neb_band_eval must be one of "
+                f"{choices}; got {cfg.neb_band_eval!r}"
             )
 
     def structure(self, cfg: Any) -> None:

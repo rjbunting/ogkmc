@@ -19,6 +19,7 @@ from autokmc.io.persistence import ReactionWriter
 from autokmc.io.resume_contract import make_resume_contract, verify_resume_contract
 from autokmc.io.summary import ReactionSummary
 from autokmc.io.trajectory import TrajectoryWriter
+from autokmc.sites.stability.neb import set_default_neb_band_eval
 from autokmc.thermo.free_energy import FreeEnergyOptions
 from autokmc.workflow.models import (
     ChannelRuntimeOptions,
@@ -344,6 +345,10 @@ def resolve_thermo_runtime(cfg, identity: RunIdentity) -> ThermoRuntime:
 
 def resolve_channel_runtime(cfg, frozen_indices: list[int] | None) -> ChannelRuntimeOptions:
     """Build the three typed keyword groups formerly assembled in the CLI."""
+    # The band-evaluation mode applies uniformly to every NEB in the run
+    # (diffusion and bond alike), so it is set once here rather than being
+    # threaded through every channel signature.
+    set_default_neb_band_eval(cfg.optimization.neb_band_eval)
     diffusion = None
     if cfg.diffusion.enabled:
         d = cfg.diffusion

@@ -43,6 +43,7 @@ from autokmc.core.constants import (
     KABSCH_MAX_MAPPINGS,
     LATERAL_SHELLS_DEFAULT,
     MAX_PAIR_SHELLS,
+    NEB_BAND_EVAL,
     NEB_FMAX,
     NEB_CLIMB,
     NEB_INTERPOLATION,
@@ -126,6 +127,10 @@ class OptimizationCfg:
 
     optimizer: str = DEFAULT_OPTIMIZER
     neb_optimizer: str = DEFAULT_NEB_OPTIMIZER
+    #: NEB band evaluation mode: ``"images"`` (per-image calculator calls)
+    #: or ``"batched"`` (whole band in one stacked model forward per
+    #: optimizer step, when the calculator supports it).
+    neb_band_eval: str = NEB_BAND_EVAL
 
 
 @dataclass
