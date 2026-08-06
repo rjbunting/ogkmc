@@ -9,12 +9,17 @@ rather than statistical.
 
 from __future__ import annotations
 
+import sys
+from types import ModuleType, SimpleNamespace
+
 import numpy as np
 import pytest
+from ase import Atoms
 from ase.build import add_adsorbate, fcc111
 from ase.calculators.emt import EMT
 from ase.constraints import FixAtoms
 
+from autokmc.io.calculators import CalculatorPool
 from autokmc.sites.stability.band_eval import (
     BandEvaluationError,
     BandImageCalculator,
@@ -23,10 +28,8 @@ from autokmc.sites.stability.band_eval import (
 )
 from autokmc.sites.stability.neb import (
     DEFAULT_NEB_BAND_EVAL,
-    default_neb_band_eval,
     normalize_band_eval,
     run_neb,
-    set_default_neb_band_eval,
 )
 
 
@@ -139,6 +142,25 @@ def test_batched_evaluates_whole_band_once_per_step():
     assert calc.single_calls == 0
 
 
+def test_batched_neb_uses_only_one_calculator_from_pool():
+    _, _, frozen = _hop_endpoints()
+    calculators = [_BandBatchingEMT(), _BandBatchingEMT()]
+    pool = CalculatorPool(calculators, max_workers=2)
+
+    try:
+        result = _run(pool, "batched", frozen=frozen)
+    finally:
+        pool.shutdown()
+
+    assert result.path_energies is not None
+    assert result.energy_ts == pytest.approx(
+        result.path_energies[result.transition_index]
+    )
+    active = [calculator for calculator in calculators if calculator.band_calls]
+    assert len(active) == 1
+    assert active[0].single_calls == 0
+
+
 def test_batched_honors_fix_atoms():
     _, _, frozen = _hop_endpoints()
     calc = _BandBatchingEMT()
@@ -164,6 +186,71 @@ def test_resolve_band_evaluator():
     assert resolve_band_evaluator(EMT()) is None
     evaluator = resolve_band_evaluator(_BandBatchingEMT())
     assert isinstance(evaluator, CallableBandEvaluator)
+
+
+def test_fairchem_evaluator_validates_before_conversion(monkeypatch):
+    events = []
+
+    atomic_data_module = ModuleType("fairchem.core.datasets.atomic_data")
+    atomic_data_module.atomicdata_list_to_batch = lambda items: items
+    for name in ("fairchem", "fairchem.core", "fairchem.core.datasets"):
+        monkeypatch.setitem(sys.modules, name, ModuleType(name))
+    monkeypatch.setitem(
+        sys.modules,
+        "fairchem.core.datasets.atomic_data",
+        atomic_data_module,
+    )
+
+    class _Predictor:
+        device = None
+
+        def validate_atoms_data(self, atoms, task_name):
+            events.append(("validate", task_name, atoms.info.get("spin")))
+            atoms.info.setdefault("spin", 1)
+
+        def predict(self, data_list):
+            events.append(("predict", len(data_list)))
+            return {
+                "energy": np.arange(len(data_list), dtype=float),
+                "forces": np.zeros(
+                    (sum(len(atoms) for atoms in data_list), 3),
+                    dtype=float,
+                ),
+            }
+
+    def convert(atoms):
+        events.append(("convert", atoms.info["spin"]))
+        return atoms
+
+    calculator = SimpleNamespace(
+        predictor=_Predictor(),
+        a2g=convert,
+        task_name="omol",
+    )
+    images = [Atoms("H"), Atoms("H2")]
+    evaluator = resolve_band_evaluator(calculator)
+
+    assert evaluator is not None
+    results = evaluator.evaluate_band(images)
+
+    assert events == [
+        ("validate", "omol", None),
+        ("convert", 1),
+        ("validate", "omol", None),
+        ("convert", 1),
+        ("predict", 2),
+    ]
+    assert [energy for energy, _forces in results] == [0.0, 1.0]
+    assert all(image.info["spin"] == 1 for image in images)
+
+
+def test_fairchem_evaluator_requires_validation_surface():
+    calculator = SimpleNamespace(
+        predictor=SimpleNamespace(predict=lambda _batch: {}),
+        a2g=lambda atoms: atoms,
+        task_name="oc20",
+    )
+    assert resolve_band_evaluator(calculator) is None
 
 
 def test_band_evaluator_output_is_validated():
@@ -207,12 +294,6 @@ def test_normalize_and_default_mode():
         normalize_band_eval("turbo")
     with pytest.raises(ValueError):
         normalize_band_eval("")
-    previous = default_neb_band_eval()
-    try:
-        set_default_neb_band_eval("batched")
-        assert default_neb_band_eval() == "batched"
-    finally:
-        set_default_neb_band_eval(previous)
     assert DEFAULT_NEB_BAND_EVAL == "images"
 
 

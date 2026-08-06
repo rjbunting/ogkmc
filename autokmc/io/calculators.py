@@ -58,7 +58,8 @@ class CalculatorCfg:
 
 	``copies`` controls how many independent calculator instances are built
 	up front.  The science code acquires these instances from a
-	CalculatorPool instead of deep-copying live calculator objects.
+	CalculatorPool instead of deep-copying live calculator objects.  A complete
+	NEB holds one instance; additional copies serve other independent work.
 	"""
 	import_path:     str | None = None
 	kwargs:          dict       = field(default_factory=dict)

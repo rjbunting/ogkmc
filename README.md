@@ -255,13 +255,15 @@ calculator:
 ```
 
 `copies` creates a calculator pool. This is useful for independent relaxation
-or NEB tasks when the calculator and hardware can support parallel work.
+or NEB tasks when the calculator and hardware can support parallel work. Each
+NEB leases exactly one calculator for its complete ordinary and climbing-image
+lifecycle; calculator copies are never divided across images in one band.
 The UMA example above creates one predictor per GPU so AutoKMC can run four
 independent calculator tasks concurrently. FAIR-Chem's single-worker predictor
 accepts `device: cuda`; `get_predict_unit_on_device` selects each configured
 ordinal during construction and verifies that the predictor retained it.
-FAIR-Chem's own `workers` option instead distributes one predictor calculation
-internally and is a separate parallelism strategy.
+The bundled FAIR-Chem device helper requires `workers: 1`, preserving the
+one-calculator/one-device NEB policy.
 
 ### Diffusion
 

@@ -100,10 +100,10 @@ relaxations and `bfgs` for NEB.
 
 `neb_band_eval` controls how the NEB band's images are evaluated on each
 optimizer step. `images` (the default, and the previous behavior) issues one
-calculator call per image — serially with a shared calculator, or as pooled
-threads when a multi-worker calculator pool is configured. `batched`
+calculator call per image, serially through the one calculator leased by that
+NEB. `batched`
 evaluates the whole band in a single stacked model forward per step when the
-calculator supports it, which lets a GPU MLIP amortize dispatch and
+leased calculator supports it, which lets a single-GPU MLIP amortize dispatch and
 host-device overhead across the band. The NEB physics, optimizer, and
 constraint handling are unchanged — only the force-evaluation access pattern
 differs — and unsupported calculators fall back to `images` with a logged
@@ -240,16 +240,19 @@ calculator:
 | `kwargs` | `{}` | Class constructor arguments. |
 | `factory` | `null` | Dotted factory callable; mutually exclusive with `import_path`. |
 | `factory_kwargs` | `{}` | Factory arguments. |
-| `copies` | `1` | Number of independent calculator instances. Independent site work, NEB images, and vibration displacements share this pool. |
+| `copies` | `1` | Number of independent calculator instances. Independent site/NEB work and vibration displacements share this pool; one NEB holds one copy for its full lifecycle. |
 | `gpu_devices` | `null` | Optional device list assigned across copies. |
 | `gpu_device_arg` | `device` | Constructor/factory argument that receives a device. |
 | `max_workers` | `null` | Maximum concurrent calculator tasks; defaults to the number of copies. |
 
 These settings expose two distinct levels of concurrency. `copies` and
 `max_workers` create independent calculator objects and schedule concurrent
-AutoKMC tasks. Calculator-specific factory arguments control any parallelism
-inside one calculator. For independent FAIR-Chem UMA work, configure one copy
-per GPU and inject each ordinal into the nested
+AutoKMC tasks. A NEB never fans its images out across those copies: separate
+NEBs may run concurrently, but each uses one calculator. Calculator-specific
+factory arguments control any parallelism inside one calculator; the bundled
+FAIR-Chem helper requires one worker so its calculator stays on one device.
+For independent FAIR-Chem UMA work, configure one copy per GPU and inject each
+ordinal into the nested
 `get_predict_unit_on_device` factory as shown above. The helper selects that
 ordinal while constructing FAIR-Chem's `device: cuda` predictor and verifies
 the resolved device. FAIR-Chem's own `workers` option instead distributes one

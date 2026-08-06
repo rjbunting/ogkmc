@@ -98,6 +98,7 @@ def test_channel_runtime_propagates_optimizer_choices():
         optimization=OptimizationCfg(
             optimizer="fire",
             neb_optimizer="mdmin",
+            neb_band_eval="batched",
         ),
         diffusion=DiffusionCfg(enabled=True),
         bond=BondCfg(enabled=True),
@@ -108,11 +109,35 @@ def test_channel_runtime_propagates_optimizer_choices():
     assert runtime.diffusion is not None
     assert runtime.diffusion.optimizer == "fire"
     assert runtime.diffusion.neb_optimizer == "mdmin"
+    assert runtime.diffusion.neb_band_eval == "batched"
     assert runtime.bond is not None
     assert runtime.bond.optimizer == "fire"
     assert runtime.bond.neb_optimizer == "mdmin"
+    assert runtime.bond.neb_band_eval == "batched"
     assert runtime.bond_growth is not None
     assert runtime.bond_growth.optimizer == "fire"
+
+
+def test_channel_runtime_neb_modes_are_isolated():
+    def resolve(mode: str):
+        cfg = RunConfig(
+            optimization=OptimizationCfg(neb_band_eval=mode),
+            diffusion=DiffusionCfg(enabled=True),
+            bond=BondCfg(enabled=True),
+        )
+        return resolve_channel_runtime(cfg, frozen_indices=None)
+
+    images = resolve("images")
+    batched = resolve("batched")
+
+    assert images.diffusion is not None
+    assert images.bond is not None
+    assert batched.diffusion is not None
+    assert batched.bond is not None
+    assert images.diffusion.neb_band_eval == "images"
+    assert images.bond.neb_band_eval == "images"
+    assert batched.diffusion.neb_band_eval == "batched"
+    assert batched.bond.neb_band_eval == "batched"
 
 
 def test_network_builder_flattens_diffusion_channels(tmp_path, monkeypatch):

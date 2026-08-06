@@ -131,11 +131,12 @@ When `free_energy.enabled` is true:
 - vibration caches are separated by species, reaction class, iso-class, and
   lateral class, then content-addressed by geometry, displacement settings, and
   calculator identity,
-- independent finite-difference displacements and NEB images share the
-  configured calculator pool without sharing live calculator objects,
+- independent finite-difference displacements and whole NEB calculations share
+  the configured calculator pool without sharing live calculator objects; each
+  NEB holds one calculator for its complete lifecycle,
 - broad initialization sweeps parallelize independent sites, while isolated
-  transition-state and thermochemistry work parallelizes images or
-  displacements; the two levels are never nested.
+  transition-state work evaluates one band per calculator and thermochemistry
+  may parallelize independent displacements; the two levels are never nested.
 
 When free-energy fields are absent, the corresponding channel uses electronic
 energies. See [Configuration](configuration.md#free_energy) for the controls.

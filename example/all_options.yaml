@@ -353,8 +353,9 @@ calculator:
   # The UMA helper path is predict_unit.factory_kwargs.device.
   gpu_device_arg: device
 
-  # Maximum concurrent calculator tasks; null defaults to copies and an
-  # explicit value must be between 1 and copies.
+  # Maximum concurrent independent calculator tasks; null defaults to copies
+  # and an explicit value must be between 1 and copies. One NEB holds one
+  # calculator for its full lifecycle, regardless of this value.
   # Set this to 4 with four independent UMA copies.
   max_workers: 1
 

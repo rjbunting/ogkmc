@@ -120,6 +120,7 @@ from autokmc.sites.stability.neb import (
 from autokmc.core.constants import (
     LATERAL_SHELLS_DEFAULT,
     NL_MULT_DEFAULT,
+    NEB_BAND_EVAL,
     NEB_N_IMAGES,
     NEB_FMAX,
     NEB_MAX_STEPS,
@@ -1088,6 +1089,7 @@ def check_diffusion_stability(
     persist_neb_path: bool = False,
     optimizer: str = DEFAULT_OPTIMIZER,
     neb_optimizer: str = DEFAULT_NEB_OPTIMIZER,
+    neb_band_eval: str = NEB_BAND_EVAL,
     verbose: bool = False,
     free_energy_options=None,
     free_energy_temperature_k: float | None = None,
@@ -1577,6 +1579,7 @@ def check_diffusion_stability(
         fmax=float(fmax),
         max_steps=int(max_steps),
         optimizer=neb_optimizer,
+        band_eval=neb_band_eval,
         verbose=verbose,
         not_converged_error=NEBNotConvergedError,
         persist_path=persist_neb_path,
@@ -1599,7 +1602,6 @@ def check_diffusion_stability(
                 images,
             )
         ),
-        band_factory=_make_neb_band,
         logfile_factory=_neb_optimizer_logfile,
     )
     E_ts = neb_result.energy_ts

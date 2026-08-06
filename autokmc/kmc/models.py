@@ -27,6 +27,7 @@ from autokmc.core.constants import (
     KABSCH_MAX_MAPPINGS,
     LATERAL_SHELLS_DEFAULT,
     MAX_PAIR_SHELLS,
+    NEB_BAND_EVAL,
     NEB_CLIMB,
     NEB_FMAX,
     NEB_INTERPOLATION,
@@ -106,6 +107,7 @@ class DiffusionChannelOptions:
     persist_neb_path: bool = False
     optimizer: str = DEFAULT_OPTIMIZER
     neb_optimizer: str = DEFAULT_NEB_OPTIMIZER
+    neb_band_eval: str = NEB_BAND_EVAL
 
     @classmethod
     def from_mapping(
@@ -134,6 +136,7 @@ class BondChannelOptions:
     persist_neb_path: bool = False
     optimizer: str = DEFAULT_OPTIMIZER
     neb_optimizer: str = DEFAULT_NEB_OPTIMIZER
+    neb_band_eval: str = NEB_BAND_EVAL
 
     @classmethod
     def from_mapping(

@@ -13,11 +13,8 @@ does not create a diffusion <-> bond import cycle.
 from __future__ import annotations
 
 import os
-import threading
 import warnings
 from collections.abc import Sequence
-from concurrent.futures import ThreadPoolExecutor, wait
-from contextlib import contextmanager
 from dataclasses import dataclass
 from importlib import import_module
 from typing import TYPE_CHECKING, Any, Callable
@@ -36,7 +33,6 @@ from autokmc.io.calculators import (
     CalculatorConfigError,
     CalculatorPool,
     acquire_calculator,
-    calculator_batch_active,
     primary_calculator,
 )
 from autokmc.sites.stability.band_eval import (
@@ -78,8 +74,6 @@ except ImportError:  # pragma: no cover
         _idpp_interpolate = None
 
 _log = get_logger(__name__)
-
-_default_band_eval = DEFAULT_NEB_BAND_EVAL
 
 #: Set once the first time a batchable calculator is seen under the ``images``
 #: default, so the "you could turn on batching" hint is logged a single time
@@ -126,17 +120,6 @@ def normalize_band_eval(value: str) -> str:
     return name
 
 
-def set_default_neb_band_eval(value: str) -> None:
-    """Set the process-wide default band evaluation mode (from config)."""
-    global _default_band_eval
-    _default_band_eval = normalize_band_eval(value)
-
-
-def default_neb_band_eval() -> str:
-    """Return the process-wide default band evaluation mode."""
-    return _default_band_eval
-
-
 @dataclass(frozen=True)
 class NEBRunResult:
     """Calculator-detached result of a converged NEB optimisation."""
@@ -148,146 +131,6 @@ class NEBRunResult:
     optimizer_steps: int
     path_energies: list[float] | None = None
     path_images: list[Atoms] | None = None
-
-
-class _NEBPoolScheduler:
-    """Bound concurrent image evaluations by a CalculatorPool's worker limit."""
-
-    def __init__(self, pool: CalculatorPool):
-        self.pool = pool
-        self.max_workers = max(
-            1,
-            min(len(pool), int(getattr(pool, "max_workers", len(pool)) or len(pool))),
-        )
-        self._semaphore = threading.BoundedSemaphore(self.max_workers)
-
-    @contextmanager
-    def acquire(self):
-        with self._semaphore:
-            with self.pool.acquire() as calculator:
-                yield calculator
-
-
-class _PooledNEBCalculator:
-    """Per-image ASE calculator facade backed by a shared calculator pool.
-
-    ASE's thread-parallel NEB requires a distinct calculator object on every
-    image.  The facades are distinct, while each force evaluation leases one
-    real calculator.  Energy is captured during the force call so the
-    immediately following energy request does not trigger a second model
-    inference after the lease has been returned.
-    """
-
-    def __init__(self, scheduler: _NEBPoolScheduler):
-        self._scheduler = scheduler
-        self._positions: np.ndarray | None = None
-        self._cell: np.ndarray | None = None
-        self._numbers: np.ndarray | None = None
-        self._energy: float | None = None
-        self._forces: np.ndarray | None = None
-
-    def _matches(self, atoms: Atoms) -> bool:
-        return bool(
-            self._energy is not None
-            and self._positions is not None
-            and self._cell is not None
-            and self._numbers is not None
-            and np.array_equal(self._positions, np.asarray(atoms.positions))
-            and np.array_equal(self._cell, np.asarray(atoms.cell.array))
-            and np.array_equal(self._numbers, np.asarray(atoms.numbers))
-        )
-
-    def _remember(
-        self,
-        atoms: Atoms,
-        energy: float,
-        forces: np.ndarray | None = None,
-    ) -> None:
-        self._positions = np.asarray(atoms.positions, dtype=float).copy()
-        self._cell = np.asarray(atoms.cell.array, dtype=float).copy()
-        self._numbers = np.asarray(atoms.numbers, dtype=int).copy()
-        self._energy = float(energy)
-        self._forces = None if forces is None else np.asarray(forces, dtype=float).copy()
-
-    def get_forces(self, atoms: Atoms) -> np.ndarray:
-        if self._matches(atoms) and self._forces is not None:
-            return self._forces.copy()
-        with self._scheduler.acquire() as calculator:
-            forces = np.asarray(calculator.get_forces(atoms), dtype=float).copy()
-            energy = float(calculator.get_potential_energy(atoms))
-        self._remember(atoms, energy, forces)
-        return forces
-
-    def get_potential_energy(
-        self,
-        atoms: Atoms,
-        force_consistent: bool = False,
-    ) -> float:
-        if self._matches(atoms):
-            return float(self._energy)
-        with self._scheduler.acquire() as calculator:
-            energy = float(
-                calculator.get_potential_energy(
-                    atoms,
-                    force_consistent=force_consistent,
-                )
-            )
-        self._remember(atoms, energy)
-        return energy
-
-
-class _ExceptionSafeParallelNEB(NEB):
-    """NEB with concurrent image evaluation and synchronous error propagation.
-
-    ASE's local ``parallel=True`` backend uses raw ``threading.Thread`` objects.
-    Exceptions raised by those threads do not reach ``get_forces()``, which can
-    leave uninitialised force/energy entries and let an optimiser continue with
-    a corrupt band.  This facade pre-evaluates every interior image with futures,
-    observes all results, and then asks ASE to assemble the band serially from
-    the calculator caches.
-    """
-
-    def __init__(self, *args, image_max_workers: int, **kwargs):
-        self._image_max_workers = max(1, int(image_max_workers))
-        super().__init__(*args, parallel=False, **kwargs)
-        # Preserve the public indication that image evaluations are concurrent.
-        # ``get_forces`` temporarily disables ASE's unsafe raw-thread branch.
-        self.parallel = True
-
-    def _prefetch_interior_forces(self) -> None:
-        interior_images = self.images[1:-1]
-        if not interior_images:
-            return
-
-        with ThreadPoolExecutor(
-            max_workers=min(self._image_max_workers, len(interior_images)),
-            thread_name_prefix="autokmc-neb-image",
-        ) as executor:
-            futures = [
-                executor.submit(image.get_forces)
-                for image in interior_images
-            ]
-            wait(futures)
-
-            first_failure: tuple[BaseException, Any] | None = None
-            for future in futures:
-                try:
-                    future.result()
-                except BaseException as exc:
-                    if first_failure is None:
-                        first_failure = (exc, exc.__traceback__)
-
-        if first_failure is not None:
-            error, traceback = first_failure
-            raise error.with_traceback(traceback)
-
-    def get_forces(self):
-        self._prefetch_interior_forces()
-        self.parallel = False
-        try:
-            return super().get_forces()
-        finally:
-            self.parallel = True
 
 
 class _BatchedBandNEB(NEB):
@@ -529,13 +372,20 @@ def make_neb_band(
     initial_path: Sequence[Atoms] | None = None,
     band_eval: str = DEFAULT_NEB_BAND_EVAL,
 ) -> tuple[Any, list[Atoms]]:
-    """Build an ASE NEB band with one shared, non-deepcopyable calculator.
+    """Build an ASE NEB band with one shared concrete calculator.
 
     ``n_images`` counts interior images.  A compatible ``initial_path`` is
     copied directly into the band; otherwise IDPP interpolation falls back to
     a linear path for the same short-band/pathological-geometry cases handled
-    by the former channel-local implementations.
+    by the former channel-local implementations.  Calculator pools must be
+    leased by :func:`run_neb` before this function is called so the same
+    concrete calculator remains assigned for the band's entire lifetime.
     """
+    if isinstance(calculator, CalculatorPool):
+        raise CalculatorConfigError(
+            "make_neb_band requires one concrete calculator; call run_neb() "
+            "with the CalculatorPool so it can hold one lease for the full NEB"
+        )
     images: list[Atoms] | None = None
     if initial_path is not None:
         try:
@@ -610,34 +460,17 @@ def make_neb_band(
 
     band_evaluator: BandEvaluator | None = None
     if normalize_band_eval(band_eval) == "batched":
-        if isinstance(calculator, CalculatorPool):
+        band_evaluator = resolve_band_evaluator(calculator)
+        if band_evaluator is None:
             _log.warning(
-                "Batched NEB band evaluation needs a concrete calculator, "
-                "not a CalculatorPool; falling back to per-image evaluation."
+                "Calculator %s does not support batched band "
+                "evaluation; falling back to per-image NEB evaluation.",
+                type(calculator).__name__,
             )
-        else:
-            band_evaluator = resolve_band_evaluator(calculator)
-            if band_evaluator is None:
-                _log.warning(
-                    "Calculator %s does not support batched band "
-                    "evaluation; falling back to per-image NEB evaluation.",
-                    type(calculator).__name__,
-                )
 
-    parallel_images = (
-        band_evaluator is None
-        and isinstance(calculator, CalculatorPool)
-        and len(calculator) > 1
-        and int(getattr(calculator, "max_workers", len(calculator)) or len(calculator)) > 1
-        and not calculator_batch_active()
-    )
     if band_evaluator is not None:
         for image in images:
             image.calc = BandImageCalculator(calculator)
-    elif parallel_images:
-        scheduler = _NEBPoolScheduler(calculator)
-        for image in images:
-            image.calc = _PooledNEBCalculator(scheduler)
     else:
         for image in images:
             image.calc = calculator
@@ -646,20 +479,12 @@ def make_neb_band(
         "k": float(spring_k),
         "climb": bool(climb),
         "method": "improvedtangent",
-        "allow_shared_calculator": (
-            band_evaluator is None and not parallel_images
-        ),
+        "allow_shared_calculator": band_evaluator is None,
     }
     if band_evaluator is not None:
         neb = _BatchedBandNEB(
             images,
             band_evaluator=band_evaluator,
-            **neb_kwargs,
-        )
-    elif parallel_images:
-        neb = _ExceptionSafeParallelNEB(
-            images,
-            image_max_workers=scheduler.max_workers,
             **neb_kwargs,
         )
     else:
@@ -739,7 +564,7 @@ def run_neb(
     failure_path_callback: Callable[[list[Atoms]], None] | None = None,
     band_factory=None,
     logfile_factory=None,
-    band_eval: str | None = None,
+    band_eval: str = DEFAULT_NEB_BAND_EVAL,
 ) -> NEBRunResult:
     """Optimise one NEB band and return a calculator-detached result.
 
@@ -751,32 +576,17 @@ def run_neb(
     stage, while ``optimizer_steps`` reports their combined step count.  If an
     optimizer, calculator, or convergence check raises after band construction,
     *failure_path_callback* receives a calculator-detached snapshot of the
-    last-known full band before the exception is re-raised.
+    last-known full band before the exception is re-raised.  A pool supplies
+    exactly one concrete calculator, and that lease is held for the complete
+    NEB lifecycle.  Other pool calculators remain available for independent
+    NEBs, never for other images in this band.
     """
     build_band = band_factory or make_neb_band
     select_logfile = logfile_factory or neb_optimizer_logfile
-    band_eval_mode = normalize_band_eval(
-        band_eval if band_eval is not None else default_neb_band_eval()
-    )
+    band_eval_mode = normalize_band_eval(band_eval)
     if band_eval_mode == "images":
         _maybe_hint_batched_available(calculator)
-    use_parallel_pool = (
-        band_eval_mode != "batched"
-        and isinstance(calculator, CalculatorPool)
-        and len(calculator) > 1
-        and int(getattr(calculator, "max_workers", len(calculator)) or len(calculator)) > 1
-        and not calculator_batch_active()
-    )
-
-    @contextmanager
-    def _band_calculator():
-        if use_parallel_pool:
-            yield calculator
-            return
-        with acquire_calculator(calculator, purpose=purpose) as concrete:
-            yield concrete
-
-    with _band_calculator() as neb_calculator:
+    with acquire_calculator(calculator, purpose=purpose) as neb_calculator:
         band_kwargs = {
             "n_images": int(n_images),
             "interpolation": str(interpolation),
@@ -954,13 +764,11 @@ __all__ = [
     "DEFAULT_NEB_BAND_EVAL",
     "NEB_BAND_EVALS",
     "NEBRunResult",
-    "default_neb_band_eval",
     "make_neb_band",
     "neb_optimizer_logfile",
     "normalize_band_eval",
     "project_neb_path",
     "run_neb",
-    "set_default_neb_band_eval",
     # Legacy facade exports.
     "NEBNotConvergedError",
     "TransitionStateInvalidError",

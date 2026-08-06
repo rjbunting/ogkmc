@@ -109,13 +109,12 @@ class CallableBandEvaluator:
 class FairChemBandEvaluator:
     """Batch a band through a FAIR-Chem predict unit in one forward pass.
 
-    Mirrors the single-image path exactly: each image is converted with the
-    calculator's own atoms-to-graph converter (``calc.a2g``), the resulting
-    graphs are collated into one batch, and the calculator's predictor runs a
-    single forward.  Reusing ``a2g`` means the batched graph construction
-    (cutoffs, edges, task/charge/spin embedding) is bit-for-bit the same as
-    what ``FAIRChemCalculator.calculate`` builds per image, so batched and
-    per-image results agree to model round-off.
+    Mirrors the single-image path exactly: each image is validated with the
+    predictor for the calculator's task, then converted with the calculator's
+    own atoms-to-graph converter (``calc.a2g``).  The resulting graphs are
+    collated into one batch and the calculator's predictor runs a single
+    forward.  Reusing the validation and ``a2g`` surfaces preserves
+    task-specific defaults (including charge/spin) and graph construction.
 
     Built defensively against fairchem-core API drift: construction raises
     ``BandEvaluationError`` when the calculator does not expose the expected
@@ -136,6 +135,16 @@ class FairChemBandEvaluator:
                 "calculator does not expose a callable a2g atoms->graph "
                 "converter"
             )
+        validator = getattr(predictor, "validate_atoms_data", None)
+        if not callable(validator):
+            raise BandEvaluationError(
+                "calculator predictor does not expose validate_atoms_data()"
+            )
+        task_name = getattr(calculator, "task_name", None)
+        if not isinstance(task_name, str) or not task_name:
+            raise BandEvaluationError(
+                "calculator does not expose a non-empty task_name"
+            )
         try:
             from fairchem.core.datasets.atomic_data import (  # type: ignore
                 atomicdata_list_to_batch,
@@ -147,12 +156,17 @@ class FairChemBandEvaluator:
         self._calculator = calculator
         self._predictor = predictor
         self._converter = converter
+        self._validator = validator
+        self._task_name = task_name
         self._collate = atomicdata_list_to_batch
         self._device = getattr(predictor, "device", None)
 
     def evaluate_band(self, images: Sequence[Atoms]) -> list[BandImageResult]:
         try:
-            data_list = [self._converter(image) for image in images]
+            data_list = []
+            for image in images:
+                self._validator(image, self._task_name)
+                data_list.append(self._converter(image))
             batch = self._collate(data_list)
             if self._device is not None and hasattr(batch, "to"):
                 batch = batch.to(self._device)

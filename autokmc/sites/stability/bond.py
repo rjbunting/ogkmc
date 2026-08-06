@@ -127,6 +127,7 @@ from autokmc.sites.diffusion import _member_clique_union
 from autokmc.core.constants import (
     LATERAL_SHELLS_DEFAULT,
     NL_MULT_DEFAULT,
+    NEB_BAND_EVAL,
     NEB_N_IMAGES,
     NEB_FMAX,
     NEB_MAX_STEPS,
@@ -1740,6 +1741,7 @@ def check_bond_site_stability(
     persist_neb_path: bool = False,
     optimizer: str = DEFAULT_OPTIMIZER,
     neb_optimizer: str = DEFAULT_NEB_OPTIMIZER,
+    neb_band_eval: str = NEB_BAND_EVAL,
     verbose: bool = False,
     calculation_cache_root: str | None = None,
     calculation_cache_lookup_enabled: bool = False,
@@ -2338,6 +2340,7 @@ def check_bond_site_stability(
         fmax=float(fmax),
         max_steps=int(max_steps),
         optimizer=neb_optimizer,
+        band_eval=neb_band_eval,
         verbose=verbose,
         not_converged_error=BondNEBNotConvergedError,
         persist_path=persist_neb_path,
@@ -2359,7 +2362,6 @@ def check_bond_site_stability(
                 images,
             )
         ),
-        band_factory=_make_neb_band,
         logfile_factory=_neb_optimizer_logfile,
     )
     E_ts = neb_result.energy_ts

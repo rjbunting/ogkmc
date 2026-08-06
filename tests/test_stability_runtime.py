@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import threading
-import time
 from types import SimpleNamespace
 
 from ase import Atoms
@@ -13,7 +12,7 @@ import networkx as nx
 import numpy as np
 import pytest
 
-from autokmc.io.calculators import CalculatorPool, calculator_batch_context
+from autokmc.io.calculators import CalculatorConfigError, CalculatorPool
 from autokmc.io.calculation_cache import scientific_input_fingerprint
 from autokmc.sites.stability import adsorption as adsorption_module
 from autokmc.sites.stability import bond as bond_module
@@ -221,62 +220,25 @@ def test_shared_neb_stops_when_preclimb_stage_does_not_converge(monkeypatch):
     assert all(image.calc is None for image in images)
 
 
-def test_neb_parallelizes_images_through_calculator_pool():
-    class Tracker:
-        def __init__(self):
-            self.active = 0
-            self.maximum = 0
-            self.lock = threading.Lock()
-
-        @contextmanager
-        def call(self):
-            with self.lock:
-                self.active += 1
-                self.maximum = max(self.maximum, self.active)
-            try:
-                time.sleep(0.02)
-                yield
-            finally:
-                with self.lock:
-                    self.active -= 1
-
-    class HarmonicCalculator:
-        def __init__(self, tracker):
-            self.tracker = tracker
-
-        def get_forces(self, atoms):
-            with self.tracker.call():
-                return -np.asarray(atoms.positions, dtype=float)
-
-        def get_potential_energy(self, atoms, force_consistent=False):
-            del force_consistent
-            positions = np.asarray(atoms.positions, dtype=float)
-            return 0.5 * float(np.einsum("ij,ij->", positions, positions))
-
-    tracker = Tracker()
-    pool = CalculatorPool(
-        [HarmonicCalculator(tracker), HarmonicCalculator(tracker)],
-        max_workers=2,
-    )
+def test_make_neb_band_requires_one_concrete_calculator():
+    pool = CalculatorPool([object(), object()], max_workers=2)
     initial = Atoms("H", positions=[[0.0, 0.0, 0.0]])
     final = Atoms("H", positions=[[1.0, 0.0, 0.0]])
 
-    neb, images = neb_module.make_neb_band(
-        initial,
-        final,
-        n_images=3,
-        interpolation="linear",
-        spring_k=0.1,
-        climb=False,
-        calculator=pool,
-        frozen_indices=None,
-    )
-    forces = neb.get_forces()
-
-    assert neb.parallel is True
-    assert len({id(image.calc) for image in images}) == len(images)
-    assert forces.shape == (3, 3)
-    assert tracker.maximum >= 2
+    try:
+        with pytest.raises(CalculatorConfigError, match="one concrete calculator"):
+            neb_module.make_neb_band(
+                initial,
+                final,
+                n_images=3,
+                interpolation="linear",
+                spring_k=0.1,
+                climb=False,
+                calculator=pool,
+                frozen_indices=None,
+            )
+    finally:
+        pool.shutdown()
 
 
 def test_idpp_starts_from_linear_band_without_shared_artifacts(
@@ -632,9 +594,13 @@ def test_project_neb_path_rejects_incompatible_inputs(mutate):
     ) is None
 
 
-def test_parallel_neb_propagates_interior_calculator_exception():
+def test_neb_uses_only_one_pool_calculator_and_propagates_its_exception():
     class SelectivelyFailingCalculator:
+        def __init__(self):
+            self.calls = 0
+
         def get_forces(self, atoms):
+            self.calls += 1
             x_position = float(atoms.positions[0, 0])
             if np.isclose(x_position, 0.5):
                 raise RuntimeError("intentional interior-image failure")
@@ -645,10 +611,8 @@ def test_parallel_neb_propagates_interior_calculator_exception():
             positions = np.asarray(atoms.positions, dtype=float)
             return 0.5 * float(np.einsum("ij,ij->", positions, positions))
 
-    pool = CalculatorPool(
-        [SelectivelyFailingCalculator(), SelectivelyFailingCalculator()],
-        max_workers=2,
-    )
+    calculators = [SelectivelyFailingCalculator(), SelectivelyFailingCalculator()]
+    pool = CalculatorPool(calculators, max_workers=2)
     initial = Atoms("H", positions=[[0.0, 0.0, 0.0]])
     final = Atoms("H", positions=[[1.0, 0.0, 0.0]])
 
@@ -661,7 +625,7 @@ def test_parallel_neb_propagates_interior_calculator_exception():
                 initial,
                 final,
                 calculator=pool,
-                purpose="failing parallel NEB",
+                purpose="failing single-calculator NEB",
                 n_images=3,
                 interpolation="linear",
                 spring_k=0.1,
@@ -675,11 +639,12 @@ def test_parallel_neb_propagates_interior_calculator_exception():
 
         with pool.acquire_many(2, purpose="failure recovery check") as calculators:
             assert len(calculators) == 2
+        assert sorted(calculator.calls for calculator in pool.calculators) == [0, 2]
     finally:
         pool.shutdown()
 
 
-def test_neb_uses_one_concrete_calculator_inside_outer_batch(monkeypatch):
+def test_neb_uses_one_concrete_calculator_without_outer_batch(monkeypatch):
     images = [_image(0.0), _image(0.5), _image(1.5), _image(0.2)]
     neb = SimpleNamespace(climb=False)
     calculators = [object(), object()]
@@ -691,16 +656,74 @@ def test_neb_uses_one_concrete_calculator_inside_outer_batch(monkeypatch):
         received.append(calculator)
         return neb, images
 
-    with calculator_batch_context():
-        result = neb_module.run_neb(
-            images[0],
-            images[-1],
+    result = neb_module.run_neb(
+        images[0],
+        images[-1],
+        calculator=pool,
+        purpose="isolated NEB",
+        n_images=2,
+        interpolation="linear",
+        spring_k=0.1,
+        climb=True,
+        frozen_indices=None,
+        fmax=0.05,
+        max_steps=20,
+        verbose=False,
+        not_converged_error=RuntimeError,
+        band_factory=band_factory,
+    )
+
+    assert result.energy_ts == pytest.approx(1.5)
+    assert received[0] in calculators
+    assert received[0] is not pool
+    pool.shutdown()
+
+
+def test_independent_nebs_can_lease_distinct_calculators(monkeypatch):
+    class EnergyCalculator:
+        def get_forces(self, atoms):
+            return np.zeros_like(atoms.positions)
+
+        def get_potential_energy(self, atoms, force_consistent=False):
+            del force_consistent
+            return float(atoms.info["energy"])
+
+    barrier = threading.Barrier(2)
+    received = []
+    received_lock = threading.Lock()
+    pool = CalculatorPool(
+        [EnergyCalculator(), EnergyCalculator()],
+        max_workers=2,
+    )
+
+    class ConcurrentOptimizer(_ConvergedOptimizer):
+        def run(self, *, fmax, steps):
+            del fmax, steps
+            barrier.wait(timeout=5)
+
+    def band_factory(*_args, calculator, **_kwargs):
+        with received_lock:
+            received.append(calculator)
+        images = []
+        for energy in (0.0, 0.5, 1.5, 0.2):
+            image = Atoms("H", positions=[[energy, 0.0, 0.0]])
+            image.info["energy"] = energy
+            image.calc = calculator
+            images.append(image)
+        return SimpleNamespace(climb=False), images
+
+    def run(label):
+        initial = Atoms("H", positions=[[0.0, 0.0, 0.0]])
+        final = Atoms("H", positions=[[1.0, 0.0, 0.0]])
+        return neb_module.run_neb(
+            initial,
+            final,
             calculator=pool,
-            purpose="outer batch NEB",
+            purpose=label,
             n_images=2,
             interpolation="linear",
             spring_k=0.1,
-            climb=True,
+            climb=False,
             frozen_indices=None,
             fmax=0.05,
             max_steps=20,
@@ -709,10 +732,20 @@ def test_neb_uses_one_concrete_calculator_inside_outer_batch(monkeypatch):
             band_factory=band_factory,
         )
 
-    assert result.energy_ts == pytest.approx(1.5)
-    assert received[0] in calculators
-    assert received[0] is not pool
-    pool.shutdown()
+    monkeypatch.setattr(neb_module, "BFGS", ConcurrentOptimizer)
+    try:
+        results = pool.gather(
+            [
+                pool.submit(run, "independent NEB 1"),
+                pool.submit(run, "independent NEB 2"),
+            ]
+        )
+    finally:
+        pool.shutdown()
+
+    assert [result.energy_ts for result in results] == pytest.approx([1.5, 1.5])
+    assert len(received) == 2
+    assert len({id(calculator) for calculator in received}) == 2
 
 
 @pytest.mark.parametrize(
