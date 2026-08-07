@@ -19,8 +19,6 @@ Pipeline
 6. Run a convex-hull pass to identify which atoms are *exposed* and
    therefore eligible to bond to a surface (the **anchor atoms**).
 
-See ``dev/PLAN_multiatom_adsorbates.md`` for the full design.
-
 Typical usage
 -------------
 ::

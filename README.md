@@ -452,7 +452,7 @@ KMC graph does not store product lineage.
 Analyze a completed run with:
 
 ```bash
-autokmc analyze runs/co_oxidation_pt111_uma_4gpu
+autokmc analyze runs/h2_oxidation_pd111_uma
 # Optional stationary-state window:
 autokmc analyze RUN_DIR --start-time 1.0e-4 --end-time 5.0e-4 --blocks 20
 # If output.run_manifest_filename was customized:

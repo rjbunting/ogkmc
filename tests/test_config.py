@@ -201,19 +201,18 @@ def test_all_options_template_lists_every_shared_constant():
     assert cfg.adsorbate_sites.max_pair_shells == 10
 
 
-@pytest.mark.parametrize(
-    "filename",
-    [
-        "co_oxidation_pt111_uma_4gpu.yaml",
-        "co_oxidation_ptnano_uma_4gpu.yaml",
-    ],
-)
-def test_uma_four_gpu_examples_assign_one_predictor_per_device(filename):
+def test_h2_oxidation_pd111_uma_example_is_four_gpu_and_batched():
     pytest.importorskip("yaml")
-    path = Path(__file__).parents[1] / "example" / filename
+    path = (
+        Path(__file__).parents[1]
+        / "example"
+        / "h2_oxidation_pd111_uma.yaml"
+    )
 
     cfg = load_config(path)
 
+    assert cfg.structure.composition == "Pd"
+    assert [reactant.smiles for reactant in cfg.reactants] == ["[H][H]", "O=O"]
     assert cfg.calculator.factory == "fairchem.core.FAIRChemCalculator"
     predictor = cfg.calculator.factory_kwargs["predict_unit"]
     assert predictor["factory"] == (
@@ -222,6 +221,7 @@ def test_uma_four_gpu_examples_assign_one_predictor_per_device(filename):
     assert predictor["factory_kwargs"] == {
         "name_or_path": "uma-s-1p2",
         "device": "cuda",
+        "workers": 1,
     }
     assert cfg.calculator.factory_kwargs["task_name"] == "oc20"
     assert cfg.calculator.copies == 4
@@ -235,6 +235,7 @@ def test_uma_four_gpu_examples_assign_one_predictor_per_device(filename):
     assert cfg.calculator.gpu_device_arg == (
         "predict_unit.factory_kwargs.device"
     )
+    assert cfg.optimization.neb_band_eval == "batched"
 
 
 def test_load_toml_ok(tmp_path):

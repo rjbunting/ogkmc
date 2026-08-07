@@ -11,7 +11,7 @@ The schema is intentionally flat and dataclass-backed so that tab-completion
 in IDEs surfaces every knob.  Missing fields fall back to defaults from
 :mod:`autokmc.core.constants`.
 
-A reference example lives at ``example/co_oxidation_pt111_uma_4gpu.yaml``.
+A reference example lives at ``example/h2_oxidation_pd111_uma.yaml``.
 """
 
 from __future__ import annotations

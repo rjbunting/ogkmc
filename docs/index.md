@@ -21,10 +21,9 @@ event and structural information for reproducible post-processing.
   and schema-change conventions.
 
 The repository [README](../README.md) remains the installation and quick-start
-entry point. The two production-style platinum examples are:
+entry point. The production-style palladium example is:
 
-- [`co_oxidation_pt111_uma_4gpu.yaml`](../example/co_oxidation_pt111_uma_4gpu.yaml)
-- [`co_oxidation_ptnano_uma_4gpu.yaml`](../example/co_oxidation_ptnano_uma_4gpu.yaml)
+- [`h2_oxidation_pd111_uma.yaml`](../example/h2_oxidation_pd111_uma.yaml)
 
 ## Command summary
 

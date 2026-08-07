@@ -1,56 +1,59 @@
-# autokmc - CO oxidation on Pt nanoparticle with FAIR-Chem UMA on 4 GPUs
-# Run with:    autokmc run example/co_oxidation_ptnano_uma_4gpu.yaml
+# autokmc - H2 oxidation on Pd(111) with FAIR-Chem UMA on 4 GPUs
+# Run with:    autokmc run example/h2_oxidation_pd111_uma.yaml
 schema_version: "1"
 
 output:
-  dir: ./runs/co_oxidation_ptnano_uma_4gpu
+  dir: ./runs/h2_oxidation_pd111_uma
   trajectory_dump_every: 10
-  log_level: INFO
+  log_level: DEBUG
 
 checkpoint:
   enabled: true
-  path: ./runs/co_oxidation_ptnano_uma_4gpu/checkpoint.pkl
+  path: ./runs/h2_oxidation_pd111_uma/checkpoint.pkl
   every_n_steps: 10
   # To restart a stopped run, set:
-  # resume_from: ./runs/co_oxidation_ptnano_uma_4gpu/checkpoint.pkl
+  # resume_from: ./runs/h2_oxidation_pd111_uma/checkpoint.pkl
 
 structure:
-  kind: nanoparticle
-  composition: Pt
+  kind: surface
+  composition: Pd
   crystal_structure: fcc
-  lattice_constant: 3.9242
-  # Approximate number of atoms in the Wulff-construction nanoparticle.
-  n_atoms: 600
-  # Leave null to calculate Pt surface energies for the Wulff construction
-  # with the configured UMA calculator.
-  surface_energies: null
+  miller_index: [1, 1, 1]
+  lattice_constant: 3.89
+  min_slab_size: 8.0
+  min_vacuum_size: 12.0
+  goal_x: 12.0
+  goal_y: 12.0
+  n_freeze_layers: 2
+  fmax: 0.01
+  max_steps: 1000
 
 reactants:
-  # CO feed.
-  - smiles: "[C]=O"
+  # H2 feed.
+  - smiles: "[H][H]"
     add_hydrogens: false
     relax_in_gas: true
+    partial_pressure_bar: 10.0
     geometry: linear
 
   # O2 feed; bond dissociation templates produce O* + O* <=> O2.
   - smiles: "O=O"
     add_hydrogens: false
     relax_in_gas: true
-    partial_pressure_bar: 0.2
+    partial_pressure_bar: 10.0
     geometry: linear
     spin: 1.0
 
-# O* is auto-built as a zero-pressure leaf species from O2 dissociation
-# templates. Once O* is formed on the surface, the KMC bond-expansion hook
-# expands O and derives later reactions such as CO* + O* <=> CO2.
+# H* and O* can be auto-built as zero-pressure leaf species from dissociation
+# templates. The KMC bond-expansion hook then derives later surface reactions.
 
 # FAIR-Chem UMA setup. FAIR-Chem uses task_name="oc20" for heterogeneous
 # catalysis. The first run needs fairchem-core installed and Hugging Face access
 # to facebook/UMA, either through huggingface-cli login or HF_TOKEN.
 #
-# Build one independent UMA predictor per GPU. FAIR-Chem accepts ``cuda`` for a
-# single predictor, so AutoKMC's helper selects each requested ordinal while
-# constructing it and verifies the resolved device before the run starts.
+# This builds four single-worker FAIRChemCalculator instances, each pinned to
+# one GPU. Up to four independent calculations can run concurrently; each NEB
+# leases one calculator/GPU for its complete lifecycle.
 calculator:
   factory: fairchem.core.FAIRChemCalculator
   factory_kwargs:
@@ -59,11 +62,17 @@ calculator:
       factory_kwargs:
         name_or_path: uma-s-1p2
         device: cuda
+        workers: 1
     task_name: oc20
   copies: 4
   gpu_devices: [cuda:0, cuda:1, cuda:2, cuda:3]
   gpu_device_arg: predict_unit.factory_kwargs.device
   max_workers: 4
+
+optimization:
+  optimizer: fire
+  neb_optimizer: fire
+  neb_band_eval: batched
 
 adsorbate_sites:
   prune_stable_only: true
@@ -74,8 +83,6 @@ adsorbate_sites:
 # true once the reaction network is behaving as expected.
 free_energy:
   enabled: false
-  # Feed-wide default used when a reactant omits partial_pressure_bar (CO here).
-  # Gas thermochemistry, when enabled, still uses a fixed 1-bar standard state.
   pressure_bar: 1.0
 
 kmc:
@@ -97,8 +104,8 @@ diffusion:
   max_steps: 1000
   n_images: 8
   climb: true
-  spring_k: 0.1
-  interpolation: idpp
+  spring_k: 5.0
+  interpolation: linear
   persist_neb_path: true
 
 bond:
@@ -122,8 +129,8 @@ bond:
   neb_max_steps: 1000
   neb_n_images: 8
   neb_climb: true
-  neb_spring_k: 0.1
-  neb_interpolation: idpp
+  neb_spring_k: 5.0
+  neb_interpolation: linear
   atom_matching: auto
   matching_trials: 8
   persist_neb_path: true

@@ -669,30 +669,43 @@ def expand_bond_sites_for_new_species(
         The newly enumerated bond-reaction iso-classes (also appended to
         ``G.graph["bond_reaction_sites"]``).
     """
-    species_build_kwargs = {
-        "nl_mult": nl_mult,
-        "random_seed": random_seed,
-        "prune_fmax": prune_fmax,
-        "prune_max_steps": prune_max_steps,
-        "optimizer": optimizer,
-        "anchor_k_max": anchor_k_max,
-        "adsorbate_bond_tolerance": adsorbate_bond_tolerance,
-        "adsorbate_n_shells_anchor": adsorbate_n_shells_anchor,
-        "adsorbate_n_shells_pair": adsorbate_n_shells_pair,
-        "co_bond_factor": co_bond_factor,
-        "anchor_bond_factor": anchor_bond_factor,
-        "anchor_repulsion_weight": anchor_repulsion_weight,
-        "site_repulsion_cutoff": site_repulsion_cutoff,
-        "adsorbate_contact_factor": adsorbate_contact_factor,
-        "adsorbate_standoff_factor": adsorbate_standoff_factor,
-        "adsorbate_rotational_restarts": adsorbate_rotational_restarts,
-        "typical_neighbor_distance": typical_neighbor_distance,
-        "adsorbate_max_pair_shells": adsorbate_max_pair_shells,
-        "anchor_hull_tolerance": anchor_hull_tolerance,
-        "kabsch_max_mappings": kabsch_max_mappings,
-        "add_hydrogens": add_hydrogens,
-    }
     reg = _registry(G)
+
+    def ensure_species_known(smi: str) -> bool:
+        """Forward the typed expansion settings to the species builder."""
+        return _ensure_species_known(
+            G,
+            smi,
+            reg,
+            calculator=calculator,
+            frozen_indices=frozen_indices,
+            nl_mult=nl_mult,
+            random_seed=random_seed,
+            prune_fmax=prune_fmax,
+            prune_max_steps=prune_max_steps,
+            optimizer=optimizer,
+            anchor_k_max=anchor_k_max,
+            adsorbate_bond_tolerance=adsorbate_bond_tolerance,
+            adsorbate_n_shells_anchor=adsorbate_n_shells_anchor,
+            adsorbate_n_shells_pair=adsorbate_n_shells_pair,
+            co_bond_factor=co_bond_factor,
+            anchor_bond_factor=anchor_bond_factor,
+            anchor_repulsion_weight=anchor_repulsion_weight,
+            site_repulsion_cutoff=site_repulsion_cutoff,
+            adsorbate_contact_factor=adsorbate_contact_factor,
+            adsorbate_standoff_factor=adsorbate_standoff_factor,
+            adsorbate_rotational_restarts=adsorbate_rotational_restarts,
+            typical_neighbor_distance=typical_neighbor_distance,
+            adsorbate_max_pair_shells=adsorbate_max_pair_shells,
+            anchor_hull_tolerance=anchor_hull_tolerance,
+            kabsch_max_mappings=kabsch_max_mappings,
+            add_hydrogens=add_hydrogens,
+            verbose=verbose,
+            free_energy_options=free_energy_options,
+            free_energy_temperature_k=free_energy_temperature_k,
+            vib_cache_root=vib_cache_root,
+        )
+
     cs = _canon_smiles(new_smiles)
     if not cs:
         return []
@@ -702,16 +715,7 @@ def expand_bond_sites_for_new_species(
         return []
 
     # 1–2. Build Reactant + sites for the newly-introduced species.
-    built_ok = _ensure_species_known(
-        G, cs, reg,
-        calculator      = calculator,
-        frozen_indices  = frozen_indices,
-        verbose         = verbose,
-        free_energy_options       = free_energy_options,
-        free_energy_temperature_k = free_energy_temperature_k,
-        vib_cache_root            = vib_cache_root,
-        **species_build_kwargs,
-    )
+    built_ok = ensure_species_known(cs)
     if not built_ok:
         # Only deterministic molecular-definition failures reach this path.
         # They are permanently classified in ``expansion_failures`` and can
@@ -816,16 +820,7 @@ def expand_bond_sites_for_new_species(
                     reg["species"].get(smi) is not None
                     and smi in reg["adsorbate_sites"]
                 )
-                available = _ensure_species_known(
-                    G, smi, reg,
-                    calculator      = calculator,
-                    frozen_indices  = frozen_indices,
-                    verbose         = verbose,
-                    free_energy_options       = free_energy_options,
-                    free_energy_temperature_k = free_energy_temperature_k,
-                    vib_cache_root            = vib_cache_root,
-                    **species_build_kwargs,
-                )
+                available = ensure_species_known(smi)
                 if not available:
                     unavailable_species.add(smi)
                 elif not was_ready and reg["adsorbate_sites"].get(smi):
