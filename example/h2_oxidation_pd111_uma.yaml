@@ -71,7 +71,17 @@ calculator:
 
 optimization:
   optimizer: fire
+  optimizer_kwargs:
+    dt: 0.01
+    dtmax: 0.05
+    maxstep: 0.05
+    downhill_check: true
   neb_optimizer: fire
+  neb_optimizer_kwargs:
+    dt: 0.01
+    dtmax: 0.05
+    maxstep: 0.05
+    downhill_check: true
   neb_band_eval: batched
 
 adsorbate_sites:

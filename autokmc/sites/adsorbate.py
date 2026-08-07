@@ -1610,6 +1610,7 @@ def prune_unstable_adsorbate_sites(
     kabsch_max_mappings: int = KABSCH_MAX_MAPPINGS,
     diagnostics_dir: str | None = None,
     optimizer: str = DEFAULT_OPTIMIZER,
+    optimizer_kwargs: dict[str, Any] | None = None,
     verbose: bool = False,
 ) -> list[AdsorbateSite]:
     """Remove iso-classes whose representative placement is unstable under ML relaxation.
@@ -1769,6 +1770,7 @@ def prune_unstable_adsorbate_sites(
                     fmax       = fmax,
                     steps      = max_steps,
                     optimizer  = optimizer,
+                    optimizer_kwargs = optimizer_kwargs,
                     verbose    = False,
                 )
                 forces = atoms_opt.get_forces()
@@ -2109,6 +2111,7 @@ def find_adsorbate_sites(
     prune_max_steps: int = PRUNE_MAX_STEPS,
     diagnostics_dir: str | None = None,
     optimizer: str = DEFAULT_OPTIMIZER,
+    optimizer_kwargs: dict[str, Any] | None = None,
     verbose: bool = False,
 ) -> list[AdsorbateSite]:
     """Universal N-atom adsorbate site enumerator (N ≥ 1).
@@ -2584,6 +2587,7 @@ def find_adsorbate_sites(
                 kabsch_max_mappings=kabsch_max_mappings,
                 diagnostics_dir=diagnostics_dir,
                 optimizer       = optimizer,
+                optimizer_kwargs=optimizer_kwargs,
                 verbose        = verbose,
             )
             # prune_unstable_adsorbate_sites already updates G.graph; keep

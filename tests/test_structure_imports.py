@@ -76,3 +76,54 @@ def test_structure_optimisation_error_retains_last_geometry(monkeypatch):
     assert caught.value.atoms.calc is None
     np.testing.assert_allclose(caught.value.atoms.positions, [[1.25, 0.0, 0.0]])
     np.testing.assert_allclose(atoms.positions, [[0.0, 0.0, 0.0]])
+
+
+def test_structure_fire_forwards_constructor_kwargs(monkeypatch):
+    from autokmc.structure import optimization as optimization_module
+
+    captured = []
+
+    class CapturingOptimizer:
+        def __init__(self, atoms, *, logfile, **kwargs):
+            del logfile
+            self.atoms = atoms
+            self.kwargs = kwargs
+            captured.append(kwargs)
+
+        def run(self, *, fmax, steps):
+            del fmax, steps
+
+        def converged(self):
+            return True
+
+        def get_number_of_steps(self):
+            return 0
+
+    monkeypatch.setattr(
+        optimization_module,
+        "_optimizer_class",
+        lambda _name: CapturingOptimizer,
+    )
+    atoms = Atoms("H", positions=[[0.0, 0.0, 0.0]])
+
+    optimization_module.optimise_structure(
+        atoms,
+        calculator=object(),
+        optimizer="fire",
+        optimizer_kwargs={
+            "dt": 0.01,
+            "dtmax": 0.05,
+            "maxstep": 0.03,
+            "downhill_check": True,
+        },
+        verbose=False,
+    )
+
+    assert captured == [
+        {
+            "dt": pytest.approx(0.01),
+            "dtmax": pytest.approx(0.05),
+            "maxstep": pytest.approx(0.03),
+            "downhill_check": True,
+        }
+    ]

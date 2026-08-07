@@ -106,7 +106,9 @@ class DiffusionChannelOptions:
     nl_mult: float = NL_MULT_DEFAULT
     persist_neb_path: bool = False
     optimizer: str = DEFAULT_OPTIMIZER
+    optimizer_kwargs: dict[str, Any] = field(default_factory=dict)
     neb_optimizer: str = DEFAULT_NEB_OPTIMIZER
+    neb_optimizer_kwargs: dict[str, Any] = field(default_factory=dict)
     neb_band_eval: str = NEB_BAND_EVAL
 
     @classmethod
@@ -135,7 +137,9 @@ class BondChannelOptions:
     nl_mult: float = NL_MULT_DEFAULT
     persist_neb_path: bool = False
     optimizer: str = DEFAULT_OPTIMIZER
+    optimizer_kwargs: dict[str, Any] = field(default_factory=dict)
     neb_optimizer: str = DEFAULT_NEB_OPTIMIZER
+    neb_optimizer_kwargs: dict[str, Any] = field(default_factory=dict)
     neb_band_eval: str = NEB_BAND_EVAL
 
     @classmethod
@@ -191,6 +195,7 @@ class BondGrowthOptions:
     bond_prune_with_calculator: bool = BOND_PRUNE_WITH_CALCULATOR
     gas_lift_height: float = BOND_GAS_LIFT_HEIGHT
     optimizer: str = DEFAULT_OPTIMIZER
+    optimizer_kwargs: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_mapping(
@@ -219,6 +224,7 @@ class KMCSettings:
     lateral_interactions: bool = True
     lateral_shells: int = LATERAL_SHELLS_DEFAULT
     optimizer: str = DEFAULT_OPTIMIZER
+    optimizer_kwargs: dict[str, Any] = field(default_factory=dict)
 
     @property
     def progress_enabled(self) -> bool:

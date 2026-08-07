@@ -7,7 +7,11 @@ from pathlib import Path, PureWindowsPath
 from typing import Any, NoReturn
 
 from autokmc.core.constants import NEB_BAND_EVALS
-from autokmc.utils.optimizers import NEB_OPTIMIZERS, REGULAR_OPTIMIZERS
+from autokmc.utils.optimizers import (
+    NEB_OPTIMIZERS,
+    REGULAR_OPTIMIZERS,
+    normalize_optimizer_kwargs,
+)
 
 
 class _Validator:
@@ -267,6 +271,15 @@ class _Validator:
                 "optimization.optimizer must be one of "
                 f"{choices}; got {cfg.optimizer!r}"
             )
+        try:
+            normalize_optimizer_kwargs(
+                optimizer,
+                cfg.optimizer_kwargs,
+                allowed=REGULAR_OPTIMIZERS,
+                setting="optimization.optimizer_kwargs",
+            )
+        except ValueError as exc:
+            self.fail(str(exc))
         neb_optimizer = self.string(
             cfg.neb_optimizer,
             "optimization.neb_optimizer",
@@ -277,6 +290,15 @@ class _Validator:
                 "optimization.neb_optimizer must be one of "
                 f"{choices}; got {cfg.neb_optimizer!r}"
             )
+        try:
+            normalize_optimizer_kwargs(
+                neb_optimizer,
+                cfg.neb_optimizer_kwargs,
+                allowed=NEB_OPTIMIZERS,
+                setting="optimization.neb_optimizer_kwargs",
+            )
+        except ValueError as exc:
+            self.fail(str(exc))
         neb_band_eval = self.string(
             cfg.neb_band_eval,
             "optimization.neb_band_eval",

@@ -126,7 +126,9 @@ class OptimizationCfg:
     """ASE optimizer choices used by calculator-backed relaxations."""
 
     optimizer: str = DEFAULT_OPTIMIZER
+    optimizer_kwargs: dict[str, Any] = field(default_factory=dict)
     neb_optimizer: str = DEFAULT_NEB_OPTIMIZER
+    neb_optimizer_kwargs: dict[str, Any] = field(default_factory=dict)
     #: NEB band evaluation mode: ``"images"`` (per-image calculator calls)
     #: or ``"batched"`` (whole band in one stacked model forward per
     #: optimizer step, when the calculator supports it).

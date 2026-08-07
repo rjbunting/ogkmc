@@ -1912,6 +1912,7 @@ def prune_unstable_bond_sites(
     max_steps: int = PRUNE_MAX_STEPS,
     nl_mult: float = NL_MULT_DEFAULT,
     optimizer: str = DEFAULT_OPTIMIZER,
+    optimizer_kwargs: dict[str, Any] | None = None,
     verbose: bool = False,
     debug_output_dir: str | None = None,
 ) -> list[BondReactionSite]:
@@ -2055,6 +2056,7 @@ def prune_unstable_bond_sites(
                     fmax       = fmax,
                     steps      = max_steps,
                     optimizer  = optimizer,
+                    optimizer_kwargs = optimizer_kwargs,
                     verbose    = False,
                 )
                 forces = atoms_opt.get_forces()

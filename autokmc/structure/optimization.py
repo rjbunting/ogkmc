@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import copy
 import os
-from typing import Dict, Optional, Tuple
+from collections.abc import Mapping
+from typing import Any, Dict, Optional, Tuple
 
 from ase import Atoms
 from ase.optimize import BFGS, FIRE, LBFGS, MDMin
@@ -30,6 +31,7 @@ from autokmc.utils.optimizers import (
     DEFAULT_OPTIMIZER,
     REGULAR_OPTIMIZERS,
     normalize_optimizer_name,
+    normalize_optimizer_kwargs,
 )
 from autokmc.utils.telemetry import instrument
 
@@ -80,6 +82,7 @@ def optimise_bulk(
     calculator=None,
     fmax: float = 0.01,
     optimizer: str = DEFAULT_OPTIMIZER,
+    optimizer_kwargs: Mapping[str, Any] | None = None,
     verbose: bool = True,
 ) -> Tuple[Atoms, Dict[str, float]]:
     """Relax a bulk unit cell and return the optimised Atoms and lattice params."""
@@ -104,7 +107,17 @@ def optimise_bulk(
 
         ecf = ExpCellFilter(bulk_atoms)
         optimizer_cls = _optimizer_class(optimizer)
-        opt = optimizer_cls(ecf, logfile=os.devnull)  # type: ignore[arg-type]
+        constructor_kwargs = normalize_optimizer_kwargs(
+            optimizer,
+            optimizer_kwargs,
+            allowed=REGULAR_OPTIMIZERS,
+            setting="optimizer_kwargs",
+        )
+        opt = optimizer_cls(  # type: ignore[arg-type]
+            ecf,
+            logfile=os.devnull,
+            **constructor_kwargs,
+        )
         opt.run(fmax=fmax)
 
         if not opt.converged():
@@ -135,6 +148,7 @@ def optimise_structure(
     steps: int = 1000,
     logfile: Optional[str] = None,
     optimizer: str = DEFAULT_OPTIMIZER,
+    optimizer_kwargs: Mapping[str, Any] | None = None,
     verbose: bool = True,
 ) -> Atoms:
     """Relax an ASE Atoms object with the selected ASE optimizer."""
@@ -166,7 +180,13 @@ def optimise_structure(
 
     log = logfile if logfile is not None else os.devnull
     optimizer_cls = _optimizer_class(optimizer)
-    opt = optimizer_cls(result, logfile=log)
+    constructor_kwargs = normalize_optimizer_kwargs(
+        optimizer,
+        optimizer_kwargs,
+        allowed=REGULAR_OPTIMIZERS,
+        setting="optimizer_kwargs",
+    )
+    opt = optimizer_cls(result, logfile=log, **constructor_kwargs)
     try:
         opt.run(fmax=fmax, steps=steps)
     except CalculatorConfigError:
@@ -209,6 +229,7 @@ def _resolve_lattice_params(
     calculator,
     fmax: float = 0.01,
     optimizer: str = DEFAULT_OPTIMIZER,
+    optimizer_kwargs: Mapping[str, Any] | None = None,
     verbose: bool = True,
 ) -> Dict[str, float]:
     """Return a lattice-parameter dict, running bulk relaxation if needed."""
@@ -221,6 +242,7 @@ def _resolve_lattice_params(
         calculator=calculator,
         fmax=fmax,
         optimizer=optimizer,
+        optimizer_kwargs=optimizer_kwargs,
         verbose=verbose,
     )
     return lp

@@ -84,7 +84,15 @@ def test_loads_optimizer_choices(tmp_path):
 schema_version: "1"
 optimization:
   optimizer: fire
+  optimizer_kwargs:
+    dt: 0.01
+    dtmax: 0.05
+    maxstep: 0.05
+    downhill_check: true
   neb_optimizer: mdmin
+  neb_optimizer_kwargs:
+    dt: 0.02
+    maxstep: 0.04
 reactants:
   - smiles: "[O]"
 calculator:
@@ -95,7 +103,113 @@ calculator:
     cfg = load_config(path)
 
     assert cfg.optimization.optimizer == "fire"
+    assert cfg.optimization.optimizer_kwargs == {
+        "dt": pytest.approx(0.01),
+        "dtmax": pytest.approx(0.05),
+        "maxstep": pytest.approx(0.05),
+        "downhill_check": True,
+    }
     assert cfg.optimization.neb_optimizer == "mdmin"
+    assert cfg.optimization.neb_optimizer_kwargs == {
+        "dt": pytest.approx(0.02),
+        "maxstep": pytest.approx(0.04),
+    }
+
+
+@pytest.mark.parametrize(
+    ("body", "message"),
+    [
+        (
+            "optimizer: bfgs\n  optimizer_kwargs: {dt: 0.01}",
+            "unsupported bfgs argument.*dt",
+        ),
+        (
+            "neb_optimizer: fire\n  neb_optimizer_kwargs: {logfile: fire.log}",
+            "cannot override AutoKMC-managed argument.*logfile",
+        ),
+        (
+            "neb_optimizer: fire\n  neb_optimizer_kwargs: 0.01",
+            "neb_optimizer_kwargs must be a mapping",
+        ),
+    ],
+)
+def test_rejects_invalid_optimizer_kwargs(tmp_path, body, message):
+    pytest.importorskip("yaml")
+    path = _write(
+        tmp_path,
+        f"""
+schema_version: "1"
+optimization:
+  {body}
+reactants:
+  - smiles: "[O]"
+calculator:
+  import_path: ase.calculators.emt.EMT
+""",
+    )
+
+    with pytest.raises(ConfigError, match=message):
+        load_config(path)
+
+
+@pytest.mark.parametrize(
+    ("optimizer", "kwargs"),
+    [
+        (
+            "lbfgs",
+            {
+                "maxstep": 0.05,
+                "memory": 50,
+                "damping": 0.5,
+                "alpha": 50.0,
+                "use_line_search": False,
+            },
+        ),
+        ("bfgs", {"maxstep": 0.05, "alpha": 50.0}),
+        (
+            "fire",
+            {
+                "dt": 0.01,
+                "dtmax": 0.05,
+                "maxstep": 0.05,
+                "Nmin": 5,
+                "finc": 1.05,
+                "fdec": 0.5,
+                "astart": 0.1,
+                "fa": 0.99,
+                "a": 0.1,
+                "downhill_check": True,
+            },
+        ),
+        ("mdmin", {"dt": 0.01, "maxstep": 0.05}),
+    ],
+)
+def test_accepts_installed_ase_regular_optimizer_controls(optimizer, kwargs):
+    from autokmc.utils.optimizers import normalize_optimizer_kwargs
+
+    assert normalize_optimizer_kwargs(optimizer, kwargs) == kwargs
+
+
+@pytest.mark.parametrize(
+    ("optimizer", "kwargs"),
+    [
+        ("bfgs", {"maxstep": 0.05, "alpha": 50.0}),
+        ("fire", {"dt": 0.01, "dtmax": 0.05, "maxstep": 0.05}),
+        ("mdmin", {"dt": 0.01, "maxstep": 0.05}),
+    ],
+)
+def test_accepts_installed_ase_neb_optimizer_controls(optimizer, kwargs):
+    from autokmc.utils.optimizers import (
+        NEB_OPTIMIZERS,
+        normalize_optimizer_kwargs,
+    )
+
+    assert normalize_optimizer_kwargs(
+        optimizer,
+        kwargs,
+        allowed=NEB_OPTIMIZERS,
+        setting="optimization.neb_optimizer_kwargs",
+    ) == kwargs
 
 
 @pytest.mark.parametrize(

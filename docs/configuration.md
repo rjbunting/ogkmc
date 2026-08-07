@@ -83,7 +83,9 @@ slab surface classification.
 ```yaml
 optimization:
   optimizer: lbfgs
+  optimizer_kwargs: {}
   neb_optimizer: bfgs
+  neb_optimizer_kwargs: {}
   neb_band_eval: images
 ```
 
@@ -92,11 +94,50 @@ generated catalyst structures, gas-phase reactants, adsorbate and bond-site
 pruning, adsorption stability, and NEB endpoint relaxation. Valid values are
 `lbfgs`, `bfgs`, `fire`, and `mdmin`.
 
+`optimizer_kwargs` is a YAML mapping forwarded to the selected ASE
+optimizer constructor for every ordinary relaxation. AutoKMC supplies the
+object being optimized and the logfile, so `atoms` and `logfile` cannot be
+overridden. All other constructor keywords supported by the installed ASE
+version are accepted and checked by `autokmc validate-config`.
+
 `neb_optimizer` controls the diffusion and bond-reaction NEB band, including
 the climbing-image refinement when enabled. Valid values are `bfgs`, `fire`,
 and `mdmin`. `lbfgs` is intentionally excluded because ASE does not recommend
 it for NEB. Defaults preserve the previous behavior: `lbfgs` for ordinary
 relaxations and `bfgs` for NEB.
+
+`neb_optimizer_kwargs` provides the same constructor-keyword interface for
+the NEB optimizer. The mapping is applied independently when the ordinary NEB
+stage and, when enabled, the climbing-image stage instantiate their optimizer.
+Both optimizer mappings are included in calculation-cache identities.
+
+For a conservative FIRE setup that limits bad initial geometries, configure
+both the initial adaptive timestep and its upper bound; `dt` alone will grow
+toward ASE's `dtmax`. `maxstep` adds a separate displacement cap:
+
+```yaml
+optimization:
+  optimizer: fire
+  optimizer_kwargs:
+    dt: 0.01
+    dtmax: 0.05
+    maxstep: 0.05
+    downhill_check: true
+  neb_optimizer: fire
+  neb_optimizer_kwargs:
+    dt: 0.01
+    dtmax: 0.05
+    maxstep: 0.05
+    downhill_check: true
+```
+
+The supported algorithmic keywords depend on the selected optimizer and the
+installed ASE version. Common controls are `maxstep` and `alpha` for BFGS;
+`dt`, `maxstep`, `dtmax`, `Nmin`, `finc`, `fdec`, `astart`, `fa`, `a`, and
+`downhill_check` for FIRE; and `dt` plus `maxstep` for MDMin. ASE lifecycle
+keywords such as `restart` and `trajectory` are also forwarded, but a single
+global path is reused by many relaxations and can collide in concurrent runs;
+omit those keywords unless the path lifecycle is managed externally.
 
 `neb_band_eval` controls how the NEB band's images are evaluated on each
 optimizer step. `images` (the default, and the previous behavior) issues one

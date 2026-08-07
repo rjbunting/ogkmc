@@ -145,6 +145,52 @@ def test_shared_neb_uses_selected_optimizer(monkeypatch):
     assert result.optimizer_steps == 4
 
 
+def test_shared_neb_forwards_fire_constructor_kwargs_to_both_stages(monkeypatch):
+    images = [_image(0.0), _image(1.0), _image(0.0)]
+    neb = SimpleNamespace(climb=False)
+    captured = []
+
+    class SelectedFire(_ConvergedOptimizer):
+        def __init__(self, stage_neb, *, logfile, **kwargs):
+            captured.append((stage_neb.climb, kwargs))
+            super().__init__(stage_neb, logfile=logfile)
+
+    monkeypatch.setattr(neb_module, "acquire_calculator", _calculator_context)
+    monkeypatch.setattr(neb_module, "FIRE", SelectedFire)
+
+    neb_module.run_neb(
+        images[0],
+        images[-1],
+        calculator=object(),
+        purpose="stable FIRE NEB",
+        n_images=1,
+        interpolation="linear",
+        spring_k=0.1,
+        climb=True,
+        frozen_indices=None,
+        fmax=0.05,
+        max_steps=20,
+        optimizer="fire",
+        optimizer_kwargs={
+            "dt": 0.01,
+            "dtmax": 0.05,
+            "maxstep": 0.03,
+            "downhill_check": True,
+        },
+        verbose=False,
+        not_converged_error=RuntimeError,
+        band_factory=lambda *_args, **_kwargs: (neb, images),
+    )
+
+    expected = {
+        "dt": pytest.approx(0.01),
+        "dtmax": pytest.approx(0.05),
+        "maxstep": pytest.approx(0.03),
+        "downhill_check": True,
+    }
+    assert captured == [(False, expected), (True, expected)]
+
+
 def test_shared_neb_stops_when_preclimb_stage_does_not_converge(monkeypatch):
     images = [_image(0.0), _image(0.5), _image(0.2)]
     neb = SimpleNamespace(climb=False)

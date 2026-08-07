@@ -164,6 +164,7 @@ def initialise_runtime(
         fmax=settings.fmax,
         max_steps=settings.max_steps,
         optimizer=settings.optimizer,
+        optimizer_kwargs=settings.optimizer_kwargs,
         verbose=settings.verbose,
         lateral_interactions=settings.lateral_interactions,
         lateral_shells=settings.lateral_shells,

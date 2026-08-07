@@ -42,7 +42,9 @@ Dependencies
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+from typing import Any
 
 import numpy as np
 import networkx as nx
@@ -60,6 +62,7 @@ from autokmc.utils.optimizers import (
     DEFAULT_OPTIMIZER,
     REGULAR_OPTIMIZERS,
     normalize_optimizer_name,
+    normalize_optimizer_kwargs,
 )
 from autokmc.utils.rdkit_logging import silence_rdkit_warnings
 
@@ -261,6 +264,7 @@ def _optimise(
     steps: int = 500,
     logfile: str = "/dev/null",
     optimizer: str = DEFAULT_OPTIMIZER,
+    optimizer_kwargs: Mapping[str, Any] | None = None,
 ) -> None:
     """Relax *atoms* in-place with *calculator* using an ASE optimizer.
 
@@ -289,7 +293,13 @@ def _optimise(
         "fire": FIRE,
         "mdmin": MDMin,
     }[optimizer_name]
-    opt = optimizer_cls(atoms, logfile=logfile)
+    constructor_kwargs = normalize_optimizer_kwargs(
+        optimizer_name,
+        optimizer_kwargs,
+        allowed=REGULAR_OPTIMIZERS,
+        setting="optimizer_kwargs",
+    )
+    opt = optimizer_cls(atoms, logfile=logfile, **constructor_kwargs)
     opt.run(fmax=fmax, steps=steps)
     if not opt.converged():
         raise RuntimeError(
@@ -457,6 +467,7 @@ def build_reactant(
     fmax: float = 0.05,
     steps: int = 500,
     optimizer: str = DEFAULT_OPTIMIZER,
+    optimizer_kwargs: Mapping[str, Any] | None = None,
     nl_mult: float = NL_MULT_DEFAULT,
     random_seed: int = RANDOM_SEED,
     hull_tol: float = 0.1,
@@ -533,6 +544,7 @@ def build_reactant(
                     fmax=fmax,
                     steps=steps,
                     optimizer=optimizer,
+                    optimizer_kwargs=optimizer_kwargs,
                 )
             atoms.calc = calc
             try:

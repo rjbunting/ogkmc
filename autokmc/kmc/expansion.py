@@ -426,6 +426,7 @@ def _ensure_species_known(
     prune_fmax: float,
     prune_max_steps: int,
     optimizer: str,
+    optimizer_kwargs: dict[str, Any] | None,
     anchor_k_max: int | None,
     adsorbate_bond_tolerance: float,
     adsorbate_n_shells_anchor: int | None,
@@ -500,6 +501,7 @@ def _ensure_species_known(
                     free_energy_temperature_k=free_energy_temperature_k,
                     vib_cache_root=vib_cache_root,
                     optimizer=optimizer,
+                    optimizer_kwargs=optimizer_kwargs,
                 ),
             )
         except ReactantDefinitionError as exc:
@@ -542,6 +544,7 @@ def _ensure_species_known(
             prune_fmax=prune_fmax,
             prune_max_steps=prune_max_steps,
             optimizer=optimizer,
+            optimizer_kwargs=optimizer_kwargs,
             verbose=verbose,
         )
     )
@@ -571,6 +574,7 @@ def expand_bond_sites_for_new_species(
     prune_fmax: float = PRUNE_FMAX,
     prune_max_steps: int = PRUNE_MAX_STEPS,
     optimizer: str = DEFAULT_OPTIMIZER,
+    optimizer_kwargs: dict[str, Any] | None = None,
     anchor_k_max: int | None = None,
     adsorbate_bond_tolerance: float = BOND_TOLERANCE,
     adsorbate_n_shells_anchor: int | None = None,
@@ -684,6 +688,7 @@ def expand_bond_sites_for_new_species(
             prune_fmax=prune_fmax,
             prune_max_steps=prune_max_steps,
             optimizer=optimizer,
+            optimizer_kwargs=optimizer_kwargs,
             anchor_k_max=anchor_k_max,
             adsorbate_bond_tolerance=adsorbate_bond_tolerance,
             adsorbate_n_shells_anchor=adsorbate_n_shells_anchor,
@@ -1036,6 +1041,7 @@ def expand_bond_sites_for_new_species(
                     max_steps=prune_max_steps,
                     nl_mult=nl_mult,
                     optimizer=optimizer,
+                    optimizer_kwargs=optimizer_kwargs,
                     verbose=verbose,
                 )
             if bond_prune_by_triple and candidate_sites:

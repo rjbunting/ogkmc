@@ -1022,6 +1022,7 @@ def check_site_stability(
     max_steps: int = 200,
     nl_mult: float = NL_MULT_DEFAULT,
     optimizer: str = DEFAULT_OPTIMIZER,
+    optimizer_kwargs: dict[str, Any] | None = None,
     verbose: bool = False,
     free_energy_options=None,
     free_energy_temperature_k: float | None = None,
@@ -1123,6 +1124,7 @@ def check_site_stability(
         "fmax": float(fmax),
         "max_steps": int(max_steps),
         "optimizer": str(optimizer).strip().lower(),
+        "optimizer_kwargs": dict(optimizer_kwargs or {}),
         "nl_mult": float(nl_mult),
         "n_shells": int(lateral_class.n_shells),
         "free_energy_enabled": bool(
@@ -1360,6 +1362,7 @@ def check_site_stability(
                     fmax       = fmax,
                     steps      = max_steps,
                     optimizer  = optimizer,
+                    optimizer_kwargs = optimizer_kwargs,
                     verbose    = verbose,
                 )
             except StructureOptimisationError as exc:

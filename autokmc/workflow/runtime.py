@@ -357,7 +357,9 @@ def resolve_channel_runtime(cfg, frozen_indices: list[int] | None) -> ChannelRun
             nl_mult=cfg.constants.neighbor_list_multiplier,
             persist_neb_path=d.persist_neb_path,
             optimizer=cfg.optimization.optimizer,
+            optimizer_kwargs=cfg.optimization.optimizer_kwargs,
             neb_optimizer=cfg.optimization.neb_optimizer,
+            neb_optimizer_kwargs=cfg.optimization.neb_optimizer_kwargs,
             neb_band_eval=cfg.optimization.neb_band_eval,
         )
 
@@ -378,7 +380,9 @@ def resolve_channel_runtime(cfg, frozen_indices: list[int] | None) -> ChannelRun
             nl_mult=cfg.constants.neighbor_list_multiplier,
             persist_neb_path=b.persist_neb_path,
             optimizer=cfg.optimization.optimizer,
+            optimizer_kwargs=cfg.optimization.optimizer_kwargs,
             neb_optimizer=cfg.optimization.neb_optimizer,
+            neb_optimizer_kwargs=cfg.optimization.neb_optimizer_kwargs,
             neb_band_eval=cfg.optimization.neb_band_eval,
         )
         bond_growth = BondGrowthOptions(
@@ -436,6 +440,7 @@ def resolve_channel_runtime(cfg, frozen_indices: list[int] | None) -> ChannelRun
             diffusion_n_shells_pair=d.n_shells_pair,
             diffusion_prune_by_ads_pair=d.prune_by_adsorption_pair,
             optimizer=cfg.optimization.optimizer,
+            optimizer_kwargs=cfg.optimization.optimizer_kwargs,
         )
 
     return ChannelRuntimeOptions(

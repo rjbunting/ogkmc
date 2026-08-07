@@ -97,7 +97,9 @@ def test_channel_runtime_propagates_optimizer_choices():
     cfg = RunConfig(
         optimization=OptimizationCfg(
             optimizer="fire",
+            optimizer_kwargs={"dt": 0.01, "maxstep": 0.05},
             neb_optimizer="mdmin",
+            neb_optimizer_kwargs={"dt": 0.02, "maxstep": 0.04},
             neb_band_eval="batched",
         ),
         diffusion=DiffusionCfg(enabled=True),
@@ -108,14 +110,31 @@ def test_channel_runtime_propagates_optimizer_choices():
 
     assert runtime.diffusion is not None
     assert runtime.diffusion.optimizer == "fire"
+    assert runtime.diffusion.optimizer_kwargs == {
+        "dt": pytest.approx(0.01),
+        "maxstep": pytest.approx(0.05),
+    }
     assert runtime.diffusion.neb_optimizer == "mdmin"
+    assert runtime.diffusion.neb_optimizer_kwargs == {
+        "dt": pytest.approx(0.02),
+        "maxstep": pytest.approx(0.04),
+    }
     assert runtime.diffusion.neb_band_eval == "batched"
     assert runtime.bond is not None
     assert runtime.bond.optimizer == "fire"
+    assert runtime.bond.optimizer_kwargs == runtime.diffusion.optimizer_kwargs
     assert runtime.bond.neb_optimizer == "mdmin"
+    assert (
+        runtime.bond.neb_optimizer_kwargs
+        == runtime.diffusion.neb_optimizer_kwargs
+    )
     assert runtime.bond.neb_band_eval == "batched"
     assert runtime.bond_growth is not None
     assert runtime.bond_growth.optimizer == "fire"
+    assert runtime.bond_growth.optimizer_kwargs == {
+        "dt": pytest.approx(0.01),
+        "maxstep": pytest.approx(0.05),
+    }
 
 
 def test_channel_runtime_neb_modes_are_isolated():

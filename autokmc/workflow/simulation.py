@@ -341,6 +341,7 @@ def execute_kmc_stage(
                 lateral_interactions=settings.lateral_interactions,
                 lateral_shells=cfg.constants.lateral_shells,
                 optimizer=cfg.optimization.optimizer,
+                optimizer_kwargs=cfg.optimization.optimizer_kwargs,
             ),
             channels=KMCChannels(
                 diffusion_sites=network.diffusion_sites,

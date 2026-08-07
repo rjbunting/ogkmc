@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from typing import Dict, Iterable, Mapping, Optional, Tuple
+from typing import Any, Dict, Iterable, Mapping, Optional, Tuple
 
 import numpy as np
 from ase import Atoms
@@ -69,6 +69,7 @@ def calculate_surface_energies(
     fmax: float = 0.05,
     max_steps: int = 300,
     optimizer: str = DEFAULT_OPTIMIZER,
+    optimizer_kwargs: Mapping[str, Any] | None = None,
     verbose: bool = True,
 ) -> dict[tuple[int, int, int], float]:
     """Calculate relaxed slab surface energies for Wulff construction.
@@ -87,7 +88,10 @@ def calculate_surface_energies(
 
     lp = _resolve_lattice_params(
         primary, crystal_structure, lattice_constant, calculator,
-        fmax=fmax, optimizer=optimizer, verbose=verbose,
+        fmax=fmax,
+        optimizer=optimizer,
+        optimizer_kwargs=optimizer_kwargs,
+        verbose=verbose,
     )
     bulk_atoms = _build_primitive_cell(primary, crystal_structure, lp)
     with acquire_calculator(calculator, purpose="bulk surface-energy relaxation") as calc:
@@ -98,6 +102,7 @@ def calculate_surface_energies(
             steps=max_steps,
             logfile=os.devnull,
             optimizer=optimizer,
+            optimizer_kwargs=optimizer_kwargs,
             verbose=False,
         )
         e_bulk_per_atom = float(bulk_relaxed.get_potential_energy()) / len(bulk_relaxed)
@@ -116,6 +121,7 @@ def calculate_surface_energies(
                 steps=max_steps,
                 logfile=os.devnull,
                 optimizer=optimizer,
+                optimizer_kwargs=optimizer_kwargs,
                 verbose=False,
             )
             e_slab = float(slab_relaxed.get_potential_energy())
@@ -151,6 +157,7 @@ def build_nanoparticle(
     vacuum: float = 10.0,
     logfile: Optional[str] = None,
     optimizer: str = DEFAULT_OPTIMIZER,
+    optimizer_kwargs: Mapping[str, Any] | None = None,
     verbose: bool = True,
 ) -> Atoms:
     """Build and optimise a Wulff-construction metal nanoparticle."""
@@ -172,7 +179,10 @@ def build_nanoparticle(
     primary = _primary_element(comp)
     lp = _resolve_lattice_params(
         primary, crystal_structure, lattice_constant, calculator,
-        fmax=fmax, optimizer=optimizer, verbose=verbose,
+        fmax=fmax,
+        optimizer=optimizer,
+        optimizer_kwargs=optimizer_kwargs,
+        verbose=verbose,
     )
     primitive = _build_primitive_cell(primary, crystal_structure, lp)
     se = normalise_surface_energies(surface_energies)
@@ -190,6 +200,7 @@ def build_nanoparticle(
             fmax                 = fmax if surface_energy_fmax is None else surface_energy_fmax,
             max_steps            = max_steps if surface_energy_max_steps is None else surface_energy_max_steps,
             optimizer            = optimizer,
+            optimizer_kwargs     = optimizer_kwargs,
             verbose              = verbose,
         )
 
@@ -250,6 +261,7 @@ def build_nanoparticle(
             steps=max_steps,
             logfile=logfile,
             optimizer=optimizer,
+            optimizer_kwargs=optimizer_kwargs,
             verbose=verbose,
         )
         atoms.calc = None

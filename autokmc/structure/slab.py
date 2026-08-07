@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import math
 import warnings
-from typing import Dict, Optional, Tuple
+from collections.abc import Mapping
+from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 from ase import Atoms
@@ -62,6 +63,7 @@ def build_surface(
     max_steps: int = 1000,
     logfile: Optional[str] = None,
     optimizer: str = DEFAULT_OPTIMIZER,
+    optimizer_kwargs: Mapping[str, Any] | None = None,
     verbose: bool = True,
 ) -> Atoms:
     """Build and optimise a metal surface slab."""
@@ -83,7 +85,10 @@ def build_surface(
     primary = _primary_element(comp)
     lp = _resolve_lattice_params(
         primary, crystal_structure, lattice_constant, calculator,
-        fmax=fmax, optimizer=optimizer, verbose=verbose,
+        fmax=fmax,
+        optimizer=optimizer,
+        optimizer_kwargs=optimizer_kwargs,
+        verbose=verbose,
     )
 
     bulk_atoms = _build_surface_parent_cell(primary, crystal_structure, lp)
@@ -175,6 +180,7 @@ def build_surface(
             steps=max_steps,
             logfile=logfile,
             optimizer=optimizer,
+            optimizer_kwargs=optimizer_kwargs,
             verbose=verbose,
         )
         result.calc = None

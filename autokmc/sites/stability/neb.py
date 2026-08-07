@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import os
 import warnings
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from importlib import import_module
 from typing import TYPE_CHECKING, Any, Callable
@@ -45,6 +45,7 @@ from autokmc.utils.optimizers import (
     DEFAULT_NEB_OPTIMIZER,
     NEB_OPTIMIZERS,
     normalize_optimizer_name,
+    normalize_optimizer_kwargs,
 )
 from autokmc.utils.telemetry import instrument
 
@@ -557,6 +558,7 @@ def run_neb(
     verbose: bool,
     not_converged_error: type[Exception],
     optimizer: str = DEFAULT_NEB_OPTIMIZER,
+    optimizer_kwargs: Mapping[str, Any] | None = None,
     persist_path: bool = False,
     capture_path: bool = False,
     initial_path: Sequence[Atoms] | None = None,
@@ -637,9 +639,16 @@ def run_neb(
                     "fire": FIRE,
                     "mdmin": MDMin,
                 }[optimizer_name]
+                constructor_kwargs = normalize_optimizer_kwargs(
+                    optimizer_name,
+                    optimizer_kwargs,
+                    allowed=NEB_OPTIMIZERS,
+                    setting="neb_optimizer_kwargs",
+                )
                 stage_optimizer = optimizer_cls(
                     neb,
                     logfile=select_logfile(verbose),
+                    **constructor_kwargs,
                 )
                 stage_optimizer.run(
                     fmax=float(fmax),

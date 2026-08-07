@@ -51,7 +51,7 @@ from __future__ import annotations
 
 from contextvars import copy_context
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Any, Iterable
 
 import numpy as np
 import networkx as nx
@@ -416,6 +416,7 @@ def get_applicable_reaction_for_member(
     fmax: float = 0.05,
     max_steps: int = 200,
     optimizer: str = DEFAULT_OPTIMIZER,
+    optimizer_kwargs: dict[str, Any] | None = None,
     verbose: bool = False,
     lateral_interactions: bool = True,
     lateral_shells: int = LATERAL_SHELLS_DEFAULT,
@@ -471,6 +472,7 @@ def get_applicable_reaction_for_member(
                         fmax=fmax,
                         max_steps=max_steps,
                         optimizer=optimizer,
+                        optimizer_kwargs=optimizer_kwargs,
                         verbose=verbose,
                         free_energy_options=free_energy_options,
                         free_energy_temperature_k=float(temperature),
@@ -545,6 +547,7 @@ def get_applicable_reactions(
     fmax: float = 0.05,
     max_steps: int = 200,
     optimizer: str = DEFAULT_OPTIMIZER,
+    optimizer_kwargs: dict[str, Any] | None = None,
     verbose: bool = False,
     lateral_interactions: bool = True,
     lateral_shells: int = LATERAL_SHELLS_DEFAULT,
@@ -602,6 +605,7 @@ def get_applicable_reactions(
             fmax=fmax,
             max_steps=max_steps,
             optimizer=optimizer,
+            optimizer_kwargs=optimizer_kwargs,
             verbose=verbose,
             lateral_interactions=lateral_interactions,
             lateral_shells=lateral_shells,
@@ -632,6 +636,7 @@ def compute_all_reactions(
     fmax: float = 0.05,
     max_steps: int = 200,
     optimizer: str = DEFAULT_OPTIMIZER,
+    optimizer_kwargs: dict[str, Any] | None = None,
     verbose: bool = False,
     lateral_interactions: bool = True,
     lateral_shells: int = LATERAL_SHELLS_DEFAULT,
@@ -662,6 +667,7 @@ def compute_all_reactions(
                     fmax                     = fmax,
                     max_steps                = max_steps,
                     optimizer                = optimizer,
+                    optimizer_kwargs         = optimizer_kwargs,
                     verbose                  = verbose,
                     lateral_interactions     = lateral_interactions,
                     lateral_shells           = lateral_shells,
@@ -692,6 +698,7 @@ def compute_all_reactions(
             fmax                     = fmax,
             max_steps                = max_steps,
             optimizer                = optimizer,
+            optimizer_kwargs         = optimizer_kwargs,
             verbose                  = verbose,
             lateral_interactions     = lateral_interactions,
             lateral_shells           = lateral_shells,

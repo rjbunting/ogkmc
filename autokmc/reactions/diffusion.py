@@ -47,6 +47,7 @@ from __future__ import annotations
 from contextvars import copy_context
 from copy import copy
 from dataclasses import dataclass
+from typing import Any
 import numpy as np
 import networkx as nx
 from ase import Atoms
@@ -390,7 +391,9 @@ def get_applicable_diffusion_for_member(
     nl_mult: float = NL_MULT_DEFAULT,
     persist_neb_path: bool = False,
     optimizer: str = DEFAULT_OPTIMIZER,
+    optimizer_kwargs: dict[str, Any] | None = None,
     neb_optimizer: str = DEFAULT_NEB_OPTIMIZER,
+    neb_optimizer_kwargs: dict[str, Any] | None = None,
     neb_band_eval: str = NEB_BAND_EVAL,
     verbose: bool = False,
     lateral_interactions: bool = True,
@@ -421,7 +424,9 @@ def get_applicable_diffusion_for_member(
             "nl_mult": nl_mult,
             "persist_neb_path": persist_neb_path,
             "optimizer": optimizer,
+            "optimizer_kwargs": optimizer_kwargs,
             "neb_optimizer": neb_optimizer,
+            "neb_optimizer_kwargs": neb_optimizer_kwargs,
             "neb_band_eval": neb_band_eval,
             "verbose": verbose,
             "free_energy_options": free_energy_options,
@@ -617,7 +622,9 @@ def get_applicable_diffusions(
     nl_mult: float = NL_MULT_DEFAULT,
     persist_neb_path: bool = False,
     optimizer: str = DEFAULT_OPTIMIZER,
+    optimizer_kwargs: dict[str, Any] | None = None,
     neb_optimizer: str = DEFAULT_NEB_OPTIMIZER,
+    neb_optimizer_kwargs: dict[str, Any] | None = None,
     neb_band_eval: str = NEB_BAND_EVAL,
     verbose: bool = False,
     lateral_interactions: bool = True,
@@ -659,7 +666,9 @@ def get_applicable_diffusions(
             nl_mult=nl_mult,
             persist_neb_path=persist_neb_path,
             optimizer=optimizer,
+            optimizer_kwargs=optimizer_kwargs,
             neb_optimizer=neb_optimizer,
+            neb_optimizer_kwargs=neb_optimizer_kwargs,
             neb_band_eval=neb_band_eval,
             verbose=verbose,
             lateral_interactions=lateral_interactions,
@@ -694,7 +703,9 @@ def compute_all_diffusions(
     nl_mult: float = NL_MULT_DEFAULT,
     persist_neb_path: bool = False,
     optimizer: str = DEFAULT_OPTIMIZER,
+    optimizer_kwargs: dict[str, Any] | None = None,
     neb_optimizer: str = DEFAULT_NEB_OPTIMIZER,
+    neb_optimizer_kwargs: dict[str, Any] | None = None,
     neb_band_eval: str = NEB_BAND_EVAL,
     verbose: bool = False,
     lateral_interactions: bool = True,
@@ -728,7 +739,9 @@ def compute_all_diffusions(
                     nl_mult                  = nl_mult,
                     persist_neb_path         = persist_neb_path,
                     optimizer                = optimizer,
+                    optimizer_kwargs         = optimizer_kwargs,
                     neb_optimizer            = neb_optimizer,
+                    neb_optimizer_kwargs     = neb_optimizer_kwargs,
                     neb_band_eval             = neb_band_eval,
                     verbose                  = verbose,
                     lateral_interactions     = lateral_interactions,
@@ -764,7 +777,9 @@ def compute_all_diffusions(
             nl_mult                  = nl_mult,
             persist_neb_path         = persist_neb_path,
             optimizer                = optimizer,
+            optimizer_kwargs         = optimizer_kwargs,
             neb_optimizer            = neb_optimizer,
+            neb_optimizer_kwargs     = neb_optimizer_kwargs,
             neb_band_eval             = neb_band_eval,
             verbose                  = verbose,
             lateral_interactions     = lateral_interactions,

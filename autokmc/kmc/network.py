@@ -271,6 +271,7 @@ class DynamicNetworkExpander:
             fmax=self.settings.fmax,
             max_steps=self.settings.max_steps,
             optimizer=self.settings.optimizer,
+            optimizer_kwargs=self.settings.optimizer_kwargs,
             verbose=self.settings.verbose,
             lateral_interactions=self.settings.lateral_interactions,
             lateral_shells=self.settings.lateral_shells,

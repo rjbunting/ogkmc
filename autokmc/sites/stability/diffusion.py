@@ -72,7 +72,7 @@ Public API
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 import numpy as np
 import networkx as nx
@@ -649,6 +649,7 @@ def _relax_endpoint(
     fmax: float,
     max_steps: int,
     optimizer: str,
+    optimizer_kwargs: dict[str, Any] | None = None,
     frozen_indices: list[int] | None,
     nl_mult: float,
     n_slab: int,
@@ -681,6 +682,7 @@ def _relax_endpoint(
                 fmax       = fmax,
                 steps      = max_steps,
                 optimizer  = optimizer,
+                optimizer_kwargs = optimizer_kwargs,
                 verbose    = verbose,
             )
 
@@ -1088,7 +1090,9 @@ def check_diffusion_stability(
     nl_mult: float = NL_MULT_DEFAULT,
     persist_neb_path: bool = False,
     optimizer: str = DEFAULT_OPTIMIZER,
+    optimizer_kwargs: dict[str, Any] | None = None,
     neb_optimizer: str = DEFAULT_NEB_OPTIMIZER,
+    neb_optimizer_kwargs: dict[str, Any] | None = None,
     neb_band_eval: str = NEB_BAND_EVAL,
     verbose: bool = False,
     free_energy_options=None,
@@ -1236,7 +1240,9 @@ def check_diffusion_stability(
         "fmax": float(fmax),
         "max_steps": int(max_steps),
         "optimizer": str(optimizer).strip().lower(),
+        "optimizer_kwargs": dict(optimizer_kwargs or {}),
         "neb_optimizer": str(neb_optimizer).strip().lower(),
+        "neb_optimizer_kwargs": dict(neb_optimizer_kwargs or {}),
         "n_images": int(n_images),
         "climb": bool(climb),
         "spring_k": float(spring_k),
@@ -1463,6 +1469,7 @@ def check_diffusion_stability(
             fmax            = fmax,
             max_steps       = max_steps,
             optimizer       = optimizer,
+            optimizer_kwargs = optimizer_kwargs,
             frozen_indices  = frozen_indices,
             nl_mult         = nl_mult,
             n_slab          = n_slab,
@@ -1510,6 +1517,7 @@ def check_diffusion_stability(
             fmax            = fmax,
             max_steps       = max_steps,
             optimizer       = optimizer,
+            optimizer_kwargs = optimizer_kwargs,
             frozen_indices  = frozen_indices,
             nl_mult         = nl_mult,
             n_slab          = n_slab,
@@ -1579,6 +1587,7 @@ def check_diffusion_stability(
         fmax=float(fmax),
         max_steps=int(max_steps),
         optimizer=neb_optimizer,
+        optimizer_kwargs=neb_optimizer_kwargs,
         band_eval=neb_band_eval,
         verbose=verbose,
         not_converged_error=NEBNotConvergedError,
