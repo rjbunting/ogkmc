@@ -299,6 +299,34 @@ class _Validator:
             )
         except ValueError as exc:
             self.fail(str(exc))
+        neb_climb_optimizer = (
+            neb_optimizer
+            if cfg.neb_climb_optimizer is None
+            else self.string(
+                cfg.neb_climb_optimizer,
+                "optimization.neb_climb_optimizer",
+            ).lower()
+        )
+        if neb_climb_optimizer not in NEB_OPTIMIZERS:
+            choices = ", ".join(sorted(NEB_OPTIMIZERS))
+            self.fail(
+                "optimization.neb_climb_optimizer must be one of "
+                f"{choices}; got {cfg.neb_climb_optimizer!r}"
+            )
+        climb_kwargs = (
+            cfg.neb_optimizer_kwargs
+            if cfg.neb_climb_optimizer_kwargs is None
+            else cfg.neb_climb_optimizer_kwargs
+        )
+        try:
+            normalize_optimizer_kwargs(
+                neb_climb_optimizer,
+                climb_kwargs,
+                allowed=NEB_OPTIMIZERS,
+                setting="optimization.neb_climb_optimizer_kwargs",
+            )
+        except ValueError as exc:
+            self.fail(str(exc))
         neb_band_eval = self.string(
             cfg.neb_band_eval,
             "optimization.neb_band_eval",

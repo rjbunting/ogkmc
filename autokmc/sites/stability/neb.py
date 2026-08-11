@@ -559,6 +559,9 @@ def run_neb(
     not_converged_error: type[Exception],
     optimizer: str = DEFAULT_NEB_OPTIMIZER,
     optimizer_kwargs: Mapping[str, Any] | None = None,
+    climb_optimizer: str | None = None,
+    climb_optimizer_kwargs: Mapping[str, Any] | None = None,
+    start_climbing: bool = False,
     persist_path: bool = False,
     capture_path: bool = False,
     initial_path: Sequence[Atoms] | None = None,
@@ -574,8 +577,10 @@ def run_neb(
     scientific transition-state validation remains in the caller after this
     mechanical optimisation step.  When ``climb`` is requested, the ordinary
     NEB is converged first and the same band is then converged again after
-    enabling its climbing image.  ``max_steps`` applies independently to each
-    stage, while ``optimizer_steps`` reports their combined step count.  If an
+    enabling its climbing image with a fresh optimizer instance. ``max_steps``
+    applies independently to each stage, while ``optimizer_steps`` reports
+    their combined step count. ``start_climbing`` skips the ordinary stage for
+    a caller-supplied CI restart band. If an
     optimizer, calculator, or convergence check raises after band construction,
     *failure_path_callback* receives a calculator-detached snapshot of the
     last-known full band before the exception is re-raised.  A pool supplies
@@ -627,12 +632,23 @@ def run_neb(
 
             optimizer_steps = 0
 
-            def _optimise_stage(*, stage: str) -> None:
+            def _optimise_stage(
+                *,
+                stage: str,
+                selected_optimizer: str,
+                selected_optimizer_kwargs: Mapping[str, Any] | None,
+                target_fmax: float,
+            ) -> None:
                 nonlocal optimizer_steps
+                climbing_stage = stage.startswith("CI-NEB")
                 optimizer_name = normalize_optimizer_name(
-                    optimizer,
+                    selected_optimizer,
                     allowed=NEB_OPTIMIZERS,
-                    setting="neb_optimizer",
+                    setting=(
+                        "neb_climb_optimizer"
+                        if climbing_stage
+                        else "neb_optimizer"
+                    ),
                 )
                 optimizer_cls = {
                     "bfgs": BFGS,
@@ -641,32 +657,60 @@ def run_neb(
                 }[optimizer_name]
                 constructor_kwargs = normalize_optimizer_kwargs(
                     optimizer_name,
-                    optimizer_kwargs,
+                    selected_optimizer_kwargs,
                     allowed=NEB_OPTIMIZERS,
-                    setting="neb_optimizer_kwargs",
+                    setting=(
+                        "neb_climb_optimizer_kwargs"
+                        if climbing_stage
+                        else "neb_optimizer_kwargs"
+                    ),
                 )
+                if (
+                    climbing_stage
+                    and optimizer_name == "fire"
+                    and constructor_kwargs.get("downhill_check", False)
+                ):
+                    constructor_kwargs["downhill_check"] = False
+                    _log.warning(
+                        "FIRE downhill_check is incompatible with CI-NEB "
+                        "because the climbing image is intentionally driven "
+                        "uphill; disabling it for the climbing stage."
+                    )
                 stage_optimizer = optimizer_cls(
                     neb,
                     logfile=select_logfile(verbose),
                     **constructor_kwargs,
                 )
                 stage_optimizer.run(
-                    fmax=float(fmax),
+                    fmax=float(target_fmax),
                     steps=int(max_steps),
                 )
                 optimizer_steps += int(stage_optimizer.nsteps)
                 if not stage_optimizer.converged():
                     raise not_converged_error(
-                        f"{stage} did not converge: fmax={fmax} eV/Å not "
+                        f"{stage} did not converge: fmax={target_fmax} eV/Å not "
                         f"reached in {max_steps} steps."
                     )
 
-            _optimise_stage(
-                stage="NEB pre-climb relaxation" if climb else "NEB"
-            )
+            if not (climb and start_climbing):
+                _optimise_stage(
+                    stage="NEB pre-climb relaxation" if climb else "NEB",
+                    selected_optimizer=optimizer,
+                    selected_optimizer_kwargs=optimizer_kwargs,
+                    target_fmax=float(fmax),
+                )
             if climb:
                 neb.climb = True
-                _optimise_stage(stage="CI-NEB")
+                _optimise_stage(
+                    stage="CI-NEB",
+                    selected_optimizer=climb_optimizer or optimizer,
+                    selected_optimizer_kwargs=(
+                        optimizer_kwargs
+                        if climb_optimizer_kwargs is None
+                        else climb_optimizer_kwargs
+                    ),
+                    target_fmax=float(fmax),
+                )
 
             energies = [float(image.get_potential_energy()) for image in images]
             interior = energies[1:-1]

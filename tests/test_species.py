@@ -223,3 +223,61 @@ def test_relax_false_still_computes_single_point_energy(monkeypatch):
 
     assert reactant.energy == pytest.approx(-1.25)
     assert captured["random_seed"] == 31415
+
+
+def test_vasp_gas_evaluation_temporarily_enables_full_pbc(monkeypatch):
+    import autokmc.species.reactant as reactant_mod
+    from ase.calculators.vasp import Vasp
+
+    atoms = reactant_mod._smiles_to_atoms("[O]")
+    observed_pbc = []
+    calculator = Vasp(command="true")
+
+    def fake_optimise(atoms_arg, calculator_arg, **_kwargs):
+        assert calculator_arg is calculator
+        observed_pbc.append(tuple(bool(value) for value in atoms_arg.pbc))
+
+    def fake_energy():
+        observed_pbc.append(tuple(bool(value) for value in atoms.pbc))
+        return -1.25
+
+    monkeypatch.setattr(reactant_mod, "_smiles_to_atoms", lambda *_a, **_k: atoms)
+    monkeypatch.setattr(reactant_mod, "_optimise", fake_optimise)
+    monkeypatch.setattr(atoms, "get_potential_energy", fake_energy)
+
+    reactant = reactant_mod.build_reactant(
+        "[O]",
+        calculator=calculator,
+    )
+
+    assert observed_pbc == [(True, True, True), (True, True, True)]
+    assert tuple(bool(value) for value in reactant.atoms.pbc) == (
+        False,
+        False,
+        False,
+    )
+
+
+def test_configured_spin_seeds_total_magnetic_moment(monkeypatch):
+    import autokmc.species.reactant as reactant_mod
+
+    atoms = reactant_mod._smiles_to_atoms("O=O", add_hydrogens=False)
+
+    class FakeCalc:
+        pass
+
+    def fake_optimise(atoms_arg, _calculator, **_kwargs):
+        assert atoms_arg.get_initial_magnetic_moments().tolist() == [1.0, 1.0]
+
+    monkeypatch.setattr(reactant_mod, "_smiles_to_atoms", lambda *_a, **_k: atoms)
+    monkeypatch.setattr(reactant_mod, "_optimise", fake_optimise)
+    monkeypatch.setattr(atoms, "get_potential_energy", lambda: -9.0)
+
+    reactant = reactant_mod.build_reactant(
+        "O=O",
+        calculator=FakeCalc(),
+        add_hydrogens=False,
+        spin=1.0,
+    )
+
+    assert reactant.atoms.get_initial_magnetic_moments().tolist() == [1.0, 1.0]

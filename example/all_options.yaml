@@ -117,10 +117,18 @@ optimization:
   # Valid choices: bfgs, fire, mdmin. ASE does not recommend LBFGS for NEB.
   neb_optimizer: bfgs
 
-  # Keyword arguments forwarded to the selected ASE NEB optimizer in both
-  # the ordinary-band and climbing-image stages.
+  # Keyword arguments forwarded to the selected ASE NEB optimizer in the
+  # ordinary-band stage.
   # BFGS example: {maxstep: 0.05, alpha: 70.0}
   neb_optimizer_kwargs: {}
+
+  # Optional CI-NEB optimizer override. null reuses neb_optimizer.
+  # MDMin is useful when FIRE oscillates close to the saddle.
+  neb_climb_optimizer: null
+
+  # Optional CI-NEB constructor kwargs. null reuses neb_optimizer_kwargs.
+  # MDMin example: {dt: 0.05, maxstep: 0.01}
+  neb_climb_optimizer_kwargs: null
 
   # How NEB band images are evaluated each optimizer step. "images" (default)
   # calls the calculator once per image; "batched" evaluates the whole band in

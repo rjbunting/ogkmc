@@ -109,6 +109,8 @@ class DiffusionChannelOptions:
     optimizer_kwargs: dict[str, Any] = field(default_factory=dict)
     neb_optimizer: str = DEFAULT_NEB_OPTIMIZER
     neb_optimizer_kwargs: dict[str, Any] = field(default_factory=dict)
+    neb_climb_optimizer: str | None = None
+    neb_climb_optimizer_kwargs: dict[str, Any] | None = None
     neb_band_eval: str = NEB_BAND_EVAL
 
     @classmethod
@@ -140,6 +142,8 @@ class BondChannelOptions:
     optimizer_kwargs: dict[str, Any] = field(default_factory=dict)
     neb_optimizer: str = DEFAULT_NEB_OPTIMIZER
     neb_optimizer_kwargs: dict[str, Any] = field(default_factory=dict)
+    neb_climb_optimizer: str | None = None
+    neb_climb_optimizer_kwargs: dict[str, Any] | None = None
     neb_band_eval: str = NEB_BAND_EVAL
 
     @classmethod

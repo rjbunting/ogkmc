@@ -100,6 +100,13 @@ def test_channel_runtime_propagates_optimizer_choices():
             optimizer_kwargs={"dt": 0.01, "maxstep": 0.05},
             neb_optimizer="mdmin",
             neb_optimizer_kwargs={"dt": 0.02, "maxstep": 0.04},
+            neb_climb_optimizer="fire",
+            neb_climb_optimizer_kwargs={
+                "dt": 0.005,
+                "dtmax": 0.02,
+                "maxstep": 0.01,
+                "downhill_check": False,
+            },
             neb_band_eval="batched",
         ),
         diffusion=DiffusionCfg(enabled=True),
@@ -119,6 +126,13 @@ def test_channel_runtime_propagates_optimizer_choices():
         "dt": pytest.approx(0.02),
         "maxstep": pytest.approx(0.04),
     }
+    assert runtime.diffusion.neb_climb_optimizer == "fire"
+    assert runtime.diffusion.neb_climb_optimizer_kwargs == {
+        "dt": pytest.approx(0.005),
+        "dtmax": pytest.approx(0.02),
+        "maxstep": pytest.approx(0.01),
+        "downhill_check": False,
+    }
     assert runtime.diffusion.neb_band_eval == "batched"
     assert runtime.bond is not None
     assert runtime.bond.optimizer == "fire"
@@ -127,6 +141,14 @@ def test_channel_runtime_propagates_optimizer_choices():
     assert (
         runtime.bond.neb_optimizer_kwargs
         == runtime.diffusion.neb_optimizer_kwargs
+    )
+    assert (
+        runtime.bond.neb_climb_optimizer
+        == runtime.diffusion.neb_climb_optimizer
+    )
+    assert (
+        runtime.bond.neb_climb_optimizer_kwargs
+        == runtime.diffusion.neb_climb_optimizer_kwargs
     )
     assert runtime.bond.neb_band_eval == "batched"
     assert runtime.bond_growth is not None

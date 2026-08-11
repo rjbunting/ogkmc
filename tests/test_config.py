@@ -93,6 +93,12 @@ optimization:
   neb_optimizer_kwargs:
     dt: 0.02
     maxstep: 0.04
+  neb_climb_optimizer: fire
+  neb_climb_optimizer_kwargs:
+    dt: 0.005
+    dtmax: 0.02
+    maxstep: 0.01
+    downhill_check: false
 reactants:
   - smiles: "[O]"
 calculator:
@@ -114,6 +120,13 @@ calculator:
         "dt": pytest.approx(0.02),
         "maxstep": pytest.approx(0.04),
     }
+    assert cfg.optimization.neb_climb_optimizer == "fire"
+    assert cfg.optimization.neb_climb_optimizer_kwargs == {
+        "dt": pytest.approx(0.005),
+        "dtmax": pytest.approx(0.02),
+        "maxstep": pytest.approx(0.01),
+        "downhill_check": False,
+    }
 
 
 @pytest.mark.parametrize(
@@ -130,6 +143,11 @@ calculator:
         (
             "neb_optimizer: fire\n  neb_optimizer_kwargs: 0.01",
             "neb_optimizer_kwargs must be a mapping",
+        ),
+        (
+            "neb_climb_optimizer: mdmin\n  "
+            "neb_climb_optimizer_kwargs: {dtmax: 0.05}",
+            "unsupported mdmin argument.*dtmax",
         ),
     ],
 )

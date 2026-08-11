@@ -308,6 +308,19 @@ def _optimise(
         )
 
 
+def _requires_full_periodic_boundaries(calculator) -> bool:
+    """Return whether *calculator* rejects non-periodic ASE atoms.
+
+    ASE's VASP calculator requires all three periodic-boundary flags even for
+    an isolated molecule in a vacuum cell.  Gas reactants remain logically
+    non-periodic; :func:`build_reactant` promotes them only while VASP is
+    evaluating energies and forces.
+    """
+    from ase.calculators.vasp import Vasp
+
+    return isinstance(calculator, Vasp)
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -532,32 +545,49 @@ def build_reactant(
         add_hydrogens=add_hydrogens,
         random_seed=random_seed,
     )
+    if spin is not None:
+        spin_value = float(spin)
+        if spin_value < 0.0:
+            raise ValueError("spin must be non-negative")
+        # ASE magnetic moments are expressed in Bohr magnetons.  Seed the
+        # configured total 2S moment evenly across the isolated molecule;
+        # spin-aware calculators such as VASP then enable their polarized
+        # calculation automatically.
+        atoms.set_initial_magnetic_moments(
+            np.full(len(atoms), 2.0 * spin_value / len(atoms), dtype=float)
+        )
 
     # 2. Optional ASE relaxation + energy
     energy = float("nan")
     if calculator is not None:
         with acquire_calculator(calculator, purpose="gas-phase reactant relaxation") as calc:
-            if relax:
-                _optimise(
-                    atoms,
-                    calc,
-                    fmax=fmax,
-                    steps=steps,
-                    optimizer=optimizer,
-                    optimizer_kwargs=optimizer_kwargs,
-                )
-            atoms.calc = calc
+            original_pbc = atoms.get_pbc().copy()
+            if _requires_full_periodic_boundaries(calc):
+                atoms.set_pbc(True)
             try:
-                energy = float(atoms.get_potential_energy())
-            except Exception as exc:
-                raise RuntimeError(
-                    f"build_reactant({smiles!r}) could not evaluate its gas-phase energy"
-                ) from exc
+                if relax:
+                    _optimise(
+                        atoms,
+                        calc,
+                        fmax=fmax,
+                        steps=steps,
+                        optimizer=optimizer,
+                        optimizer_kwargs=optimizer_kwargs,
+                    )
+                atoms.calc = calc
+                try:
+                    energy = float(atoms.get_potential_energy())
+                except Exception as exc:
+                    raise RuntimeError(
+                        f"build_reactant({smiles!r}) could not evaluate its gas-phase energy"
+                    ) from exc
+            finally:
+                atoms.calc = None
+                atoms.set_pbc(original_pbc)
             if not np.isfinite(energy):
                 raise ValueError(
                     f"build_reactant({smiles!r}) returned non-finite gas energy {energy!r}"
                 )
-        atoms.calc = None
 
     # 3. Tag every atom as adsorbate (molecules have no bulk interior and are
     #    not part of the surface — they will adsorb onto it).

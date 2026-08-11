@@ -360,6 +360,10 @@ def resolve_channel_runtime(cfg, frozen_indices: list[int] | None) -> ChannelRun
             optimizer_kwargs=cfg.optimization.optimizer_kwargs,
             neb_optimizer=cfg.optimization.neb_optimizer,
             neb_optimizer_kwargs=cfg.optimization.neb_optimizer_kwargs,
+            neb_climb_optimizer=cfg.optimization.neb_climb_optimizer,
+            neb_climb_optimizer_kwargs=(
+                cfg.optimization.neb_climb_optimizer_kwargs
+            ),
             neb_band_eval=cfg.optimization.neb_band_eval,
         )
 
@@ -383,6 +387,10 @@ def resolve_channel_runtime(cfg, frozen_indices: list[int] | None) -> ChannelRun
             optimizer_kwargs=cfg.optimization.optimizer_kwargs,
             neb_optimizer=cfg.optimization.neb_optimizer,
             neb_optimizer_kwargs=cfg.optimization.neb_optimizer_kwargs,
+            neb_climb_optimizer=cfg.optimization.neb_climb_optimizer,
+            neb_climb_optimizer_kwargs=(
+                cfg.optimization.neb_climb_optimizer_kwargs
+            ),
             neb_band_eval=cfg.optimization.neb_band_eval,
         )
         bond_growth = BondGrowthOptions(

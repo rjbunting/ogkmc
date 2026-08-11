@@ -129,6 +129,8 @@ class OptimizationCfg:
     optimizer_kwargs: dict[str, Any] = field(default_factory=dict)
     neb_optimizer: str = DEFAULT_NEB_OPTIMIZER
     neb_optimizer_kwargs: dict[str, Any] = field(default_factory=dict)
+    neb_climb_optimizer: str | None = None
+    neb_climb_optimizer_kwargs: dict[str, Any] | None = None
     #: NEB band evaluation mode: ``"images"`` (per-image calculator calls)
     #: or ``"batched"`` (whole band in one stacked model forward per
     #: optimizer step, when the calculator supports it).

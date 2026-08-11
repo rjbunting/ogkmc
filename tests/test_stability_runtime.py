@@ -182,13 +182,103 @@ def test_shared_neb_forwards_fire_constructor_kwargs_to_both_stages(monkeypatch)
         band_factory=lambda *_args, **_kwargs: (neb, images),
     )
 
-    expected = {
+    expected_ordinary = {
         "dt": pytest.approx(0.01),
         "dtmax": pytest.approx(0.05),
         "maxstep": pytest.approx(0.03),
         "downhill_check": True,
     }
-    assert captured == [(False, expected), (True, expected)]
+    expected_climbing = {**expected_ordinary, "downhill_check": False}
+    assert captured == [
+        (False, expected_ordinary),
+        (True, expected_climbing),
+    ]
+
+
+def test_shared_neb_uses_climbing_optimizer_override(monkeypatch):
+    images = [_image(0.0), _image(1.0), _image(0.0)]
+    neb = SimpleNamespace(climb=False)
+    captured = []
+
+    class SelectedFire(_ConvergedOptimizer):
+        def __init__(self, stage_neb, *, logfile, **kwargs):
+            captured.append(("fire", stage_neb.climb, kwargs))
+            super().__init__(stage_neb, logfile=logfile)
+
+    class SelectedMDMin(_ConvergedOptimizer):
+        def __init__(self, stage_neb, *, logfile, **kwargs):
+            captured.append(("mdmin", stage_neb.climb, kwargs))
+            super().__init__(stage_neb, logfile=logfile)
+
+    monkeypatch.setattr(neb_module, "acquire_calculator", _calculator_context)
+    monkeypatch.setattr(neb_module, "FIRE", SelectedFire)
+    monkeypatch.setattr(neb_module, "MDMin", SelectedMDMin)
+
+    neb_module.run_neb(
+        images[0],
+        images[-1],
+        calculator=object(),
+        purpose="stage-specific optimizer NEB",
+        n_images=1,
+        interpolation="linear",
+        spring_k=1.0,
+        climb=True,
+        frozen_indices=None,
+        fmax=0.05,
+        max_steps=20,
+        optimizer="fire",
+        optimizer_kwargs={"dt": 0.01, "downhill_check": True},
+        climb_optimizer="mdmin",
+        climb_optimizer_kwargs={"dt": 0.05, "maxstep": 0.01},
+        verbose=False,
+        not_converged_error=RuntimeError,
+        band_factory=lambda *_args, **_kwargs: (neb, images),
+    )
+
+    assert captured == [
+        ("fire", False, {"dt": pytest.approx(0.01), "downhill_check": True}),
+        (
+            "mdmin",
+            True,
+            {"dt": pytest.approx(0.05), "maxstep": pytest.approx(0.01)},
+        ),
+    ]
+
+
+def test_shared_neb_climbing_restart_skips_ordinary_stage(monkeypatch):
+    images = [_image(0.0), _image(1.0), _image(0.0)]
+    neb = SimpleNamespace(climb=False)
+    captured = []
+
+    class SelectedMDMin(_ConvergedOptimizer):
+        def __init__(self, stage_neb, *, logfile, **kwargs):
+            captured.append(("mdmin", stage_neb.climb, kwargs))
+            super().__init__(stage_neb, logfile=logfile)
+
+    monkeypatch.setattr(neb_module, "acquire_calculator", _calculator_context)
+    monkeypatch.setattr(neb_module, "MDMin", SelectedMDMin)
+
+    neb_module.run_neb(
+        images[0],
+        images[-1],
+        calculator=object(),
+        purpose="CI restart",
+        n_images=1,
+        interpolation="linear",
+        spring_k=1.0,
+        climb=True,
+        frozen_indices=None,
+        fmax=0.05,
+        max_steps=20,
+        optimizer="fire",
+        climb_optimizer="mdmin",
+        start_climbing=True,
+        verbose=False,
+        not_converged_error=RuntimeError,
+        band_factory=lambda *_args, **_kwargs: (neb, images),
+    )
+
+    assert captured == [("mdmin", True, {})]
 
 
 def test_shared_neb_stops_when_preclimb_stage_does_not_converge(monkeypatch):

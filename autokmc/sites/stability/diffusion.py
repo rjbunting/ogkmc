@@ -1093,6 +1093,8 @@ def check_diffusion_stability(
     optimizer_kwargs: dict[str, Any] | None = None,
     neb_optimizer: str = DEFAULT_NEB_OPTIMIZER,
     neb_optimizer_kwargs: dict[str, Any] | None = None,
+    neb_climb_optimizer: str | None = None,
+    neb_climb_optimizer_kwargs: dict[str, Any] | None = None,
     neb_band_eval: str = NEB_BAND_EVAL,
     verbose: bool = False,
     free_energy_options=None,
@@ -1243,6 +1245,14 @@ def check_diffusion_stability(
         "optimizer_kwargs": dict(optimizer_kwargs or {}),
         "neb_optimizer": str(neb_optimizer).strip().lower(),
         "neb_optimizer_kwargs": dict(neb_optimizer_kwargs or {}),
+        "neb_climb_optimizer": str(
+            neb_climb_optimizer or neb_optimizer
+        ).strip().lower(),
+        "neb_climb_optimizer_kwargs": dict(
+            (neb_optimizer_kwargs or {})
+            if neb_climb_optimizer_kwargs is None
+            else neb_climb_optimizer_kwargs
+        ),
         "n_images": int(n_images),
         "climb": bool(climb),
         "spring_k": float(spring_k),
@@ -1588,6 +1598,8 @@ def check_diffusion_stability(
         max_steps=int(max_steps),
         optimizer=neb_optimizer,
         optimizer_kwargs=neb_optimizer_kwargs,
+        climb_optimizer=neb_climb_optimizer,
+        climb_optimizer_kwargs=neb_climb_optimizer_kwargs,
         band_eval=neb_band_eval,
         verbose=verbose,
         not_converged_error=NEBNotConvergedError,
