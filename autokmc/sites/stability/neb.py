@@ -580,13 +580,19 @@ def run_neb(
     enabling its climbing image with a fresh optimizer instance. ``max_steps``
     applies independently to each stage, while ``optimizer_steps`` reports
     their combined step count. ``start_climbing`` skips the ordinary stage for
-    a caller-supplied CI restart band. If an
-    optimizer, calculator, or convergence check raises after band construction,
-    *failure_path_callback* receives a calculator-detached snapshot of the
-    last-known full band before the exception is re-raised.  A pool supplies
-    exactly one concrete calculator, and that lease is held for the complete
-    NEB lifecycle.  Other pool calculators remain available for independent
-    NEBs, never for other images in this band.
+    a caller-supplied CI restart band.
+
+    Ordinary FIRE may begin with ``downhill_check=True`` as a preconditioner.
+    If five rollback halvings collapse its timestep, AutoKMC disables the
+    check, restores the stage's initial ``dt``, and continues without creating
+    another optimizer stage. CI-FIRE disables downhill checking immediately.
+
+    If an optimizer, calculator, or convergence check raises after band
+    construction, *failure_path_callback* receives a calculator-detached
+    snapshot of the last-known full band before the exception is re-raised. A
+    pool supplies exactly one concrete calculator, and that lease is held for
+    the complete NEB lifecycle. Other pool calculators remain available for
+    independent NEBs, never for other images in this band.
     """
     build_band = band_factory or make_neb_band
     select_logfile = logfile_factory or neb_optimizer_logfile
@@ -665,6 +671,7 @@ def run_neb(
                         else "neb_optimizer_kwargs"
                     ),
                 )
+                fire_recovery_state = None
                 if (
                     climbing_stage
                     and optimizer_name == "fire"
@@ -674,13 +681,74 @@ def run_neb(
                     _log.warning(
                         "FIRE downhill_check is incompatible with CI-NEB "
                         "because the climbing image is intentionally driven "
-                        "uphill; disabling it for the climbing stage."
+                        "uphill; disabling it for %s.",
+                        stage,
+                    )
+                elif (
+                    optimizer_name == "fire"
+                    and constructor_kwargs.get("downhill_check", False)
+                ):
+                    user_reset_callback = constructor_kwargs.get(
+                        "position_reset_callback"
+                    )
+                    fire_recovery_state = {
+                        "optimizer": None,
+                        "initial_dt": None,
+                        "switched": False,
+                    }
+
+                    def recover_stalled_fire(
+                        optimizable,
+                        last_positions,
+                        energy,
+                        last_energy,
+                    ) -> None:
+                        if user_reset_callback is not None:
+                            user_reset_callback(
+                                optimizable,
+                                last_positions,
+                                energy,
+                                last_energy,
+                            )
+                        state = fire_recovery_state
+                        stage_fire = state["optimizer"]
+                        initial_dt = state["initial_dt"]
+                        if (
+                            state["switched"]
+                            or stage_fire is None
+                            or initial_dt is None
+                        ):
+                            return
+                        # FIRE applies fdec after this callback. Trigger after
+                        # five rollback halvings and compensate for the final
+                        # pending halving so the next trial uses the initial dt.
+                        threshold = initial_dt * stage_fire.fdec**4
+                        if stage_fire.dt > threshold:
+                            return
+                        state["switched"] = True
+                        stage_fire.downhill_check = False
+                        stage_fire.dt = initial_dt / stage_fire.fdec
+                        _log.warning(
+                            "FIRE downhill_check stalled %s after repeated "
+                            "energy rollbacks; disabling it and restoring "
+                            "dt=%g.",
+                            stage,
+                            initial_dt,
+                        )
+
+                    constructor_kwargs["position_reset_callback"] = (
+                        recover_stalled_fire
                     )
                 stage_optimizer = optimizer_cls(
                     neb,
                     logfile=select_logfile(verbose),
                     **constructor_kwargs,
                 )
+                if fire_recovery_state is not None:
+                    fire_recovery_state["optimizer"] = stage_optimizer
+                    fire_recovery_state["initial_dt"] = float(
+                        stage_optimizer.dt
+                    )
                 stage_optimizer.run(
                     fmax=float(target_fmax),
                     steps=int(max_steps),

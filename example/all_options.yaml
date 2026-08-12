@@ -120,6 +120,9 @@ optimization:
   # Keyword arguments forwarded to the selected ASE NEB optimizer in the
   # ordinary-band stage.
   # BFGS example: {maxstep: 0.05, alpha: 70.0}
+  # For FIRE, downhill_check may precondition the ordinary band. If repeated
+  # rollbacks collapse dt, AutoKMC disables the check and restores the initial
+  # dt automatically. CI-FIRE always disables downhill checking immediately.
   neb_optimizer_kwargs: {}
 
   # Optional CI-NEB optimizer override. null reuses neb_optimizer.

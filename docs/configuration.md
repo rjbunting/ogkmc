@@ -86,6 +86,8 @@ optimization:
   optimizer_kwargs: {}
   neb_optimizer: bfgs
   neb_optimizer_kwargs: {}
+  neb_climb_optimizer: null
+  neb_climb_optimizer_kwargs: null
   neb_band_eval: images
 ```
 
@@ -100,16 +102,20 @@ object being optimized and the logfile, so `atoms` and `logfile` cannot be
 overridden. All other constructor keywords supported by the installed ASE
 version are accepted and checked by `autokmc validate-config`.
 
-`neb_optimizer` controls the diffusion and bond-reaction NEB band, including
-the climbing-image refinement when enabled. Valid values are `bfgs`, `fire`,
-and `mdmin`. `lbfgs` is intentionally excluded because ASE does not recommend
-it for NEB. Defaults preserve the previous behavior: `lbfgs` for ordinary
-relaxations and `bfgs` for NEB.
+`neb_optimizer` controls the ordinary diffusion and bond-reaction NEB band.
+Valid values are `bfgs`, `fire`, and `mdmin`. `lbfgs` is intentionally excluded
+because ASE does not recommend it for NEB. Defaults preserve the previous
+behavior: `lbfgs` for ordinary relaxations and `bfgs` for NEB.
 
 `neb_optimizer_kwargs` provides the same constructor-keyword interface for
-the NEB optimizer. The mapping is applied independently when the ordinary NEB
-stage and, when enabled, the climbing-image stage instantiate their optimizer.
-Both optimizer mappings are included in calculation-cache identities.
+the ordinary NEB optimizer. `neb_climb_optimizer` optionally selects a separate
+optimizer after the ordinary band converges and the climbing image is enabled;
+`null` reuses `neb_optimizer`. `neb_climb_optimizer_kwargs` supplies that
+climbing optimizer's constructor keywords; `null` reuses
+`neb_optimizer_kwargs`. Each stage creates a fresh optimizer instance, so FIRE
+or MDMin velocity state is not carried from ordinary NEB into CI-NEB. All
+optimizer choices and constructor mappings are included in calculation-cache
+identities.
 
 For a conservative FIRE setup that limits bad initial geometries, configure
 both the initial adaptive timestep and its upper bound; `dt` alone will grow
@@ -129,7 +135,44 @@ optimization:
     dtmax: 0.05
     maxstep: 0.05
     downhill_check: true
+  neb_climb_optimizer: mdmin
+  neb_climb_optimizer_kwargs:
+    dt: 0.05
+    maxstep: 0.01
 ```
+
+### FIRE downhill recovery for NEB
+
+ASE's FIRE `downhill_check` compares the maximum potential energy along the
+band before accepting a step. NEB, however, follows projected physical and
+spring forces, which are not the negative gradient of that maximum-energy
+scalar. An ordinary NEB step can therefore be useful even when the maximum
+image energy rises. Repeated rejection of such steps restores the same
+coordinates, zeros the FIRE velocity, and multiplies `dt` by `fdec`; the
+visible symptom is many identical energy and `fmax` lines while `dt` approaches
+zero.
+
+AutoKMC treats `downhill_check: true` for ordinary FIRE NEB as a temporary
+preconditioner:
+
+1. FIRE begins with downhill checking enabled and retains ASE's normal rollback
+   behavior.
+2. AutoKMC watches the rollback callback and the live FIRE timestep.
+3. After five rollback halvings, AutoKMC disables downhill checking, restores
+   the stage's initial `dt`, and continues with the velocity reset performed by
+   FIRE. The change is internal; no second optimizer or YAML setting is needed.
+4. A warning containing `disabling it and restoring dt=` records the switch.
+
+If FIRE is selected for CI-NEB, AutoKMC disables downhill checking immediately
+because the climbing image is intentionally driven uphill. A separate MDMin
+climbing stage is the conservative configuration shown above. When
+`downhill_check` is already `false`, AutoKMC does not install the recovery
+behavior.
+
+This recovery prevents a zero-timestep loop; it does not prove that a band is
+chemically valid. Inspect the saved initial and optimized paths for image
+continuity, overlaps, endpoint integrity, topology, energies, and forces before
+accepting a barrier or transition state.
 
 The supported algorithmic keywords depend on the selected optimizer and the
 installed ASE version. Common controls are `maxstep` and `alpha` for BFGS;

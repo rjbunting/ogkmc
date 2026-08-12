@@ -145,7 +145,7 @@ def test_shared_neb_uses_selected_optimizer(monkeypatch):
     assert result.optimizer_steps == 4
 
 
-def test_shared_neb_forwards_fire_constructor_kwargs_to_both_stages(monkeypatch):
+def test_shared_neb_recovers_ordinary_fire_but_disables_ci_downhill(monkeypatch):
     images = [_image(0.0), _image(1.0), _image(0.0)]
     neb = SimpleNamespace(climb=False)
     captured = []
@@ -153,6 +153,9 @@ def test_shared_neb_forwards_fire_constructor_kwargs_to_both_stages(monkeypatch)
     class SelectedFire(_ConvergedOptimizer):
         def __init__(self, stage_neb, *, logfile, **kwargs):
             captured.append((stage_neb.climb, kwargs))
+            self.dt = float(kwargs.get("dt", 0.1))
+            self.fdec = float(kwargs.get("fdec", 0.5))
+            self.downhill_check = bool(kwargs.get("downhill_check", False))
             super().__init__(stage_neb, logfile=logfile)
 
     monkeypatch.setattr(neb_module, "acquire_calculator", _calculator_context)
@@ -182,17 +185,86 @@ def test_shared_neb_forwards_fire_constructor_kwargs_to_both_stages(monkeypatch)
         band_factory=lambda *_args, **_kwargs: (neb, images),
     )
 
-    expected_ordinary = {
+    ordinary_climb, ordinary_kwargs = captured[0]
+    reset_callback = ordinary_kwargs.pop("position_reset_callback")
+    assert ordinary_climb is False
+    assert callable(reset_callback)
+    assert ordinary_kwargs == {
         "dt": pytest.approx(0.01),
         "dtmax": pytest.approx(0.05),
         "maxstep": pytest.approx(0.03),
         "downhill_check": True,
     }
-    expected_climbing = {**expected_ordinary, "downhill_check": False}
-    assert captured == [
-        (False, expected_ordinary),
-        (True, expected_climbing),
-    ]
+    assert captured[1] == (
+        True,
+        {
+            "dt": pytest.approx(0.01),
+            "dtmax": pytest.approx(0.05),
+            "maxstep": pytest.approx(0.03),
+            "downhill_check": False,
+        },
+    )
+
+
+def test_shared_neb_switches_off_downhill_after_fire_dt_collapse(monkeypatch, caplog):
+    images = [_image(0.0), _image(1.0), _image(0.0)]
+    neb = SimpleNamespace(climb=False)
+    selected = []
+
+    class PlateauFire:
+        def __init__(
+            self,
+            stage_neb,
+            *,
+            logfile,
+            dt,
+            downhill_check,
+            position_reset_callback,
+        ):
+            del stage_neb, logfile
+            self.dt = float(dt)
+            self.fdec = 0.5
+            self.downhill_check = downhill_check
+            self.position_reset_callback = position_reset_callback
+            self.nsteps = 0
+            selected.append(self)
+
+        def run(self, *, fmax, steps):
+            del fmax, steps
+            for _ in range(5):
+                self.position_reset_callback(None, None, 1.0, 0.0)
+                self.dt *= self.fdec
+            self.nsteps = 5
+
+        def converged(self) -> bool:
+            return True
+
+    monkeypatch.setattr(neb_module, "acquire_calculator", _calculator_context)
+    monkeypatch.setattr(neb_module, "FIRE", PlateauFire)
+
+    neb_module.run_neb(
+        images[0],
+        images[-1],
+        calculator=object(),
+        purpose="plateau recovery NEB",
+        n_images=1,
+        interpolation="linear",
+        spring_k=1.0,
+        climb=False,
+        frozen_indices=None,
+        fmax=0.05,
+        max_steps=20,
+        optimizer="fire",
+        optimizer_kwargs={"dt": 0.01, "downhill_check": True},
+        verbose=False,
+        not_converged_error=RuntimeError,
+        band_factory=lambda *_args, **_kwargs: (neb, images),
+    )
+
+    assert len(selected) == 1
+    assert selected[0].downhill_check is False
+    assert selected[0].dt == pytest.approx(0.01)
+    assert "disabling it and restoring dt=0.01" in caplog.text
 
 
 def test_shared_neb_uses_climbing_optimizer_override(monkeypatch):
@@ -203,6 +275,9 @@ def test_shared_neb_uses_climbing_optimizer_override(monkeypatch):
     class SelectedFire(_ConvergedOptimizer):
         def __init__(self, stage_neb, *, logfile, **kwargs):
             captured.append(("fire", stage_neb.climb, kwargs))
+            self.dt = float(kwargs.get("dt", 0.1))
+            self.fdec = float(kwargs.get("fdec", 0.5))
+            self.downhill_check = bool(kwargs.get("downhill_check", False))
             super().__init__(stage_neb, logfile=logfile)
 
     class SelectedMDMin(_ConvergedOptimizer):
@@ -235,14 +310,19 @@ def test_shared_neb_uses_climbing_optimizer_override(monkeypatch):
         band_factory=lambda *_args, **_kwargs: (neb, images),
     )
 
-    assert captured == [
-        ("fire", False, {"dt": pytest.approx(0.01), "downhill_check": True}),
-        (
-            "mdmin",
-            True,
-            {"dt": pytest.approx(0.05), "maxstep": pytest.approx(0.01)},
-        ),
-    ]
+    fire_name, fire_climb, fire_kwargs = captured[0]
+    assert fire_name == "fire"
+    assert fire_climb is False
+    assert callable(fire_kwargs.pop("position_reset_callback"))
+    assert fire_kwargs == {
+        "dt": pytest.approx(0.01),
+        "downhill_check": True,
+    }
+    assert captured[1] == (
+        "mdmin",
+        True,
+        {"dt": pytest.approx(0.05), "maxstep": pytest.approx(0.01)},
+    )
 
 
 def test_shared_neb_climbing_restart_skips_ordinary_stage(monkeypatch):
