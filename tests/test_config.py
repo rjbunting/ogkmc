@@ -559,6 +559,8 @@ bond:
   atom_matching: hungarian
   matching_trials: 12
   gas_lift_height: 4.5
+  gas_precursor_relax: false
+  gas_precursor_distance: 2.1
 """)
     cfg = load_config(p)
     assert cfg.bond.enabled is True
@@ -566,6 +568,8 @@ bond:
     assert cfg.bond.atom_matching == "hungarian"
     assert cfg.bond.matching_trials == 12
     assert cfg.bond.gas_lift_height == 4.5
+    assert cfg.bond.gas_precursor_relax is False
+    assert cfg.bond.gas_precursor_distance == 2.1
 
 
 def test_unknown_extension(tmp_path):

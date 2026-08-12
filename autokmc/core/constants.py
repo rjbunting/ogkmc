@@ -359,6 +359,15 @@ BOND_MATCHING_TRIALS: int = 8
 #: gas-phase product rather than a materialised surface placement.
 BOND_GAS_LIFT_HEIGHT: float = 6.0
 
+#: Prepare gas-product bond NEBs from a relaxed, intact molecular precursor
+#: adsorbed above the reacting surface site.  The gas-phase asymptote remains
+#: the thermodynamic C-state reference used by KMC rates.
+BOND_GAS_PRECURSOR_RELAX: bool = True
+
+#: Initial minimum molecule-to-slab distance (Å) for the fixed-environment
+#: gas-precursor relaxation.
+BOND_GAS_PRECURSOR_DISTANCE: float = 1.8
+
 #: Folder-name format for bond reaction folders persisted by
 #: :class:`autokmc.io.persistence.ReactionWriter` (when enabled).
 BOND_FOLDER_FMT: str = "bond_iso{iso}_lat{lat}"

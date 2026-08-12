@@ -12,6 +12,8 @@ import numpy as np
 from autokmc.core.constants import (
     BOND_ATOM_MATCHING,
     BOND_GAS_LIFT_HEIGHT,
+    BOND_GAS_PRECURSOR_DISTANCE,
+    BOND_GAS_PRECURSOR_RELAX,
     BOND_MATCHING_TRIALS,
     BOND_MAX_HOPS,
     BOND_NEB_INTERPOLATION,
@@ -138,6 +140,8 @@ class BondChannelOptions:
     interpolation: str = BOND_NEB_INTERPOLATION
     atom_matching: str = BOND_ATOM_MATCHING
     matching_trials: int = BOND_MATCHING_TRIALS
+    gas_precursor_relax: bool = BOND_GAS_PRECURSOR_RELAX
+    gas_precursor_distance: float = BOND_GAS_PRECURSOR_DISTANCE
     nl_mult: float = NL_MULT_DEFAULT
     persist_neb_path: bool = False
     optimizer: str = DEFAULT_OPTIMIZER

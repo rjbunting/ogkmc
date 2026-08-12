@@ -560,6 +560,7 @@ def get_applicable_diffusion_for_member(
                             )
 
             if lc.stable is None:
+                lc.last_failure_reason = None
                 try:
                     check_diffusion_stability(
                         G,
@@ -575,9 +576,10 @@ def get_applicable_diffusion_for_member(
                         neb_seed_member_index=bare_seed_member_index,
                         **stability_kwargs,
                     )
-                except NEBNotConvergedError:
+                except NEBNotConvergedError as exc:
                     # Preserve stable=None: a numerical search failure is
                     # retryable, not evidence that the event is impossible.
+                    lc.last_failure_reason = f"{type(exc).__name__}: {exc}"
                     raise
                 except DiffusionStabilityError as exc:
                     reason = f"{type(exc).__name__}: {exc}"

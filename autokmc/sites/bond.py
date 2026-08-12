@@ -195,8 +195,12 @@ class BondReactionLateral:
         Potential energy (eV) of the relaxed *A occupied + B occupied,
         C empty* state.
     energy_c : float | None
-        Potential energy (eV) of the relaxed *C occupied, A and B empty*
-        state.
+        Potential energy (eV) of the *C occupied, A and B empty* state.  For
+        gas products this is the empty-surface + gas-phase thermodynamic
+        reference used by KMC rates, not the molecular precursor energy.
+    energy_c_precursor : float | None
+        Potential energy (eV) of the relaxed intact molecule above the
+        surface used as the physical NEB endpoint for gas-product channels.
     energy_ts : float | None
         Potential energy (eV) of the highest NEB image between the two
         states above (the climbing-image saddle when ``climb=True``).
@@ -217,6 +221,9 @@ class BondReactionLateral:
         any stability failure; ``None`` until the check has run.
     invalid_reason : str | None
         Human-readable explanation of why this lateral class is invalid.
+    last_failure_reason : str | None
+        Most recent retryable numerical failure.  Unlike
+        :attr:`invalid_reason`, this does not set :attr:`stable` to ``False``.
     """
     lateral_class    : int
     ego_graph        : Any              = None
@@ -224,6 +231,7 @@ class BondReactionLateral:
     members          : list[int]        = field(default_factory=list)
     energy_ab        : float | None     = None
     energy_c         : float | None     = None
+    energy_c_precursor: float | None    = None
     energy_ts        : float | None     = None
     atoms_ab         : Any              = None
     atoms_c          : Any              = None
@@ -235,6 +243,8 @@ class BondReactionLateral:
     neb_path_energies: list[float] | None = None
     stable           : bool | None      = None
     invalid_reason   : str | None       = None
+    last_failure_reason: str | None     = None
+    gas_precursor_relaxed: bool | None  = None
     # ── Free-energy / vibrational fields (autokmc.thermo.free_energy) ────────────
     g_correction_ab  : float | None = None
     g_correction_c   : float | None = None

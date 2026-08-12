@@ -382,6 +382,8 @@ def resolve_channel_runtime(cfg, frozen_indices: list[int] | None) -> ChannelRun
             interpolation=b.neb_interpolation,
             atom_matching=b.atom_matching,
             matching_trials=b.matching_trials,
+            gas_precursor_relax=b.gas_precursor_relax,
+            gas_precursor_distance=b.gas_precursor_distance,
             nl_mult=cfg.constants.neighbor_list_multiplier,
             persist_neb_path=b.persist_neb_path,
             optimizer=cfg.optimization.optimizer,

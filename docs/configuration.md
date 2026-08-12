@@ -445,7 +445,9 @@ cache or resume contract being able to detect it.
 | `include_dissociation` | `true` | Generate C to A + B templates. |
 | `include_coupling` | `true` | Generate A + B to C templates. |
 | `deduplicate_iso` | `true` | Deduplicate graph-isomorphic classes. |
-| `gas_lift_height` | `6.0` Å | Lift used for gas-product NEB endpoints. |
+| `gas_lift_height` | `6.0` Å | Staging lift used to align a gas product above the reacting site. |
+| `gas_precursor_relax` | `true` | For gas products, relax an intact adsorbed molecular precursor before the bond NEB. The slab and lateral environment are fixed for this step. |
+| `gas_precursor_distance` | `1.8` Å | Initial minimum molecule-to-slab distance for the precursor relaxation. |
 | `auto_build_leaf_species` | `true` | Build implied species absent from the feed list. |
 | `pair_n_shells` | `1` | Ego-graph depth for triple pruning. |
 | `prune_by_triple` | `true` | Keep the preferred stable class per adsorption triple. |
@@ -461,6 +463,15 @@ cache or resume contract being able to detect it.
 | `atom_matching` | `auto` | `auto`, `greedy`, `hungarian`, or `reactant_index`. |
 | `matching_trials` | `8` | Number of mapping trials used by automatic matching. |
 | `persist_neb_path` | `false` | Save both bond NEB paths for successful runs; failed NEBs retain them automatically. |
+
+For a gas-fed bond dissociation such as H2(g) to 2H*, the default workflow
+does not interpolate directly from a far gas molecule to dissociated
+adsorbates. It aligns the intact molecule above the reacting site, lowers it
+to `gas_precursor_distance`, fixes the slab and lateral adsorbates, and relaxes
+the molecule. The relaxed molecular precursor is then the physical endpoint
+of the bond NEB. `energy_c` remains the empty-surface plus gas-phase energy
+used for KMC thermodynamics, while the distinct precursor energy is persisted
+as `energy_c_precursor` / `energies_ev.state_c_precursor` for diagnostics.
 
 When lateral interactions are enabled, diffusion and bond channels
 automatically retain the optimized no-neighbour NEB band as an internal

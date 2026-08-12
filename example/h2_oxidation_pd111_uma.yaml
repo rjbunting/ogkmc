@@ -136,6 +136,13 @@ bond:
   deduplicate_iso: true
   auto_build_leaf_species: true
 
+  # For gas-fed dissociation (for example H2(g) -> 2H*), first place the
+  # intact molecule 1.8 Å above the surface and relax only the molecule while
+  # the slab is fixed. The resulting adsorbed precursor is the NEB endpoint;
+  # empty slab + gas remains the KMC thermodynamic reference.
+  gas_precursor_relax: true
+  gas_precursor_distance: 1.8
+
   pair_n_shells: 1
   prune_by_triple: true
   prune_with_calculator: true

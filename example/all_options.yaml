@@ -551,8 +551,17 @@ bond:
   # Remove graph-isomorphic duplicate reaction classes.
   deduplicate_iso: true
 
-  # Gas-product lift above the surface in angstrom for NEB endpoints.
+  # Gas-product alignment lift above the surface in angstrom. This is the
+  # staging position before optional molecular-precursor placement.
   gas_lift_height: 6.0
+
+  # For gas-product bond channels, relax an intact adsorbed molecular
+  # precursor before constructing the bond-breaking/forming NEB.
+  gas_precursor_relax: true
+
+  # Initial minimum molecule-to-slab distance in angstrom. The slab and
+  # lateral environment are fixed during the precursor relaxation.
+  gas_precursor_distance: 1.8
 
   # Build fragment/coupling-product species implied by templates when those
   # species are absent from the feed.

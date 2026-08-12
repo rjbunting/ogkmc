@@ -66,15 +66,22 @@ class KMCSession:
 
     def _run_session(self) -> KMCRunResult:
         """Execute the session while its telemetry context is installed."""
-        runtime = initialise_runtime(
-            self.system,
-            self.settings,
-            self.channels,
-            self.thermochemistry,
-            self.resume,
-            rng=self.rng,
-            compute_adsorption=self.functions.compute_adsorption,
-        )
+        try:
+            runtime = initialise_runtime(
+                self.system,
+                self.settings,
+                self.channels,
+                self.thermochemistry,
+                self.resume,
+                rng=self.rng,
+                compute_adsorption=self.functions.compute_adsorption,
+            )
+        except Exception as exc:
+            self._persist_partial_outputs(
+                step=int(self.resume.step),
+                primary_error=exc,
+            )
+            raise
         self.runtime = runtime
         outputs = KMCOutputManager(
             self.system,
@@ -101,7 +108,14 @@ class KMCSession:
         )
         stop_step = runtime.start_step + int(self.settings.n_steps)
         for step in range(runtime.start_step + 1, stop_step + 1):
-            stopped_reason = self._run_step(step, outputs, expander)
+            try:
+                stopped_reason = self._run_step(step, outputs, expander)
+            except Exception as exc:
+                self._persist_partial_outputs(
+                    step=step,
+                    primary_error=exc,
+                )
+                raise
             if stopped_reason is not None:
                 termination_status = "stopped"
                 termination_reason = stopped_reason
@@ -112,6 +126,94 @@ class KMCSession:
             termination_status=termination_status,
             termination_reason=termination_reason,
         )
+
+    def _persist_partial_outputs(
+        self,
+        *,
+        step: int,
+        primary_error: Exception,
+    ) -> None:
+        """Durably retain completed work and diagnostics before aborting.
+
+        Initial reaction sweeps run before :class:`KMCOutputManager` exists,
+        while recomputation deliberately publishes no event until all
+        scientific updates succeed.  A failure in either phase must still
+        preserve reactions that already completed and the last-known failed
+        endpoint/NEB structures.
+        """
+        writer = self.observers.reaction_writer
+        if writer is None:
+            return
+        try:
+            ensure_reaction = getattr(writer, "ensure_reaction", None)
+            if callable(ensure_reaction):
+                for site in (
+                    *self.system.adsorbate_sites,
+                    *self.channels.diffusion_sites,
+                    *self.channels.bond_sites,
+                ):
+                    for reaction in (
+                        getattr(site, "applicable_reactions", None) or []
+                    ):
+                        if reaction is not None:
+                            ensure_reaction(reaction, step=int(step))
+
+            for site in self.system.adsorbate_sites:
+                write_invalid = getattr(
+                    writer,
+                    "write_invalid_adsorption",
+                    None,
+                )
+                if not callable(write_invalid):
+                    break
+                for lateral_class in site.lateral_classes:
+                    if lateral_class.stable is False:
+                        write_invalid(site, lateral_class, step=int(step))
+
+            for method_name, sites in (
+                ("write_invalid_diffusion", self.channels.diffusion_sites),
+                ("write_invalid_bond", self.channels.bond_sites),
+            ):
+                write_invalid = getattr(writer, method_name, None)
+                if not callable(write_invalid):
+                    continue
+                for site in sites:
+                    for lateral_class in site.lateral_classes:
+                        seed_only = bool(
+                            getattr(lateral_class, "_seed_only", False)
+                            and not getattr(lateral_class, "members", None)
+                        )
+                        failed = (
+                            lateral_class.stable is False
+                            or bool(
+                                getattr(
+                                    lateral_class,
+                                    "last_failure_reason",
+                                    None,
+                                )
+                            )
+                        )
+                        if failed and not seed_only:
+                            write_invalid(
+                                site,
+                                lateral_class,
+                                step=int(step),
+                            )
+
+            sync = getattr(writer, "sync_for_checkpoint", None)
+            if callable(sync):
+                sync()
+        except Exception as output_error:
+            # BaseException.add_note was introduced in Python 3.11, while
+            # AutoKMC still supports Python 3.10.  Preserve the original
+            # scientific failure even when the compatibility runtime cannot
+            # attach the secondary persistence error.
+            add_note = getattr(primary_error, "add_note", None)
+            if callable(add_note):
+                add_note(
+                    "AutoKMC also failed while persisting partial reaction "
+                    f"diagnostics: {type(output_error).__name__}: {output_error}"
+                )
 
     def _run_step(
         self,

@@ -95,6 +95,8 @@ from autokmc.core.constants import (
     BOND_NEB_INTERPOLATION,
     BOND_ATOM_MATCHING,
     BOND_MATCHING_TRIALS,
+    BOND_GAS_PRECURSOR_DISTANCE,
+    BOND_GAS_PRECURSOR_RELAX,
     NL_MULT_DEFAULT,
     LATERAL_SHELLS_DEFAULT,
 )
@@ -434,6 +436,8 @@ def get_applicable_bond_reaction_for_member(
     interpolation: str = BOND_NEB_INTERPOLATION,
     atom_matching: str = BOND_ATOM_MATCHING,
     matching_trials: int = BOND_MATCHING_TRIALS,
+    gas_precursor_relax: bool = BOND_GAS_PRECURSOR_RELAX,
+    gas_precursor_distance: float = BOND_GAS_PRECURSOR_DISTANCE,
     nl_mult: float = NL_MULT_DEFAULT,
     persist_neb_path: bool = False,
     optimizer: str = DEFAULT_OPTIMIZER,
@@ -472,6 +476,8 @@ def get_applicable_bond_reaction_for_member(
             "interpolation": interpolation,
             "atom_matching": atom_matching,
             "matching_trials": matching_trials,
+            "gas_precursor_relax": gas_precursor_relax,
+            "gas_precursor_distance": gas_precursor_distance,
             "nl_mult": nl_mult,
             "persist_neb_path": persist_neb_path,
             "optimizer": optimizer,
@@ -601,6 +607,7 @@ def get_applicable_bond_reaction_for_member(
                             )
 
             if lc.stable is None and calculator is not None:
+                lc.last_failure_reason = None
                 try:
                     check_bond_site_stability(
                         G,
@@ -616,9 +623,10 @@ def get_applicable_bond_reaction_for_member(
                         neb_seed_member_index=bare_seed_member_index,
                         **stability_kwargs,
                     )
-                except BondNEBNotConvergedError:
+                except BondNEBNotConvergedError as exc:
                     # Preserve stable=None: a numerical search failure is
                     # retryable, not evidence that the event is impossible.
+                    lc.last_failure_reason = f"{type(exc).__name__}: {exc}"
                     raise
                 except BondStabilityError as exc:
                     reason = f"{type(exc).__name__}: {exc}"
@@ -689,6 +697,8 @@ def get_applicable_bond_reactions(
     interpolation: str = BOND_NEB_INTERPOLATION,
     atom_matching: str = BOND_ATOM_MATCHING,
     matching_trials: int = BOND_MATCHING_TRIALS,
+    gas_precursor_relax: bool = BOND_GAS_PRECURSOR_RELAX,
+    gas_precursor_distance: float = BOND_GAS_PRECURSOR_DISTANCE,
     nl_mult: float = NL_MULT_DEFAULT,
     persist_neb_path: bool = False,
     optimizer: str = DEFAULT_OPTIMIZER,
@@ -737,6 +747,8 @@ def get_applicable_bond_reactions(
             interpolation=interpolation,
             atom_matching=atom_matching,
             matching_trials=matching_trials,
+            gas_precursor_relax=gas_precursor_relax,
+            gas_precursor_distance=gas_precursor_distance,
             nl_mult=nl_mult,
             persist_neb_path=persist_neb_path,
             optimizer=optimizer,
@@ -779,6 +791,8 @@ def compute_all_bond_reactions(
     interpolation: str = BOND_NEB_INTERPOLATION,
     atom_matching: str = BOND_ATOM_MATCHING,
     matching_trials: int = BOND_MATCHING_TRIALS,
+    gas_precursor_relax: bool = BOND_GAS_PRECURSOR_RELAX,
+    gas_precursor_distance: float = BOND_GAS_PRECURSOR_DISTANCE,
     nl_mult: float = NL_MULT_DEFAULT,
     persist_neb_path: bool = False,
     optimizer: str = DEFAULT_OPTIMIZER,
@@ -821,6 +835,8 @@ def compute_all_bond_reactions(
                     interpolation            = interpolation,
                     atom_matching            = atom_matching,
                     matching_trials          = matching_trials,
+                    gas_precursor_relax       = gas_precursor_relax,
+                    gas_precursor_distance    = gas_precursor_distance,
                     nl_mult                  = nl_mult,
                     persist_neb_path         = persist_neb_path,
                     optimizer                = optimizer,
@@ -864,6 +880,8 @@ def compute_all_bond_reactions(
             interpolation            = interpolation,
             atom_matching            = atom_matching,
             matching_trials          = matching_trials,
+            gas_precursor_relax       = gas_precursor_relax,
+            gas_precursor_distance    = gas_precursor_distance,
             nl_mult                  = nl_mult,
             persist_neb_path         = persist_neb_path,
             optimizer                = optimizer,

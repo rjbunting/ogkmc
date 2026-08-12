@@ -137,6 +137,8 @@ from autokmc.core.constants import (
     BOND_NEB_INTERPOLATION,
     BOND_ATOM_MATCHING,
     BOND_MATCHING_TRIALS,
+    BOND_GAS_PRECURSOR_DISTANCE,
+    BOND_GAS_PRECURSOR_RELAX,
 )
 from autokmc.utils.logging import get_logger
 from autokmc.utils.optimizers import DEFAULT_NEB_OPTIMIZER, DEFAULT_OPTIMIZER
@@ -1206,6 +1208,255 @@ def _gas_product_neb_endpoint(
     return atoms_c, diagnostics
 
 
+def _minimum_gas_surface_distance(
+    atoms: Atoms,
+    *,
+    n_slab: int,
+    n_lat: int,
+    n_react: int,
+) -> float:
+    """Return the minimum MIC distance between gas and slab atoms."""
+    if n_slab < 1 or n_react < 1:
+        raise ValueError("gas precursor requires slab and reacting atoms")
+    positions = np.asarray(atoms.get_positions(), dtype=float)
+    gas_start = n_slab + n_lat
+    gas_stop = gas_start + n_react
+    vectors = (
+        positions[gas_start:gas_stop, None, :]
+        - positions[None, :n_slab, :]
+    )
+    mic = minimum_image_vectors(vectors, atoms.cell.array, atoms.pbc)
+    return float(np.linalg.norm(mic, axis=-1).min())
+
+
+def _position_gas_precursor_seed(
+    atoms_far: Atoms,
+    *,
+    n_slab: int,
+    n_lat: int,
+    n_react: int,
+    target_distance: float,
+) -> tuple[Atoms, dict[str, float]]:
+    """Lower a far gas endpoint until it first reaches the surface distance.
+
+    The existing gas-product endpoint is already Kabsch-aligned above the
+    dissociated reacting atoms.  Translating that intact molecule along -z
+    preserves the alignment and avoids combining adsorption/desorption with
+    bond breaking in a single interpolated NEB path.
+    """
+    target = float(target_distance)
+    if not np.isfinite(target) or target <= 0.0:
+        raise ValueError("gas precursor distance must be finite and positive")
+
+    seed = atoms_far.copy()
+    seed.calc = None
+    initial_distance = _minimum_gas_surface_distance(
+        seed,
+        n_slab=n_slab,
+        n_lat=n_lat,
+        n_react=n_react,
+    )
+    if initial_distance <= target:
+        raise ValueError(
+            "far gas endpoint is already at or inside the requested "
+            f"precursor distance ({initial_distance:.3f} <= {target:.3f} Å)"
+        )
+
+    positions = np.asarray(seed.get_positions(), dtype=float)
+    gas_slice = slice(n_slab + n_lat, n_slab + n_lat + n_react)
+    base_gas = positions[gas_slice].copy()
+    slab_z = positions[:n_slab, 2]
+    gas_z = base_gas[:, 2]
+    vertical_gap = float(gas_z.min() - slab_z.max())
+    max_drop = max(10.0, abs(vertical_gap) + 2.0 * target + 5.0)
+    scan_step = min(0.05, target / 20.0)
+
+    drop_lo = 0.0
+    drop_hi: float | None = None
+    n_scan = int(np.ceil(max_drop / scan_step))
+    for scan_index in range(1, n_scan + 1):
+        drop = min(float(scan_index) * scan_step, max_drop)
+        positions[gas_slice] = base_gas - np.array([0.0, 0.0, drop])
+        seed.set_positions(positions)
+        distance = _minimum_gas_surface_distance(
+            seed,
+            n_slab=n_slab,
+            n_lat=n_lat,
+            n_react=n_react,
+        )
+        if distance <= target:
+            drop_hi = drop
+            break
+        drop_lo = drop
+
+    if drop_hi is None:
+        raise ValueError(
+            "could not place the aligned gas molecule at the requested "
+            f"{target:.3f} Å surface distance by translating it along -z"
+        )
+
+    for _ in range(48):
+        drop = 0.5 * (drop_lo + drop_hi)
+        positions[gas_slice] = base_gas - np.array([0.0, 0.0, drop])
+        seed.set_positions(positions)
+        distance = _minimum_gas_surface_distance(
+            seed,
+            n_slab=n_slab,
+            n_lat=n_lat,
+            n_react=n_react,
+        )
+        if distance > target:
+            drop_lo = drop
+        else:
+            drop_hi = drop
+
+    positions[gas_slice] = base_gas - np.array([0.0, 0.0, drop_hi])
+    seed.set_positions(positions)
+    final_distance = _minimum_gas_surface_distance(
+        seed,
+        n_slab=n_slab,
+        n_lat=n_lat,
+        n_react=n_react,
+    )
+    return seed, {
+        "precursor_target_distance_ang": target,
+        "precursor_initial_min_distance_ang": initial_distance,
+        "precursor_seed_min_distance_ang": final_distance,
+        "precursor_vertical_drop_ang": float(drop_hi),
+    }
+
+
+def _relax_gas_precursor(
+    atoms_seed: Atoms,
+    *,
+    calculator,
+    gas_reactant,
+    gas_atom_order: Sequence[int],
+    target_distance: float,
+    fmax: float,
+    max_steps: int,
+    optimizer: str,
+    optimizer_kwargs: dict[str, Any] | None,
+    n_slab: int,
+    n_lat: int,
+    n_react: int,
+    verbose: bool,
+) -> tuple[Atoms, float, dict[str, Any]]:
+    """Relax an intact adsorbed gas precursor with its environment fixed."""
+    from autokmc.structure import StructureOptimisationError, optimise_structure
+
+    gas_atoms = getattr(gas_reactant, "atoms", None)
+    order = [int(index) for index in gas_atom_order]
+    if gas_atoms is None or len(order) != n_react:
+        raise ValueError("gas precursor atom mapping is incomplete")
+
+    expected_bonds = _bond_set(
+        gas_atoms,
+        nl_mult=1.25,
+        relevant_indices=set(range(len(gas_atoms))),
+    )
+    expected_bonds = {
+        pair for pair in expected_bonds if len(pair) == 2
+    }
+    if n_react > 1 and not expected_bonds:
+        raise ValueError("gas product has no detectable intramolecular bond")
+
+    relax_seed = atoms_seed.copy()
+    environment = list(range(n_slab + n_lat))
+    if environment:
+        relax_seed.set_constraint(
+            [*relax_seed.constraints, FixAtoms(indices=environment)]
+        )
+
+    atoms_opt: Atoms | None = None
+    try:
+        with acquire_calculator(
+            calculator,
+            purpose="bond gas-product molecular-precursor relaxation",
+        ) as calc:
+            atoms_opt = optimise_structure(
+                relax_seed,
+                calculator=calc,
+                fmax=fmax,
+                steps=max_steps,
+                optimizer=optimizer,
+                optimizer_kwargs=optimizer_kwargs,
+                verbose=verbose,
+            )
+            energy = float(atoms_opt.get_potential_energy())
+            atoms_opt.set_pbc(atoms_seed.get_pbc())
+            atoms_opt.calc = None
+    except StructureOptimisationError as exc:
+        wrapped = BondEndpointStabilityError(
+            "Endpoint 'endpoint_c_precursor' molecular relaxation failed: "
+            f"{exc}"
+        )
+        wrapped.atoms = exc.atoms
+        wrapped.state_label = "endpoint_c_precursor"
+        raise wrapped from exc
+
+    assert atoms_opt is not None
+    atoms_opt.set_constraint(atoms_seed.constraints)
+    source_to_slot = {source: slot for slot, source in enumerate(order)}
+    gas_start = n_slab + n_lat
+    bond_lengths: list[dict[str, float | int]] = []
+    for pair in expected_bonds:
+        source_i, source_j = sorted(int(index) for index in pair)
+        if source_i not in source_to_slot or source_j not in source_to_slot:
+            raise ValueError("gas precursor atom mapping omits a bonded atom")
+        ref_length = float(gas_atoms.get_distance(source_i, source_j, mic=True))
+        atom_i = gas_start + source_to_slot[source_i]
+        atom_j = gas_start + source_to_slot[source_j]
+        relaxed_length = float(atoms_opt.get_distance(atom_i, atom_j, mic=True))
+        max_length = max(1.5 * ref_length, ref_length + 0.4)
+        bond_lengths.append(
+            {
+                "source_i": source_i,
+                "source_j": source_j,
+                "reference_ang": ref_length,
+                "relaxed_ang": relaxed_length,
+                "maximum_ang": max_length,
+            }
+        )
+        if relaxed_length > max_length:
+            wrapped = BondEndpointStabilityError(
+                "Endpoint 'endpoint_c_precursor' broke the intact gas "
+                f"molecule: bond {source_i}-{source_j} relaxed to "
+                f"{relaxed_length:.3f} Å (maximum {max_length:.3f} Å)."
+            )
+            wrapped.atoms = atoms_opt
+            wrapped.state_label = "endpoint_c_precursor"
+            raise wrapped
+
+    relaxed_distance = _minimum_gas_surface_distance(
+        atoms_opt,
+        n_slab=n_slab,
+        n_lat=n_lat,
+        n_react=n_react,
+    )
+    maximum_adsorbed_distance = max(
+        float(target_distance) + 1.0,
+        1.5 * float(target_distance),
+    )
+    if relaxed_distance > maximum_adsorbed_distance:
+        wrapped = BondEndpointStabilityError(
+            "Endpoint 'endpoint_c_precursor' desorbed during relaxation: "
+            f"minimum gas-surface distance is {relaxed_distance:.3f} Å "
+            f"(maximum {maximum_adsorbed_distance:.3f} Å)."
+        )
+        wrapped.atoms = atoms_opt
+        wrapped.state_label = "endpoint_c_precursor"
+        raise wrapped
+
+    return atoms_opt, energy, {
+        "precursor_relaxed": True,
+        "precursor_environment_fixed": True,
+        "precursor_relaxed_min_distance_ang": relaxed_distance,
+        "precursor_max_adsorbed_distance_ang": maximum_adsorbed_distance,
+        "precursor_bond_lengths": bond_lengths,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Endpoint relaxation helper (bond variant — supports two self-groups)
 # ---------------------------------------------------------------------------
@@ -1331,6 +1582,7 @@ def _check_bond_ts_validity(
     e_ts: float,
     ts_index: int,
     n_interior: int,
+    e_c_path: float | None = None,
     energy_tol: float = 1e-3,
 ) -> None:
     """Validate that the highest-energy NEB image is a real saddle.
@@ -1341,16 +1593,23 @@ def _check_bond_ts_validity(
     accepted whenever it matches *either* endpoint (i.e. the saddle has
     not split off into a third species).
     """
-    if not (np.isfinite(e_ts) and np.isfinite(e_ab) and np.isfinite(e_c)):
+    c_endpoint_energy = float(e_c if e_c_path is None else e_c_path)
+    if not (
+        np.isfinite(e_ts)
+        and np.isfinite(e_ab)
+        and np.isfinite(e_c)
+        and np.isfinite(c_endpoint_energy)
+    ):
         raise BondTransitionStateInvalidError(
             f"TS / endpoint energies are not finite "
-            f"(E_ab={e_ab}, E_c={e_c}, E_ts={e_ts})."
+            f"(E_ab={e_ab}, E_c={e_c}, "
+            f"E_c_path={c_endpoint_energy}, E_ts={e_ts})."
         )
-    e_max_endpoint = max(float(e_ab), float(e_c))
+    e_max_endpoint = max(float(e_ab), c_endpoint_energy)
     if float(e_ts) < e_max_endpoint - float(energy_tol):
         _log.warning(
             "Bond NEB has no genuine saddle: E_ts=%.4f eV is below "
-            "max(E_ab, E_c)=%.4f eV (tol=%.3f). "
+            "max(E_ab, E_c_path)=%.4f eV (tol=%.3f). "
             "The KMC barrier will be floored at EA_MIN.",
             e_ts, e_max_endpoint, energy_tol,
         )
@@ -1367,10 +1626,11 @@ def _check_bond_ts_validity(
                 f"endpoint AB: E_ts={e_ts:.4f} eV ≈ E_ab={e_ab:.4f} eV "
                 f"(tol={energy_tol})."
             )
-        if abs(float(e_ts) - float(e_c)) < float(energy_tol):
+        if abs(float(e_ts) - c_endpoint_energy) < float(energy_tol):
             raise BondTransitionStateInvalidError(
                 f"TS image (k={ts_index}) has energy indistinguishable from "
-                f"endpoint C: E_ts={e_ts:.4f} eV ≈ E_c={e_c:.4f} eV "
+                "the physical endpoint C: "
+                f"E_ts={e_ts:.4f} eV ≈ E_c_path={c_endpoint_energy:.4f} eV "
                 f"(tol={energy_tol})."
             )
 
@@ -1612,6 +1872,8 @@ def _write_bond_calculation_cache(
     props_c = {
         name: getattr(lc, name, None)
         for name in (
+            "energy_c_precursor",
+            "gas_precursor_relaxed",
             "g_correction_c",
             "g_c",
             "zpe_c",
@@ -1703,6 +1965,16 @@ def _write_bond_calculation_cache(
                 getattr(lc, "matching_diagnostics", {}) or {}
             ),
             "gas_product": getattr(lc, "gas_product", None),
+            "gas_precursor_relaxed": getattr(
+                lc,
+                "gas_precursor_relaxed",
+                None,
+            ),
+            "energy_c_precursor": getattr(
+                lc,
+                "energy_c_precursor",
+                None,
+            ),
             "neb_initialization": getattr(
                 lc,
                 "neb_initialization",
@@ -1740,6 +2012,8 @@ def check_bond_site_stability(
     interpolation: str = BOND_NEB_INTERPOLATION,
     atom_matching: str = BOND_ATOM_MATCHING,
     matching_trials: int = BOND_MATCHING_TRIALS,
+    gas_precursor_relax: bool = BOND_GAS_PRECURSOR_RELAX,
+    gas_precursor_distance: float = BOND_GAS_PRECURSOR_DISTANCE,
     nl_mult: float = NL_MULT_DEFAULT,
     persist_neb_path: bool = False,
     optimizer: str = DEFAULT_OPTIMIZER,
@@ -1772,7 +2046,11 @@ def check_bond_site_stability(
        assignment plus bounded swap trials), then build the C endpoint with
        C's atoms overwriting the reacting-block positions inherited from the
        relaxed AB slab+lat.  Relax; verify C's intended surface coordination
-       survives.
+       survives.  For gas products, first lower the intact, aligned molecule
+       to ``gas_precursor_distance`` and relax only that molecule while the
+       surface/lateral environment is fixed.  This molecular precursor is the
+       NEB endpoint; the separate empty-surface + gas energy remains the KMC
+       thermodynamic reference.
     3. Converge an ordinary NEB band of ``n_images`` interior images between
        the two relaxed endpoints with the requested *interpolation* and
        *spring_k*.  If *climb* is enabled, retain the same band and spring
@@ -1895,6 +2173,8 @@ def check_bond_site_stability(
         "interpolation": str(interpolation),
         "atom_matching": str(atom_matching),
         "matching_trials": int(matching_trials),
+        "gas_precursor_relax": bool(gas_precursor_relax),
+        "gas_precursor_distance": float(gas_precursor_distance),
         "nl_mult": float(nl_mult),
         "n_shells": int(lc.n_shells),
         "persist_neb_path": bool(persist_neb_path),
@@ -2219,10 +2499,50 @@ def check_bond_site_stability(
             G=G,
             lift_height=float(getattr(brs, "gas_lift_height", 6.0)),
         )
-        # The gas-product C endpoint is constructed directly rather than
-        # relaxed as one combined structure, so this is the actual
-        # pre-NEB endpoint supplied to the band.
-        lc.atoms_c_initial = atoms_c_opt.copy()
+        lc.energy_c_precursor = None
+        lc.gas_precursor_relaxed = False
+        if gas_precursor_relax:
+            atoms_c_seed, placement_diag = _position_gas_precursor_seed(
+                atoms_c_opt,
+                n_slab=n_slab,
+                n_lat=n_lat,
+                n_react=n_react,
+                target_distance=float(gas_precursor_distance),
+            )
+            gas_mapping_diag.update(placement_diag)
+            lc.atoms_c_initial = atoms_c_seed.copy()
+            lc.atoms_c_initial.calc = None
+            try:
+                (
+                    atoms_c_opt,
+                    E_c_precursor,
+                    precursor_diag,
+                ) = _relax_gas_precursor(
+                    atoms_c_seed,
+                    calculator=calculator,
+                    gas_reactant=gas_reactant,
+                    gas_atom_order=gas_mapping_diag.get("gas_atom_order", []),
+                    target_distance=float(gas_precursor_distance),
+                    fmax=fmax,
+                    max_steps=max_steps,
+                    optimizer=optimizer,
+                    optimizer_kwargs=optimizer_kwargs,
+                    n_slab=n_slab,
+                    n_lat=n_lat,
+                    n_react=n_react,
+                    verbose=verbose,
+                )
+            except BondEndpointStabilityError as exc:
+                failed_atoms = getattr(exc, "atoms", None)
+                if failed_atoms is not None:
+                    lc.atoms_c = failed_atoms
+                raise
+            gas_mapping_diag.update(precursor_diag)
+            lc.energy_c_precursor = E_c_precursor
+            lc.gas_precursor_relaxed = True
+        else:
+            # Compatibility mode: use the lifted gas asymptote directly.
+            lc.atoms_c_initial = atoms_c_opt.copy()
         lc.atoms_c_initial.calc = None
         lc.atom_matching_method = gas_mapping_diag["selected_method"]
         lc.atom_mapping = list(gas_mapping_diag.get("gas_atom_order", []))
@@ -2233,8 +2553,16 @@ def check_bond_site_stability(
                 f"  [endpoint C(gas)] E_empty={E_empty:.4f} eV  "
                 f"E_gas={float(gas_energy):.4f} eV  "
                 f"E_c={E_c:.4f} eV  "
-                f"NEB final molecule lifted "
-                f"{gas_mapping_diag['selected_lift_height_ang']:.2f} Å"
+                + (
+                    "relaxed molecular precursor "
+                    f"E={float(lc.energy_c_precursor):.4f} eV  "
+                    f"d(surface)={gas_mapping_diag['precursor_relaxed_min_distance_ang']:.2f} Å"
+                    if lc.gas_precursor_relaxed
+                    else (
+                        "NEB final molecule lifted "
+                        f"{gas_mapping_diag['selected_lift_height_ang']:.2f} Å"
+                    )
+                )
             )
     else:
         # Pair C's atoms to the AB reacting block so atom k aligns across
@@ -2312,6 +2640,11 @@ def check_bond_site_stability(
             raise
     lc.energy_c = E_c
     lc.atoms_c  = atoms_c_opt
+    E_c_path = float(
+        getattr(lc, "energy_c_precursor", None)
+        if getattr(lc, "energy_c_precursor", None) is not None
+        else E_c
+    )
 
     # ── 3-4. NEB band ───────────────────────────────────────────────────
     projected_seed_path = None
@@ -2419,6 +2752,7 @@ def check_bond_site_stability(
         nl_mult    = nl_mult,
         e_ab       = E_ab,
         e_c        = E_c,
+        e_c_path   = E_c_path,
         e_ts       = E_ts,
         ts_index   = k_ts,
         n_interior = neb_result.n_interior,

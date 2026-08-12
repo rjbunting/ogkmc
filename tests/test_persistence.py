@@ -224,6 +224,7 @@ def test_reaction_writer_persists_initial_structures_and_neb_paths(
         lateral_class=3,
         energy_ab=-3.0,
         energy_c=-3.5,
+        energy_c_precursor=-3.7,
         energy_ts=-2.0,
         atoms_ab_initial=initial.copy(),
         atoms_c_initial=initial.copy(),
@@ -270,6 +271,11 @@ def test_reaction_writer_persists_initial_structures_and_neb_paths(
     assert (bond_folder / "state_c_initial.extxyz").is_file()
     assert (bond_folder / "neb_path_initial.extxyz").is_file()
     assert (bond_folder / "neb_path.extxyz").is_file()
+    bond_payload = json.loads((bond_folder / "reaction.json").read_text())
+    assert bond_payload["energies_ev"]["state_c"] == pytest.approx(-3.5)
+    assert bond_payload["energies_ev"]["state_c_precursor"] == pytest.approx(
+        -3.7
+    )
 
     diffusion_payload = json.loads(
         (diffusion_folder / "reaction.json").read_text()
@@ -1117,7 +1123,9 @@ def test_invalid_bond_record_writes_failed_endpoint_and_neb_paths(tmp_path):
     )
     lateral = SimpleNamespace(
         lateral_class=4,
-        invalid_reason="BondNEBNotConvergedError: forced failure",
+        stable=None,
+        invalid_reason=None,
+        last_failure_reason="BondNEBNotConvergedError: forced failure",
         atoms_ab_initial=atoms.copy(),
         atoms_c_initial=atoms.copy(),
         atoms_ab=atoms.copy(),
@@ -1145,6 +1153,11 @@ def test_invalid_bond_record_writes_failed_endpoint_and_neb_paths(tmp_path):
     payload = json.loads((folder / "reaction.json").read_text())
     assert payload["kind"] == "bond"
     assert payload["valid"] is False
+    assert payload["diagnostic_status"] == "retryable_failure"
+    assert payload["retryable"] is True
+    assert payload["invalid_reason"] == (
+        "BondNEBNotConvergedError: forced failure"
+    )
     assert payload["discovery_step"] == 9
     assert payload["atoms"]["neb_path"] == "neb_path.extxyz"
     definitions = load_reaction_index(tmp_path / "reactions" / "index.jsonl")

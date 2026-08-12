@@ -1394,6 +1394,11 @@ class ReactionWriter:
             if existing_discovery_step is None
             else existing_discovery_step
         )
+        failure_reason = getattr(lc, "last_failure_reason", None)
+        invalid_reason = getattr(lc, "invalid_reason", None) or failure_reason
+        retryable = bool(
+            getattr(lc, "stable", None) is not False and failure_reason
+        )
         payload = {
             "artifact_type": REACTION_DOCUMENT_ARTIFACT_TYPE,
             "schema_version": REACTION_DOCUMENT_SCHEMA_VERSION,
@@ -1403,12 +1408,21 @@ class ReactionWriter:
             "lateral_class":   lat,
             "reactant_smiles": smiles,
             "valid":           False,
-            "invalid_reason":  getattr(lc, "invalid_reason", None),
+            "invalid_reason":  invalid_reason,
+            "diagnostic_status": (
+                "retryable_failure" if retryable else "invalid"
+            ),
+            "retryable": retryable,
             "kind_directions": ["a_to_b", "b_to_a"],
             "description": (
                 "Invalid diffusion candidate"
-                if getattr(lc, "invalid_reason", None) is None
-                else f"Invalid diffusion candidate: {lc.invalid_reason}"
+                if invalid_reason is None
+                else (
+                    "Diffusion candidate evaluation failed (retryable): "
+                    f"{invalid_reason}"
+                    if retryable
+                    else f"Invalid diffusion candidate: {invalid_reason}"
+                )
             ),
             "template": {"species": smiles},
             "gas_product": False,
@@ -1474,7 +1488,7 @@ class ReactionWriter:
         _log.info(
             "ReactionWriter: wrote invalid diffusion folder "
             "species=%s iso=%d lat=%d  reason=%s",
-            species, iso, lat, getattr(lc, "invalid_reason", None),
+            species, iso, lat, invalid_reason,
         )
         return folder
 
@@ -1539,6 +1553,11 @@ class ReactionWriter:
             if existing_discovery_step is None
             else existing_discovery_step
         )
+        failure_reason = getattr(lc, "last_failure_reason", None)
+        invalid_reason = getattr(lc, "invalid_reason", None) or failure_reason
+        retryable = bool(
+            getattr(lc, "stable", None) is not False and failure_reason
+        )
         payload = {
             "artifact_type": REACTION_DOCUMENT_ARTIFACT_TYPE,
             "schema_version": REACTION_DOCUMENT_SCHEMA_VERSION,
@@ -1548,12 +1567,21 @@ class ReactionWriter:
             "lateral_class": lat,
             "reactant_smiles": smiles,
             "valid": False,
-            "invalid_reason": getattr(lc, "invalid_reason", None),
+            "invalid_reason": invalid_reason,
+            "diagnostic_status": (
+                "retryable_failure" if retryable else "invalid"
+            ),
+            "retryable": retryable,
             "kind_directions": ["couple", "dissoc"],
             "description": (
                 "Invalid bond candidate"
-                if getattr(lc, "invalid_reason", None) is None
-                else f"Invalid bond candidate: {lc.invalid_reason}"
+                if invalid_reason is None
+                else (
+                    "Bond candidate evaluation failed (retryable): "
+                    f"{invalid_reason}"
+                    if retryable
+                    else f"Invalid bond candidate: {invalid_reason}"
+                )
             ),
             "template": {
                 "smiles_a": template.smiles_a,
@@ -1617,7 +1645,7 @@ class ReactionWriter:
             species,
             iso,
             lat,
-            getattr(lc, "invalid_reason", None),
+            invalid_reason,
         )
         return folder
 

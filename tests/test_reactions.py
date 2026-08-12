@@ -535,6 +535,9 @@ def test_neb_nonconvergence_is_not_permanently_classified_invalid(
                 lateral_interactions=False,
             )
         assert lateral.stable is None
+        assert lateral.last_failure_reason == (
+            f"{nonconvergence_error.__name__}: forced numerical NEB failure"
+        )
 
     assert bare.stable is None
     assert not hasattr(bare, "invalid_reason")

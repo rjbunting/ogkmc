@@ -625,6 +625,7 @@ class _Validator:
             "include_dissociation",
             "include_coupling",
             "deduplicate_iso",
+            "gas_precursor_relax",
             "auto_build_leaf_species",
             "prune_by_triple",
             "prune_with_calculator",
@@ -647,6 +648,7 @@ class _Validator:
             )
         for name in (
             "gas_lift_height",
+            "gas_precursor_distance",
             "prune_fmax",
             "neb_fmax",
             "neb_spring_k",

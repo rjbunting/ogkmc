@@ -1109,6 +1109,118 @@ def test_gas_product_endpoint_uses_periodic_reacting_centroid():
     assert np.linalg.norm(gas_positions[1] - gas_positions[0]) == pytest.approx(0.4)
 
 
+def test_gas_precursor_seed_is_lowered_to_requested_surface_distance():
+    atoms = Atoms(
+        "CuH2",
+        positions=[
+            [0.0, 5.0, 1.0],
+            [9.8, 5.0, 8.0],
+            [0.2, 5.0, 8.0],
+        ],
+        cell=np.diag([10.0, 10.0, 20.0]),
+        pbc=[True, True, False],
+    )
+
+    seed, diagnostics = bond_module._position_gas_precursor_seed(
+        atoms,
+        n_slab=1,
+        n_lat=0,
+        n_react=2,
+        target_distance=1.8,
+    )
+
+    assert bond_module._minimum_gas_surface_distance(
+        seed,
+        n_slab=1,
+        n_lat=0,
+        n_react=2,
+    ) == pytest.approx(1.8, abs=1.0e-10)
+    assert diagnostics["precursor_initial_min_distance_ang"] > 1.8
+    assert diagnostics["precursor_vertical_drop_ang"] > 0.0
+    assert seed.get_distance(1, 2, mic=True) == pytest.approx(0.4)
+
+
+def test_gas_precursor_relaxation_fixes_environment_and_keeps_molecule(
+    monkeypatch,
+):
+    import autokmc.structure as structure_module
+
+    seed = Atoms(
+        "CuH2",
+        positions=[[0.0, 0.0, 0.0], [-0.37, 0.0, 1.8], [0.37, 0.0, 1.8]],
+        cell=np.diag([10.0, 10.0, 20.0]),
+        pbc=[True, True, False],
+    )
+    gas_reactant = SimpleNamespace(
+        atoms=Atoms("H2", positions=[[-0.37, 0.0, 0.0], [0.37, 0.0, 0.0]])
+    )
+
+    def fake_optimise(atoms, **kwargs):
+        assert kwargs["fmax"] == pytest.approx(0.05)
+        fixed = {
+            int(index)
+            for constraint in atoms.constraints
+            if hasattr(constraint, "get_indices")
+            for index in constraint.get_indices()
+        }
+        assert fixed == {0}
+        result = atoms.copy()
+        result.calc = SinglePointCalculator(
+            result,
+            energy=-3.0,
+            forces=np.zeros((len(result), 3)),
+        )
+        return result
+
+    monkeypatch.setattr(structure_module, "optimise_structure", fake_optimise)
+    monkeypatch.setattr(bond_module, "acquire_calculator", _calculator_context)
+
+    relaxed, energy, diagnostics = bond_module._relax_gas_precursor(
+        seed,
+        calculator=object(),
+        gas_reactant=gas_reactant,
+        gas_atom_order=[0, 1],
+        target_distance=1.8,
+        fmax=0.05,
+        max_steps=100,
+        optimizer="fire",
+        optimizer_kwargs={"dt": 0.01},
+        n_slab=1,
+        n_lat=0,
+        n_react=2,
+        verbose=False,
+    )
+
+    assert energy == pytest.approx(-3.0)
+    assert relaxed.calc is None
+    assert diagnostics["precursor_relaxed"] is True
+    assert diagnostics["precursor_environment_fixed"] is True
+    assert diagnostics["precursor_bond_lengths"][0]["relaxed_ang"] == pytest.approx(0.74)
+
+
+def test_bond_ts_validation_uses_physical_precursor_energy():
+    atoms = Atoms("H", positions=[[0.0, 0.0, 0.0]])
+    with pytest.raises(
+        BondTransitionStateInvalidError,
+        match="physical endpoint C",
+    ):
+        _check_bond_ts_validity(
+            atoms,
+            atoms.copy(),
+            atoms.copy(),
+            n_slab=0,
+            n_lat=0,
+            n_react=1,
+            nl_mult=1.2,
+            e_ab=0.0,
+            e_c=-2.0,
+            e_c_path=0.2,
+            e_ts=0.2,
+            ts_index=1,
+            n_interior=1,
+        )
+
+
 @pytest.mark.parametrize(
     ("field", "changed"),
     [

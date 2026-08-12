@@ -24,6 +24,8 @@ from typing import Any
 from autokmc.core.constants import (
     BOND_ATOM_MATCHING,
     BOND_GAS_LIFT_HEIGHT,
+    BOND_GAS_PRECURSOR_DISTANCE,
+    BOND_GAS_PRECURSOR_RELAX,
     BOND_MATCHING_TRIALS,
     BOND_MAX_HOPS,
     BOND_NEB_INTERPOLATION,
@@ -296,6 +298,12 @@ class BondCfg:
     include_coupling:       bool = True
     deduplicate_iso:        bool = True
     gas_lift_height:        float = BOND_GAS_LIFT_HEIGHT
+    #: For gas products, relax the intact molecule above the surface before
+    #: starting the bond-breaking/forming NEB.  The surface and lateral
+    #: environment are fixed during this molecular precursor relaxation.
+    gas_precursor_relax:    bool = BOND_GAS_PRECURSOR_RELAX
+    #: Initial minimum molecule-to-slab separation for that relaxation.
+    gas_precursor_distance: float = BOND_GAS_PRECURSOR_DISTANCE
     # When True, every leaf species (fragment / coupling product) implied
     # by the templates that is *not* already in ``reactants`` is built and
     # has its adsorbate sites enumerated automatically.  When False, the

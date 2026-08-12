@@ -127,6 +127,9 @@ class DiffusionLateral:
         Human-readable explanation of why this lateral class is invalid
         (set when ``stable=False``).  ``None`` when ``stable`` is ``True``
         or not yet evaluated.
+    last_failure_reason : str | None
+        Most recent retryable numerical failure.  This is diagnostic state;
+        :attr:`stable` remains ``None`` so a later evaluation can retry it.
     """
     lateral_class : int
     ego_graph     : Any              = None
@@ -145,6 +148,7 @@ class DiffusionLateral:
     neb_path_energies: list[float] | None = None
     stable        : bool | None      = None
     invalid_reason: str | None       = None
+    last_failure_reason: str | None  = None
     # ── Free-energy / vibrational fields (autokmc.thermo.free_energy) ────────────
     g_correction_a   : float | None = None
     g_correction_b   : float | None = None

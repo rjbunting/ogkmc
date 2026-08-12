@@ -13,6 +13,7 @@ import autokmc.kmc.session as session_module
 from autokmc.kmc.engine import run_kmc
 from autokmc.kmc.index import _ReactionIndex
 from autokmc.kmc.models import (
+    KMCChannels,
     KMCFunctions,
     KMCObservers,
     KMCResumeState,
@@ -126,6 +127,76 @@ def test_typed_request_returns_typed_result_with_run_telemetry():
     assert result.performance["counters"]["kmc.session.runs"] == 1
     assert result.performance["timings_s"]["kmc.session.seconds"] >= 0.0
     assert result.to_legacy_dict()["time"] == result.time_s
+
+
+def test_initialisation_failure_flushes_reactions_and_retryable_bond_diagnostics(
+    monkeypatch,
+):
+    completed_reaction = SimpleNamespace(kind="adsorption")
+    adsorption_site = _site(iso_class=0, member_nodes=[[10]])
+    adsorption_site.applicable_reactions = [completed_reaction]
+    retryable_lateral = SimpleNamespace(
+        lateral_class=2,
+        members=[0],
+        stable=None,
+        last_failure_reason=(
+            "BondNEBNotConvergedError: forced numerical failure"
+        ),
+    )
+    bond_site = SimpleNamespace(
+        lateral_classes=[retryable_lateral],
+        applicable_reactions=[],
+    )
+
+    calls = []
+
+    class Writer:
+        def ensure_reaction(self, reaction, *, step):
+            calls.append(("reaction", reaction, step))
+
+        def write_invalid_bond(self, site, lateral, *, step):
+            calls.append(("invalid_bond", site, lateral, step))
+
+        def sync_for_checkpoint(self):
+            calls.append(("sync",))
+
+    def fail_initialisation(*_args, **_kwargs):
+        raise RuntimeError("initial NEB sweep failed")
+
+    monkeypatch.setattr(
+        session_module,
+        "initialise_runtime",
+        fail_initialisation,
+    )
+    request = KMCRunRequest(
+        system=KMCSystem(
+            nx.Graph(),
+            [adsorption_site],
+            None,
+            {"[O]": 0.0},
+        ),
+        settings=KMCSettings(
+            temperature=500.0,
+            n_steps=0,
+            verbose=False,
+        ),
+        channels=KMCChannels(bond_sites=[bond_site]),
+        observers=KMCObservers(reaction_writer=Writer()),  # type: ignore[arg-type]
+    )
+    functions = KMCFunctions(
+        compute_adsorption=lambda *_args, **_kwargs: [],
+        recompute_affected=lambda *_args, **_kwargs: ([], []),
+        expand_bond_network=lambda *_args, **_kwargs: [],
+    )
+
+    with pytest.raises(RuntimeError, match="initial NEB sweep failed"):
+        run_kmc(request, functions=functions)
+
+    assert calls == [
+        ("reaction", completed_reaction, 0),
+        ("invalid_bond", bond_site, retryable_lateral, 0),
+        ("sync",),
+    ]
 
 
 def test_event_is_not_published_when_recomputation_fails(monkeypatch):

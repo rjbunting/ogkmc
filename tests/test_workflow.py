@@ -84,11 +84,18 @@ def test_channel_runtime_propagates_anchor_clique_cap(
 ):
     cfg = RunConfig(
         adsorbate_sites=AdsorbateSitesCfg(anchor_k_max=configured_cap),
-        bond=BondCfg(enabled=True),
+        bond=BondCfg(
+            enabled=True,
+            gas_precursor_relax=False,
+            gas_precursor_distance=2.2,
+        ),
     )
 
     runtime = resolve_channel_runtime(cfg, frozen_indices=None)
 
+    assert runtime.bond is not None
+    assert runtime.bond.gas_precursor_relax is False
+    assert runtime.bond.gas_precursor_distance == pytest.approx(2.2)
     assert runtime.bond_growth is not None
     assert runtime.bond_growth.anchor_k_max == expected_cap
 

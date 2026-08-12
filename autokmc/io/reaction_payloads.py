@@ -177,6 +177,7 @@ def build_bond_payload(
     template = getattr(reaction.site, "template", None)
     e_ab = getattr(lc, "energy_ab", None)
     e_c = getattr(lc, "energy_c", None)
+    e_c_precursor = getattr(lc, "energy_c_precursor", None)
     e_ts = getattr(lc, "energy_ts", None)
     e_ts_eff: float | None
     ea_couple_raw: float | None
@@ -221,6 +222,9 @@ def build_bond_payload(
         "energies_ev": {
             "state_ab": None if e_ab is None else float(e_ab),
             "state_c": None if e_c is None else float(e_c),
+            "state_c_precursor": (
+                None if e_c_precursor is None else float(e_c_precursor)
+            ),
             "transition_raw": None if e_ts is None else float(e_ts),
             "transition_eff": None if e_ts_eff is None else float(e_ts_eff),
         },
