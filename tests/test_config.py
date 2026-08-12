@@ -74,6 +74,7 @@ def test_load_yaml_ok(tmp_path):
     assert cfg.output.isaac_export_enabled is False
     assert cfg.optimization.optimizer == "lbfgs"
     assert cfg.optimization.neb_optimizer == "bfgs"
+    assert cfg.optimization.neb_method == "improvedtangent"
 
 
 def test_loads_optimizer_choices(tmp_path):
@@ -99,6 +100,7 @@ optimization:
     dtmax: 0.02
     maxstep: 0.01
     downhill_check: false
+  neb_method: aseneb
 reactants:
   - smiles: "[O]"
 calculator:
@@ -127,6 +129,7 @@ calculator:
         "maxstep": pytest.approx(0.01),
         "downhill_check": False,
     }
+    assert cfg.optimization.neb_method == "aseneb"
 
 
 @pytest.mark.parametrize(
@@ -183,7 +186,7 @@ calculator:
                 "use_line_search": False,
             },
         ),
-        ("bfgs", {"maxstep": 0.05, "alpha": 50.0}),
+        ("bfgs", {"maxstep": 0.05, "alpha": 50.0, "master": False}),
         (
             "fire",
             {
@@ -235,6 +238,7 @@ def test_accepts_installed_ase_neb_optimizer_controls(optimizer, kwargs):
     [
         ("optimizer", "not-an-optimizer", "optimization.optimizer"),
         ("neb_optimizer", "lbfgs", "optimization.neb_optimizer"),
+        ("neb_method", "not-a-method", "optimization.neb_method"),
     ],
 )
 def test_rejects_invalid_optimizer_choices(tmp_path, key, value, message):
@@ -368,6 +372,7 @@ def test_h2_oxidation_pd111_uma_example_is_four_gpu_and_batched():
         "predict_unit.factory_kwargs.device"
     )
     assert cfg.optimization.neb_band_eval == "batched"
+    assert cfg.optimization.neb_method == "improvedtangent"
 
 
 def test_load_toml_ok(tmp_path):

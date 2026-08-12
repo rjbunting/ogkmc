@@ -145,8 +145,10 @@ energies. See [Configuration](configuration.md#free_energy) for the controls.
 
 Scientific and persistence failures are explicit:
 
-- failed gas, structure, endpoint, or NEB convergence raises or invalidates
-  only a reaction class when that invalidity is an expected stability result,
+- failed gas, structure, or endpoint stability invalidates only the affected
+  reaction class when that invalidity is an expected chemical result; numerical
+  NEB non-convergence preserves the band and propagates without permanently
+  excluding the undecided event,
 - on-the-fly species/site/network expansion retries transient runtime failures
   three times, records each stage under the checkpointed
   `bond_registry.expansion_failures` diagnostics, and raises after exhaustion;

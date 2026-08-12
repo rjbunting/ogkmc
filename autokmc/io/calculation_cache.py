@@ -1147,6 +1147,21 @@ def close_calculation_cache_connections(
         item = connections.pop(key, None)
         if item is not None:
             item.connection.close()
+    # This hook explicitly permits callers to replace or delete an index.
+    # Linux may immediately reuse the old inode for the replacement, so the
+    # path/device/inode schema cache cannot safely survive this lifecycle
+    # boundary.
+    with _INDEX_SCHEMA_LOCK:
+        if root is None:
+            _INITIALISED_INDEX_FILES.clear()
+        else:
+            index_path = keys[0]
+            stale_entries = {
+                entry
+                for entry in _INITIALISED_INDEX_FILES
+                if entry[0] == index_path
+            }
+            _INITIALISED_INDEX_FILES.difference_update(stale_entries)
 
 
 def _backfill_index_metadata(root: Path, connection: sqlite3.Connection) -> None:

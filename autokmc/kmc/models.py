@@ -31,6 +31,7 @@ from autokmc.core.constants import (
     NEB_CLIMB,
     NEB_FMAX,
     NEB_INTERPOLATION,
+    NEB_METHOD,
     NEB_MAX_STEPS,
     NEB_N_IMAGES,
     NEB_SPRING_K,
@@ -111,6 +112,7 @@ class DiffusionChannelOptions:
     neb_optimizer_kwargs: dict[str, Any] = field(default_factory=dict)
     neb_climb_optimizer: str | None = None
     neb_climb_optimizer_kwargs: dict[str, Any] | None = None
+    neb_method: str = NEB_METHOD
     neb_band_eval: str = NEB_BAND_EVAL
 
     @classmethod
@@ -144,6 +146,7 @@ class BondChannelOptions:
     neb_optimizer_kwargs: dict[str, Any] = field(default_factory=dict)
     neb_climb_optimizer: str | None = None
     neb_climb_optimizer_kwargs: dict[str, Any] | None = None
+    neb_method: str = NEB_METHOD
     neb_band_eval: str = NEB_BAND_EVAL
 
     @classmethod

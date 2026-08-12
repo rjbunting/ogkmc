@@ -273,6 +273,13 @@ NEB_SPRING_K: float = 5.0
 #: potential, ASE default for chemistry) or ``"linear"``.
 NEB_INTERPOLATION: str = "linear"
 
+#: ASE NEB force/tangent formulation. ``"improvedtangent"`` is the default;
+#: the other values map directly to ASE's ``NEB(method=...)`` choices.
+NEB_METHODS: frozenset[str] = frozenset(
+    {"aseneb", "eb", "improvedtangent", "spline", "string"}
+)
+NEB_METHOD: str = "improvedtangent"
+
 #: How NEB band images are evaluated each optimizer step: ``"images"``
 #: (per-image calculator calls — serial with a shared calculator, or pooled
 #: threads on a multi-worker CalculatorPool) or ``"batched"`` (the whole band

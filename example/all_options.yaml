@@ -133,6 +133,10 @@ optimization:
   # MDMin example: {dt: 0.05, maxstep: 0.01}
   neb_climb_optimizer_kwargs: null
 
+  # ASE NEB force/tangent formulation: improvedtangent, aseneb, eb, spline,
+  # or string. The same method is retained for the CI stage.
+  neb_method: improvedtangent
+
   # How NEB band images are evaluated each optimizer step. "images" (default)
   # calls the calculator once per image; "batched" evaluates the whole band in
   # one model forward when the calculator supports it (FAIR-Chem/UMA, or any

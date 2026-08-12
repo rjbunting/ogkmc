@@ -28,6 +28,8 @@ from ase.optimize import BFGS, FIRE, MDMin
 from autokmc.core.constants import (
     NEB_BAND_EVAL as DEFAULT_NEB_BAND_EVAL,
     NEB_BAND_EVALS,
+    NEB_METHOD as DEFAULT_NEB_METHOD,
+    NEB_METHODS,
 )
 from autokmc.io.calculators import (
     CalculatorConfigError,
@@ -117,6 +119,19 @@ def normalize_band_eval(value: str) -> str:
         choices = ", ".join(sorted(NEB_BAND_EVALS))
         raise ValueError(
             f"neb_band_eval must be one of {choices}; got {value!r}"
+        )
+    return name
+
+
+def normalize_neb_method(value: str) -> str:
+    """Return a canonical ASE NEB method or raise a useful error."""
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"neb_method must be a non-empty string, got {value!r}")
+    name = value.strip().lower()
+    if name not in NEB_METHODS:
+        choices = ", ".join(sorted(NEB_METHODS))
+        raise ValueError(
+            f"neb_method must be one of {choices}; got {value!r}"
         )
     return name
 
@@ -370,6 +385,7 @@ def make_neb_band(
     climb: bool,
     calculator,
     frozen_indices: list[int] | None,
+    neb_method: str = DEFAULT_NEB_METHOD,
     initial_path: Sequence[Atoms] | None = None,
     band_eval: str = DEFAULT_NEB_BAND_EVAL,
 ) -> tuple[Any, list[Atoms]]:
@@ -479,7 +495,7 @@ def make_neb_band(
     neb_kwargs = {
         "k": float(spring_k),
         "climb": bool(climb),
-        "method": "improvedtangent",
+        "method": normalize_neb_method(neb_method),
         "allow_shared_calculator": band_evaluator is None,
     }
     if band_evaluator is not None:
@@ -561,6 +577,7 @@ def run_neb(
     optimizer_kwargs: Mapping[str, Any] | None = None,
     climb_optimizer: str | None = None,
     climb_optimizer_kwargs: Mapping[str, Any] | None = None,
+    neb_method: str = DEFAULT_NEB_METHOD,
     start_climbing: bool = False,
     persist_path: bool = False,
     capture_path: bool = False,
@@ -597,6 +614,7 @@ def run_neb(
     build_band = band_factory or make_neb_band
     select_logfile = logfile_factory or neb_optimizer_logfile
     band_eval_mode = normalize_band_eval(band_eval)
+    method_name = normalize_neb_method(neb_method)
     if band_eval_mode == "images":
         _maybe_hint_batched_available(calculator)
     with acquire_calculator(calculator, purpose=purpose) as neb_calculator:
@@ -608,6 +626,12 @@ def run_neb(
             "calculator": neb_calculator,
             "frozen_indices": frozen_indices,
         }
+        # Preserve compatibility with legacy custom band factories when the
+        # default is requested. A non-default method must be understood by the
+        # factory or construction fails explicitly rather than silently using
+        # different NEB physics.
+        if band_factory is None or method_name != DEFAULT_NEB_METHOD:
+            band_kwargs["neb_method"] = method_name
         if initial_path is not None:
             band_kwargs["initial_path"] = initial_path
         if band_factory is None:
@@ -883,11 +907,14 @@ def __getattr__(name: str) -> Any:
 
 __all__ = [
     "DEFAULT_NEB_BAND_EVAL",
+    "DEFAULT_NEB_METHOD",
     "NEB_BAND_EVALS",
+    "NEB_METHODS",
     "NEBRunResult",
     "make_neb_band",
     "neb_optimizer_logfile",
     "normalize_band_eval",
+    "normalize_neb_method",
     "project_neb_path",
     "run_neb",
     # Legacy facade exports.

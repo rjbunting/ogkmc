@@ -64,6 +64,7 @@ from autokmc.sites.stability.diffusion import (
     check_diffusion_stability,
     DiffusionStabilityError,
     get_diffusion_bare_lateral,
+    NEBNotConvergedError,
 )
 from autokmc.reactions.rates import (
     EA_MIN,
@@ -78,6 +79,7 @@ from autokmc.core.constants import (
     NEB_CLIMB,
     NEB_SPRING_K,
     NEB_INTERPOLATION,
+    NEB_METHOD,
     NL_MULT_DEFAULT,
     LATERAL_SHELLS_DEFAULT,
 )
@@ -396,6 +398,7 @@ def get_applicable_diffusion_for_member(
     neb_optimizer_kwargs: dict[str, Any] | None = None,
     neb_climb_optimizer: str | None = None,
     neb_climb_optimizer_kwargs: dict[str, Any] | None = None,
+    neb_method: str = NEB_METHOD,
     neb_band_eval: str = NEB_BAND_EVAL,
     verbose: bool = False,
     lateral_interactions: bool = True,
@@ -431,6 +434,7 @@ def get_applicable_diffusion_for_member(
             "neb_optimizer_kwargs": neb_optimizer_kwargs,
             "neb_climb_optimizer": neb_climb_optimizer,
             "neb_climb_optimizer_kwargs": neb_climb_optimizer_kwargs,
+            "neb_method": neb_method,
             "neb_band_eval": neb_band_eval,
             "verbose": verbose,
             "free_energy_options": free_energy_options,
@@ -501,6 +505,21 @@ def get_applicable_diffusion_for_member(
                             capture_neb_path=True,
                             **stability_kwargs,
                         )
+                    except NEBNotConvergedError as exc:
+                        # This bare calculation is only an optional warm start
+                        # for the current lateral event. Keep the bare class
+                        # undecided and let the lateral NEB use interpolation.
+                        bare_seed_path = None
+                        bare_seed_member_index = None
+                        _log.warning(
+                            "diff_iso=%d m=%d bare warm-start NEB did not "
+                            "converge: %s; lateral calculation will use %s "
+                            "interpolation",
+                            ds.iso_class,
+                            index,
+                            exc,
+                            interpolation,
+                        )
                     except DiffusionStabilityError as exc:
                         reason = f"{type(exc).__name__}: {exc}"
                         if not preserve_bare_result:
@@ -556,6 +575,10 @@ def get_applicable_diffusion_for_member(
                         neb_seed_member_index=bare_seed_member_index,
                         **stability_kwargs,
                     )
+                except NEBNotConvergedError:
+                    # Preserve stable=None: a numerical search failure is
+                    # retryable, not evidence that the event is impossible.
+                    raise
                 except DiffusionStabilityError as exc:
                     reason = f"{type(exc).__name__}: {exc}"
                     _log.warning(
@@ -631,6 +654,7 @@ def get_applicable_diffusions(
     neb_optimizer_kwargs: dict[str, Any] | None = None,
     neb_climb_optimizer: str | None = None,
     neb_climb_optimizer_kwargs: dict[str, Any] | None = None,
+    neb_method: str = NEB_METHOD,
     neb_band_eval: str = NEB_BAND_EVAL,
     verbose: bool = False,
     lateral_interactions: bool = True,
@@ -677,6 +701,7 @@ def get_applicable_diffusions(
             neb_optimizer_kwargs=neb_optimizer_kwargs,
             neb_climb_optimizer=neb_climb_optimizer,
             neb_climb_optimizer_kwargs=neb_climb_optimizer_kwargs,
+            neb_method=neb_method,
             neb_band_eval=neb_band_eval,
             verbose=verbose,
             lateral_interactions=lateral_interactions,
@@ -716,6 +741,7 @@ def compute_all_diffusions(
     neb_optimizer_kwargs: dict[str, Any] | None = None,
     neb_climb_optimizer: str | None = None,
     neb_climb_optimizer_kwargs: dict[str, Any] | None = None,
+    neb_method: str = NEB_METHOD,
     neb_band_eval: str = NEB_BAND_EVAL,
     verbose: bool = False,
     lateral_interactions: bool = True,
@@ -754,6 +780,7 @@ def compute_all_diffusions(
                     neb_optimizer_kwargs     = neb_optimizer_kwargs,
                     neb_climb_optimizer      = neb_climb_optimizer,
                     neb_climb_optimizer_kwargs = neb_climb_optimizer_kwargs,
+                    neb_method                = neb_method,
                     neb_band_eval             = neb_band_eval,
                     verbose                  = verbose,
                     lateral_interactions     = lateral_interactions,
@@ -794,6 +821,7 @@ def compute_all_diffusions(
             neb_optimizer_kwargs     = neb_optimizer_kwargs,
             neb_climb_optimizer      = neb_climb_optimizer,
             neb_climb_optimizer_kwargs = neb_climb_optimizer_kwargs,
+            neb_method                = neb_method,
             neb_band_eval             = neb_band_eval,
             verbose                  = verbose,
             lateral_interactions     = lateral_interactions,

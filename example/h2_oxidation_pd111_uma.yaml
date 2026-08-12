@@ -79,8 +79,8 @@ optimization:
   neb_optimizer: fire
   neb_optimizer_kwargs:
     dt: 0.01
-    dtmax: 0.05
-    maxstep: 0.05
+    dtmax: 0.01
+    maxstep: 0.02
     downhill_check: true
   # Use a fresh MDMin instance after the ordinary band has converged and the
   # climbing image is enabled.
@@ -88,6 +88,7 @@ optimization:
   neb_climb_optimizer_kwargs:
     dt: 0.05
     maxstep: 0.01
+  neb_method: improvedtangent
   neb_band_eval: batched
 
 adsorbate_sites:
@@ -143,7 +144,8 @@ bond:
 
   neb_fmax: 0.05
   neb_max_steps: 1000
-  neb_n_images: 4
+  # Eight interior images plus two endpoints match the ten-frame path.
+  neb_n_images: 8
   neb_climb: true
   neb_spring_k: 1.0
   neb_interpolation: linear

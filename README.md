@@ -679,6 +679,11 @@ Useful package areas:
   automatically disables the check and restores the initial timestep after
   five rollback halvings for ordinary NEB; CI-FIRE disables it immediately.
   See [FIRE downhill recovery for NEB](docs/configuration.md#fire-downhill-recovery-for-neb).
+- A NEB that exhausts its optimizer steps is not evidence that the reaction is
+  chemically impossible. AutoKMC preserves the failed band and propagates the
+  non-convergence instead of permanently excluding that event from OGKMC.
+  Inspect or retry the saved path; do not replace a missing barrier with a
+  fabricated value.
 - If no reactions are available, inspect adsorption-site pruning and gas-phase
   reactant energies.
 - If post-processed product rates are zero, inspect `events.jsonl` for a

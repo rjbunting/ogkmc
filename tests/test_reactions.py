@@ -416,6 +416,132 @@ def test_bare_stability_value_errors_are_not_swallowed_as_classifier_errors(
 
 
 @pytest.mark.parametrize(
+    (
+        "reaction_module",
+        "applicability_name",
+        "bare_getter_name",
+        "classifier_name",
+        "stability_name",
+        "entrypoint_name",
+        "nonconvergence_error",
+        "direction",
+    ),
+    [
+        (
+            diffusion_module,
+            "is_diffusion_applicable",
+            "get_diffusion_bare_lateral",
+            "check_diffusion_site_lateral",
+            "check_diffusion_stability",
+            "get_applicable_diffusion_for_member",
+            diffusion_module.NEBNotConvergedError,
+            "a_to_b",
+        ),
+        (
+            bond_module,
+            "is_bond_applicable",
+            "get_bond_bare_lateral",
+            "check_bond_site_lateral",
+            "check_bond_site_stability",
+            "get_applicable_bond_reaction_for_member",
+            bond_module.BondNEBNotConvergedError,
+            "couple",
+        ),
+    ],
+)
+@pytest.mark.parametrize("failure_scope", ["bare", "lateral"])
+def test_neb_nonconvergence_is_not_permanently_classified_invalid(
+    monkeypatch,
+    reaction_module,
+    applicability_name,
+    bare_getter_name,
+    classifier_name,
+    stability_name,
+    entrypoint_name,
+    nonconvergence_error,
+    direction,
+    failure_scope,
+):
+    bare = SimpleNamespace(
+        stable=None,
+        members=[],
+        lateral_class=0,
+        atoms_neb_path=None,
+    )
+    lateral = SimpleNamespace(stable=None, members=[0], lateral_class=1)
+    site = SimpleNamespace(
+        iso_class=9,
+        _member_lc={},
+        applicable_reactions=[],
+    )
+
+    monkeypatch.setattr(
+        reaction_module,
+        applicability_name,
+        lambda *_args: (True, direction),
+    )
+    monkeypatch.setattr(
+        reaction_module,
+        bare_getter_name,
+        lambda *_args, **_kwargs: bare,
+    )
+    monkeypatch.setattr(
+        reaction_module,
+        classifier_name,
+        lambda *_args, **_kwargs: lateral,
+    )
+
+    def fail_nonconverged(_graph, _site, _member, lc, _calculator, **kwargs):
+        if failure_scope == "bare" and lc is bare:
+            raise nonconvergence_error("forced numerical NEB failure")
+        if failure_scope == "lateral" and lc is bare:
+            raise AssertionError("bare search is disabled for this case")
+        if failure_scope == "bare":
+            assert kwargs["neb_seed_path"] is None
+            if reaction_module is diffusion_module:
+                lc.energy_a = 0.0
+                lc.energy_b = 0.2
+            else:
+                lc.energy_ab = 0.0
+                lc.energy_c = 0.2
+            lc.energy_ts = 0.8
+            lc.stable = True
+            return
+        raise nonconvergence_error("forced numerical NEB failure")
+
+    monkeypatch.setattr(reaction_module, stability_name, fail_nonconverged)
+
+    if failure_scope == "bare":
+        reaction = getattr(reaction_module, entrypoint_name)(
+            nx.Graph(),
+            site,
+            0,
+            object(),
+            temperature=500.0,
+            n_images=1,
+            lateral_interactions=True,
+        )
+        assert reaction is not None
+        assert lateral.stable is True
+    else:
+        with pytest.raises(nonconvergence_error, match="forced numerical NEB failure"):
+            getattr(reaction_module, entrypoint_name)(
+                nx.Graph(),
+                site,
+                0,
+                object(),
+                temperature=500.0,
+                n_images=1,
+                lateral_interactions=False,
+            )
+        assert lateral.stable is None
+
+    assert bare.stable is None
+    assert not hasattr(bare, "invalid_reason")
+    assert not hasattr(lateral, "invalid_reason")
+
+
+@pytest.mark.parametrize(
     "seed_helper",
     [
         diffusion_module._diffusion_seed_path,

@@ -23,6 +23,35 @@ _OPTIMIZER_CLASSES = {
 _MANAGED_OPTIMIZER_KWARGS = frozenset({"atoms", "logfile"})
 
 
+def _accepted_optimizer_kwargs(optimizer_class: type[Any]) -> set[str]:
+    """Collect explicit keyword parameters through an optimizer's MRO.
+
+    Recent ASE releases expose ``**kwargs`` on optimizer constructors and
+    forward them through ``Optimizer``/``Dynamics`` to ``BaseDynamics``.
+    Treating that forwarding parameter as accepting arbitrary input lets
+    misspelled or optimizer-specific YAML controls through validation.  The
+    explicit parameters on every constructor in the hierarchy are the actual
+    supported interface.
+    """
+    accepted: set[str] = set()
+    for optimizer_base in optimizer_class.__mro__:
+        constructor = optimizer_base.__dict__.get("__init__")
+        if constructor is None:
+            continue
+        try:
+            signature = inspect.signature(constructor)
+        except (TypeError, ValueError):
+            continue
+        accepted.update(
+            parameter_name
+            for parameter_name, parameter in signature.parameters.items()
+            if parameter_name != "self"
+            and parameter.kind
+            in {parameter.POSITIONAL_OR_KEYWORD, parameter.KEYWORD_ONLY}
+        )
+    return accepted
+
+
 def normalize_optimizer_name(
     value: str,
     *,
@@ -66,25 +95,14 @@ def normalize_optimizer_kwargs(
     if not all(isinstance(key, str) and key for key in value):
         raise ValueError(f"{setting} keys must be non-empty strings")
 
-    signature = inspect.signature(_OPTIMIZER_CLASSES[optimizer_name].__init__)
-    accepted = {
-        parameter_name
-        for parameter_name, parameter in signature.parameters.items()
-        if parameter_name != "self"
-        and parameter.kind
-        in {parameter.POSITIONAL_OR_KEYWORD, parameter.KEYWORD_ONLY}
-    }
-    accepts_arbitrary_keywords = any(
-        parameter.kind == parameter.VAR_KEYWORD
-        for parameter in signature.parameters.values()
-    )
+    accepted = _accepted_optimizer_kwargs(_OPTIMIZER_CLASSES[optimizer_name])
     managed = sorted(set(value) & _MANAGED_OPTIMIZER_KWARGS)
     if managed:
         raise ValueError(
             f"{setting} cannot override AutoKMC-managed argument(s): "
             f"{', '.join(managed)}"
         )
-    unknown = [] if accepts_arbitrary_keywords else sorted(set(value) - accepted)
+    unknown = sorted(set(value) - accepted)
     if unknown:
         choices = ", ".join(sorted(accepted - _MANAGED_OPTIMIZER_KWARGS))
         raise ValueError(

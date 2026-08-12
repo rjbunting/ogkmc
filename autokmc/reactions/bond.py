@@ -80,6 +80,7 @@ from autokmc.reactions.rates import EA_MIN, DEFAULT_TRANSMISSION_COEFFICIENT, _e
 from autokmc.sites.stability.bond import (
     check_bond_site_lateral,
     check_bond_site_stability,
+    BondNEBNotConvergedError,
     BondStabilityError,
     get_bond_bare_lateral,
 )
@@ -90,6 +91,7 @@ from autokmc.core.constants import (
     NEB_N_IMAGES,
     NEB_CLIMB,
     NEB_SPRING_K,
+    NEB_METHOD,
     BOND_NEB_INTERPOLATION,
     BOND_ATOM_MATCHING,
     BOND_MATCHING_TRIALS,
@@ -440,6 +442,7 @@ def get_applicable_bond_reaction_for_member(
     neb_optimizer_kwargs: dict[str, Any] | None = None,
     neb_climb_optimizer: str | None = None,
     neb_climb_optimizer_kwargs: dict[str, Any] | None = None,
+    neb_method: str = NEB_METHOD,
     neb_band_eval: str = NEB_BAND_EVAL,
     lateral_interactions: bool = True,
     lateral_shells: int = LATERAL_SHELLS_DEFAULT,
@@ -477,6 +480,7 @@ def get_applicable_bond_reaction_for_member(
             "neb_optimizer_kwargs": neb_optimizer_kwargs,
             "neb_climb_optimizer": neb_climb_optimizer,
             "neb_climb_optimizer_kwargs": neb_climb_optimizer_kwargs,
+            "neb_method": neb_method,
             "neb_band_eval": neb_band_eval,
             "verbose": verbose,
             "calculation_cache_root": calculation_cache_root,
@@ -542,6 +546,21 @@ def get_applicable_bond_reaction_for_member(
                             capture_neb_path=True,
                             **stability_kwargs,
                         )
+                    except BondNEBNotConvergedError as exc:
+                        # This bare calculation is only an optional warm start
+                        # for the current lateral event. Keep the bare class
+                        # undecided and let the lateral NEB use interpolation.
+                        bare_seed_path = None
+                        bare_seed_member_index = None
+                        _log.warning(
+                            "bond_iso=%d m=%d bare warm-start NEB did not "
+                            "converge: %s; lateral calculation will use %s "
+                            "interpolation",
+                            brs.iso_class,
+                            index,
+                            exc,
+                            interpolation,
+                        )
                     except BondStabilityError as exc:
                         reason = f"{type(exc).__name__}: {exc}"
                         if not preserve_bare_result:
@@ -597,6 +616,10 @@ def get_applicable_bond_reaction_for_member(
                         neb_seed_member_index=bare_seed_member_index,
                         **stability_kwargs,
                     )
+                except BondNEBNotConvergedError:
+                    # Preserve stable=None: a numerical search failure is
+                    # retryable, not evidence that the event is impossible.
+                    raise
                 except BondStabilityError as exc:
                     reason = f"{type(exc).__name__}: {exc}"
                     _log.warning(
@@ -674,6 +697,7 @@ def get_applicable_bond_reactions(
     neb_optimizer_kwargs: dict[str, Any] | None = None,
     neb_climb_optimizer: str | None = None,
     neb_climb_optimizer_kwargs: dict[str, Any] | None = None,
+    neb_method: str = NEB_METHOD,
     neb_band_eval: str = NEB_BAND_EVAL,
     lateral_interactions: bool = True,
     lateral_shells: int = LATERAL_SHELLS_DEFAULT,
@@ -721,6 +745,7 @@ def get_applicable_bond_reactions(
             neb_optimizer_kwargs=neb_optimizer_kwargs,
             neb_climb_optimizer=neb_climb_optimizer,
             neb_climb_optimizer_kwargs=neb_climb_optimizer_kwargs,
+            neb_method=neb_method,
             neb_band_eval=neb_band_eval,
             lateral_interactions=lateral_interactions,
             lateral_shells=lateral_shells,
@@ -762,6 +787,7 @@ def compute_all_bond_reactions(
     neb_optimizer_kwargs: dict[str, Any] | None = None,
     neb_climb_optimizer: str | None = None,
     neb_climb_optimizer_kwargs: dict[str, Any] | None = None,
+    neb_method: str = NEB_METHOD,
     neb_band_eval: str = NEB_BAND_EVAL,
     lateral_interactions: bool = True,
     lateral_shells: int = LATERAL_SHELLS_DEFAULT,
@@ -803,6 +829,7 @@ def compute_all_bond_reactions(
                     neb_optimizer_kwargs     = neb_optimizer_kwargs,
                     neb_climb_optimizer      = neb_climb_optimizer,
                     neb_climb_optimizer_kwargs = neb_climb_optimizer_kwargs,
+                    neb_method                = neb_method,
                     neb_band_eval             = neb_band_eval,
                     lateral_interactions     = lateral_interactions,
                     lateral_shells           = lateral_shells,
@@ -845,6 +872,7 @@ def compute_all_bond_reactions(
             neb_optimizer_kwargs     = neb_optimizer_kwargs,
             neb_climb_optimizer      = neb_climb_optimizer,
             neb_climb_optimizer_kwargs = neb_climb_optimizer_kwargs,
+            neb_method                = neb_method,
             neb_band_eval             = neb_band_eval,
             lateral_interactions     = lateral_interactions,
             lateral_shells           = lateral_shells,

@@ -935,8 +935,19 @@ def test_index_is_rebuilt_from_verified_record_folders(tmp_path, failure):
         assert connection.execute("SELECT COUNT(*) FROM records").fetchone()[0] == 1
 
 
-def test_legacy_sqlite_index_is_migrated_and_metadata_backfilled(tmp_path):
+def test_legacy_sqlite_index_is_migrated_and_metadata_backfilled(
+    tmp_path,
+    monkeypatch,
+):
     root = tmp_path / "reaction_db"
+    # Reproduce Linux immediately reusing the deleted index's inode.  Closing
+    # an index must invalidate the schema cache even when its identity tuple is
+    # unchanged after replacement.
+    monkeypatch.setattr(
+        calculation_cache,
+        "_index_file_identity",
+        lambda _path: (1, 1),
+    )
     key, operation, parameters, record_path = _adsorption_record(root)
     isaac = json.loads(record_path.read_text())
     configuration = isaac["system"]["configuration"]["autokmc"]

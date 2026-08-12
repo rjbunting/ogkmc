@@ -88,6 +88,7 @@ optimization:
   neb_optimizer_kwargs: {}
   neb_climb_optimizer: null
   neb_climb_optimizer_kwargs: null
+  neb_method: improvedtangent
   neb_band_eval: images
 ```
 
@@ -117,6 +118,26 @@ or MDMin velocity state is not carried from ordinary NEB into CI-NEB. All
 optimizer choices and constructor mappings are included in calculation-cache
 identities.
 
+`neb_method` selects ASE's NEB force and tangent formulation for both the
+ordinary and climbing-image stages. Valid values are:
+
+- `improvedtangent` (default): energy-weighted Henkelman--Jónsson tangents and
+  tangential spring forces.
+- `aseneb`: ASE's standard tangent, selected relative to the current
+  highest-energy image.
+- `eb`: the full elastic-band spring force, including perpendicular spring
+  components.
+- `spline`: spline-derived tangents plus ASE's spline-curvature spring force.
+- `string`: spline-derived tangents with equal-arc-length redistribution after
+  optimizer position updates instead of an explicit spring force.
+
+The method is part of the calculation-cache identity. `spline` and `string`
+fit splines through Cartesian image coordinates; for periodic paths, unwrap
+cross-boundary atomic trajectories consistently before using them. Changing
+the method can substantially change the projected force norm, so compare
+methods from the same saved coordinates rather than treating their reported
+`fmax` values as directly interchangeable.
+
 For a conservative FIRE setup that limits bad initial geometries, configure
 both the initial adaptive timestep and its upper bound; `dt` alone will grow
 toward ASE's `dtmax`. `maxstep` adds a separate displacement cap:
@@ -139,6 +160,7 @@ optimization:
   neb_climb_optimizer_kwargs:
     dt: 0.05
     maxstep: 0.01
+  neb_method: improvedtangent
 ```
 
 ### FIRE downhill recovery for NEB
@@ -173,6 +195,16 @@ This recovery prevents a zero-timestep loop; it does not prove that a band is
 chemically valid. Inspect the saved initial and optimized paths for image
 continuity, overlaps, endpoint integrity, topology, energies, and forces before
 accepting a barrier or transition state.
+
+Numerical NEB non-convergence is likewise not a chemical stability result.
+AutoKMC preserves the last-known band and propagates the channel-specific
+non-convergence exception while leaving the lateral class undecided. This
+prevents OGKMC from silently dropping a physically real event merely because
+one optimizer attempt exhausted its step budget. Endpoint or transition-state
+topology failures remain chemically invalid and are excluded as before. If an
+optional bare-band warm start does not converge, the target lateral NEB instead
+falls back to its configured interpolation while the bare class stays
+undecided.
 
 The supported algorithmic keywords depend on the selected optimizer and the
 installed ASE version. Common controls are `maxstep` and `alpha` for BFGS;

@@ -22,6 +22,7 @@ jobs:
       - run: python -m compileall -q autokmc
       - run: ruff check autokmc tests
       - name: Type-check persistence and typed runtime boundaries
+        if: matrix.python-version == '3.10'
         run: >-
           mypy --follow-imports=skip
           autokmc/io/_files.py

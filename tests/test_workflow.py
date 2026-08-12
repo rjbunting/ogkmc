@@ -107,6 +107,7 @@ def test_channel_runtime_propagates_optimizer_choices():
                 "maxstep": 0.01,
                 "downhill_check": False,
             },
+            neb_method="aseneb",
             neb_band_eval="batched",
         ),
         diffusion=DiffusionCfg(enabled=True),
@@ -134,6 +135,7 @@ def test_channel_runtime_propagates_optimizer_choices():
         "downhill_check": False,
     }
     assert runtime.diffusion.neb_band_eval == "batched"
+    assert runtime.diffusion.neb_method == "aseneb"
     assert runtime.bond is not None
     assert runtime.bond.optimizer == "fire"
     assert runtime.bond.optimizer_kwargs == runtime.diffusion.optimizer_kwargs
@@ -151,6 +153,7 @@ def test_channel_runtime_propagates_optimizer_choices():
         == runtime.diffusion.neb_climb_optimizer_kwargs
     )
     assert runtime.bond.neb_band_eval == "batched"
+    assert runtime.bond.neb_method == "aseneb"
     assert runtime.bond_growth is not None
     assert runtime.bond_growth.optimizer == "fire"
     assert runtime.bond_growth.optimizer_kwargs == {

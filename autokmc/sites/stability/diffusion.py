@@ -127,6 +127,7 @@ from autokmc.core.constants import (
     NEB_CLIMB,
     NEB_SPRING_K,
     NEB_INTERPOLATION,
+    NEB_METHOD,
 )
 from autokmc.utils.logging import get_logger
 from autokmc.utils.optimizers import DEFAULT_NEB_OPTIMIZER, DEFAULT_OPTIMIZER
@@ -1095,6 +1096,7 @@ def check_diffusion_stability(
     neb_optimizer_kwargs: dict[str, Any] | None = None,
     neb_climb_optimizer: str | None = None,
     neb_climb_optimizer_kwargs: dict[str, Any] | None = None,
+    neb_method: str = NEB_METHOD,
     neb_band_eval: str = NEB_BAND_EVAL,
     verbose: bool = False,
     free_energy_options=None,
@@ -1253,6 +1255,7 @@ def check_diffusion_stability(
             if neb_climb_optimizer_kwargs is None
             else neb_climb_optimizer_kwargs
         ),
+        "neb_method": str(neb_method).strip().lower(),
         "n_images": int(n_images),
         "climb": bool(climb),
         "spring_k": float(spring_k),
@@ -1600,6 +1603,7 @@ def check_diffusion_stability(
         optimizer_kwargs=neb_optimizer_kwargs,
         climb_optimizer=neb_climb_optimizer,
         climb_optimizer_kwargs=neb_climb_optimizer_kwargs,
+        neb_method=neb_method,
         band_eval=neb_band_eval,
         verbose=verbose,
         not_converged_error=NEBNotConvergedError,

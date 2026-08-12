@@ -47,6 +47,7 @@ from autokmc.core.constants import (
     NEB_FMAX,
     NEB_CLIMB,
     NEB_INTERPOLATION,
+    NEB_METHOD,
     NEB_MAX_STEPS,
     NEB_N_IMAGES,
     NEB_SPRING_K,
@@ -131,6 +132,9 @@ class OptimizationCfg:
     neb_optimizer_kwargs: dict[str, Any] = field(default_factory=dict)
     neb_climb_optimizer: str | None = None
     neb_climb_optimizer_kwargs: dict[str, Any] | None = None
+    #: ASE NEB force/tangent formulation (``improvedtangent``, ``aseneb``,
+    #: ``eb``, ``spline``, or ``string``).
+    neb_method: str = NEB_METHOD
     #: NEB band evaluation mode: ``"images"`` (per-image calculator calls)
     #: or ``"batched"`` (whole band in one stacked model forward per
     #: optimizer step, when the calculator supports it).

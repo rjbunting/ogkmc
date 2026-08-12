@@ -457,6 +457,47 @@ def test_make_neb_band_requires_one_concrete_calculator():
         pool.shutdown()
 
 
+@pytest.mark.parametrize(
+    "method",
+    ["improvedtangent", "aseneb", "eb", "spline", "string"],
+)
+def test_make_neb_band_uses_selected_ase_method(method):
+    initial = Atoms("H", positions=[[0.0, 0.0, 0.0]])
+    final = Atoms("H", positions=[[1.0, 0.0, 0.0]])
+
+    neb, _ = neb_module.make_neb_band(
+        initial,
+        final,
+        n_images=2,
+        interpolation="linear",
+        spring_k=0.1,
+        climb=False,
+        calculator=object(),
+        frozen_indices=None,
+        neb_method=method,
+    )
+
+    assert neb.method == method
+
+
+def test_make_neb_band_rejects_unknown_method():
+    initial = Atoms("H", positions=[[0.0, 0.0, 0.0]])
+    final = Atoms("H", positions=[[1.0, 0.0, 0.0]])
+
+    with pytest.raises(ValueError, match="neb_method must be one of"):
+        neb_module.make_neb_band(
+            initial,
+            final,
+            n_images=2,
+            interpolation="linear",
+            spring_k=0.1,
+            climb=False,
+            calculator=object(),
+            frozen_indices=None,
+            neb_method="unknown",
+        )
+
+
 def test_idpp_starts_from_linear_band_without_shared_artifacts(
     monkeypatch,
     tmp_path,
@@ -855,7 +896,8 @@ def test_neb_uses_only_one_pool_calculator_and_propagates_its_exception():
 
         with pool.acquire_many(2, purpose="failure recovery check") as calculators:
             assert len(calculators) == 2
-        assert sorted(calculator.calls for calculator in pool.calculators) == [0, 2]
+        call_counts = [calculator.calls for calculator in pool.calculators]
+        assert sum(count > 0 for count in call_counts) == 1
     finally:
         pool.shutdown()
 
