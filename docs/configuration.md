@@ -428,7 +428,7 @@ cache or resume contract being able to detect it.
 | `fmax` | `0.01` eV/Å | NEB force threshold. |
 | `max_steps` | `200` | NEB optimization limit. |
 | `n_images` | `10` | Fixed interior-image count when `image_spacing` is `null`; total frames add two endpoints. |
-| `image_spacing` | `0.25` Å | Enable dynamic selection from the maximum MIC-aware corresponding-atom endpoint displacement. |
+| `image_spacing` | `0.25` Å | Enable dynamic image selection and limit every adjacent-image atom displacement to twice this value. |
 | `min_images` | `6` | Minimum dynamically selected interior-image count, giving at least eight total frames. |
 | `max_images` | `8` | Maximum dynamically selected interior-image count, giving at most ten total frames. |
 | `climb` | `true` | Refine the converged ordinary NEB with a climbing image. |
@@ -446,6 +446,16 @@ maximum bound is reached, the persisted `estimated_linear_spacing_ang` can be
 larger than the requested target and `count_limited_by` is `maximum`.
 The bond channel uses the same rule through the `neb_image_spacing`,
 `neb_min_images`, `neb_max_images`, and `neb_n_images` names.
+
+Dynamic spacing also supplies a geometric guard during both the ordinary and
+climbing-image stages. After every optimizer step, AutoKMC measures the
+MIC-aware displacement of every unfrozen atom between adjacent images. If any
+displacement exceeds twice the configured spacing, the step is rejected and
+the lowest-force geometrically valid band from that stage is restored. A fresh
+optimizer resets its velocities and continues within the original step budget.
+For FIRE, both `dt` and `dtmax` are halved on every geometric restart. MDMin
+halves `dt`; BFGS, which has no timestep, halves `maxstep`. Set the spacing to
+`null` to use a fixed image count without this derived geometric limit.
 
 ## `bond`
 
@@ -471,7 +481,7 @@ The bond channel uses the same rule through the `neb_image_spacing`,
 | `neb_fmax` | `0.01` eV/Å | Bond NEB threshold. |
 | `neb_max_steps` | `200` | Bond NEB step limit. |
 | `neb_n_images` | `10` | Fixed bond-NEB interior-image count when `neb_image_spacing` is `null`. |
-| `neb_image_spacing` | `0.25` Å | Enable dynamic bond-NEB selection from the maximum MIC-aware corresponding-atom endpoint displacement. |
+| `neb_image_spacing` | `0.25` Å | Enable dynamic bond-NEB selection and limit every adjacent-image atom displacement to twice this value. |
 | `neb_min_images` | `6` | Minimum dynamically selected bond-NEB interior-image count, giving at least eight total frames. |
 | `neb_max_images` | `8` | Maximum dynamically selected bond-NEB interior-image count, giving at most ten total frames. |
 | `neb_climb` | `true` | Refine the converged ordinary bond NEB with a climbing image. |

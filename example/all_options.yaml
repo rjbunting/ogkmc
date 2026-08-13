@@ -510,7 +510,9 @@ diffusion:
   n_images: 10
 
   # Dynamic density: choose the smallest count whose largest MIC-aware
-  # corresponding-atom displacement is about 0.25 angstrom per frame.
+  # corresponding-atom displacement is about 0.25 angstrom per frame. During
+  # optimization, crossing 0.50 angstrom restores the lowest-force valid band
+  # and restarts with smaller optimizer controls.
   image_spacing: 0.25
   min_images: 6
   max_images: 8
@@ -594,6 +596,7 @@ bond:
   neb_n_images: 10
 
   # Dynamic bond-NEB image density; total frames are interior images + 2.
+  # The optimization guard limits adjacent-image motion to twice this value.
   neb_image_spacing: 0.25
   neb_min_images: 6
   neb_max_images: 8

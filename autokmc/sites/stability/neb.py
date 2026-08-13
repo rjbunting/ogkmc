@@ -161,6 +161,70 @@ class NEBImageSelection:
     limited_by: str
 
 
+@dataclass(frozen=True)
+class _NEBBandGap:
+    """Largest MIC-aware corresponding-atom gap in an NEB band."""
+
+    distance: float
+    left_image: int
+    atom_index: int
+
+
+class _NEBBandSpacingViolation(RuntimeError):
+    """Internal signal used to restart an optimizer from a valid band."""
+
+    def __init__(self, gap: _NEBBandGap, limit: float) -> None:
+        self.gap = gap
+        self.limit = float(limit)
+        super().__init__(
+            "adjacent NEB images separated by "
+            f"{gap.distance:.6f} Å at image pair "
+            f"{gap.left_image}-{gap.left_image + 1}, atom {gap.atom_index}; "
+            f"limit={self.limit:.6f} Å"
+        )
+
+
+def _maximum_adjacent_image_displacement(
+    images: Sequence[Atoms],
+    *,
+    frozen_indices: Sequence[int] | None,
+) -> _NEBBandGap:
+    """Return the largest unfrozen-atom displacement between band images."""
+    if len(images) < 2:
+        return _NEBBandGap(0.0, -1, -1)
+
+    n_atoms = len(images[0])
+    mobile = np.ones(n_atoms, dtype=bool)
+    if frozen_indices:
+        frozen = np.asarray(list(frozen_indices), dtype=int)
+        if np.any((frozen < 0) | (frozen >= n_atoms)):
+            raise ValueError("frozen atom index is outside the NEB image")
+        mobile[frozen] = False
+    mobile_indices = np.flatnonzero(mobile)
+    if not len(mobile_indices):
+        return _NEBBandGap(0.0, -1, -1)
+
+    maximum = _NEBBandGap(0.0, 0, int(mobile_indices[0]))
+    for left_index, (left, right) in enumerate(zip(images[:-1], images[1:])):
+        delta = np.asarray(right.positions - left.positions, dtype=float)
+        if np.asarray(left.pbc, dtype=bool).any():
+            delta, _ = find_mic(
+                delta,
+                np.asarray(left.cell.array, dtype=float),
+                pbc=np.asarray(left.pbc, dtype=bool),
+            )
+        distances = np.linalg.norm(delta[mobile_indices], axis=1)
+        local_offset = int(np.argmax(distances))
+        local_distance = float(distances[local_offset])
+        if local_distance > maximum.distance:
+            maximum = _NEBBandGap(
+                local_distance,
+                left_index,
+                int(mobile_indices[local_offset]),
+            )
+    return maximum
+
+
 def resolve_neb_image_count(
     atoms_initial: Atoms,
     atoms_final: Atoms,
@@ -685,6 +749,7 @@ def run_neb(
     band_factory=None,
     logfile_factory=None,
     band_eval: str = DEFAULT_NEB_BAND_EVAL,
+    image_spacing: float | None = None,
 ) -> NEBRunResult:
     """Optimise one NEB band and return a calculator-detached result.
 
@@ -708,11 +773,26 @@ def run_neb(
     pool supplies exactly one concrete calculator, and that lease is held for
     the complete NEB lifecycle. Other pool calculators remain available for
     independent NEBs, never for other images in this band.
+
+    When ``image_spacing`` is configured, no unfrozen atom may move more than
+    twice that distance between adjacent images (using the minimum-image
+    convention). The lowest-force geometrically valid band in the current
+    stage is checkpointed. If a later step crosses the limit, that checkpoint
+    is restored and a fresh optimizer is created. FIRE restarts with both
+    ``dt`` and ``dtmax`` halved; other supported optimizers reduce their
+    available displacement control. Restarts share the original stage step
+    budget.
     """
     build_band = band_factory or make_neb_band
     select_logfile = logfile_factory or neb_optimizer_logfile
     band_eval_mode = normalize_band_eval(band_eval)
     method_name = normalize_neb_method(neb_method)
+    spacing_limit = None
+    if image_spacing is not None:
+        resolved_spacing = float(image_spacing)
+        if not np.isfinite(resolved_spacing) or resolved_spacing <= 0.0:
+            raise ValueError("image_spacing must be finite and positive")
+        spacing_limit = 2.0 * resolved_spacing
     if band_eval_mode == "images":
         _maybe_hint_batched_available(calculator)
     with acquire_calculator(calculator, purpose=purpose) as neb_calculator:
@@ -783,7 +863,7 @@ def run_neb(
                     "fire": FIRE,
                     "mdmin": MDMin,
                 }[optimizer_name]
-                constructor_kwargs = normalize_optimizer_kwargs(
+                stage_constructor_kwargs = normalize_optimizer_kwargs(
                     optimizer_name,
                     selected_optimizer_kwargs,
                     allowed=NEB_OPTIMIZERS,
@@ -793,94 +873,200 @@ def run_neb(
                         else "neb_optimizer_kwargs"
                     ),
                 )
-                fire_recovery_state = None
                 if (
                     climbing_stage
                     and optimizer_name == "fire"
-                    and constructor_kwargs.get("downhill_check", False)
+                    and stage_constructor_kwargs.get("downhill_check", False)
                 ):
-                    constructor_kwargs["downhill_check"] = False
+                    stage_constructor_kwargs["downhill_check"] = False
                     _log.warning(
                         "FIRE downhill_check is incompatible with CI-NEB "
                         "because the climbing image is intentionally driven "
                         "uphill; disabling it for %s.",
                         stage,
                     )
-                elif (
-                    optimizer_name == "fire"
-                    and constructor_kwargs.get("downhill_check", False)
-                ):
-                    user_reset_callback = constructor_kwargs.get(
-                        "position_reset_callback"
-                    )
-                    fire_recovery_state = {
-                        "optimizer": None,
-                        "initial_dt": None,
-                        "switched": False,
-                    }
 
-                    def recover_stalled_fire(
-                        optimizable,
-                        last_positions,
-                        energy,
-                        last_energy,
-                    ) -> None:
-                        if user_reset_callback is not None:
-                            user_reset_callback(
-                                optimizable,
-                                last_positions,
-                                energy,
-                                last_energy,
+                best_fmax = float("inf")
+                best_positions: list[np.ndarray] | None = None
+                remaining_steps = int(max_steps)
+
+                while remaining_steps > 0:
+                    constructor_kwargs = dict(stage_constructor_kwargs)
+                    fire_recovery_state = None
+                    if (
+                        not climbing_stage
+                        and optimizer_name == "fire"
+                        and constructor_kwargs.get("downhill_check", False)
+                    ):
+                        user_reset_callback = constructor_kwargs.get(
+                            "position_reset_callback"
+                        )
+                        fire_recovery_state = {
+                            "optimizer": None,
+                            "initial_dt": None,
+                            "switched": False,
+                        }
+
+                        def recover_stalled_fire(
+                            optimizable,
+                            last_positions,
+                            energy,
+                            last_energy,
+                        ) -> None:
+                            if user_reset_callback is not None:
+                                user_reset_callback(
+                                    optimizable,
+                                    last_positions,
+                                    energy,
+                                    last_energy,
+                                )
+                            state = fire_recovery_state
+                            stage_fire = state["optimizer"]
+                            initial_dt = state["initial_dt"]
+                            if (
+                                state["switched"]
+                                or stage_fire is None
+                                or initial_dt is None
+                            ):
+                                return
+                            # FIRE applies fdec after this callback. Trigger
+                            # after five rollback halvings and compensate for
+                            # the final pending halving so the next trial uses
+                            # the initial dt.
+                            threshold = initial_dt * stage_fire.fdec**4
+                            if stage_fire.dt > threshold:
+                                return
+                            state["switched"] = True
+                            stage_fire.downhill_check = False
+                            stage_fire.dt = initial_dt / stage_fire.fdec
+                            _log.warning(
+                                "FIRE downhill_check stalled %s after repeated "
+                                "energy rollbacks; disabling it and restoring "
+                                "dt=%g.",
+                                stage,
+                                initial_dt,
                             )
-                        state = fire_recovery_state
-                        stage_fire = state["optimizer"]
-                        initial_dt = state["initial_dt"]
-                        if (
-                            state["switched"]
-                            or stage_fire is None
-                            or initial_dt is None
-                        ):
-                            return
-                        # FIRE applies fdec after this callback. Trigger after
-                        # five rollback halvings and compensate for the final
-                        # pending halving so the next trial uses the initial dt.
-                        threshold = initial_dt * stage_fire.fdec**4
-                        if stage_fire.dt > threshold:
-                            return
-                        state["switched"] = True
-                        stage_fire.downhill_check = False
-                        stage_fire.dt = initial_dt / stage_fire.fdec
-                        _log.warning(
-                            "FIRE downhill_check stalled %s after repeated "
-                            "energy rollbacks; disabling it and restoring "
-                            "dt=%g.",
-                            stage,
-                            initial_dt,
+
+                        constructor_kwargs["position_reset_callback"] = (
+                            recover_stalled_fire
                         )
 
-                    constructor_kwargs["position_reset_callback"] = (
-                        recover_stalled_fire
+                    stage_optimizer = optimizer_cls(
+                        neb,
+                        logfile=select_logfile(verbose),
+                        **constructor_kwargs,
                     )
-                stage_optimizer = optimizer_cls(
-                    neb,
-                    logfile=select_logfile(verbose),
-                    **constructor_kwargs,
-                )
-                if fire_recovery_state is not None:
-                    fire_recovery_state["optimizer"] = stage_optimizer
-                    fire_recovery_state["initial_dt"] = float(
-                        stage_optimizer.dt
-                    )
-                stage_optimizer.run(
-                    fmax=float(target_fmax),
-                    steps=int(max_steps),
-                )
-                optimizer_steps += int(stage_optimizer.nsteps)
-                if not stage_optimizer.converged():
-                    raise not_converged_error(
-                        f"{stage} did not converge: fmax={target_fmax} eV/Å not "
-                        f"reached in {max_steps} steps."
-                    )
+                    if fire_recovery_state is not None:
+                        fire_recovery_state["optimizer"] = stage_optimizer
+                        fire_recovery_state["initial_dt"] = float(
+                            stage_optimizer.dt
+                        )
+
+                    initial_controls = {
+                        name: float(getattr(stage_optimizer, name))
+                        for name in ("dt", "dtmax", "maxstep")
+                        if hasattr(stage_optimizer, name)
+                    }
+
+                    if spacing_limit is not None:
+
+                        def retain_lowest_force_valid_band() -> None:
+                            nonlocal best_fmax, best_positions
+                            gap = _maximum_adjacent_image_displacement(
+                                images,
+                                frozen_indices=frozen_indices,
+                            )
+                            if gap.distance > spacing_limit * (1.0 + 1.0e-12):
+                                raise _NEBBandSpacingViolation(
+                                    gap,
+                                    spacing_limit,
+                                )
+                            forces = np.asarray(neb.get_forces(), dtype=float)
+                            force_norms = np.linalg.norm(
+                                forces.reshape((-1, 3)),
+                                axis=1,
+                            )
+                            current_fmax = (
+                                float(force_norms.max())
+                                if len(force_norms)
+                                else 0.0
+                            )
+                            if np.isfinite(current_fmax) and current_fmax < best_fmax:
+                                best_fmax = current_fmax
+                                best_positions = [
+                                    np.asarray(image.positions, dtype=float).copy()
+                                    for image in images
+                                ]
+
+                        stage_optimizer.attach(
+                            retain_lowest_force_valid_band,
+                            interval=1,
+                        )
+
+                    try:
+                        stage_optimizer.run(
+                            fmax=float(target_fmax),
+                            steps=remaining_steps,
+                        )
+                    except _NEBBandSpacingViolation as exc:
+                        steps_used = int(stage_optimizer.nsteps)
+                        optimizer_steps += steps_used
+                        remaining_steps -= steps_used
+                        if best_positions is None:
+                            raise not_converged_error(
+                                f"{stage} has no geometrically valid band to "
+                                f"restore: {exc}"
+                            ) from exc
+                        for image, positions in zip(images, best_positions):
+                            image.set_positions(
+                                positions,
+                                apply_constraint=False,
+                            )
+                        if remaining_steps <= 0:
+                            raise not_converged_error(
+                                f"{stage} exceeded its adjacent-image spacing "
+                                f"limit and exhausted {max_steps} steps; the "
+                                "lowest-force valid band was restored."
+                            ) from exc
+
+                        reduced_controls: dict[str, float] = {}
+                        for control in ("dt", "dtmax"):
+                            if control in initial_controls:
+                                reduced_controls[control] = (
+                                    0.5 * initial_controls[control]
+                                )
+                        if not reduced_controls and "maxstep" in initial_controls:
+                            reduced_controls["maxstep"] = (
+                                0.5 * initial_controls["maxstep"]
+                            )
+                        stage_constructor_kwargs.update(reduced_controls)
+                        controls = ", ".join(
+                            f"{name}={value:g}"
+                            for name, value in reduced_controls.items()
+                        )
+                        _log.warning(
+                            "%s exceeded the adjacent-image limit: %s. "
+                            "Restored the lowest-force valid band "
+                            "(fmax=%.6f eV/Å) and restarting %s with %s; "
+                            "%d steps remain.",
+                            stage,
+                            exc,
+                            best_fmax,
+                            optimizer_name.upper(),
+                            controls,
+                            remaining_steps,
+                        )
+                        continue
+
+                    steps_used = int(stage_optimizer.nsteps)
+                    optimizer_steps += steps_used
+                    remaining_steps -= steps_used
+                    if not stage_optimizer.converged():
+                        raise not_converged_error(
+                            f"{stage} did not converge: fmax={target_fmax} "
+                            f"eV/Å not reached in {max_steps} steps."
+                        )
+                    return
 
             if not (climb and start_climbing):
                 _optimise_stage(

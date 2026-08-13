@@ -291,6 +291,12 @@ Each new diffusion lateral class can trigger two endpoint relaxations, an
 ordinary NEB relaxation, and then a climbing-image NEB refinement of the same
 band. These are often among the most expensive parts of a run.
 
+When `image_spacing` (or bond `neb_image_spacing`) is set, it also guards the
+optimized geometry: no unfrozen atom may move more than twice that distance
+between adjacent images. A violating step restores the lowest-force valid band
+and starts a fresh optimizer inside the existing step budget. FIRE restarts
+with halved `dt` and `dtmax`, preventing a stretched band from being retained.
+
 With lateral interactions enabled, AutoKMC automatically uses the optimized
 no-neighbour path as the initial band for a diffusion class containing a
 neighbouring adsorbate. If that bare path has not been calculated yet, the bare

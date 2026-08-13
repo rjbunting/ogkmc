@@ -1299,6 +1299,11 @@ def check_diffusion_stability(
         "persist_neb_path": bool(persist_neb_path),
         "capture_neb_path": bool(capture_neb_path),
         "neb_seed_policy": "auto_bare_transfer_v1",
+        "neb_geometry_guard": (
+            None
+            if image_spacing is None
+            else "max_gap_2x_restore_lowest_fmax_halve_controls_v1"
+        ),
         "free_energy_enabled": bool(
             free_energy_options is not None
             and getattr(free_energy_options, "enabled", False)
@@ -1676,6 +1681,7 @@ def check_diffusion_stability(
         climb_optimizer_kwargs=neb_climb_optimizer_kwargs,
         neb_method=neb_method,
         band_eval=neb_band_eval,
+        image_spacing=image_selection.target_spacing,
         verbose=verbose,
         not_converged_error=NEBNotConvergedError,
         persist_path=persist_neb_path,

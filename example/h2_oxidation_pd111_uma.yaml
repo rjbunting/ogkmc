@@ -120,7 +120,8 @@ diffusion:
   fmax: 0.05
   max_steps: 1000
   # Dynamically space images by maximum corresponding-atom displacement.
-  # n_images is the fixed fallback when image_spacing is null.
+  # During optimization, a gap above 0.50 Å restores the lowest-force valid
+  # band and halves FIRE dt/dtmax. n_images is the fixed fallback when null.
   n_images: 8
   image_spacing: 0.25
   min_images: 6
@@ -157,7 +158,8 @@ bond:
   neb_fmax: 0.05
   neb_max_steps: 1000
   # Dynamically choose the band length from the relaxed endpoint distance.
-  # neb_n_images is the fixed fallback when neb_image_spacing is null.
+  # During optimization, a gap above 0.50 Å restores the lowest-force valid
+  # band and halves FIRE dt/dtmax. neb_n_images is the fallback when null.
   neb_n_images: 8
   neb_image_spacing: 0.25
   neb_min_images: 6

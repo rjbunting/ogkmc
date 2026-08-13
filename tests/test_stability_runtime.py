@@ -167,6 +167,149 @@ def test_dynamic_neb_image_count_honours_bounds_and_fixed_mode():
     assert fixed.limited_by == "fixed"
 
 
+def test_neb_band_gap_is_mic_aware_and_ignores_frozen_atoms():
+    left = Atoms(
+        "H2",
+        positions=[[9.8, 0.0, 0.0], [0.0, 0.0, 0.0]],
+        cell=[10.0, 10.0, 10.0],
+        pbc=True,
+    )
+    right = left.copy()
+    right.positions[0, 0] = 0.2  # 0.4 Å through the periodic boundary.
+    right.positions[1, 0] = 4.0  # Larger, but this atom is frozen.
+
+    gap = neb_module._maximum_adjacent_image_displacement(
+        [left, right],
+        frozen_indices=[1],
+    )
+
+    assert gap.distance == pytest.approx(0.4)
+    assert gap.left_image == 0
+    assert gap.atom_index == 0
+
+
+def test_shared_neb_restores_best_valid_band_and_halves_fire_timestep(
+    monkeypatch,
+    caplog,
+):
+    energies = [0.0, 1.0, 0.0]
+    images = [
+        Atoms("H", positions=[[position, 0.0, 0.0]])
+        for position in (0.0, 0.10, 0.20)
+    ]
+
+    class ControlledNEB:
+        def __init__(self):
+            self.climb = False
+            self.force = 0.4
+
+        def get_forces(self):
+            return np.asarray([[self.force, 0.0, 0.0]])
+
+    neb = ControlledNEB()
+    attempts = []
+
+    class DivergingFire:
+        def __init__(
+            self,
+            stage_neb,
+            *,
+            logfile,
+            dt,
+            dtmax,
+            maxstep,
+            downhill_check,
+        ):
+            del logfile, downhill_check
+            self.neb = stage_neb
+            self.dt = float(dt)
+            self.dtmax = float(dtmax)
+            self.maxstep = float(maxstep)
+            self.fdec = 0.5
+            self.nsteps = 0
+            self.observers = []
+            self.attempt = len(attempts)
+            attempts.append(
+                {
+                    "dt": self.dt,
+                    "dtmax": self.dtmax,
+                    "start": float(images[1].positions[0, 0]),
+                }
+            )
+
+        def attach(self, function, interval=1):
+            assert interval == 1
+            self.observers.append(function)
+
+        def _observe(self):
+            for observer in self.observers:
+                observer()
+
+        def run(self, *, fmax, steps):
+            del fmax
+            if self.attempt == 0:
+                # The lowest valid force is at x=0.15. A later, worse valid
+                # band must not replace it before the band finally diverges.
+                states = [
+                    (0.10, 0.4),
+                    (0.15, 0.2),
+                    (0.12, 0.3),
+                    (0.90, 0.1),
+                ]
+                for index, (position, force) in enumerate(states):
+                    images[1].positions[0, 0] = position
+                    self.neb.force = force
+                    self.nsteps = index
+                    assert self.nsteps <= steps
+                    self._observe()
+            else:
+                assert images[1].positions[0, 0] == pytest.approx(0.15)
+                self.neb.force = 0.1
+                self._observe()
+                self.nsteps = 1
+                for image, energy in zip(images, energies):
+                    image.calc = SinglePointCalculator(image, energy=energy)
+
+        def converged(self) -> bool:
+            return self.attempt == 1
+
+    monkeypatch.setattr(neb_module, "acquire_calculator", _calculator_context)
+    monkeypatch.setattr(neb_module, "FIRE", DivergingFire)
+
+    result = neb_module.run_neb(
+        images[0],
+        images[-1],
+        calculator=object(),
+        purpose="geometry recovery NEB",
+        n_images=1,
+        interpolation="linear",
+        spring_k=1.0,
+        climb=False,
+        frozen_indices=None,
+        fmax=0.05,
+        max_steps=20,
+        optimizer="fire",
+        optimizer_kwargs={
+            "dt": 0.04,
+            "dtmax": 0.20,
+            "maxstep": 0.10,
+            "downhill_check": False,
+        },
+        image_spacing=0.25,
+        verbose=False,
+        not_converged_error=RuntimeError,
+        band_factory=lambda *_args, **_kwargs: (neb, images),
+    )
+
+    assert attempts == [
+        {"dt": 0.04, "dtmax": 0.20, "start": 0.10},
+        {"dt": 0.02, "dtmax": 0.10, "start": 0.15},
+    ]
+    assert result.optimizer_steps == 4
+    assert "Restored the lowest-force valid band" in caplog.text
+    assert "dt=0.02, dtmax=0.1" in caplog.text
+
+
 def test_shared_neb_uses_selected_optimizer(monkeypatch):
     images = [_image(0.0), _image(1.0), _image(0.0)]
     neb = SimpleNamespace(climb=False)
