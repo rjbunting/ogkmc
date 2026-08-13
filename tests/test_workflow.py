@@ -116,6 +116,7 @@ def test_channel_runtime_propagates_optimizer_choices():
             },
             neb_method="aseneb",
             neb_band_eval="batched",
+            neb_geometry_guard_multiplier=4.0,
         ),
         diffusion=DiffusionCfg(enabled=True),
         bond=BondCfg(enabled=True),
@@ -143,11 +144,12 @@ def test_channel_runtime_propagates_optimizer_choices():
     }
     assert runtime.diffusion.neb_band_eval == "batched"
     assert runtime.diffusion.neb_method == "aseneb"
+    assert runtime.diffusion.neb_geometry_guard_multiplier == pytest.approx(4.0)
     assert runtime.diffusion.image_spacing == pytest.approx(0.25)
     assert runtime.diffusion.min_images == 6
     assert runtime.diffusion.max_images == 8
     assert runtime.bond is not None
-    assert runtime.bond.gas_precursor_distance == pytest.approx(3.0)
+    assert runtime.bond.gas_precursor_distance == pytest.approx(2.5)
     assert runtime.bond.image_spacing == pytest.approx(0.25)
     assert runtime.bond.min_images == 6
     assert runtime.bond.max_images == 8
@@ -168,6 +170,7 @@ def test_channel_runtime_propagates_optimizer_choices():
     )
     assert runtime.bond.neb_band_eval == "batched"
     assert runtime.bond.neb_method == "aseneb"
+    assert runtime.bond.neb_geometry_guard_multiplier == pytest.approx(4.0)
     assert runtime.bond_growth is not None
     assert runtime.bond_growth.optimizer == "fire"
     assert runtime.bond_growth.optimizer_kwargs == {

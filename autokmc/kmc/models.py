@@ -34,6 +34,7 @@ from autokmc.core.constants import (
     NEB_FMAX,
     NEB_IMAGE_SPACING,
     NEB_INTERPOLATION,
+    NEB_MAX_ADJACENT_IMAGE_SPACING_MULTIPLIER,
     NEB_MAX_IMAGES,
     NEB_METHOD,
     NEB_MAX_STEPS,
@@ -122,6 +123,9 @@ class DiffusionChannelOptions:
     neb_climb_optimizer_kwargs: dict[str, Any] | None = None
     neb_method: str = NEB_METHOD
     neb_band_eval: str = NEB_BAND_EVAL
+    neb_geometry_guard_multiplier: float = (
+        NEB_MAX_ADJACENT_IMAGE_SPACING_MULTIPLIER
+    )
 
     @classmethod
     def from_mapping(
@@ -161,6 +165,9 @@ class BondChannelOptions:
     neb_climb_optimizer_kwargs: dict[str, Any] | None = None
     neb_method: str = NEB_METHOD
     neb_band_eval: str = NEB_BAND_EVAL
+    neb_geometry_guard_multiplier: float = (
+        NEB_MAX_ADJACENT_IMAGE_SPACING_MULTIPLIER
+    )
 
     @classmethod
     def from_mapping(

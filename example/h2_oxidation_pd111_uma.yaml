@@ -90,6 +90,7 @@ optimization:
     maxstep: 0.01
   neb_method: improvedtangent
   neb_band_eval: batched
+  neb_geometry_guard_multiplier: 3.0
 
 adsorbate_sites:
   prune_stable_only: true
@@ -120,7 +121,7 @@ diffusion:
   fmax: 0.05
   max_steps: 1000
   # Dynamically space images by maximum corresponding-atom displacement.
-  # During optimization, a gap above 0.50 Å restores the lowest-force valid
+  # During optimization, a gap above 0.75 Å restores the lowest-force valid
   # band and halves FIRE dt/dtmax. n_images is the fixed fallback when null.
   n_images: 8
   image_spacing: 0.25
@@ -144,11 +145,11 @@ bond:
   auto_build_leaf_species: true
 
   # For gas-fed dissociation (for example H2(g) -> 2H*), first place the
-  # intact molecule 3.0 Å from the surface and relax only the molecule while
+  # intact molecule 2.5 Å from the surface and relax only the molecule while
   # the slab is fixed. The resulting adsorbed precursor is the NEB endpoint;
   # empty slab + gas remains the KMC thermodynamic reference.
   gas_precursor_relax: true
-  gas_precursor_distance: 3.0
+  gas_precursor_distance: 2.5
 
   pair_n_shells: 1
   prune_by_triple: true
@@ -159,7 +160,7 @@ bond:
   neb_fmax: 0.05
   neb_max_steps: 1000
   # Dynamically choose the band length from the relaxed endpoint distance.
-  # During optimization, a gap above 0.50 Å restores the lowest-force valid
+  # During optimization, a gap above 0.75 Å restores the lowest-force valid
   # band and halves FIRE dt/dtmax. neb_n_images is the fallback when null.
   neb_n_images: 8
   neb_image_spacing: 0.25

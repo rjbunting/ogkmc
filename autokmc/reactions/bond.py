@@ -88,6 +88,7 @@ from autokmc.core.constants import (
     NEB_BAND_EVAL,
     NEB_FMAX,
     NEB_IMAGE_SPACING,
+    NEB_MAX_ADJACENT_IMAGE_SPACING_MULTIPLIER,
     NEB_MAX_IMAGES,
     NEB_MAX_STEPS,
     NEB_MIN_IMAGES,
@@ -454,6 +455,9 @@ def get_applicable_bond_reaction_for_member(
     neb_climb_optimizer_kwargs: dict[str, Any] | None = None,
     neb_method: str = NEB_METHOD,
     neb_band_eval: str = NEB_BAND_EVAL,
+    neb_geometry_guard_multiplier: float = (
+        NEB_MAX_ADJACENT_IMAGE_SPACING_MULTIPLIER
+    ),
     lateral_interactions: bool = True,
     lateral_shells: int = LATERAL_SHELLS_DEFAULT,
     verbose: bool = False,
@@ -497,6 +501,7 @@ def get_applicable_bond_reaction_for_member(
             "neb_climb_optimizer_kwargs": neb_climb_optimizer_kwargs,
             "neb_method": neb_method,
             "neb_band_eval": neb_band_eval,
+            "neb_geometry_guard_multiplier": neb_geometry_guard_multiplier,
             "verbose": verbose,
             "calculation_cache_root": calculation_cache_root,
             "calculation_cache_lookup_enabled": (
@@ -637,8 +642,27 @@ def get_applicable_bond_reaction_for_member(
                 except BondNEBNotConvergedError as exc:
                     # Preserve stable=None: a numerical search failure is
                     # retryable, not evidence that the event is impossible.
-                    lc.last_failure_reason = f"{type(exc).__name__}: {exc}"
-                    raise
+                    # Omit only this candidate from the current rate index;
+                    # aborting the full initial sweep would prevent otherwise
+                    # valid KMC reactions from executing at all.
+                    reason = f"{type(exc).__name__}: {exc}"
+                    lc.last_failure_reason = reason
+                    _log.warning(
+                        "bond_iso=%d m=%d lat=%d: %s — excluding this "
+                        "reaction from the current KMC sweep; the lateral "
+                        "class remains retryable",
+                        brs.iso_class,
+                        index,
+                        lc.lateral_class,
+                        reason,
+                    )
+                    if verbose:
+                        print(
+                            f"  ⚠  bond_iso={brs.iso_class} m={index} "
+                            f"lat={lc.lateral_class}: {reason}\n"
+                            "     → omitted from this KMC sweep "
+                            "(will be retried when recomputed)"
+                        )
                 except BondStabilityError as exc:
                     reason = f"{type(exc).__name__}: {exc}"
                     _log.warning(
@@ -723,6 +747,9 @@ def get_applicable_bond_reactions(
     neb_climb_optimizer_kwargs: dict[str, Any] | None = None,
     neb_method: str = NEB_METHOD,
     neb_band_eval: str = NEB_BAND_EVAL,
+    neb_geometry_guard_multiplier: float = (
+        NEB_MAX_ADJACENT_IMAGE_SPACING_MULTIPLIER
+    ),
     lateral_interactions: bool = True,
     lateral_shells: int = LATERAL_SHELLS_DEFAULT,
     verbose: bool = False,
@@ -749,46 +776,60 @@ def get_applicable_bond_reactions(
     brs.applicable_reactions = reactions
 
     for m_idx in range(len(brs.member_node_ids)):
-        reaction = get_applicable_bond_reaction_for_member(
-            G,
-            brs,
-            m_idx,
-            calculator,
-            temperature=temperature,
-            transmission_coefficient=transmission_coefficient,
-            frozen_indices=frozen_indices,
-            fmax=fmax,
-            max_steps=max_steps,
-            n_images=n_images,
-            image_spacing=image_spacing,
-            min_images=min_images,
-            max_images=max_images,
-            climb=climb,
-            spring_k=spring_k,
-            interpolation=interpolation,
-            atom_matching=atom_matching,
-            matching_trials=matching_trials,
-            gas_precursor_relax=gas_precursor_relax,
-            gas_precursor_distance=gas_precursor_distance,
-            nl_mult=nl_mult,
-            persist_neb_path=persist_neb_path,
-            optimizer=optimizer,
-            optimizer_kwargs=optimizer_kwargs,
-            neb_optimizer=neb_optimizer,
-            neb_optimizer_kwargs=neb_optimizer_kwargs,
-            neb_climb_optimizer=neb_climb_optimizer,
-            neb_climb_optimizer_kwargs=neb_climb_optimizer_kwargs,
-            neb_method=neb_method,
-            neb_band_eval=neb_band_eval,
-            lateral_interactions=lateral_interactions,
-            lateral_shells=lateral_shells,
-            verbose=verbose,
-            calculation_cache_root=calculation_cache_root,
-            calculation_cache_lookup_enabled=calculation_cache_lookup_enabled,
-            free_energy_options=free_energy_options,
-            vib_cache_root=vib_cache_root,
-            update_site_cache=False,
-        )
+        try:
+            reaction = get_applicable_bond_reaction_for_member(
+                G,
+                brs,
+                m_idx,
+                calculator,
+                temperature=temperature,
+                transmission_coefficient=transmission_coefficient,
+                frozen_indices=frozen_indices,
+                fmax=fmax,
+                max_steps=max_steps,
+                n_images=n_images,
+                image_spacing=image_spacing,
+                min_images=min_images,
+                max_images=max_images,
+                climb=climb,
+                spring_k=spring_k,
+                interpolation=interpolation,
+                atom_matching=atom_matching,
+                matching_trials=matching_trials,
+                gas_precursor_relax=gas_precursor_relax,
+                gas_precursor_distance=gas_precursor_distance,
+                nl_mult=nl_mult,
+                persist_neb_path=persist_neb_path,
+                optimizer=optimizer,
+                optimizer_kwargs=optimizer_kwargs,
+                neb_optimizer=neb_optimizer,
+                neb_optimizer_kwargs=neb_optimizer_kwargs,
+                neb_climb_optimizer=neb_climb_optimizer,
+                neb_climb_optimizer_kwargs=neb_climb_optimizer_kwargs,
+                neb_method=neb_method,
+                neb_band_eval=neb_band_eval,
+                neb_geometry_guard_multiplier=neb_geometry_guard_multiplier,
+                lateral_interactions=lateral_interactions,
+                lateral_shells=lateral_shells,
+                verbose=verbose,
+                calculation_cache_root=calculation_cache_root,
+                calculation_cache_lookup_enabled=calculation_cache_lookup_enabled,
+                free_energy_options=free_energy_options,
+                vib_cache_root=vib_cache_root,
+                update_site_cache=False,
+            )
+        except BondNEBNotConvergedError as exc:
+            # Defensive boundary: the member entry point normally converts
+            # this into ``None`` after recording diagnostics.  Keep a future
+            # or alternate implementation from aborting the remaining sweep.
+            _log.warning(
+                "bond_iso=%d m=%d: numerical NEB failure escaped member "
+                "evaluation (%s); continuing the KMC sweep",
+                brs.iso_class,
+                m_idx,
+                exc,
+            )
+            reaction = None
         if reaction is not None:
             reactions.append(reaction)
 
@@ -826,6 +867,9 @@ def compute_all_bond_reactions(
     neb_climb_optimizer_kwargs: dict[str, Any] | None = None,
     neb_method: str = NEB_METHOD,
     neb_band_eval: str = NEB_BAND_EVAL,
+    neb_geometry_guard_multiplier: float = (
+        NEB_MAX_ADJACENT_IMAGE_SPACING_MULTIPLIER
+    ),
     lateral_interactions: bool = True,
     lateral_shells: int = LATERAL_SHELLS_DEFAULT,
     verbose: bool = False,
@@ -873,6 +917,9 @@ def compute_all_bond_reactions(
                     neb_climb_optimizer_kwargs = neb_climb_optimizer_kwargs,
                     neb_method                = neb_method,
                     neb_band_eval             = neb_band_eval,
+                    neb_geometry_guard_multiplier = (
+                        neb_geometry_guard_multiplier
+                    ),
                     lateral_interactions     = lateral_interactions,
                     lateral_shells           = lateral_shells,
                     verbose                  = verbose,
@@ -921,6 +968,7 @@ def compute_all_bond_reactions(
             neb_climb_optimizer_kwargs = neb_climb_optimizer_kwargs,
             neb_method                = neb_method,
             neb_band_eval             = neb_band_eval,
+            neb_geometry_guard_multiplier = neb_geometry_guard_multiplier,
             lateral_interactions     = lateral_interactions,
             lateral_shells           = lateral_shells,
             verbose                  = verbose,

@@ -244,9 +244,15 @@ def test_neb_band_gap_is_mic_aware_and_ignores_frozen_atoms():
     assert gap.atom_index == 0
 
 
+@pytest.mark.parametrize(
+    ("guard_multiplier", "expected_optimizer_steps"),
+    [(2.0, 4), (3.0, 5)],
+)
 def test_shared_neb_restores_best_valid_band_and_halves_fire_timestep(
     monkeypatch,
     caplog,
+    guard_multiplier,
+    expected_optimizer_steps,
 ):
     energies = [0.0, 1.0, 0.0]
     images = [
@@ -310,6 +316,9 @@ def test_shared_neb_restores_best_valid_band_and_halves_fire_timestep(
                     (0.10, 0.4),
                     (0.15, 0.2),
                     (0.12, 0.3),
+                    # Valid at the 3x 0.25 Å limit; the former 2x guard
+                    # would have restarted before reaching the next state.
+                    (0.70, 0.25),
                     (0.90, 0.1),
                 ]
                 for index, (position, force) in enumerate(states):
@@ -352,6 +361,7 @@ def test_shared_neb_restores_best_valid_band_and_halves_fire_timestep(
             "downhill_check": False,
         },
         image_spacing=0.25,
+        geometry_guard_multiplier=guard_multiplier,
         verbose=False,
         not_converged_error=RuntimeError,
         band_factory=lambda *_args, **_kwargs: (neb, images),
@@ -361,7 +371,7 @@ def test_shared_neb_restores_best_valid_band_and_halves_fire_timestep(
         {"dt": 0.04, "dtmax": 0.20, "start": 0.10},
         {"dt": 0.02, "dtmax": 0.10, "start": 0.15},
     ]
-    assert result.optimizer_steps == 4
+    assert result.optimizer_steps == expected_optimizer_steps
     assert "Restored the lowest-force valid band" in caplog.text
     assert "dt=0.02, dtmax=0.1" in caplog.text
 

@@ -148,8 +148,9 @@ Scientific and persistence failures are explicit:
 
 - failed gas, structure, or endpoint stability invalidates only the affected
   reaction class when that invalidity is an expected chemical result; numerical
-  NEB non-convergence preserves the band and propagates without permanently
-  excluding the undecided event,
+  NEB non-convergence preserves the band, omits that candidate from the current
+  rate-index sweep, and leaves it undecided for a later retry without stopping
+  other valid KMC events,
 - on-the-fly species/site/network expansion retries transient runtime failures
   three times, records each stage under the checkpointed
   `bond_registry.expansion_failures` diagnostics, and raises after exhaustion;

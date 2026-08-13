@@ -347,6 +347,11 @@ class _Validator:
                 "optimization.neb_band_eval must be one of "
                 f"{choices}; got {cfg.neb_band_eval!r}"
             )
+        self.number(
+            cfg.neb_geometry_guard_multiplier,
+            "optimization.neb_geometry_guard_multiplier",
+            strictly_positive=True,
+        )
 
     def structure(self, cfg: Any) -> None:
         if cfg.kind not in {"surface", "nanoparticle", "file"}:

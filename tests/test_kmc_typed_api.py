@@ -9,6 +9,7 @@ import networkx as nx
 import numpy as np
 import pytest
 
+import autokmc.kmc.initialization as initialization_module
 import autokmc.kmc.session as session_module
 from autokmc.kmc.engine import run_kmc
 from autokmc.kmc.index import _ReactionIndex
@@ -197,6 +198,94 @@ def test_initialisation_failure_flushes_reactions_and_retryable_bond_diagnostics
         ("invalid_bond", bond_site, retryable_lateral, 0),
         ("sync",),
     ]
+
+
+def test_retryable_transition_omission_does_not_block_kmc_step(monkeypatch):
+    adsorption_site = _site(iso_class=0, member_nodes=[[10]])
+    adsorption_reaction = SimpleNamespace(
+        kind="adsorption",
+        site=adsorption_site,
+        member_index=0,
+        lateral_class=SimpleNamespace(lateral_class=0),
+        delta_e=-0.1,
+        barrier=0.2,
+        rate=1.0,
+    )
+    retryable_lateral = SimpleNamespace(
+        lateral_class=1,
+        members=[0],
+        stable=None,
+        last_failure_reason=(
+            "BondNEBNotConvergedError: forced numerical failure"
+        ),
+    )
+    bond_site = SimpleNamespace(
+        iso_class=1,
+        template=SimpleNamespace(
+            smiles_a="[H]",
+            smiles_b="[H]",
+            smiles_c="[H][H]",
+            bond_type="single",
+            source="test",
+            is_symmetric=True,
+        ),
+        member_node_ids=[([20], [21], [22])],
+        lateral_classes=[retryable_lateral],
+        applicable_reactions=[],
+        site_id="",
+    )
+
+    def compute_adsorption(*_args, **_kwargs):
+        adsorption_site.applicable_reactions = [adsorption_reaction]
+        return [adsorption_reaction]
+
+    def omit_retryable_bond(_graph, sites, *_args, **_kwargs):
+        assert sites == [bond_site]
+        bond_site.applicable_reactions = []
+        return []
+
+    monkeypatch.setattr(
+        initialization_module,
+        "compute_all_bond_reactions",
+        omit_retryable_bond,
+    )
+    monkeypatch.setattr(
+        session_module,
+        "execute_reaction",
+        lambda *_args, **_kwargs: set(),
+    )
+    monkeypatch.setattr(
+        KMCOutputManager,
+        "capture_transition",
+        lambda *_args, **_kwargs: None,
+    )
+
+    request = KMCRunRequest(
+        system=KMCSystem(
+            nx.Graph(),
+            [adsorption_site],
+            None,
+            {"[O]": 0.0},
+        ),
+        settings=KMCSettings(
+            temperature=500.0,
+            n_steps=1,
+            verbose=False,
+        ),
+        channels=KMCChannels(bond_sites=[bond_site]),
+        rng=13,
+    )
+    functions = KMCFunctions(
+        compute_adsorption=compute_adsorption,
+        recompute_affected=lambda *_args, **_kwargs: ([], []),
+        expand_bond_network=lambda *_args, **_kwargs: [],
+    )
+
+    result = run_kmc(request, functions=functions)
+
+    assert result.steps_executed == 1
+    assert result.termination_status == "complete"
+    assert result.termination_reason == "requested_steps_completed"
 
 
 def test_event_is_not_published_when_recomputation_fails(monkeypatch):

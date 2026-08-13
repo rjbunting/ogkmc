@@ -50,6 +50,7 @@ from autokmc.core.constants import (
     NEB_CLIMB,
     NEB_IMAGE_SPACING,
     NEB_INTERPOLATION,
+    NEB_MAX_ADJACENT_IMAGE_SPACING_MULTIPLIER,
     NEB_MAX_IMAGES,
     NEB_METHOD,
     NEB_MAX_STEPS,
@@ -144,6 +145,11 @@ class OptimizationCfg:
     #: or ``"batched"`` (whole band in one stacked model forward per
     #: optimizer step, when the calculator supports it).
     neb_band_eval: str = NEB_BAND_EVAL
+    #: Maximum adjacent-image displacement as a multiple of the configured
+    #: diffusion/bond image spacing before the band is restored and restarted.
+    neb_geometry_guard_multiplier: float = (
+        NEB_MAX_ADJACENT_IMAGE_SPACING_MULTIPLIER
+    )
 
 
 @dataclass

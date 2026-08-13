@@ -75,6 +75,7 @@ from autokmc.core.constants import (
     NEB_BAND_EVAL,
     NEB_FMAX,
     NEB_IMAGE_SPACING,
+    NEB_MAX_ADJACENT_IMAGE_SPACING_MULTIPLIER,
     NEB_MAX_IMAGES,
     NEB_MAX_STEPS,
     NEB_MIN_IMAGES,
@@ -406,6 +407,9 @@ def get_applicable_diffusion_for_member(
     neb_climb_optimizer_kwargs: dict[str, Any] | None = None,
     neb_method: str = NEB_METHOD,
     neb_band_eval: str = NEB_BAND_EVAL,
+    neb_geometry_guard_multiplier: float = (
+        NEB_MAX_ADJACENT_IMAGE_SPACING_MULTIPLIER
+    ),
     verbose: bool = False,
     lateral_interactions: bool = True,
     lateral_shells: int = LATERAL_SHELLS_DEFAULT,
@@ -445,6 +449,7 @@ def get_applicable_diffusion_for_member(
             "neb_climb_optimizer_kwargs": neb_climb_optimizer_kwargs,
             "neb_method": neb_method,
             "neb_band_eval": neb_band_eval,
+            "neb_geometry_guard_multiplier": neb_geometry_guard_multiplier,
             "verbose": verbose,
             "free_energy_options": free_energy_options,
             "free_energy_temperature_k": float(temperature),
@@ -590,8 +595,27 @@ def get_applicable_diffusion_for_member(
                 except NEBNotConvergedError as exc:
                     # Preserve stable=None: a numerical search failure is
                     # retryable, not evidence that the event is impossible.
-                    lc.last_failure_reason = f"{type(exc).__name__}: {exc}"
-                    raise
+                    # Omit only this candidate from the current rate index;
+                    # aborting the full initial sweep would prevent otherwise
+                    # valid KMC reactions from executing at all.
+                    reason = f"{type(exc).__name__}: {exc}"
+                    lc.last_failure_reason = reason
+                    _log.warning(
+                        "diff_iso=%d m=%d lat=%d: %s — excluding this "
+                        "reaction from the current KMC sweep; the lateral "
+                        "class remains retryable",
+                        ds.iso_class,
+                        index,
+                        lc.lateral_class,
+                        reason,
+                    )
+                    if verbose:
+                        print(
+                            f"  ⚠  diff_iso={ds.iso_class} m={index} "
+                            f"lat={lc.lateral_class}: {reason}\n"
+                            "     → omitted from this KMC sweep "
+                            "(will be retried when recomputed)"
+                        )
                 except DiffusionStabilityError as exc:
                     reason = f"{type(exc).__name__}: {exc}"
                     _log.warning(
@@ -672,6 +696,9 @@ def get_applicable_diffusions(
     neb_climb_optimizer_kwargs: dict[str, Any] | None = None,
     neb_method: str = NEB_METHOD,
     neb_band_eval: str = NEB_BAND_EVAL,
+    neb_geometry_guard_multiplier: float = (
+        NEB_MAX_ADJACENT_IMAGE_SPACING_MULTIPLIER
+    ),
     verbose: bool = False,
     lateral_interactions: bool = True,
     lateral_shells: int = LATERAL_SHELLS_DEFAULT,
@@ -699,42 +726,56 @@ def get_applicable_diffusions(
     ds.applicable_reactions = reactions
 
     for m_idx in range(len(ds.member_node_ids)):
-        reaction = get_applicable_diffusion_for_member(
-            G,
-            ds,
-            m_idx,
-            calculator,
-            temperature=temperature,
-            transmission_coefficient=transmission_coefficient,
-            frozen_indices=frozen_indices,
-            fmax=fmax,
-            max_steps=max_steps,
-            n_images=n_images,
-            image_spacing=image_spacing,
-            min_images=min_images,
-            max_images=max_images,
-            climb=climb,
-            spring_k=spring_k,
-            interpolation=interpolation,
-            nl_mult=nl_mult,
-            persist_neb_path=persist_neb_path,
-            optimizer=optimizer,
-            optimizer_kwargs=optimizer_kwargs,
-            neb_optimizer=neb_optimizer,
-            neb_optimizer_kwargs=neb_optimizer_kwargs,
-            neb_climb_optimizer=neb_climb_optimizer,
-            neb_climb_optimizer_kwargs=neb_climb_optimizer_kwargs,
-            neb_method=neb_method,
-            neb_band_eval=neb_band_eval,
-            verbose=verbose,
-            lateral_interactions=lateral_interactions,
-            lateral_shells=lateral_shells,
-            free_energy_options=free_energy_options,
-            vib_cache_root=vib_cache_root,
-            calculation_cache_root=calculation_cache_root,
-            calculation_cache_lookup_enabled=calculation_cache_lookup_enabled,
-            update_site_cache=False,
-        )
+        try:
+            reaction = get_applicable_diffusion_for_member(
+                G,
+                ds,
+                m_idx,
+                calculator,
+                temperature=temperature,
+                transmission_coefficient=transmission_coefficient,
+                frozen_indices=frozen_indices,
+                fmax=fmax,
+                max_steps=max_steps,
+                n_images=n_images,
+                image_spacing=image_spacing,
+                min_images=min_images,
+                max_images=max_images,
+                climb=climb,
+                spring_k=spring_k,
+                interpolation=interpolation,
+                nl_mult=nl_mult,
+                persist_neb_path=persist_neb_path,
+                optimizer=optimizer,
+                optimizer_kwargs=optimizer_kwargs,
+                neb_optimizer=neb_optimizer,
+                neb_optimizer_kwargs=neb_optimizer_kwargs,
+                neb_climb_optimizer=neb_climb_optimizer,
+                neb_climb_optimizer_kwargs=neb_climb_optimizer_kwargs,
+                neb_method=neb_method,
+                neb_band_eval=neb_band_eval,
+                neb_geometry_guard_multiplier=neb_geometry_guard_multiplier,
+                verbose=verbose,
+                lateral_interactions=lateral_interactions,
+                lateral_shells=lateral_shells,
+                free_energy_options=free_energy_options,
+                vib_cache_root=vib_cache_root,
+                calculation_cache_root=calculation_cache_root,
+                calculation_cache_lookup_enabled=calculation_cache_lookup_enabled,
+                update_site_cache=False,
+            )
+        except NEBNotConvergedError as exc:
+            # Defensive boundary: the member entry point normally converts
+            # this into ``None`` after recording diagnostics.  Keep a future
+            # or alternate implementation from aborting the remaining sweep.
+            _log.warning(
+                "diff_iso=%d m=%d: numerical NEB failure escaped member "
+                "evaluation (%s); continuing the KMC sweep",
+                ds.iso_class,
+                m_idx,
+                exc,
+            )
+            reaction = None
         if reaction is not None:
             reactions.append(reaction)
 
@@ -768,6 +809,9 @@ def compute_all_diffusions(
     neb_climb_optimizer_kwargs: dict[str, Any] | None = None,
     neb_method: str = NEB_METHOD,
     neb_band_eval: str = NEB_BAND_EVAL,
+    neb_geometry_guard_multiplier: float = (
+        NEB_MAX_ADJACENT_IMAGE_SPACING_MULTIPLIER
+    ),
     verbose: bool = False,
     lateral_interactions: bool = True,
     lateral_shells: int = LATERAL_SHELLS_DEFAULT,
@@ -810,6 +854,9 @@ def compute_all_diffusions(
                     neb_climb_optimizer_kwargs = neb_climb_optimizer_kwargs,
                     neb_method                = neb_method,
                     neb_band_eval             = neb_band_eval,
+                    neb_geometry_guard_multiplier = (
+                        neb_geometry_guard_multiplier
+                    ),
                     verbose                  = verbose,
                     lateral_interactions     = lateral_interactions,
                     lateral_shells           = lateral_shells,
@@ -854,6 +901,7 @@ def compute_all_diffusions(
             neb_climb_optimizer_kwargs = neb_climb_optimizer_kwargs,
             neb_method                = neb_method,
             neb_band_eval             = neb_band_eval,
+            neb_geometry_guard_multiplier = neb_geometry_guard_multiplier,
             verbose                  = verbose,
             lateral_interactions     = lateral_interactions,
             lateral_shells           = lateral_shells,

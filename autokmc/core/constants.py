@@ -260,6 +260,11 @@ NEB_N_IMAGES: int = 10
 #: ``NEB_N_IMAGES`` policy.
 NEB_IMAGE_SPACING: float | None = 0.25
 
+#: Maximum allowed adjacent-image displacement during NEB optimisation,
+#: expressed as a multiple of ``NEB_IMAGE_SPACING``. A step crossing this
+#: geometric limit is rolled back to the lowest-force valid band.
+NEB_MAX_ADJACENT_IMAGE_SPACING_MULTIPLIER: float = 3.0
+
 #: Lower and upper bounds on the dynamically selected number of interior
 #: images.  The upper bound protects KMC campaigns from pathological atom
 #: mappings that would otherwise allocate an unbounded band.
@@ -383,7 +388,7 @@ BOND_GAS_PRECURSOR_RELAX: bool = True
 
 #: Initial minimum molecule-to-slab distance (Å) for the fixed-environment
 #: gas-precursor relaxation.
-BOND_GAS_PRECURSOR_DISTANCE: float = 3.0
+BOND_GAS_PRECURSOR_DISTANCE: float = 2.5
 
 #: Folder-name format for bond reaction folders persisted by
 #: :class:`autokmc.io.persistence.ReactionWriter` (when enabled).

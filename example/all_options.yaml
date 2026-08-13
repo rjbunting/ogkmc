@@ -143,6 +143,10 @@ optimization:
   # calculator exposing evaluate_band). Same barriers, fewer GPU calls.
   neb_band_eval: images
 
+  # Roll back an NEB band when an adjacent-image atom displacement exceeds
+  # this multiple of diffusion.image_spacing or bond.neb_image_spacing.
+  neb_geometry_guard_multiplier: 3.0
+
 
 # ---------------------------------------------------------------------------
 # Output files
@@ -511,7 +515,7 @@ diffusion:
 
   # Dynamic density: choose the smallest count whose largest MIC-aware
   # corresponding-atom displacement is about 0.25 angstrom per frame. During
-  # optimization, crossing 0.50 angstrom restores the lowest-force valid band
+  # optimization, crossing 0.75 angstrom restores the lowest-force valid band
   # and restarts with smaller optimizer controls.
   image_spacing: 0.25
   min_images: 6
@@ -569,7 +573,7 @@ bond:
 
   # Initial minimum molecule-to-slab distance in angstrom. The slab and
   # lateral environment are fixed during the precursor relaxation.
-  gas_precursor_distance: 3.0
+  gas_precursor_distance: 2.5
 
   # Build fragment/coupling-product species implied by templates when those
   # species are absent from the feed.
@@ -596,7 +600,7 @@ bond:
   neb_n_images: 10
 
   # Dynamic bond-NEB image density; total frames are interior images + 2.
-  # The optimization guard limits adjacent-image motion to twice this value.
+  # The optimization guard multiplies this by the optimization-level setting.
   neb_image_spacing: 0.25
   neb_min_images: 6
   neb_max_images: 8

@@ -132,6 +132,7 @@ from autokmc.core.constants import (
     NL_MULT_DEFAULT,
     NEB_BAND_EVAL,
     NEB_IMAGE_SPACING,
+    NEB_MAX_ADJACENT_IMAGE_SPACING_MULTIPLIER,
     NEB_MAX_IMAGES,
     NEB_MIN_IMAGES,
     NEB_N_IMAGES,
@@ -2117,6 +2118,9 @@ def check_bond_site_stability(
     neb_climb_optimizer_kwargs: dict[str, Any] | None = None,
     neb_method: str = NEB_METHOD,
     neb_band_eval: str = NEB_BAND_EVAL,
+    neb_geometry_guard_multiplier: float = (
+        NEB_MAX_ADJACENT_IMAGE_SPACING_MULTIPLIER
+    ),
     verbose: bool = False,
     calculation_cache_root: str | None = None,
     calculation_cache_lookup_enabled: bool = False,
@@ -2261,6 +2265,9 @@ def check_bond_site_stability(
             else neb_climb_optimizer_kwargs
         ),
         "neb_method": str(neb_method).strip().lower(),
+        "neb_geometry_guard_multiplier": float(
+            neb_geometry_guard_multiplier
+        ),
         "n_images": int(n_images),
         "image_spacing": (
             None if image_spacing is None else float(image_spacing)
@@ -2282,7 +2289,7 @@ def check_bond_site_stability(
         "neb_geometry_guard": (
             None
             if image_spacing is None
-            else "max_gap_2x_restore_lowest_fmax_halve_controls_v1"
+            else "max_gap_configurable_restore_lowest_fmax_halve_controls_v3"
         ),
         "neb_climb_policy": {
             "name": "skip_if_either_regular_barrier_below_ea_min_v1",
@@ -2874,6 +2881,7 @@ def check_bond_site_stability(
         neb_method=neb_method,
         band_eval=neb_band_eval,
         image_spacing=image_selection.target_spacing,
+        geometry_guard_multiplier=neb_geometry_guard_multiplier,
         barrier_endpoint_energies=(float(E_ab), float(E_c)),
         verbose=verbose,
         not_converged_error=BondNEBNotConvergedError,

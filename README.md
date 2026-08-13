@@ -296,10 +296,12 @@ energy consistency is preserved. These calculations are often among the most
 expensive parts of a run.
 
 When `image_spacing` (or bond `neb_image_spacing`) is set, it also guards the
-optimized geometry: no unfrozen atom may move more than twice that distance
-between adjacent images. A violating step restores the lowest-force valid band
+optimized geometry: by default, no unfrozen atom may move more than three times
+that distance between adjacent images. A violating step restores the lowest-force valid band
 and starts a fresh optimizer inside the existing step budget. FIRE restarts
 with halved `dt` and `dtmax`, preventing a stretched band from being retained.
+Set `optimization.neb_geometry_guard_multiplier` to change the multiplier
+without changing the image density.
 
 With lateral interactions enabled, AutoKMC automatically uses the optimized
 no-neighbour path as the initial band for a diffusion class containing a
@@ -706,10 +708,10 @@ Useful package areas:
   five rollback halvings for ordinary NEB; CI-FIRE disables it immediately.
   See [FIRE downhill recovery for NEB](docs/configuration.md#fire-downhill-recovery-for-neb).
 - A NEB that exhausts its optimizer steps is not evidence that the reaction is
-  chemically impossible. AutoKMC preserves the failed band and propagates the
-  non-convergence instead of permanently excluding that event from OGKMC.
-  Inspect or retry the saved path; do not replace a missing barrier with a
-  fabricated value.
+  chemically impossible. AutoKMC preserves the failed band, keeps its lateral
+  class retryable, and omits only that candidate from the current rate-index
+  sweep so other valid KMC events can still run. Inspect or retry the saved
+  path; do not replace a missing barrier with a fabricated value.
 - If no reactions are available, inspect adsorption-site pruning and gas-phase
   reactant energies.
 - If post-processed product rates are zero, inspect `events.jsonl` for a

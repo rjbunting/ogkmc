@@ -29,6 +29,7 @@ from autokmc.core.constants import (
     EA_MIN,
     NEB_BAND_EVAL as DEFAULT_NEB_BAND_EVAL,
     NEB_BAND_EVALS,
+    NEB_MAX_ADJACENT_IMAGE_SPACING_MULTIPLIER,
     NEB_METHOD as DEFAULT_NEB_METHOD,
     NEB_METHODS,
 )
@@ -755,6 +756,9 @@ def run_neb(
     logfile_factory=None,
     band_eval: str = DEFAULT_NEB_BAND_EVAL,
     image_spacing: float | None = None,
+    geometry_guard_multiplier: float = (
+        NEB_MAX_ADJACENT_IMAGE_SPACING_MULTIPLIER
+    ),
     barrier_endpoint_energies: tuple[float, float] | None = None,
 ) -> NEBRunResult:
     """Optimise one NEB band and return a calculator-detached result.
@@ -781,13 +785,13 @@ def run_neb(
     independent NEBs, never for other images in this band.
 
     When ``image_spacing`` is configured, no unfrozen atom may move more than
-    twice that distance between adjacent images (using the minimum-image
-    convention). The lowest-force geometrically valid band in the current
-    stage is checkpointed. If a later step crosses the limit, that checkpoint
-    is restored and a fresh optimizer is created. FIRE restarts with both
-    ``dt`` and ``dtmax`` halved; other supported optimizers reduce their
-    available displacement control. Restarts share the original stage step
-    budget.
+    ``geometry_guard_multiplier`` times that distance between adjacent images
+    (using the minimum-image convention). The default multiplier is three.
+    The lowest-force geometrically valid band in the current stage is
+    checkpointed. If a later step crosses the limit, that checkpoint is
+    restored and a fresh optimizer is created. FIRE restarts with both ``dt``
+    and ``dtmax`` halved; other supported optimizers reduce their available
+    displacement control. Restarts share the original stage step budget.
 
     When climbing was requested after an ordinary stage, the highest ordinary
     image is also checked against both endpoint energies. If either raw barrier
@@ -805,7 +809,17 @@ def run_neb(
         resolved_spacing = float(image_spacing)
         if not np.isfinite(resolved_spacing) or resolved_spacing <= 0.0:
             raise ValueError("image_spacing must be finite and positive")
-        spacing_limit = 2.0 * resolved_spacing
+        resolved_guard_multiplier = float(geometry_guard_multiplier)
+        if (
+            not np.isfinite(resolved_guard_multiplier)
+            or resolved_guard_multiplier <= 0.0
+        ):
+            raise ValueError(
+                "geometry_guard_multiplier must be finite and positive"
+            )
+        spacing_limit = (
+            resolved_guard_multiplier * resolved_spacing
+        )
     resolved_barrier_endpoints = None
     if barrier_endpoint_energies is not None:
         if len(barrier_endpoint_energies) != 2:

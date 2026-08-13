@@ -206,21 +206,25 @@ def test_reactions_package_exports_public_models():
     assert BondReaction.__name__ == "BondReaction"
 
 
-def test_bond_sweep_retains_completed_members_when_later_neb_fails(
+def test_bond_sweep_continues_past_retryable_neb_failure(
     monkeypatch,
 ):
-    completed = object()
+    completed_before = object()
+    completed_after = object()
     site = SimpleNamespace(
-        member_node_ids=[object(), object()],
+        member_node_ids=[object(), object(), object()],
         applicable_reactions=["stale"],
+        iso_class=4,
     )
 
     def evaluate_member(_graph, _site, member_index, *_args, **_kwargs):
         if member_index == 0:
-            return completed
-        raise bond_module.BondNEBNotConvergedError(
-            "forced later-member CI-NEB failure"
-        )
+            return completed_before
+        if member_index == 1:
+            raise bond_module.BondNEBNotConvergedError(
+                "forced middle-member CI-NEB failure"
+            )
+        return completed_after
 
     monkeypatch.setattr(
         bond_module,
@@ -228,18 +232,15 @@ def test_bond_sweep_retains_completed_members_when_later_neb_fails(
         evaluate_member,
     )
 
-    with pytest.raises(
-        bond_module.BondNEBNotConvergedError,
-        match="later-member CI-NEB failure",
-    ):
-        bond_module.get_applicable_bond_reactions(
-            nx.Graph(),
-            site,
-            object(),
-            temperature=500.0,
-        )
+    reactions = bond_module.get_applicable_bond_reactions(
+        nx.Graph(),
+        site,
+        object(),
+        temperature=500.0,
+    )
 
-    assert site.applicable_reactions == [completed]
+    assert reactions == [completed_before, completed_after]
+    assert site.applicable_reactions == reactions
 
 
 def _detached_seed_band() -> list[Atoms]:
@@ -600,16 +601,16 @@ def test_neb_nonconvergence_is_not_permanently_classified_invalid(
         assert reaction is not None
         assert lateral.stable is True
     else:
-        with pytest.raises(nonconvergence_error, match="forced numerical NEB failure"):
-            getattr(reaction_module, entrypoint_name)(
-                nx.Graph(),
-                site,
-                0,
-                object(),
-                temperature=500.0,
-                n_images=1,
-                lateral_interactions=False,
-            )
+        reaction = getattr(reaction_module, entrypoint_name)(
+            nx.Graph(),
+            site,
+            0,
+            object(),
+            temperature=500.0,
+            n_images=1,
+            lateral_interactions=False,
+        )
+        assert reaction is None
         assert lateral.stable is None
         assert lateral.last_failure_reason == (
             f"{nonconvergence_error.__name__}: forced numerical NEB failure"

@@ -90,6 +90,7 @@ optimization:
   neb_climb_optimizer_kwargs: null
   neb_method: improvedtangent
   neb_band_eval: images
+  neb_geometry_guard_multiplier: 3.0
 ```
 
 `optimizer` controls calculator-backed ordinary relaxations, including
@@ -120,6 +121,14 @@ keywords; `null` reuses `neb_optimizer_kwargs`. Each stage creates a fresh
 optimizer instance, so FIRE or MDMin velocity state is not carried from
 ordinary NEB into CI-NEB. All optimizer choices, constructor mappings, and the
 low-barrier climbing policy are included in calculation-cache identities.
+
+`neb_geometry_guard_multiplier` controls the geometric rollback threshold for
+both diffusion and bond NEBs. The maximum adjacent-image atom displacement is
+the multiplier times `diffusion.image_spacing` or `bond.neb_image_spacing`.
+The default `3.0` therefore gives a 0.75 Å limit for the default 0.25 Å image
+spacing. Changing this multiplier does not change the dynamically selected
+number of images. It must be finite and greater than zero, and it is included
+in calculation-cache identities.
 
 The retained ordinary transition energy remains the raw recorded value. At
 rate construction, both reversible directions use the same effective level,
@@ -210,14 +219,15 @@ continuity, overlaps, endpoint integrity, topology, energies, and forces before
 accepting a barrier or transition state.
 
 Numerical NEB non-convergence is likewise not a chemical stability result.
-AutoKMC preserves the last-known band and propagates the channel-specific
-non-convergence exception while leaving the lateral class undecided. This
-prevents OGKMC from silently dropping a physically real event merely because
-one optimizer attempt exhausted its step budget. Endpoint or transition-state
-topology failures remain chemically invalid and are excluded as before. If an
-optional bare-band warm start does not converge, the target lateral NEB instead
-falls back to its configured interpolation while the bare class stays
-undecided.
+AutoKMC preserves the last-known band, leaves the lateral class undecided, and
+omits only that reaction from the current rate-index sweep. Other valid
+reactions remain available, so one exhausted optimizer cannot prevent the KMC
+loop from starting. The undecided class is retried when its member is later
+recomputed, and its failed structures are written as retryable diagnostics.
+Endpoint or transition-state topology failures remain chemically invalid and
+are excluded as before. If an optional bare-band warm start does not converge,
+the target lateral NEB instead falls back to its configured interpolation while
+the bare class stays undecided.
 
 The supported algorithmic keywords depend on the selected optimizer and the
 installed ASE version. Common controls are `maxstep` and `alpha` for BFGS;
@@ -441,7 +451,7 @@ cache or resume contract being able to detect it.
 | `fmax` | `0.01` eV/Å | NEB force threshold. |
 | `max_steps` | `200` | NEB optimization limit. |
 | `n_images` | `10` | Fixed interior-image count when `image_spacing` is `null`; total frames add two endpoints. |
-| `image_spacing` | `0.25` Å | Enable dynamic image selection and limit every adjacent-image atom displacement to twice this value. |
+| `image_spacing` | `0.25` Å | Enable dynamic image selection and limit every adjacent-image atom displacement to three times this value. |
 | `min_images` | `6` | Minimum dynamically selected interior-image count, giving at least eight total frames. |
 | `max_images` | `8` | Maximum dynamically selected interior-image count, giving at most ten total frames. |
 | `climb` | `true` | Refine the ordinary NEB with a climbing image unless either raw directional barrier is below 0.1 eV. |
@@ -463,7 +473,8 @@ The bond channel uses the same rule through the `neb_image_spacing`,
 Dynamic spacing also supplies a geometric guard during both the ordinary and
 climbing-image stages. After every optimizer step, AutoKMC measures the
 MIC-aware displacement of every unfrozen atom between adjacent images. If any
-displacement exceeds twice the configured spacing, the step is rejected and
+displacement exceeds `optimization.neb_geometry_guard_multiplier` times the
+configured spacing, the step is rejected and
 the lowest-force geometrically valid band from that stage is restored. A fresh
 optimizer resets its velocities and continues within the original step budget.
 For FIRE, both `dt` and `dtmax` are halved on every geometric restart. MDMin
@@ -484,7 +495,7 @@ halves `dt`; BFGS, which has no timestep, halves `maxstep`. Set the spacing to
 | `deduplicate_iso` | `true` | Deduplicate graph-isomorphic classes. |
 | `gas_lift_height` | `6.0` Å | Staging lift used to align a gas product above the reacting site. |
 | `gas_precursor_relax` | `true` | For gas products, relax an intact adsorbed molecular precursor before the bond NEB. The slab and lateral environment are fixed for this step. |
-| `gas_precursor_distance` | `3.0` Å | Initial minimum molecule-to-slab distance for the precursor relaxation. |
+| `gas_precursor_distance` | `2.5` Å | Initial minimum molecule-to-slab distance for the precursor relaxation. |
 | `auto_build_leaf_species` | `true` | Build implied species absent from the feed list. |
 | `pair_n_shells` | `1` | Ego-graph depth for triple pruning. |
 | `prune_by_triple` | `true` | Keep the preferred stable class per adsorption triple. |
@@ -494,7 +505,7 @@ halves `dt`; BFGS, which has no timestep, halves `maxstep`. Set the spacing to
 | `neb_fmax` | `0.01` eV/Å | Bond NEB threshold. |
 | `neb_max_steps` | `200` | Bond NEB step limit. |
 | `neb_n_images` | `10` | Fixed bond-NEB interior-image count when `neb_image_spacing` is `null`. |
-| `neb_image_spacing` | `0.25` Å | Enable dynamic bond-NEB selection and limit every adjacent-image atom displacement to twice this value. |
+| `neb_image_spacing` | `0.25` Å | Enable dynamic bond-NEB selection and limit every adjacent-image atom displacement to three times this value. |
 | `neb_min_images` | `6` | Minimum dynamically selected bond-NEB interior-image count, giving at least eight total frames. |
 | `neb_max_images` | `8` | Maximum dynamically selected bond-NEB interior-image count, giving at most ten total frames. |
 | `neb_climb` | `true` | Refine the ordinary bond NEB with a climbing image unless either raw directional barrier is below 0.1 eV. |
