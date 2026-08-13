@@ -149,6 +149,13 @@ _STATE_FILENAMES: dict[str, dict[str, str]] = {
     },
 }
 
+_OPTIONAL_STATE_FILENAMES: dict[str, dict[str, str]] = {
+    "bond": {
+        "state_c_gas_reference": "state_c_gas_reference.extxyz",
+        "gas_molecule": "gas_molecule.extxyz",
+    },
+}
+
 _ISAAC_ROOT_FIELDS = {
     "isaac_record_version",
     "record_id",
@@ -1760,7 +1767,17 @@ def write_calculation_record(
     )
 
     state_assets: dict[str, str] = {}
-    for state_name, filename in _STATE_FILENAMES[kind].items():
+    state_filenames = dict(_STATE_FILENAMES[kind])
+    state_filenames.update(
+        {
+            state_name: filename
+            for state_name, filename in _OPTIONAL_STATE_FILENAMES.get(
+                kind, {}
+            ).items()
+            if state_name in record["states"]
+        }
+    )
+    for state_name, filename in state_filenames.items():
         payload = record["states"][state_name]
         atoms = payload.get("atoms")
         if not isinstance(atoms, Atoms):
@@ -1932,7 +1949,15 @@ def _load_record_path(
         stored_kind = str(configuration["kind"])
         if stored_kind not in _STATE_FILENAMES:
             return None
-        if set(configuration.get("state_assets", {})) != set(_STATE_FILENAMES[stored_kind]):
+        state_asset_names = set(configuration.get("state_assets", {}))
+        required_state_names = set(_STATE_FILENAMES[stored_kind])
+        allowed_state_names = required_state_names | set(
+            _OPTIONAL_STATE_FILENAMES.get(stored_kind, {})
+        )
+        if (
+            not required_state_names.issubset(state_asset_names)
+            or not state_asset_names.issubset(allowed_state_names)
+        ):
             return None
         states: dict[str, Any] = {}
         for state_name, asset_id in configuration["state_assets"].items():

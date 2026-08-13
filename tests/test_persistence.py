@@ -208,6 +208,12 @@ def test_reaction_writer_persists_initial_structures_and_neb_paths(
         atoms_ts=optimized.copy(),
         atoms_neb_path_initial=path_initial,
         atoms_neb_path=path_optimized,
+        neb_n_images=6,
+        neb_n_frames=8,
+        neb_max_endpoint_displacement=1.5,
+        neb_target_image_spacing=0.25,
+        neb_estimated_image_spacing=1.5 / 7.0,
+        neb_image_count_limited_by="distance",
     )
     diffusion_reaction = SimpleNamespace(
         kind="diffusion",
@@ -223,23 +229,37 @@ def test_reaction_writer_persists_initial_structures_and_neb_paths(
     bond_lateral = SimpleNamespace(
         lateral_class=3,
         energy_ab=-3.0,
-        energy_c=-3.5,
+        energy_c=-4.7,
         energy_c_precursor=-3.7,
+        energy_c_gas_reference=-4.1,
         energy_ts=-2.0,
         atoms_ab_initial=initial.copy(),
         atoms_c_initial=initial.copy(),
         atoms_ab=optimized.copy(),
         atoms_c=optimized.copy(),
+        atoms_c_gas_reference=Atoms(
+            "Pt2", positions=[[0.0, 0.0, 0.0], [2.7, 0.0, 0.0]]
+        ),
+        atoms_gas_molecule=Atoms(
+            "H2", positions=[[0.0, 0.0, 0.0], [0.0, 0.0, 0.74]]
+        ),
         atoms_ts=optimized.copy(),
         atoms_neb_path_initial=path_initial,
         atoms_neb_path=path_optimized,
+        neb_n_images=6,
+        neb_n_frames=8,
+        neb_max_endpoint_displacement=1.5,
+        neb_target_image_spacing=0.25,
+        neb_estimated_image_spacing=1.5 / 7.0,
+        neb_image_count_limited_by="distance",
     )
     bond_reaction = SimpleNamespace(
         kind="bond",
         direction="couple",
         site=SimpleNamespace(
             iso_class=2,
-            gas_product=False,
+            gas_product=True,
+            gas_reactant=SimpleNamespace(energy=-0.6),
             template=SimpleNamespace(
                 smiles_a="[H]",
                 smiles_b="[H]",
@@ -269,12 +289,31 @@ def test_reaction_writer_persists_initial_structures_and_neb_paths(
     assert (diffusion_folder / "neb_path.extxyz").is_file()
     assert (bond_folder / "state_ab_initial.extxyz").is_file()
     assert (bond_folder / "state_c_initial.extxyz").is_file()
+    assert (bond_folder / "state_c_gas_reference.extxyz").is_file()
+    assert (bond_folder / "gas_molecule.extxyz").is_file()
     assert (bond_folder / "neb_path_initial.extxyz").is_file()
     assert (bond_folder / "neb_path.extxyz").is_file()
     bond_payload = json.loads((bond_folder / "reaction.json").read_text())
-    assert bond_payload["energies_ev"]["state_c"] == pytest.approx(-3.5)
+    assert bond_payload["energies_ev"]["state_c"] == pytest.approx(-4.7)
     assert bond_payload["energies_ev"]["state_c_precursor"] == pytest.approx(
         -3.7
+    )
+    assert bond_payload["energies_ev"]["state_c_gas_reference"] == pytest.approx(
+        -4.1
+    )
+    assert bond_payload["energies_ev"]["gas_molecule"] == pytest.approx(-0.6)
+    assert bond_payload["atoms"]["state_c_gas_reference"] == (
+        "state_c_gas_reference.extxyz"
+    )
+    assert bond_payload["atoms"]["gas_molecule"] == "gas_molecule.extxyz"
+    gas_surface = ase_read(bond_folder / "state_c_gas_reference.extxyz")
+    gas_molecule = ase_read(bond_folder / "gas_molecule.extxyz")
+    assert gas_surface.get_chemical_symbols() == ["Pt", "Pt"]
+    assert gas_molecule.get_chemical_symbols() == ["H", "H"]
+    assert bond_payload["neb_images"]["interior_images"] == 6
+    assert bond_payload["neb_images"]["total_frames"] == 8
+    assert bond_payload["neb_images"]["target_spacing_ang"] == pytest.approx(
+        0.25
     )
 
     diffusion_payload = json.loads(
@@ -283,6 +322,7 @@ def test_reaction_writer_persists_initial_structures_and_neb_paths(
     assert diffusion_payload["atoms"]["state_a_initial"] == (
         "state_a_initial.extxyz"
     )
+    assert diffusion_payload["neb_images"]["interior_images"] == 6
     assert diffusion_payload["atoms"]["neb_path_initial"] == (
         "neb_path_initial.extxyz"
     )
@@ -1119,7 +1159,8 @@ def test_invalid_bond_record_writes_failed_endpoint_and_neb_paths(tmp_path):
     site = SimpleNamespace(
         iso_class=3,
         template=template,
-        gas_product=False,
+        gas_product=True,
+        gas_reactant=SimpleNamespace(energy=-1.2),
     )
     lateral = SimpleNamespace(
         lateral_class=4,
@@ -1130,6 +1171,13 @@ def test_invalid_bond_record_writes_failed_endpoint_and_neb_paths(tmp_path):
         atoms_c_initial=atoms.copy(),
         atoms_ab=atoms.copy(),
         atoms_c=atoms.copy(),
+        atoms_c_gas_reference=Atoms(
+            "Pt", positions=[[0.0, 0.0, 0.0]]
+        ),
+        atoms_gas_molecule=Atoms(
+            "H2", positions=[[0.0, 0.0, 0.0], [0.0, 0.0, 0.74]]
+        ),
+        energy_c_gas_reference=-3.0,
         atoms_neb_path_initial=[atoms.copy(), atoms.copy(), atoms.copy()],
         atoms_neb_path=[atoms.copy(), atoms.copy(), atoms.copy()],
     )
@@ -1145,6 +1193,8 @@ def test_invalid_bond_record_writes_failed_endpoint_and_neb_paths(tmp_path):
         "state_c_initial.extxyz",
         "state_ab.extxyz",
         "state_c.extxyz",
+        "state_c_gas_reference.extxyz",
+        "gas_molecule.extxyz",
         "neb_path_initial.extxyz",
         "neb_path.extxyz",
         "reaction.json",
@@ -1160,6 +1210,12 @@ def test_invalid_bond_record_writes_failed_endpoint_and_neb_paths(tmp_path):
     )
     assert payload["discovery_step"] == 9
     assert payload["atoms"]["neb_path"] == "neb_path.extxyz"
+    assert payload["atoms"]["state_c_gas_reference"] == (
+        "state_c_gas_reference.extxyz"
+    )
+    assert payload["atoms"]["gas_molecule"] == "gas_molecule.extxyz"
+    assert len(ase_read(folder / "state_c_gas_reference.extxyz")) == 1
+    assert len(ase_read(folder / "gas_molecule.extxyz")) == 2
     definitions = load_reaction_index(tmp_path / "reactions" / "index.jsonl")
     assert definitions[payload["reaction_id"]]["folder"].startswith(
         "diagnostics/invalid_bond/"

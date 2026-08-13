@@ -115,12 +115,16 @@ from autokmc.sites.stability.neb import (
     make_neb_band,
     neb_optimizer_logfile,
     project_neb_path,
+    resolve_neb_image_count,
     run_neb,
 )
 from autokmc.core.constants import (
     LATERAL_SHELLS_DEFAULT,
     NL_MULT_DEFAULT,
     NEB_BAND_EVAL,
+    NEB_IMAGE_SPACING,
+    NEB_MAX_IMAGES,
+    NEB_MIN_IMAGES,
     NEB_N_IMAGES,
     NEB_FMAX,
     NEB_MAX_STEPS,
@@ -1064,6 +1068,28 @@ def _write_diffusion_calculation_cache(
                 "neb_seed_fingerprint",
                 None,
             ),
+            "neb_n_images": getattr(lateral_class, "neb_n_images", None),
+            "neb_n_frames": getattr(lateral_class, "neb_n_frames", None),
+            "neb_max_endpoint_displacement": getattr(
+                lateral_class,
+                "neb_max_endpoint_displacement",
+                None,
+            ),
+            "neb_target_image_spacing": getattr(
+                lateral_class,
+                "neb_target_image_spacing",
+                None,
+            ),
+            "neb_estimated_image_spacing": getattr(
+                lateral_class,
+                "neb_estimated_image_spacing",
+                None,
+            ),
+            "neb_image_count_limited_by": getattr(
+                lateral_class,
+                "neb_image_count_limited_by",
+                None,
+            ),
         },
     )
     write_calculation_record(
@@ -1085,6 +1111,9 @@ def check_diffusion_stability(
     fmax: float = NEB_FMAX,
     max_steps: int = NEB_MAX_STEPS,
     n_images: int = NEB_N_IMAGES,
+    image_spacing: float | None = NEB_IMAGE_SPACING,
+    min_images: int = NEB_MIN_IMAGES,
+    max_images: int = NEB_MAX_IMAGES,
     climb: bool = NEB_CLIMB,
     spring_k: float = NEB_SPRING_K,
     interpolation: str = NEB_INTERPOLATION,
@@ -1257,6 +1286,11 @@ def check_diffusion_stability(
         ),
         "neb_method": str(neb_method).strip().lower(),
         "n_images": int(n_images),
+        "image_spacing": (
+            None if image_spacing is None else float(image_spacing)
+        ),
+        "min_images": int(min_images),
+        "max_images": int(max_images),
         "climb": bool(climb),
         "spring_k": float(spring_k),
         "interpolation": str(interpolation),
@@ -1363,7 +1397,15 @@ def check_diffusion_stability(
                     cached_path = list(
                         getattr(lateral_class, "atoms_neb_path", None) or []
                     )
-                    if len(cached_path) != int(n_images) + 2:
+                    cached_interior = len(cached_path) - 2
+                    compatible_count = (
+                        cached_interior >= 1
+                        and (
+                            image_spacing is not None
+                            or cached_interior == int(n_images)
+                        )
+                    )
+                    if not compatible_count:
                         lateral_class.stable = None
                         raise ValueError(
                             "cached bare diffusion result has no compatible "
@@ -1378,6 +1420,8 @@ def check_diffusion_stability(
                         getattr(lateral_class, "neb_path_energies", None) or []
                     )
                     lateral_class._warm_start_member_index = int(member_index)
+                    lateral_class.neb_n_images = cached_interior
+                    lateral_class.neb_n_frames = len(cached_path)
                     if not persist_neb_path:
                         lateral_class.atoms_neb_path = None
                         lateral_class.neb_path_energies = None
@@ -1552,6 +1596,25 @@ def check_diffusion_stability(
     lateral_class.atoms_b  = atoms_b_opt
 
     # ── 3-4. NEB band ───────────────────────────────────────────────────
+    image_selection = resolve_neb_image_count(
+        atoms_a_opt,
+        atoms_b_opt,
+        fixed_n_images=int(n_images),
+        image_spacing=image_spacing,
+        min_images=int(min_images),
+        max_images=int(max_images),
+    )
+    resolved_n_images = image_selection.n_images
+    lateral_class.neb_n_images = resolved_n_images
+    lateral_class.neb_n_frames = image_selection.n_frames
+    lateral_class.neb_max_endpoint_displacement = (
+        image_selection.max_endpoint_displacement
+    )
+    lateral_class.neb_target_image_spacing = image_selection.target_spacing
+    lateral_class.neb_estimated_image_spacing = (
+        image_selection.estimated_linear_spacing
+    )
+    lateral_class.neb_image_count_limited_by = image_selection.limited_by
     projected_seed_path = None
     if seed_images:
         projected_seed_path = project_neb_path(
@@ -1561,6 +1624,11 @@ def check_diffusion_stability(
             n_slab=n_slab,
             n_lateral=n_lat,
         )
+        if (
+            projected_seed_path is not None
+            and len(projected_seed_path) != resolved_n_images + 2
+        ):
+            projected_seed_path = None
     lateral_class.neb_seed_fingerprint = seed_fingerprint
     lateral_class.neb_initialization = (
         "bare_transfer"
@@ -1573,7 +1641,10 @@ def check_diffusion_stability(
     )
     if verbose:
         print(
-            f"  [NEB] images={int(n_images)}  climb={bool(climb)}  "
+            f"  [NEB] images={resolved_n_images} interior / "
+            f"{image_selection.n_frames} frames  "
+            f"spacing≈{image_selection.estimated_linear_spacing:.3f} Å  "
+            f"climb={bool(climb)}  "
             f"fmax={float(fmax):.4f} eV/Å  max_steps={int(max_steps)}"
         )
         if projected_seed_path is not None:
@@ -1592,7 +1663,7 @@ def check_diffusion_stability(
         atoms_b_opt,
         calculator=calculator,
         purpose="diffusion NEB",
-        n_images=int(n_images),
+        n_images=resolved_n_images,
         interpolation=str(interpolation),
         spring_k=float(spring_k),
         climb=bool(climb),

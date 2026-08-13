@@ -74,7 +74,10 @@ from autokmc.reactions.rates import (
 from autokmc.core.constants import (
     NEB_BAND_EVAL,
     NEB_FMAX,
+    NEB_IMAGE_SPACING,
+    NEB_MAX_IMAGES,
     NEB_MAX_STEPS,
+    NEB_MIN_IMAGES,
     NEB_N_IMAGES,
     NEB_CLIMB,
     NEB_SPRING_K,
@@ -336,7 +339,7 @@ def _replace_cached_member_diffusion(
 def _diffusion_seed_path(
     lateral_class: DiffusionLateral,
     *,
-    n_images: int,
+    n_images: int | None,
     current_member_index: int,
 ) -> tuple[list[Atoms] | None, int | None]:
     """Return a detached compatible bare band and its source member."""
@@ -361,7 +364,7 @@ def _diffusion_seed_path(
     except TypeError:
         return None, None
     if (
-        len(images) != int(n_images) + 2
+        (n_images is not None and len(images) != int(n_images) + 2)
         or not all(isinstance(image, Atoms) for image in images)
     ):
         return None, None
@@ -387,6 +390,9 @@ def get_applicable_diffusion_for_member(
     fmax: float = NEB_FMAX,
     max_steps: int = NEB_MAX_STEPS,
     n_images: int = NEB_N_IMAGES,
+    image_spacing: float | None = NEB_IMAGE_SPACING,
+    min_images: int = NEB_MIN_IMAGES,
+    max_images: int = NEB_MAX_IMAGES,
     climb: bool = NEB_CLIMB,
     spring_k: float = NEB_SPRING_K,
     interpolation: str = NEB_INTERPOLATION,
@@ -423,6 +429,9 @@ def get_applicable_diffusion_for_member(
             "fmax": fmax,
             "max_steps": max_steps,
             "n_images": n_images,
+            "image_spacing": image_spacing,
+            "min_images": min_images,
+            "max_images": max_images,
             "climb": climb,
             "spring_k": spring_k,
             "interpolation": interpolation,
@@ -477,7 +486,7 @@ def get_applicable_diffusion_for_member(
                 bare_seed_path, bare_seed_member_index = (
                     _diffusion_seed_path(
                         bare_lc,
-                        n_images=n_images,
+                        n_images=(None if image_spacing is not None else n_images),
                         current_member_index=index,
                     )
                 )
@@ -539,7 +548,9 @@ def get_applicable_diffusion_for_member(
                         bare_seed_path, bare_seed_member_index = (
                             _diffusion_seed_path(
                                 capture_lc,
-                                n_images=n_images,
+                                n_images=(
+                                    None if image_spacing is not None else n_images
+                                ),
                                 current_member_index=index,
                             )
                         )
@@ -645,6 +656,9 @@ def get_applicable_diffusions(
     fmax: float = NEB_FMAX,
     max_steps: int = NEB_MAX_STEPS,
     n_images: int = NEB_N_IMAGES,
+    image_spacing: float | None = NEB_IMAGE_SPACING,
+    min_images: int = NEB_MIN_IMAGES,
+    max_images: int = NEB_MAX_IMAGES,
     climb: bool = NEB_CLIMB,
     spring_k: float = NEB_SPRING_K,
     interpolation: str = NEB_INTERPOLATION,
@@ -692,6 +706,9 @@ def get_applicable_diffusions(
             fmax=fmax,
             max_steps=max_steps,
             n_images=n_images,
+            image_spacing=image_spacing,
+            min_images=min_images,
+            max_images=max_images,
             climb=climb,
             spring_k=spring_k,
             interpolation=interpolation,
@@ -732,6 +749,9 @@ def compute_all_diffusions(
     fmax: float = NEB_FMAX,
     max_steps: int = NEB_MAX_STEPS,
     n_images: int = NEB_N_IMAGES,
+    image_spacing: float | None = NEB_IMAGE_SPACING,
+    min_images: int = NEB_MIN_IMAGES,
+    max_images: int = NEB_MAX_IMAGES,
     climb: bool = NEB_CLIMB,
     spring_k: float = NEB_SPRING_K,
     interpolation: str = NEB_INTERPOLATION,
@@ -771,6 +791,9 @@ def compute_all_diffusions(
                     fmax                     = fmax,
                     max_steps                = max_steps,
                     n_images                 = n_images,
+                    image_spacing            = image_spacing,
+                    min_images               = min_images,
+                    max_images               = max_images,
                     climb                    = climb,
                     spring_k                 = spring_k,
                     interpolation            = interpolation,
@@ -812,6 +835,9 @@ def compute_all_diffusions(
             fmax                     = fmax,
             max_steps                = max_steps,
             n_images                 = n_images,
+            image_spacing            = image_spacing,
+            min_images               = min_images,
+            max_images               = max_images,
             climb                    = climb,
             spring_k                 = spring_k,
             interpolation            = interpolation,

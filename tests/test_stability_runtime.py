@@ -110,6 +110,63 @@ def test_shared_neb_selects_transition_and_detaches_images(monkeypatch):
     assert telemetry.timings_s["neb.seconds"] >= 0.0
 
 
+def test_dynamic_neb_image_count_uses_maximum_mic_atom_displacement():
+    initial = Atoms(
+        "H2",
+        positions=[[9.8, 0.0, 0.0], [4.0, 0.0, 0.0]],
+        cell=np.diag([10.0, 10.0, 10.0]),
+        pbc=True,
+    )
+    final = initial.copy()
+    final.positions[0, 0] = 0.8  # 1.0 Å across the periodic boundary.
+    final.positions[1, 0] = 4.5  # 0.5 Å.
+
+    selection = neb_module.resolve_neb_image_count(
+        initial,
+        final,
+        fixed_n_images=10,
+        image_spacing=0.25,
+        min_images=1,
+        max_images=24,
+    )
+
+    assert selection.n_images == 3
+    assert selection.n_frames == 5
+    assert selection.max_endpoint_displacement == pytest.approx(1.0)
+    assert selection.estimated_linear_spacing == pytest.approx(0.25)
+    assert selection.limited_by == "distance"
+
+
+def test_dynamic_neb_image_count_honours_bounds_and_fixed_mode():
+    initial = Atoms("H", positions=[[0.0, 0.0, 0.0]])
+    final = Atoms("H", positions=[[4.0, 0.0, 0.0]])
+
+    capped = neb_module.resolve_neb_image_count(
+        initial,
+        final,
+        fixed_n_images=10,
+        image_spacing=0.25,
+        min_images=2,
+        max_images=8,
+    )
+    fixed = neb_module.resolve_neb_image_count(
+        initial,
+        final,
+        fixed_n_images=6,
+        image_spacing=None,
+        min_images=1,
+        max_images=24,
+    )
+
+    assert capped.n_images == 8
+    assert capped.n_frames == 10
+    assert capped.limited_by == "maximum"
+    assert capped.estimated_linear_spacing > 0.25
+    assert fixed.n_images == 6
+    assert fixed.n_frames == 8
+    assert fixed.limited_by == "fixed"
+
+
 def test_shared_neb_uses_selected_optimizer(monkeypatch):
     images = [_image(0.0), _image(1.0), _image(0.0)]
     neb = SimpleNamespace(climb=False)

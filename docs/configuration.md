@@ -427,11 +427,25 @@ cache or resume contract being able to detect it.
 | `prune_by_adsorption_pair` | `true` | Keep one diffusion class per adsorption pair. |
 | `fmax` | `0.01` eV/Å | NEB force threshold. |
 | `max_steps` | `200` | NEB optimization limit. |
-| `n_images` | `10` | Number of NEB images. |
+| `n_images` | `10` | Fixed interior-image count when `image_spacing` is `null`; total frames add two endpoints. |
+| `image_spacing` | `0.25` Å | Enable dynamic selection from the maximum MIC-aware corresponding-atom endpoint displacement. |
+| `min_images` | `6` | Minimum dynamically selected interior-image count, giving at least eight total frames. |
+| `max_images` | `8` | Maximum dynamically selected interior-image count, giving at most ten total frames. |
 | `climb` | `true` | Refine the converged ordinary NEB with a climbing image. |
 | `spring_k` | `5.0` eV/Å² | NEB spring constant used for both optimization stages. |
 | `interpolation` | `linear` | `linear` or `idpp`. |
 | `persist_neb_path` | `false` | Save both image sequences for successful runs; failed NEBs retain their initial and last-known bands automatically. |
+
+Dynamic image selection is evaluated after both endpoints have relaxed and
+atom correspondence is fixed. Let `d_max` be the largest minimum-image
+displacement of any corresponding atom between the endpoints. AutoKMC chooses
+`ceil(d_max / image_spacing) - 1` interior images, clips that value to
+`min_images`/`max_images`, and constructs two additional endpoint frames. Set
+`image_spacing: null` to recover the exact fixed `n_images` behavior. If the
+maximum bound is reached, the persisted `estimated_linear_spacing_ang` can be
+larger than the requested target and `count_limited_by` is `maximum`.
+The bond channel uses the same rule through the `neb_image_spacing`,
+`neb_min_images`, `neb_max_images`, and `neb_n_images` names.
 
 ## `bond`
 
@@ -447,7 +461,7 @@ cache or resume contract being able to detect it.
 | `deduplicate_iso` | `true` | Deduplicate graph-isomorphic classes. |
 | `gas_lift_height` | `6.0` Å | Staging lift used to align a gas product above the reacting site. |
 | `gas_precursor_relax` | `true` | For gas products, relax an intact adsorbed molecular precursor before the bond NEB. The slab and lateral environment are fixed for this step. |
-| `gas_precursor_distance` | `1.8` Å | Initial minimum molecule-to-slab distance for the precursor relaxation. |
+| `gas_precursor_distance` | `3.0` Å | Initial minimum molecule-to-slab distance for the precursor relaxation. |
 | `auto_build_leaf_species` | `true` | Build implied species absent from the feed list. |
 | `pair_n_shells` | `1` | Ego-graph depth for triple pruning. |
 | `prune_by_triple` | `true` | Keep the preferred stable class per adsorption triple. |
@@ -456,7 +470,10 @@ cache or resume contract being able to detect it.
 | `prune_max_steps` | `500` | Bond-pruning step limit. |
 | `neb_fmax` | `0.01` eV/Å | Bond NEB threshold. |
 | `neb_max_steps` | `200` | Bond NEB step limit. |
-| `neb_n_images` | `10` | Bond NEB images. |
+| `neb_n_images` | `10` | Fixed bond-NEB interior-image count when `neb_image_spacing` is `null`. |
+| `neb_image_spacing` | `0.25` Å | Enable dynamic bond-NEB selection from the maximum MIC-aware corresponding-atom endpoint displacement. |
+| `neb_min_images` | `6` | Minimum dynamically selected bond-NEB interior-image count, giving at least eight total frames. |
+| `neb_max_images` | `8` | Maximum dynamically selected bond-NEB interior-image count, giving at most ten total frames. |
 | `neb_climb` | `true` | Refine the converged ordinary bond NEB with a climbing image. |
 | `neb_spring_k` | `5.0` eV/Å² | Bond NEB spring constant used for both optimization stages. |
 | `neb_interpolation` | `idpp` | `linear` or `idpp`. |

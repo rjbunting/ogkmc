@@ -149,6 +149,104 @@ class NEBRunResult:
     path_images: list[Atoms] | None = None
 
 
+@dataclass(frozen=True)
+class NEBImageSelection:
+    """Resolved interior-image count and endpoint-spacing diagnostics."""
+
+    n_images: int
+    n_frames: int
+    max_endpoint_displacement: float
+    target_spacing: float | None
+    estimated_linear_spacing: float
+    limited_by: str
+
+
+def resolve_neb_image_count(
+    atoms_initial: Atoms,
+    atoms_final: Atoms,
+    *,
+    fixed_n_images: int,
+    image_spacing: float | None,
+    min_images: int,
+    max_images: int,
+) -> NEBImageSelection:
+    """Select a MIC-aware NEB image count from endpoint atom displacement.
+
+    ``n_images`` in ASE/AutoKMC means *interior* images, so a band has
+    ``n_images + 2`` frames and ``n_images + 1`` adjacent intervals.  In
+    dynamic mode the smallest count is chosen for which the largest
+    corresponding-atom displacement in a linear MIC interpolation is no
+    greater than ``image_spacing``, subject to the configured bounds.
+    """
+    fixed = int(fixed_n_images)
+    lower = int(min_images)
+    upper = int(max_images)
+    if fixed < 1:
+        raise ValueError("fixed_n_images must be >= 1")
+    if lower < 1:
+        raise ValueError("min_images must be >= 1")
+    if upper < lower:
+        raise ValueError("max_images must be >= min_images")
+    if len(atoms_initial) != len(atoms_final):
+        raise ValueError("NEB endpoints must have the same atom count")
+    if not np.array_equal(atoms_initial.numbers, atoms_final.numbers):
+        raise ValueError("NEB endpoints must have the same atom ordering")
+    if not np.array_equal(atoms_initial.pbc, atoms_final.pbc):
+        raise ValueError("NEB endpoints must have the same PBC")
+    if not np.allclose(
+        atoms_initial.cell.array,
+        atoms_final.cell.array,
+        rtol=0.0,
+        atol=1.0e-8,
+    ):
+        raise ValueError("NEB endpoints must have the same cell")
+
+    delta = np.asarray(
+        atoms_final.positions - atoms_initial.positions,
+        dtype=float,
+    )
+    if not np.isfinite(delta).all():
+        raise ValueError("NEB endpoint displacement contains non-finite values")
+    pbc = np.asarray(atoms_initial.pbc, dtype=bool)
+    if pbc.any():
+        mic_delta, _ = find_mic(
+            delta,
+            np.asarray(atoms_initial.cell.array, dtype=float),
+            pbc=pbc,
+        )
+    else:
+        mic_delta = delta
+    displacement = np.linalg.norm(np.asarray(mic_delta, dtype=float), axis=1)
+    maximum = float(displacement.max()) if len(displacement) else 0.0
+
+    if image_spacing is None:
+        resolved = fixed
+        target = None
+        limited_by = "fixed"
+    else:
+        target = float(image_spacing)
+        if not np.isfinite(target) or target <= 0.0:
+            raise ValueError("image_spacing must be finite and positive")
+        required_intervals = max(2, int(np.ceil(maximum / target)))
+        required_images = required_intervals - 1
+        resolved = min(upper, max(lower, required_images))
+        if resolved < required_images:
+            limited_by = "maximum"
+        elif resolved > required_images:
+            limited_by = "minimum"
+        else:
+            limited_by = "distance"
+
+    return NEBImageSelection(
+        n_images=int(resolved),
+        n_frames=int(resolved) + 2,
+        max_endpoint_displacement=maximum,
+        target_spacing=target,
+        estimated_linear_spacing=(maximum / float(int(resolved) + 1)),
+        limited_by=limited_by,
+    )
+
+
 class _BatchedBandNEB(NEB):
     """NEB whose images are evaluated in one batched model call per step.
 
@@ -911,11 +1009,13 @@ __all__ = [
     "NEB_BAND_EVALS",
     "NEB_METHODS",
     "NEBRunResult",
+    "NEBImageSelection",
     "make_neb_band",
     "neb_optimizer_logfile",
     "normalize_band_eval",
     "normalize_neb_method",
     "project_neb_path",
+    "resolve_neb_image_count",
     "run_neb",
     # Legacy facade exports.
     "NEBNotConvergedError",

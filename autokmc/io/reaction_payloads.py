@@ -44,6 +44,34 @@ def _adsorption_last_event(reaction, step: int, *, fired: bool) -> dict[str, Any
     }
 
 
+def _neb_image_payload(lateral_class) -> dict[str, Any]:
+    """Return resolved dynamic-band diagnostics for persisted reactions."""
+    return {
+        "interior_images": getattr(lateral_class, "neb_n_images", None),
+        "total_frames": getattr(lateral_class, "neb_n_frames", None),
+        "max_endpoint_displacement_ang": getattr(
+            lateral_class,
+            "neb_max_endpoint_displacement",
+            None,
+        ),
+        "target_spacing_ang": getattr(
+            lateral_class,
+            "neb_target_image_spacing",
+            None,
+        ),
+        "estimated_linear_spacing_ang": getattr(
+            lateral_class,
+            "neb_estimated_image_spacing",
+            None,
+        ),
+        "count_limited_by": getattr(
+            lateral_class,
+            "neb_image_count_limited_by",
+            None,
+        ),
+    }
+
+
 def build_diffusion_payload(
     reaction,
     *,
@@ -93,6 +121,7 @@ def build_diffusion_payload(
         "template": {"species": smiles},
         "gas_product": False,
         "description": description,
+        "neb_images": _neb_image_payload(lc),
         "energies_ev": {
             "state_a": None if e_a is None else float(e_a),
             "state_b": None if e_b is None else float(e_b),
@@ -178,6 +207,8 @@ def build_bond_payload(
     e_ab = getattr(lc, "energy_ab", None)
     e_c = getattr(lc, "energy_c", None)
     e_c_precursor = getattr(lc, "energy_c_precursor", None)
+    gas_reactant = getattr(reaction.site, "gas_reactant", None)
+    e_gas_molecule = getattr(gas_reactant, "energy", None)
     e_ts = getattr(lc, "energy_ts", None)
     e_ts_eff: float | None
     ea_couple_raw: float | None
@@ -219,11 +250,20 @@ def build_bond_payload(
         "kind_directions": ["couple", "dissoc"],
         "gas_product": bool(getattr(reaction.site, "gas_product", False)),
         "description": description,
+        "neb_images": _neb_image_payload(lc),
         "energies_ev": {
             "state_ab": None if e_ab is None else float(e_ab),
             "state_c": None if e_c is None else float(e_c),
             "state_c_precursor": (
                 None if e_c_precursor is None else float(e_c_precursor)
+            ),
+            "state_c_gas_reference": (
+                None
+                if getattr(lc, "energy_c_gas_reference", None) is None
+                else float(lc.energy_c_gas_reference)
+            ),
+            "gas_molecule": (
+                None if e_gas_molecule is None else float(e_gas_molecule)
             ),
             "transition_raw": None if e_ts is None else float(e_ts),
             "transition_eff": None if e_ts_eff is None else float(e_ts_eff),
@@ -280,6 +320,16 @@ def build_bond_payload(
             ),
             "state_ab": "state_ab.extxyz",
             "state_c": "state_c.extxyz",
+            "state_c_gas_reference": (
+                "state_c_gas_reference.extxyz"
+                if getattr(lc, "atoms_c_gas_reference", None) is not None
+                else None
+            ),
+            "gas_molecule": (
+                "gas_molecule.extxyz"
+                if getattr(lc, "atoms_gas_molecule", None) is not None
+                else None
+            ),
             "transition": "ts.extxyz",
             "neb_path_initial": (
                 "neb_path_initial.extxyz"

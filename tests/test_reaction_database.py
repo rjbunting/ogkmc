@@ -1114,6 +1114,67 @@ def test_neb_reactions_write_required_states_and_optional_path(
     assert len(hit["neb"]["path"]) == 3
 
 
+def test_bond_record_round_trips_optional_gas_reference_states(tmp_path):
+    root = tmp_path / "bond_gas_reference"
+    operation = {
+        "smiles_a": "[H]",
+        "smiles_b": "[H]",
+        "smiles_c": "[H][H]",
+    }
+    parameters = {
+        "n_images": 3,
+        "climb": True,
+        "calculator": {"class": "ase.calculators.emt.EMT"},
+    }
+    key = calculation_cache_key(
+        kind="bond",
+        identity=operation,
+        parameters=parameters,
+        inputs={},
+    )
+    states = {
+        "state_ab": state_payload(_atoms(), energy_ev=-7.0),
+        "state_c": state_payload(_atoms(0.1), energy_ev=-8.0),
+        "transition": state_payload(_atoms(0.05), energy_ev=-6.5),
+        "state_c_gas_reference": state_payload(
+            Atoms("Pt", positions=[[0.0, 0.0, 0.0]]),
+            energy_ev=-6.8,
+        ),
+        "gas_molecule": state_payload(
+            Atoms(
+                "H2",
+                positions=[[0.0, 0.0, 0.0], [0.0, 0.0, 0.74]],
+            ),
+            energy_ev=-1.2,
+        ),
+    }
+    record = make_calculation_record(
+        kind="bond",
+        cache_key=key,
+        operation=operation,
+        parameters=parameters,
+        inputs={},
+        states=states,
+        reaction_graph=_graph(),
+    )
+
+    record_path = write_calculation_record(root, "bond", key, record)
+    isaac = json.loads(record_path.read_text())
+    assert {
+        "state_c_gas_reference.extxyz",
+        "gas_molecule.extxyz",
+    }.issubset({asset["uri"] for asset in isaac["assets"]})
+
+    hit = load_calculation_record(root, "bond", key, reaction_graph=_graph())
+    assert hit is not None
+    assert len(hit["states"]["state_c_gas_reference"]["atoms"]) == 1
+    assert len(hit["states"]["gas_molecule"]["atoms"]) == 2
+    assert hit["states"]["state_c_gas_reference"]["energy_ev"] == pytest.approx(
+        -6.8
+    )
+    assert hit["states"]["gas_molecule"]["energy_ev"] == pytest.approx(-1.2)
+
+
 def test_verified_states_hydrate_lateral_class_and_export(tmp_path):
     root = tmp_path / "reaction_db"
     key, _, _, _ = _adsorption_record(root)

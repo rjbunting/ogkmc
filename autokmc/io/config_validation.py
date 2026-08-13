@@ -602,6 +602,8 @@ class _Validator:
             ("n_shells_pair", 0),
             ("max_steps", 1),
             ("n_images", 1),
+            ("min_images", 1),
+            ("max_images", 1),
         ):
             self.integer(
                 getattr(cfg, name),
@@ -614,6 +616,14 @@ class _Validator:
                 f"diffusion.{name}",
                 strictly_positive=True,
             )
+        if cfg.image_spacing is not None:
+            self.number(
+                cfg.image_spacing,
+                "diffusion.image_spacing",
+                strictly_positive=True,
+            )
+        if cfg.max_images < cfg.min_images:
+            self.fail("diffusion.max_images must be >= diffusion.min_images")
         if cfg.interpolation not in {"linear", "idpp"}:
             self.fail("diffusion.interpolation must be 'linear' or 'idpp'")
 
@@ -639,6 +649,8 @@ class _Validator:
             ("prune_max_steps", 1),
             ("neb_max_steps", 1),
             ("neb_n_images", 1),
+            ("neb_min_images", 1),
+            ("neb_max_images", 1),
             ("matching_trials", 0),
         ):
             self.integer(
@@ -658,6 +670,14 @@ class _Validator:
                 f"bond.{name}",
                 strictly_positive=True,
             )
+        if cfg.neb_image_spacing is not None:
+            self.number(
+                cfg.neb_image_spacing,
+                "bond.neb_image_spacing",
+                strictly_positive=True,
+            )
+        if cfg.neb_max_images < cfg.neb_min_images:
+            self.fail("bond.neb_max_images must be >= bond.neb_min_images")
         if cfg.neb_interpolation not in {"linear", "idpp"}:
             self.fail("bond.neb_interpolation must be 'linear' or 'idpp'")
         valid_matching = {"auto", "greedy", "hungarian", "reactant_index"}

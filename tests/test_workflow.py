@@ -143,7 +143,14 @@ def test_channel_runtime_propagates_optimizer_choices():
     }
     assert runtime.diffusion.neb_band_eval == "batched"
     assert runtime.diffusion.neb_method == "aseneb"
+    assert runtime.diffusion.image_spacing == pytest.approx(0.25)
+    assert runtime.diffusion.min_images == 6
+    assert runtime.diffusion.max_images == 8
     assert runtime.bond is not None
+    assert runtime.bond.gas_precursor_distance == pytest.approx(3.0)
+    assert runtime.bond.image_spacing == pytest.approx(0.25)
+    assert runtime.bond.min_images == 6
+    assert runtime.bond.max_images == 8
     assert runtime.bond.optimizer == "fire"
     assert runtime.bond.optimizer_kwargs == runtime.diffusion.optimizer_kwargs
     assert runtime.bond.neb_optimizer == "mdmin"

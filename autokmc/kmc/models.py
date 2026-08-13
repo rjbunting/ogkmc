@@ -32,9 +32,12 @@ from autokmc.core.constants import (
     NEB_BAND_EVAL,
     NEB_CLIMB,
     NEB_FMAX,
+    NEB_IMAGE_SPACING,
     NEB_INTERPOLATION,
+    NEB_MAX_IMAGES,
     NEB_METHOD,
     NEB_MAX_STEPS,
+    NEB_MIN_IMAGES,
     NEB_N_IMAGES,
     NEB_SPRING_K,
     NL_MULT_DEFAULT,
@@ -103,6 +106,9 @@ class DiffusionChannelOptions:
     fmax: float = NEB_FMAX
     max_steps: int = NEB_MAX_STEPS
     n_images: int = NEB_N_IMAGES
+    image_spacing: float | None = NEB_IMAGE_SPACING
+    min_images: int = NEB_MIN_IMAGES
+    max_images: int = NEB_MAX_IMAGES
     climb: bool = NEB_CLIMB
     spring_k: float = NEB_SPRING_K
     interpolation: str = NEB_INTERPOLATION
@@ -135,6 +141,9 @@ class BondChannelOptions:
     fmax: float = NEB_FMAX
     max_steps: int = NEB_MAX_STEPS
     n_images: int = NEB_N_IMAGES
+    image_spacing: float | None = NEB_IMAGE_SPACING
+    min_images: int = NEB_MIN_IMAGES
+    max_images: int = NEB_MAX_IMAGES
     climb: bool = NEB_CLIMB
     spring_k: float = NEB_SPRING_K
     interpolation: str = BOND_NEB_INTERPOLATION

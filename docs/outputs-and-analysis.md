@@ -131,6 +131,8 @@ reactions/
     state_ab.extxyz
     state_c_initial.extxyz
     state_c.extxyz
+    state_c_gas_reference.extxyz # empty surface only; gas products
+    gas_molecule.extxyz          # optimized gas molecule; gas products
     ts.extxyz
     neb_path_initial.extxyz      # optional
     neb_path.extxyz              # optional
@@ -141,6 +143,12 @@ vibrational results, KMC barriers, calculator identity, validity, and
 cumulative firing statistics. The `.extxyz` files preserve the structures
 behind those values. Its immutable `discovery_step` records when the folder
 first became part of the discovered network.
+For a gas-product bond reaction, the thermodynamic C-state geometry is stored
+as two independent calculation inputs: `state_c_gas_reference.extxyz` contains
+the relaxed surface/lateral environment without a molecule in the vacuum, and
+`gas_molecule.extxyz` contains only the optimized gas molecule. Their energies
+sum to `energies_ev.state_c`; `state_c.extxyz` remains the molecular precursor
+used as the NEB endpoint.
 Endpoint files ending in `_initial.extxyz` contain the exact structures passed
 to relaxation. When an optimization fails, its corresponding non-`_initial`
 endpoint file contains the last-known atomic geometry. When

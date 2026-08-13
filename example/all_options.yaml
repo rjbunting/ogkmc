@@ -506,8 +506,14 @@ diffusion:
   fmax: 0.01
   max_steps: 200
 
-  # Number of intermediate NEB images; endpoints are not included.
+  # Fixed interior-image count used only when image_spacing is null.
   n_images: 10
+
+  # Dynamic density: choose the smallest count whose largest MIC-aware
+  # corresponding-atom displacement is about 0.25 angstrom per frame.
+  image_spacing: 0.25
+  min_images: 6
+  max_images: 8
 
   # Enable climbing-image NEB.
   climb: true
@@ -561,7 +567,7 @@ bond:
 
   # Initial minimum molecule-to-slab distance in angstrom. The slab and
   # lateral environment are fixed during the precursor relaxation.
-  gas_precursor_distance: 1.8
+  gas_precursor_distance: 3.0
 
   # Build fragment/coupling-product species implied by templates when those
   # species are absent from the feed.
@@ -584,8 +590,13 @@ bond:
   neb_fmax: 0.01
   neb_max_steps: 200
 
-  # Number of intermediate NEB images; endpoints are not included.
+  # Fixed interior-image count used only when neb_image_spacing is null.
   neb_n_images: 10
+
+  # Dynamic bond-NEB image density; total frames are interior images + 2.
+  neb_image_spacing: 0.25
+  neb_min_images: 6
+  neb_max_images: 8
 
   # Enable climbing-image NEB.
   neb_climb: true

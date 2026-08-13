@@ -201,12 +201,20 @@ class BondReactionLateral:
     energy_c_precursor : float | None
         Potential energy (eV) of the relaxed intact molecule above the
         surface used as the physical NEB endpoint for gas-product channels.
+    energy_c_gas_reference : float | None
+        Potential energy (eV) of the relaxed empty surface/lateral
+        environment for a gas-product channel.  Together with the standalone
+        gas-molecule energy this reproduces :attr:`energy_c`.
     energy_ts : float | None
         Potential energy (eV) of the highest NEB image between the two
         states above (the climbing-image saddle when ``climb=True``).
     atoms_ab, atoms_c, atoms_ts : Atoms | None
         Relaxed ASE atoms snapshots persisted by
         :class:`autokmc.io.persistence.ReactionWriter`.
+    atoms_c_gas_reference, atoms_gas_molecule : Atoms | None
+        Separate empty-surface and optimized gas-molecule structures used for
+        the thermodynamic C-state reference of a gas-product channel.  The
+        empty-surface structure contains no molecule in the vacuum region.
     atoms_ab_initial, atoms_c_initial : Atoms | None
         Pre-optimization endpoint structures supplied to the relaxations.
     atoms_neb_path_initial : list[Atoms] | None
@@ -232,15 +240,24 @@ class BondReactionLateral:
     energy_ab        : float | None     = None
     energy_c         : float | None     = None
     energy_c_precursor: float | None    = None
+    energy_c_gas_reference: float | None = None
     energy_ts        : float | None     = None
     atoms_ab         : Any              = None
     atoms_c          : Any              = None
     atoms_ts         : Any              = None
     atoms_ab_initial : Any              = None
     atoms_c_initial  : Any              = None
+    atoms_c_gas_reference: Any          = None
+    atoms_gas_molecule: Any             = None
     atoms_neb_path_initial: Any         = None
     atoms_neb_path   : Any              = None
     neb_path_energies: list[float] | None = None
+    neb_n_images   : int | None       = None
+    neb_n_frames   : int | None       = None
+    neb_max_endpoint_displacement: float | None = None
+    neb_target_image_spacing: float | None = None
+    neb_estimated_image_spacing: float | None = None
+    neb_image_count_limited_by: str | None = None
     stable           : bool | None      = None
     invalid_reason   : str | None       = None
     last_failure_reason: str | None     = None

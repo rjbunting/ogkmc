@@ -146,6 +146,12 @@ class DiffusionLateral:
     atoms_neb_path_initial: Any      = None
     atoms_neb_path: Any              = None
     neb_path_energies: list[float] | None = None
+    neb_n_images: int | None       = None
+    neb_n_frames: int | None       = None
+    neb_max_endpoint_displacement: float | None = None
+    neb_target_image_spacing: float | None = None
+    neb_estimated_image_spacing: float | None = None
+    neb_image_count_limited_by: str | None = None
     stable        : bool | None      = None
     invalid_reason: str | None       = None
     last_failure_reason: str | None  = None

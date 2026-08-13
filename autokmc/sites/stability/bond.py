@@ -76,7 +76,7 @@ Public API
 from __future__ import annotations
 
 import itertools
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, TYPE_CHECKING
 
@@ -120,6 +120,7 @@ from autokmc.sites.stability.neb import (
     make_neb_band,
     neb_optimizer_logfile,
     project_neb_path,
+    resolve_neb_image_count,
     run_neb,
 )
 from autokmc.sites.bond import BondReactionSite, BondReactionLateral
@@ -128,6 +129,9 @@ from autokmc.core.constants import (
     LATERAL_SHELLS_DEFAULT,
     NL_MULT_DEFAULT,
     NEB_BAND_EVAL,
+    NEB_IMAGE_SPACING,
+    NEB_MAX_IMAGES,
+    NEB_MIN_IMAGES,
     NEB_N_IMAGES,
     NEB_FMAX,
     NEB_MAX_STEPS,
@@ -1715,6 +1719,18 @@ def _stamp_gas_product_runtime_state(
         )
 
 
+def _cached_gas_reference_atoms(
+    record: Mapping[str, Any],
+) -> tuple[Atoms, Atoms] | None:
+    """Return the two reproducible gas-reference structures from a cache hit."""
+    states = record.get("states", {})
+    surface = states.get("state_c_gas_reference", {}).get("atoms")
+    molecule = states.get("gas_molecule", {}).get("atoms")
+    if not isinstance(surface, Atoms) or not isinstance(molecule, Atoms):
+        return None
+    return surface.copy(), molecule.copy()
+
+
 def _apply_bond_thermochemistry(
     lc: BondReactionLateral,
     brs: BondReactionSite,
@@ -1907,6 +1923,48 @@ def _write_bond_calculation_cache(
             "energies_ev": list(cache_neb_energies or []),
             "path_atoms": list(cache_neb_path),
         }
+    states = {
+        "state_ab": state_payload(
+            atoms_ab,
+            energy_ev=energy_ab,
+            properties=props_ab,
+        ),
+        "state_c": state_payload(
+            atoms_c,
+            energy_ev=energy_c,
+            properties=props_c,
+        ),
+        "transition": state_payload(
+            atoms_ts,
+            energy_ev=energy_ts,
+            properties=props_ts,
+        ),
+    }
+    gas_surface = getattr(lc, "atoms_c_gas_reference", None)
+    gas_molecule = getattr(lc, "atoms_gas_molecule", None)
+    gas_surface_energy = getattr(lc, "energy_c_gas_reference", None)
+    gas_reactant = getattr(brs, "gas_reactant", None)
+    gas_molecule_energy = getattr(gas_reactant, "energy", None)
+    if (
+        gas_product
+        and isinstance(gas_surface, Atoms)
+        and isinstance(gas_molecule, Atoms)
+        and gas_surface_energy is not None
+        and gas_molecule_energy is not None
+    ):
+        states.update(
+            {
+                "state_c_gas_reference": state_payload(
+                    gas_surface,
+                    energy_ev=float(gas_surface_energy),
+                ),
+                "gas_molecule": state_payload(
+                    gas_molecule,
+                    energy_ev=float(gas_molecule_energy),
+                ),
+            }
+        )
+
     record = make_calculation_record(
         kind="bond",
         cache_key=cache_key,
@@ -1935,23 +1993,7 @@ def _write_bond_calculation_cache(
             "lateral_class": int(lc.lateral_class),
             "gas_product": bool(gas_product),
         },
-        states={
-            "state_ab": state_payload(
-                atoms_ab,
-                energy_ev=energy_ab,
-                properties=props_ab,
-            ),
-            "state_c": state_payload(
-                atoms_c,
-                energy_ev=energy_c,
-                properties=props_c,
-            ),
-            "transition": state_payload(
-                atoms_ts,
-                energy_ev=energy_ts,
-                properties=props_ts,
-            ),
-        },
+        states=states,
         reaction_graph=cache_graph,
         neb=neb,
         lateral_attributes={
@@ -1985,6 +2027,28 @@ def _write_bond_calculation_cache(
                 "neb_seed_fingerprint",
                 None,
             ),
+            "neb_n_images": getattr(lc, "neb_n_images", None),
+            "neb_n_frames": getattr(lc, "neb_n_frames", None),
+            "neb_max_endpoint_displacement": getattr(
+                lc,
+                "neb_max_endpoint_displacement",
+                None,
+            ),
+            "neb_target_image_spacing": getattr(
+                lc,
+                "neb_target_image_spacing",
+                None,
+            ),
+            "neb_estimated_image_spacing": getattr(
+                lc,
+                "neb_estimated_image_spacing",
+                None,
+            ),
+            "neb_image_count_limited_by": getattr(
+                lc,
+                "neb_image_count_limited_by",
+                None,
+            ),
         },
     )
     write_calculation_record(
@@ -2007,6 +2071,9 @@ def check_bond_site_stability(
     fmax: float = NEB_FMAX,
     max_steps: int = NEB_MAX_STEPS,
     n_images: int = NEB_N_IMAGES,
+    image_spacing: float | None = NEB_IMAGE_SPACING,
+    min_images: int = NEB_MIN_IMAGES,
+    max_images: int = NEB_MAX_IMAGES,
     climb: bool = NEB_CLIMB,
     spring_k: float = NEB_SPRING_K,
     interpolation: str = BOND_NEB_INTERPOLATION,
@@ -2168,6 +2235,11 @@ def check_bond_site_stability(
         ),
         "neb_method": str(neb_method).strip().lower(),
         "n_images": int(n_images),
+        "image_spacing": (
+            None if image_spacing is None else float(image_spacing)
+        ),
+        "min_images": int(min_images),
+        "max_images": int(max_images),
         "climb": bool(climb),
         "spring_k": float(spring_k),
         "interpolation": str(interpolation),
@@ -2282,6 +2354,17 @@ def check_bond_site_stability(
                     allow_electronic_match=True,
                     fingerprint_memo=cache_fingerprint_memo,
                 )
+            cached_gas_atoms = (
+                None
+                if cached is None or not gas_product
+                else _cached_gas_reference_atoms(cached)
+            )
+            if gas_product and cached is not None and cached_gas_atoms is None:
+                # Older gas-product records do not contain the two independent
+                # structures needed to reproduce the additive C-state energy.
+                # Recompute once so the upgraded cache and result folder are
+                # complete rather than silently returning incomplete assets.
+                cached = None
             if cached is not None and apply_cached_states(
                 lc,
                 cached,
@@ -2292,11 +2375,27 @@ def check_bond_site_stability(
                 },
                 include_properties=cached.get("_cache_match") != "electronic",
             ):
+                if cached_gas_atoms is not None:
+                    (
+                        lc.atoms_c_gas_reference,
+                        lc.atoms_gas_molecule,
+                    ) = cached_gas_atoms
+                    lc.energy_c_gas_reference = float(
+                        cached["states"]["state_c_gas_reference"]["energy_ev"]
+                    )
                 if capture_neb_path:
                     cached_path = list(
                         getattr(lc, "atoms_neb_path", None) or []
                     )
-                    if len(cached_path) != int(n_images) + 2:
+                    cached_interior = len(cached_path) - 2
+                    compatible_count = (
+                        cached_interior >= 1
+                        and (
+                            image_spacing is not None
+                            or cached_interior == int(n_images)
+                        )
+                    )
+                    if not compatible_count:
                         lc.stable = None
                         raise ValueError(
                             "cached bare bond result has no compatible "
@@ -2311,6 +2410,8 @@ def check_bond_site_stability(
                         getattr(lc, "neb_path_energies", None) or []
                     )
                     lc._warm_start_member_index = int(member_index)
+                    lc.neb_n_images = cached_interior
+                    lc.neb_n_frames = len(cached_path)
                     if not persist_neb_path:
                         lc.atoms_neb_path = None
                         lc.neb_path_energies = None
@@ -2448,6 +2549,14 @@ def check_bond_site_stability(
         from autokmc.structure import StructureOptimisationError, optimise_structure
 
         gas_reactant = getattr(brs, "gas_reactant", None)
+        gas_atoms = getattr(gas_reactant, "atoms", None)
+        if not isinstance(gas_atoms, Atoms):
+            raise ValueError(
+                f"Gas product {brs.template.smiles_c!r} has no optimized "
+                "gas-phase structure."
+            )
+        lc.atoms_gas_molecule = gas_atoms.copy()
+        lc.atoms_gas_molecule.calc = None
         gas_energy = getattr(gas_reactant, "energy", float("nan"))
         if not np.isfinite(float(gas_energy)):
             raise ValueError(
@@ -2488,6 +2597,9 @@ def check_bond_site_stability(
             wrapped.state_label = "endpoint_c"
             raise wrapped from exc
         E_c = E_empty + float(gas_energy)
+        lc.energy_c_gas_reference = E_empty
+        lc.atoms_c_gas_reference = atoms_empty_opt.copy()
+        lc.atoms_c_gas_reference.calc = None
         atoms_c_opt, gas_mapping_diag = _gas_product_neb_endpoint(
             atoms_empty=atoms_empty_opt,
             atoms_ab=atoms_ab_opt,
@@ -2647,6 +2759,23 @@ def check_bond_site_stability(
     )
 
     # ── 3-4. NEB band ───────────────────────────────────────────────────
+    image_selection = resolve_neb_image_count(
+        atoms_ab_opt,
+        atoms_c_opt,
+        fixed_n_images=int(n_images),
+        image_spacing=image_spacing,
+        min_images=int(min_images),
+        max_images=int(max_images),
+    )
+    resolved_n_images = image_selection.n_images
+    lc.neb_n_images = resolved_n_images
+    lc.neb_n_frames = image_selection.n_frames
+    lc.neb_max_endpoint_displacement = (
+        image_selection.max_endpoint_displacement
+    )
+    lc.neb_target_image_spacing = image_selection.target_spacing
+    lc.neb_estimated_image_spacing = image_selection.estimated_linear_spacing
+    lc.neb_image_count_limited_by = image_selection.limited_by
     projected_seed_path = None
     if seed_images:
         projected_seed_path = project_neb_path(
@@ -2656,6 +2785,11 @@ def check_bond_site_stability(
             n_slab=n_slab,
             n_lateral=n_lat,
         )
+        if (
+            projected_seed_path is not None
+            and len(projected_seed_path) != resolved_n_images + 2
+        ):
+            projected_seed_path = None
     lc.neb_seed_fingerprint = seed_fingerprint
     lc.neb_initialization = (
         "bare_transfer"
@@ -2668,7 +2802,10 @@ def check_bond_site_stability(
     )
     if verbose:
         print(
-            f"  [NEB] images={int(n_images)}  climb={bool(climb)}  "
+            f"  [NEB] images={resolved_n_images} interior / "
+            f"{image_selection.n_frames} frames  "
+            f"spacing≈{image_selection.estimated_linear_spacing:.3f} Å  "
+            f"climb={bool(climb)}  "
             f"fmax={float(fmax):.4f} eV/Å  max_steps={int(max_steps)}"
         )
         if projected_seed_path is not None:
@@ -2687,7 +2824,7 @@ def check_bond_site_stability(
         atoms_c_opt,
         calculator=calculator,
         purpose="bond NEB",
-        n_images=int(n_images),
+        n_images=resolved_n_images,
         interpolation=str(interpolation),
         spring_k=float(spring_k),
         climb=bool(climb),

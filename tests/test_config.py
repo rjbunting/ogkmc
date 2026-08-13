@@ -67,7 +67,13 @@ def test_load_yaml_ok(tmp_path):
     assert cfg.kmc.n_steps == 10
     assert cfg.diffusion.enabled is False
     assert cfg.diffusion.spring_k == pytest.approx(5.0)
+    assert cfg.diffusion.image_spacing == pytest.approx(0.25)
+    assert cfg.diffusion.min_images == 6
+    assert cfg.diffusion.max_images == 8
     assert cfg.bond.neb_spring_k == pytest.approx(5.0)
+    assert cfg.bond.neb_image_spacing == pytest.approx(0.25)
+    assert cfg.bond.neb_min_images == 6
+    assert cfg.bond.neb_max_images == 8
     assert cfg.free_energy.symmetry_tolerance == pytest.approx(0.3)
     assert cfg.adsorbate_sites.anchor_k_max == 4
     assert cfg.output.calculation_cache_lookup_enabled is False
@@ -590,6 +596,10 @@ def test_missing_file():
         "output:\n  calculation_cache_lookup_enabled: 'false'\n",
         "diffusion:\n  enabled: 'false'\n",
         "bond:\n  neb_climb: 'true'\n",
+        "diffusion:\n  image_spacing: 0\n",
+        "diffusion:\n  min_images: 4\n  max_images: 3\n",
+        "bond:\n  neb_image_spacing: -0.1\n",
+        "bond:\n  neb_min_images: 5\n  neb_max_images: 4\n",
         "kmc:\n  temperature_k: 0\n",
         "free_energy:\n  vibration_nfree: 3\n",
         "free_energy:\n  symmetry_tolerance: 0\n",

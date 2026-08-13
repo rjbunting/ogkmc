@@ -255,6 +255,17 @@ DIFFUSION_MAX_HOPS: int = 0
 #: :func:`autokmc.sites.stability.diffusion.check_diffusion_stability`.
 NEB_N_IMAGES: int = 10
 
+#: Target maximum displacement (Å) of any corresponding atom between
+#: adjacent linearly interpolated NEB frames.  ``None`` restores the fixed
+#: ``NEB_N_IMAGES`` policy.
+NEB_IMAGE_SPACING: float | None = 0.25
+
+#: Lower and upper bounds on the dynamically selected number of interior
+#: images.  The upper bound protects KMC campaigns from pathological atom
+#: mappings that would otherwise allocate an unbounded band.
+NEB_MIN_IMAGES: int = 6
+NEB_MAX_IMAGES: int = 8
+
 #: Force convergence threshold (eV/Å) for the NEB band relaxation in
 #: :func:`autokmc.sites.stability.diffusion.check_diffusion_stability`.
 NEB_FMAX: float = 0.01
@@ -366,7 +377,7 @@ BOND_GAS_PRECURSOR_RELAX: bool = True
 
 #: Initial minimum molecule-to-slab distance (Å) for the fixed-environment
 #: gas-precursor relaxation.
-BOND_GAS_PRECURSOR_DISTANCE: float = 1.8
+BOND_GAS_PRECURSOR_DISTANCE: float = 3.0
 
 #: Folder-name format for bond reaction folders persisted by
 #: :class:`autokmc.io.persistence.ReactionWriter` (when enabled).

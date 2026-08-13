@@ -119,7 +119,12 @@ diffusion:
   prune_by_adsorption_pair: true
   fmax: 0.05
   max_steps: 1000
+  # Dynamically space images by maximum corresponding-atom displacement.
+  # n_images is the fixed fallback when image_spacing is null.
   n_images: 8
+  image_spacing: 0.25
+  min_images: 6
+  max_images: 8
   climb: true
   spring_k: 5.0
   interpolation: linear
@@ -137,11 +142,11 @@ bond:
   auto_build_leaf_species: true
 
   # For gas-fed dissociation (for example H2(g) -> 2H*), first place the
-  # intact molecule 1.8 Å above the surface and relax only the molecule while
+  # intact molecule 3.0 Å from the surface and relax only the molecule while
   # the slab is fixed. The resulting adsorbed precursor is the NEB endpoint;
   # empty slab + gas remains the KMC thermodynamic reference.
   gas_precursor_relax: true
-  gas_precursor_distance: 1.8
+  gas_precursor_distance: 3.0
 
   pair_n_shells: 1
   prune_by_triple: true
@@ -151,8 +156,12 @@ bond:
 
   neb_fmax: 0.05
   neb_max_steps: 1000
-  # Eight interior images plus two endpoints match the ten-frame path.
+  # Dynamically choose the band length from the relaxed endpoint distance.
+  # neb_n_images is the fixed fallback when neb_image_spacing is null.
   neb_n_images: 8
+  neb_image_spacing: 0.25
+  neb_min_images: 6
+  neb_max_images: 8
   neb_climb: true
   neb_spring_k: 1.0
   neb_interpolation: linear

@@ -48,9 +48,12 @@ from autokmc.core.constants import (
     NEB_BAND_EVAL,
     NEB_FMAX,
     NEB_CLIMB,
+    NEB_IMAGE_SPACING,
     NEB_INTERPOLATION,
+    NEB_MAX_IMAGES,
     NEB_METHOD,
     NEB_MAX_STEPS,
+    NEB_MIN_IMAGES,
     NEB_N_IMAGES,
     NEB_SPRING_K,
     NL_MULT_DEFAULT,
@@ -253,7 +256,14 @@ class DiffusionCfg:
     prune_by_adsorption_pair:  bool   = DIFFUSION_PRUNE_BY_ADS_PAIR
     fmax:             float  = NEB_FMAX
     max_steps:        int    = NEB_MAX_STEPS
+    #: Fixed interior-image count used when ``image_spacing`` is null.
     n_images:         int    = NEB_N_IMAGES
+    #: Target maximum corresponding-atom displacement per initial frame.
+    #: A positive value enables dynamic image selection; ``None`` uses
+    #: ``n_images`` exactly.
+    image_spacing:    float | None = NEB_IMAGE_SPACING
+    min_images:       int    = NEB_MIN_IMAGES
+    max_images:       int    = NEB_MAX_IMAGES
     climb:            bool   = NEB_CLIMB
     spring_k:         float  = NEB_SPRING_K
     interpolation:    str    = NEB_INTERPOLATION
@@ -327,7 +337,13 @@ class BondCfg:
     # ── NEB knobs (consumed by ``check_bond_site_stability`` via the KMC loop)
     neb_fmax:                float = NEB_FMAX
     neb_max_steps:           int   = NEB_MAX_STEPS
+    #: Fixed interior-image count used when ``neb_image_spacing`` is null.
     neb_n_images:            int   = NEB_N_IMAGES
+    #: Dynamic image density and safety bounds.  Counts refer to interior
+    #: images; total frames are the resolved count plus two endpoints.
+    neb_image_spacing:       float | None = NEB_IMAGE_SPACING
+    neb_min_images:          int   = NEB_MIN_IMAGES
+    neb_max_images:          int   = NEB_MAX_IMAGES
     neb_climb:               bool  = NEB_CLIMB
     neb_spring_k:            float = NEB_SPRING_K
     neb_interpolation:       str   = BOND_NEB_INTERPOLATION

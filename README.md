@@ -278,6 +278,9 @@ diffusion:
   fmax: 0.05
   max_steps: 500
   n_images: 8
+  image_spacing: 0.25
+  min_images: 6
+  max_images: 8
   climb: true
   spring_k: 5.0
   interpolation: idpp
@@ -317,6 +320,9 @@ bond:
   neb_fmax: 0.05
   neb_max_steps: 500
   neb_n_images: 8
+  neb_image_spacing: 0.25
+  neb_min_images: 6
+  neb_max_images: 8
   neb_climb: true
   neb_spring_k: 5.0
   neb_interpolation: idpp
@@ -328,6 +334,10 @@ bond:
 `atom_matching` controls how atoms in the initial and final bond-reaction
 endpoints are paired before NEB interpolation. The default `auto` tries several
 reasonable same-element mappings and keeps the lowest-displacement path.
+With the default non-null image spacing, AutoKMC chooses the interior-image
+count dynamically from the largest MIC-aware corresponding-atom displacement
+between relaxed endpoints. The configured `n_images`/`neb_n_images` values are
+fixed-count fallbacks used when the corresponding spacing is `null`.
 `hungarian` uses global same-element assignment directly. `greedy` and
 `reactant_index` are useful comparison modes.
 
@@ -425,6 +435,8 @@ reactions/
     state_ab.extxyz
     state_c_initial.extxyz
     state_c.extxyz
+    state_c_gas_reference.extxyz # empty surface only, gas products
+    gas_molecule.extxyz          # optimized gas molecule only, gas products
     ts.extxyz
     neb_path_initial.extxyz       # when persist_neb_path is true
     neb_path.extxyz               # when persist_neb_path is true
@@ -433,6 +445,10 @@ reactions/
 `reaction.json` stores the energies, barriers, vibrational data when present,
 calculator metadata, and references to the structures written in that folder.
 The `*_initial.extxyz` endpoint files are the structures before relaxation.
+For gas-product bond reactions, `state_c_gas_reference.extxyz` is the relaxed
+empty surface/lateral environment with no molecule in the vacuum, while
+`gas_molecule.extxyz` is the separately optimized gas molecule. Recomputing
+their independent energies reproduces the additive thermodynamic C state.
 For diffusion and bond reactions, `neb_path_initial.extxyz` is the interpolated
 band before NEB optimization and `neb_path.extxyz` is the optimized band.
 Failed diffusion and bond candidates retain both files automatically, even

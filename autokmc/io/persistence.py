@@ -983,6 +983,10 @@ class ReactionWriter:
             atoms_ab = getattr(lc, "atoms_ab", None)
             atoms_c  = getattr(lc, "atoms_c",  None)
             atoms_ts = getattr(lc, "atoms_ts", None)
+            atoms_c_gas_reference = getattr(
+                lc, "atoms_c_gas_reference", None
+            )
+            atoms_gas_molecule = getattr(lc, "atoms_gas_molecule", None)
             if atoms_ab_initial is not None:
                 _atomic_extxyz(
                     folder / "state_ab_initial.extxyz",
@@ -1008,6 +1012,16 @@ class ReactionWriter:
                     "ReactionWriter: bond lateral_class iso=%d lat=%d "
                     "has no atoms_c — state_c.extxyz will not be written.",
                     iso, lat,
+                )
+            if atoms_c_gas_reference is not None:
+                _atomic_extxyz(
+                    folder / "state_c_gas_reference.extxyz",
+                    _safe_atoms_copy(atoms_c_gas_reference),
+                )
+            if atoms_gas_molecule is not None:
+                _atomic_extxyz(
+                    folder / "gas_molecule.extxyz",
+                    _safe_atoms_copy(atoms_gas_molecule),
                 )
             if atoms_ts is not None:
                 _atomic_extxyz(folder / "ts.extxyz", _safe_atoms_copy(atoms_ts))
@@ -1518,6 +1532,16 @@ class ReactionWriter:
             ("state_c_initial", "state_c_initial.extxyz", getattr(lc, "atoms_c_initial", None)),
             ("state_ab", "state_ab.extxyz", getattr(lc, "atoms_ab", None)),
             ("state_c", "state_c.extxyz", getattr(lc, "atoms_c", None)),
+            (
+                "state_c_gas_reference",
+                "state_c_gas_reference.extxyz",
+                getattr(lc, "atoms_c_gas_reference", None),
+            ),
+            (
+                "gas_molecule",
+                "gas_molecule.extxyz",
+                getattr(lc, "atoms_gas_molecule", None),
+            ),
             ("transition", "ts.extxyz", getattr(lc, "atoms_ts", None)),
         )
         atom_assets: dict[str, str | None] = {}
@@ -1603,6 +1627,17 @@ class ReactionWriter:
                     None
                     if getattr(lc, "energy_c", None) is None
                     else float(lc.energy_c)
+                ),
+                "state_c_gas_reference": (
+                    None
+                    if getattr(lc, "energy_c_gas_reference", None) is None
+                    else float(lc.energy_c_gas_reference)
+                ),
+                "gas_molecule": (
+                    None
+                    if getattr(getattr(brs, "gas_reactant", None), "energy", None)
+                    is None
+                    else float(brs.gas_reactant.energy)
                 ),
                 "transition_raw": (
                     None
