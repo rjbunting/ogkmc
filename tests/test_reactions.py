@@ -108,6 +108,46 @@ def test_bond_energetics_rejects_unknown_direction():
         _bond_energetics_cached(lc, "merge-ish", temperature=500.0)
 
 
+def test_reversible_rates_floor_low_regular_neb_barrier_at_point_one_ev():
+    diffusion = SimpleNamespace(
+        energy_a=0.0,
+        energy_b=0.4,
+        energy_ts=0.45,
+    )
+    bond = SimpleNamespace(
+        energy_ab=0.0,
+        energy_c=0.4,
+        energy_ts=0.45,
+        gas_product=False,
+    )
+
+    diffusion_forward = _diffusion_energetics_cached(
+        diffusion,
+        "a_to_b",
+        temperature=500.0,
+    )
+    diffusion_reverse = _diffusion_energetics_cached(
+        diffusion,
+        "b_to_a",
+        temperature=500.0,
+    )
+    bond_forward = _bond_energetics_cached(
+        bond,
+        "couple",
+        temperature=500.0,
+    )
+    bond_reverse = _bond_energetics_cached(
+        bond,
+        "dissoc",
+        temperature=500.0,
+    )
+
+    assert diffusion_reverse[1] == pytest.approx(0.1)
+    assert bond_reverse[1] == pytest.approx(0.1)
+    assert diffusion_forward[1] == pytest.approx(0.5)
+    assert bond_forward[1] == pytest.approx(0.5)
+
+
 def test_nonfinite_adsorption_energetics_are_rejected():
     lc = SimpleNamespace(energy_occupied=float("nan"), energy_unoccupied=0.0)
 
@@ -164,6 +204,42 @@ def test_reactions_package_exports_public_models():
     assert AdsorptionReaction.__name__ == "AdsorptionReaction"
     assert DiffusionReaction.__name__ == "DiffusionReaction"
     assert BondReaction.__name__ == "BondReaction"
+
+
+def test_bond_sweep_retains_completed_members_when_later_neb_fails(
+    monkeypatch,
+):
+    completed = object()
+    site = SimpleNamespace(
+        member_node_ids=[object(), object()],
+        applicable_reactions=["stale"],
+    )
+
+    def evaluate_member(_graph, _site, member_index, *_args, **_kwargs):
+        if member_index == 0:
+            return completed
+        raise bond_module.BondNEBNotConvergedError(
+            "forced later-member CI-NEB failure"
+        )
+
+    monkeypatch.setattr(
+        bond_module,
+        "get_applicable_bond_reaction_for_member",
+        evaluate_member,
+    )
+
+    with pytest.raises(
+        bond_module.BondNEBNotConvergedError,
+        match="later-member CI-NEB failure",
+    ):
+        bond_module.get_applicable_bond_reactions(
+            nx.Graph(),
+            site,
+            object(),
+            temperature=500.0,
+        )
+
+    assert site.applicable_reactions == [completed]
 
 
 def _detached_seed_band() -> list[Atoms]:

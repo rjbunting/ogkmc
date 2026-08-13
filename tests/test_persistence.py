@@ -214,6 +214,10 @@ def test_reaction_writer_persists_initial_structures_and_neb_paths(
         neb_target_image_spacing=0.25,
         neb_estimated_image_spacing=1.5 / 7.0,
         neb_image_count_limited_by="distance",
+        neb_climb_performed=True,
+        neb_climb_skipped_low_barrier=False,
+        neb_regular_forward_barrier=1.0,
+        neb_regular_reverse_barrier=0.8,
     )
     diffusion_reaction = SimpleNamespace(
         kind="diffusion",
@@ -252,6 +256,10 @@ def test_reaction_writer_persists_initial_structures_and_neb_paths(
         neb_target_image_spacing=0.25,
         neb_estimated_image_spacing=1.5 / 7.0,
         neb_image_count_limited_by="distance",
+        neb_climb_performed=False,
+        neb_climb_skipped_low_barrier=True,
+        neb_regular_forward_barrier=1.5,
+        neb_regular_reverse_barrier=0.05,
     )
     bond_reaction = SimpleNamespace(
         kind="bond",
@@ -315,6 +323,11 @@ def test_reaction_writer_persists_initial_structures_and_neb_paths(
     assert bond_payload["neb_images"]["target_spacing_ang"] == pytest.approx(
         0.25
     )
+    assert bond_payload["neb_images"]["climb_performed"] is False
+    assert bond_payload["neb_images"]["climb_skipped_low_barrier"] is True
+    assert bond_payload["neb_images"][
+        "regular_reverse_barrier_ev"
+    ] == pytest.approx(0.05)
 
     diffusion_payload = json.loads(
         (diffusion_folder / "reaction.json").read_text()
@@ -323,6 +336,7 @@ def test_reaction_writer_persists_initial_structures_and_neb_paths(
         "state_a_initial.extxyz"
     )
     assert diffusion_payload["neb_images"]["interior_images"] == 6
+    assert diffusion_payload["neb_images"]["climb_performed"] is True
     assert diffusion_payload["atoms"]["neb_path_initial"] == (
         "neb_path_initial.extxyz"
     )

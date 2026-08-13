@@ -591,6 +591,10 @@ def get_applicable_reactions(
             f"{site.reactant!r}.  Pass it via the ``reactants`` argument."
         )
     reactions: list[AdsorptionReaction] = []
+    # Publish the live list before the first expensive member calculation.
+    # If a later relaxation/NEB raises, KMC's emergency persistence pass can
+    # still retain every reaction completed earlier in this site sweep.
+    site.applicable_reactions = reactions
 
     for m_idx in range(len(site.member_node_ids)):
         reaction = get_applicable_reaction_for_member(
@@ -620,7 +624,6 @@ def get_applicable_reactions(
         if reaction is not None:
             reactions.append(reaction)
 
-    site.applicable_reactions = reactions
     return reactions
 
 

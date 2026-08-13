@@ -69,6 +69,26 @@ def _neb_image_payload(lateral_class) -> dict[str, Any]:
             "neb_image_count_limited_by",
             None,
         ),
+        "climb_performed": getattr(
+            lateral_class,
+            "neb_climb_performed",
+            None,
+        ),
+        "climb_skipped_low_barrier": getattr(
+            lateral_class,
+            "neb_climb_skipped_low_barrier",
+            None,
+        ),
+        "regular_forward_barrier_ev": getattr(
+            lateral_class,
+            "neb_regular_forward_barrier",
+            None,
+        ),
+        "regular_reverse_barrier_ev": getattr(
+            lateral_class,
+            "neb_regular_reverse_barrier",
+            None,
+        ),
     }
 
 

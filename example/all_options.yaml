@@ -517,7 +517,7 @@ diffusion:
   min_images: 6
   max_images: 8
 
-  # Enable climbing-image NEB.
+  # Enable climbing-image NEB when both ordinary barriers are >= 0.1 eV.
   climb: true
 
   # NEB spring constant.
@@ -601,7 +601,7 @@ bond:
   neb_min_images: 6
   neb_max_images: 8
 
-  # Enable climbing-image NEB.
+  # Enable climbing-image NEB when both ordinary barriers are >= 0.1 eV.
   neb_climb: true
 
   # Bond-reaction NEB spring constant.

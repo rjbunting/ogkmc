@@ -277,6 +277,12 @@ NEB_MAX_STEPS: int = 200
 #: climbing-image NEB (CI-NEB) so it converges onto the saddle point.
 NEB_CLIMB: bool = True
 
+#: Minimum activation barrier used by reversible KMC rates.  An ordinary NEB
+#: whose raw forward or reverse barrier is below this value does not need a
+#: climbing-image refinement; the common effective TS level applies this floor
+#: while preserving detailed energy consistency between both directions.
+EA_MIN: float = 0.1
+
 #: NEB spring constant (eV / Å²).
 NEB_SPRING_K: float = 5.0
 

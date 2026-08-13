@@ -21,8 +21,9 @@ to be evaluated lazily, only when the KMC loop actually needs them:
    ``energy_ab`` and ``energy_c`` on the
    :class:`~autokmc.sites.bond.BondReactionLateral`.
 
-3. The **CI-NEB transition-state energy** ``energy_ts`` between the two
-   endpoints, with the standard connectivity / saddle-validity guards.
+3. The **NEB transition-state energy** ``energy_ts`` between the two
+   endpoints, with CI refinement only when both ordinary directional barriers
+   are at least the KMC floor, plus the standard connectivity guards.
 
 See :func:`check_bond_site_stability`.
 
@@ -126,6 +127,7 @@ from autokmc.sites.stability.neb import (
 from autokmc.sites.bond import BondReactionSite, BondReactionLateral
 from autokmc.sites.diffusion import _member_clique_union
 from autokmc.core.constants import (
+    EA_MIN,
     LATERAL_SHELLS_DEFAULT,
     NL_MULT_DEFAULT,
     NEB_BAND_EVAL,
@@ -1588,6 +1590,7 @@ def _check_bond_ts_validity(
     n_interior: int,
     e_c_path: float | None = None,
     energy_tol: float = 1e-3,
+    allow_barrier_floor: bool = False,
 ) -> None:
     """Validate that the highest-energy NEB image is a real saddle.
 
@@ -1618,7 +1621,7 @@ def _check_bond_ts_validity(
             e_ts, e_max_endpoint, energy_tol,
         )
 
-    if n_interior >= 1:
+    if n_interior >= 1 and not allow_barrier_floor:
         # Check energy proximity regardless of image index — a TS image at
         # position k=2 can still collapse to an endpoint energy if the NEB
         # is nearly flat near that end.  Restricting to ts_index == 1 or
@@ -1820,7 +1823,10 @@ def _apply_bond_thermochemistry(
     else:
         c_thermo = _harm(atoms_c, "state_c", energy_c)
 
-    if getattr(free_energy_options, "include_ts_vibrations", True):
+    if (
+        getattr(free_energy_options, "include_ts_vibrations", True)
+        and not getattr(lc, "neb_climb_skipped_low_barrier", False)
+    ):
         ts_thermo = _harm(atoms_ts, "ts", energy_ts)
     else:
         average = 0.5 * (ab_thermo["g_corr_ev"] + c_thermo["g_corr_ev"])
@@ -2049,6 +2055,26 @@ def _write_bond_calculation_cache(
                 "neb_image_count_limited_by",
                 None,
             ),
+            "neb_climb_performed": getattr(
+                lc,
+                "neb_climb_performed",
+                None,
+            ),
+            "neb_climb_skipped_low_barrier": getattr(
+                lc,
+                "neb_climb_skipped_low_barrier",
+                None,
+            ),
+            "neb_regular_forward_barrier": getattr(
+                lc,
+                "neb_regular_forward_barrier",
+                None,
+            ),
+            "neb_regular_reverse_barrier": getattr(
+                lc,
+                "neb_regular_reverse_barrier",
+                None,
+            ),
         },
     )
     write_calculation_record(
@@ -2120,9 +2146,10 @@ def check_bond_site_stability(
        thermodynamic reference.
     3. Converge an ordinary NEB band of ``n_images`` interior images between
        the two relaxed endpoints with the requested *interpolation* and
-       *spring_k*.  If *climb* is enabled, retain the same band and spring
-       constant, enable its climbing image, and converge it again.  All images
-       share one acquired calculator via ASE's SingleCalculatorNEB-style path.
+       *spring_k*. If *climb* is enabled and both raw directional barriers are
+       at least ``EA_MIN``, retain the same band and spring constant, enable
+       its climbing image, and converge it again. All images share one acquired
+       calculator via ASE's SingleCalculatorNEB-style path.
     4. Identify the TS as the highest-energy interior image; validate
        (no fragmentation into a third species, no collapse onto an
        endpoint); store all energies / atoms / (optional) full band on
@@ -2257,6 +2284,10 @@ def check_bond_site_stability(
             if image_spacing is None
             else "max_gap_2x_restore_lowest_fmax_halve_controls_v1"
         ),
+        "neb_climb_policy": {
+            "name": "skip_if_either_regular_barrier_below_ea_min_v1",
+            "minimum_barrier_ev": float(EA_MIN),
+        },
         "gas_product": bool(gas_product),
         "gas_lift_height": float(getattr(brs, "gas_lift_height", 6.0)),
         "free_energy_enabled": bool(
@@ -2843,6 +2874,7 @@ def check_bond_site_stability(
         neb_method=neb_method,
         band_eval=neb_band_eval,
         image_spacing=image_selection.target_spacing,
+        barrier_endpoint_energies=(float(E_ab), float(E_c)),
         verbose=verbose,
         not_converged_error=BondNEBNotConvergedError,
         persist_path=persist_neb_path,
@@ -2871,6 +2903,12 @@ def check_bond_site_stability(
     k_ts = neb_result.transition_index
 
     lc.energy_ts = E_ts
+    lc.neb_climb_performed = neb_result.climb_performed
+    lc.neb_climb_skipped_low_barrier = (
+        neb_result.climb_skipped_low_barrier
+    )
+    lc.neb_regular_forward_barrier = neb_result.regular_forward_barrier
+    lc.neb_regular_reverse_barrier = neb_result.regular_reverse_barrier
     lc.atoms_ts = atoms_ts
     # Keep the final path attached until all validation and thermochemistry
     # steps succeed.  Failed candidates are then self-contained diagnostics.
@@ -2899,7 +2937,8 @@ def check_bond_site_stability(
         e_ts       = E_ts,
         ts_index   = k_ts,
         n_interior = neb_result.n_interior,
-    )
+        allow_barrier_floor=neb_result.climb_skipped_low_barrier,
+        )
 
     _apply_bond_thermochemistry(
         lc,

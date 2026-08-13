@@ -6,6 +6,8 @@ import math
 
 from scipy import constants
 
+from autokmc.core.constants import EA_MIN
+
 #: Boltzmann constant in eV / K.
 KB_EV: float = float(constants.physical_constants["Boltzmann constant in eV/K"][0])
 
@@ -14,10 +16,6 @@ H_EV_S: float = float(constants.physical_constants["Planck constant in eV s"][0]
 
 #: Default transmission coefficient κ for the Eyring equation.
 DEFAULT_TRANSMISSION_COEFFICIENT: float = 1.0
-
-#: Minimum activation barrier floor in eV.
-EA_MIN: float = 0.1
-
 
 def _eyring_prefactor(
     temperature: float,

@@ -743,6 +743,10 @@ def get_applicable_bond_reactions(
     classification.
     """
     reactions: list[BondReaction] = []
+    # Keep completed members visible while the initial sweep is in progress.
+    # In particular, a CI-NEB failure for a later lateral class must not hide
+    # valid reactions already obtained for this BondReactionSite.
+    brs.applicable_reactions = reactions
 
     for m_idx in range(len(brs.member_node_ids)):
         reaction = get_applicable_bond_reaction_for_member(
@@ -788,7 +792,6 @@ def get_applicable_bond_reactions(
         if reaction is not None:
             reactions.append(reaction)
 
-    brs.applicable_reactions = reactions
     return reactions
 
 

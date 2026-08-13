@@ -126,6 +126,7 @@ diffusion:
   image_spacing: 0.25
   min_images: 6
   max_images: 8
+  # CI is skipped if either ordinary directional barrier is below 0.1 eV.
   climb: true
   spring_k: 5.0
   interpolation: linear
@@ -164,6 +165,7 @@ bond:
   neb_image_spacing: 0.25
   neb_min_images: 6
   neb_max_images: 8
+  # CI is skipped if either ordinary directional barrier is below 0.1 eV.
   neb_climb: true
   neb_spring_k: 1.0
   neb_interpolation: linear

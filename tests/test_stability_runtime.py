@@ -110,6 +110,62 @@ def test_shared_neb_selects_transition_and_detaches_images(monkeypatch):
     assert telemetry.timings_s["neb.seconds"] >= 0.0
 
 
+@pytest.mark.parametrize(
+    ("transition_energy", "expected_stages", "expected_skip"),
+    [
+        (0.45, [False], True),
+        (0.50, [False, True], False),
+    ],
+)
+def test_shared_neb_skips_ci_when_either_regular_barrier_is_below_floor(
+    monkeypatch,
+    caplog,
+    transition_energy,
+    expected_stages,
+    expected_skip,
+):
+    # Forward barrier is 0.45/0.50 eV; reverse is 0.05/0.10 eV.
+    images = [_image(0.0), _image(transition_energy), _image(0.40)]
+    neb = SimpleNamespace(climb=False)
+    observed_stages = []
+
+    class StageTrackingOptimizer(_ConvergedOptimizer):
+        def __init__(self, stage_neb, *, logfile):
+            observed_stages.append(stage_neb.climb)
+            super().__init__(stage_neb, logfile=logfile)
+
+    monkeypatch.setattr(neb_module, "acquire_calculator", _calculator_context)
+    monkeypatch.setattr(neb_module, "BFGS", StageTrackingOptimizer)
+
+    result = neb_module.run_neb(
+        images[0],
+        images[-1],
+        calculator=object(),
+        purpose="low-barrier NEB",
+        n_images=1,
+        interpolation="linear",
+        spring_k=1.0,
+        climb=True,
+        frozen_indices=None,
+        fmax=0.05,
+        max_steps=20,
+        barrier_endpoint_energies=(0.0, 0.40),
+        verbose=False,
+        not_converged_error=RuntimeError,
+        band_factory=lambda *_args, **_kwargs: (neb, images),
+    )
+
+    assert observed_stages == expected_stages
+    assert result.climb_skipped_low_barrier is expected_skip
+    assert result.climb_performed is (not expected_skip)
+    assert result.regular_forward_barrier == pytest.approx(transition_energy)
+    assert result.regular_reverse_barrier == pytest.approx(
+        transition_energy - 0.40
+    )
+    if expected_skip:
+        assert "Skipping CI-NEB" in caplog.text
+
+
 def test_dynamic_neb_image_count_uses_maximum_mic_atom_displacement():
     initial = Atoms(
         "H2",
@@ -1243,6 +1299,41 @@ def test_transition_validators_reject_nonfinite_energy(
             **energy_names,
             **extra,
         )
+
+
+def test_transition_validators_allow_intentional_low_barrier_floor():
+    atoms = Atoms("H", positions=[[0.0, 0.0, 0.0]])
+
+    _check_ts_validity(
+        atoms,
+        atoms.copy(),
+        atoms.copy(),
+        n_slab=0,
+        n_lat=0,
+        n_mig=1,
+        nl_mult=1.2,
+        e_a=0.0,
+        e_b=0.4,
+        e_ts=0.4,
+        ts_index=1,
+        n_interior=1,
+        allow_barrier_floor=True,
+    )
+    _check_bond_ts_validity(
+        atoms,
+        atoms.copy(),
+        atoms.copy(),
+        n_slab=0,
+        n_lat=0,
+        n_react=1,
+        nl_mult=1.2,
+        e_ab=0.0,
+        e_c=0.4,
+        e_ts=0.4,
+        ts_index=1,
+        n_interior=1,
+        allow_barrier_floor=True,
+    )
 
 
 def _gas_reactant(**overrides):

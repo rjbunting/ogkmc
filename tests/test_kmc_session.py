@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import networkx as nx
 import numpy as np
+import pytest
 from ase.io import read as ase_read
 
 from autokmc.io.event_log import EventHistory
@@ -12,14 +13,17 @@ from autokmc.kmc.index import _ReactionIndex
 from autokmc.kmc.initialization import initialise_runtime, normalise_channels
 from autokmc.kmc.models import (
     KMCChannels,
+    KMCFunctions,
     KMCObservers,
     KMCResumeState,
+    KMCRunRequest,
     KMCRuntime,
     KMCSettings,
     KMCSystem,
     KMCThermochemistry,
 )
 from autokmc.kmc.outputs import KMCOutputManager
+from autokmc.kmc.session import KMCSession
 
 
 def test_channel_normalisation_copies_inputs_and_resolves_cache_root():
@@ -270,3 +274,57 @@ def test_initialise_runtime_keeps_lazy_resume_history_unmaterialized(tmp_path):
 
     assert runtime.history is history
     assert history.in_memory_count == 0
+
+
+def test_initialisation_failure_flushes_completed_reactions_before_reraising(
+    caplog,
+):
+    completed = object()
+    site = type(
+        "Site",
+        (),
+        {"applicable_reactions": [], "lateral_classes": []},
+    )()
+
+    class Writer:
+        def __init__(self):
+            self.ensured = []
+            self.synced = False
+
+        def ensure_reaction(self, reaction, **kwargs):
+            self.ensured.append((reaction, kwargs))
+
+        def sync_for_checkpoint(self):
+            self.synced = True
+
+    writer = Writer()
+
+    def fail_after_completed_reaction(*_args, **_kwargs):
+        site.applicable_reactions.append(completed)
+        raise RuntimeError("later initialization failure")
+
+    request = KMCRunRequest(
+        system=KMCSystem(nx.Graph(), [site], None, {}),
+        settings=KMCSettings(temperature=500.0, n_steps=0, verbose=False),
+        observers=KMCObservers(reaction_writer=writer),
+    )
+    functions = KMCFunctions(
+        compute_adsorption=fail_after_completed_reaction,
+        recompute_affected=lambda *_args, **_kwargs: None,
+        expand_bond_network=lambda *_args, **_kwargs: None,
+    )
+
+    with caplog.at_level("INFO", logger="autokmc.kmc.session"):
+        with pytest.raises(RuntimeError, match="later initialization failure"):
+            KMCSession(request=request, functions=functions).run()
+
+    assert writer.ensured == [
+        (
+            completed,
+            {
+                "step": 0,
+            },
+        )
+    ]
+    assert writer.synced is True
+    assert "persisted 1 completed reaction instance(s)" in caplog.text

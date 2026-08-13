@@ -693,6 +693,10 @@ def get_applicable_diffusions(
         classification.  Defaults to :data:`LATERAL_SHELLS_DEFAULT`.
     """
     reactions: list[DiffusionReaction] = []
+    # Keep completed members visible while the initial sweep is in progress.
+    # A later retryable NEB failure must not hide earlier valid reactions from
+    # the emergency persistence pass.
+    ds.applicable_reactions = reactions
 
     for m_idx in range(len(ds.member_node_ids)):
         reaction = get_applicable_diffusion_for_member(
@@ -734,7 +738,6 @@ def get_applicable_diffusions(
         if reaction is not None:
             reactions.append(reaction)
 
-    ds.applicable_reactions = reactions
     return reactions
 
 

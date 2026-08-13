@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import logging
 from time import perf_counter
 
 import numpy as np
@@ -26,6 +27,9 @@ from autokmc.utils.telemetry import (
     telemetry_context,
     timed,
 )
+
+
+_log = logging.getLogger(__name__)
 
 
 class KMCSession:
@@ -145,6 +149,8 @@ class KMCSession:
         if writer is None:
             return
         try:
+            n_completed = 0
+            n_invalid = 0
             ensure_reaction = getattr(writer, "ensure_reaction", None)
             if callable(ensure_reaction):
                 for site in (
@@ -156,7 +162,11 @@ class KMCSession:
                         getattr(site, "applicable_reactions", None) or []
                     ):
                         if reaction is not None:
-                            ensure_reaction(reaction, step=int(step))
+                            ensure_reaction(
+                                reaction,
+                                step=int(step),
+                            )
+                            n_completed += 1
 
             for site in self.system.adsorbate_sites:
                 write_invalid = getattr(
@@ -169,6 +179,7 @@ class KMCSession:
                 for lateral_class in site.lateral_classes:
                     if lateral_class.stable is False:
                         write_invalid(site, lateral_class, step=int(step))
+                        n_invalid += 1
 
             for method_name, sites in (
                 ("write_invalid_diffusion", self.channels.diffusion_sites),
@@ -199,10 +210,19 @@ class KMCSession:
                                 lateral_class,
                                 step=int(step),
                             )
+                            n_invalid += 1
 
             sync = getattr(writer, "sync_for_checkpoint", None)
             if callable(sync):
                 sync()
+            _log.info(
+                "KMC partial-output flush: persisted %d completed reaction "
+                "instance(s) and %d invalid/retryable lateral diagnostic(s) "
+                "before re-raising %s",
+                n_completed,
+                n_invalid,
+                type(primary_error).__name__,
+            )
         except Exception as output_error:
             # BaseException.add_note was introduced in Python 3.11, while
             # AutoKMC still supports Python 3.10.  Preserve the original

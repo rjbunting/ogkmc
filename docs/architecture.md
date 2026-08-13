@@ -89,10 +89,11 @@ by the configured partial pressure in bar.
 ### Diffusion
 
 Diffusion connects two placements of the same species. Endpoint relaxation and
-CI-NEB populate state A, state B, and transition-state energies. Both forward
-and reverse barriers are derived from one effective transition-state level so
-detailed energy consistency is preserved when the minimum barrier floor is
-applied.
+ordinary NEB populate state A, state B, and transition-state energies. CI-NEB
+refines the transition only when both raw ordinary directional barriers are at
+least 0.1 eV. Both forward and reverse rates are derived from one effective
+transition-state level so detailed energy consistency is preserved when the
+minimum barrier floor is applied.
 
 For a lateral environment containing neighbouring adsorbates, the reaction
 evaluator first ensures that the corresponding no-neighbour lateral class has

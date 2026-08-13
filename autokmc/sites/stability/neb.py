@@ -26,6 +26,7 @@ from ase.geometry import find_mic
 from ase.optimize import BFGS, FIRE, MDMin
 
 from autokmc.core.constants import (
+    EA_MIN,
     NEB_BAND_EVAL as DEFAULT_NEB_BAND_EVAL,
     NEB_BAND_EVALS,
     NEB_METHOD as DEFAULT_NEB_METHOD,
@@ -147,6 +148,10 @@ class NEBRunResult:
     optimizer_steps: int
     path_energies: list[float] | None = None
     path_images: list[Atoms] | None = None
+    climb_performed: bool = False
+    climb_skipped_low_barrier: bool = False
+    regular_forward_barrier: float | None = None
+    regular_reverse_barrier: float | None = None
 
 
 @dataclass(frozen=True)
@@ -750,6 +755,7 @@ def run_neb(
     logfile_factory=None,
     band_eval: str = DEFAULT_NEB_BAND_EVAL,
     image_spacing: float | None = None,
+    barrier_endpoint_energies: tuple[float, float] | None = None,
 ) -> NEBRunResult:
     """Optimise one NEB band and return a calculator-detached result.
 
@@ -782,6 +788,13 @@ def run_neb(
     ``dt`` and ``dtmax`` halved; other supported optimizers reduce their
     available displacement control. Restarts share the original stage step
     budget.
+
+    When climbing was requested after an ordinary stage, the highest ordinary
+    image is also checked against both endpoint energies. If either raw barrier
+    is below :data:`EA_MIN`, CI-NEB is skipped. The ordinary band is retained
+    as the raw result; the reversible rate layer raises its common effective
+    TS level so that the affected KMC barrier is exactly the configured floor
+    without violating detailed energy consistency.
     """
     build_band = band_factory or make_neb_band
     select_logfile = logfile_factory or neb_optimizer_logfile
@@ -793,6 +806,15 @@ def run_neb(
         if not np.isfinite(resolved_spacing) or resolved_spacing <= 0.0:
             raise ValueError("image_spacing must be finite and positive")
         spacing_limit = 2.0 * resolved_spacing
+    resolved_barrier_endpoints = None
+    if barrier_endpoint_energies is not None:
+        if len(barrier_endpoint_energies) != 2:
+            raise ValueError("barrier_endpoint_energies must contain two values")
+        resolved_barrier_endpoints = tuple(
+            float(value) for value in barrier_endpoint_energies
+        )
+        if not all(np.isfinite(value) for value in resolved_barrier_endpoints):
+            raise ValueError("barrier_endpoint_energies must be finite")
     if band_eval_mode == "images":
         _maybe_hint_batched_available(calculator)
     with acquire_calculator(calculator, purpose=purpose) as neb_calculator:
@@ -1068,6 +1090,11 @@ def run_neb(
                         )
                     return
 
+            climb_performed = False
+            climb_skipped_low_barrier = False
+            regular_forward_barrier = None
+            regular_reverse_barrier = None
+
             if not (climb and start_climbing):
                 _optimise_stage(
                     stage="NEB pre-climb relaxation" if climb else "NEB",
@@ -1075,7 +1102,43 @@ def run_neb(
                     selected_optimizer_kwargs=optimizer_kwargs,
                     target_fmax=float(fmax),
                 )
-            if climb:
+                regular_energies = [
+                    float(image.get_potential_energy()) for image in images
+                ]
+                regular_interior = regular_energies[1:-1]
+                if not regular_interior:
+                    raise not_converged_error(
+                        "NEB band has no interior images (n_images=0); "
+                        "cannot identify a TS."
+                    )
+                regular_ts_energy = float(max(regular_interior))
+                barrier_endpoints = (
+                    resolved_barrier_endpoints
+                    if resolved_barrier_endpoints is not None
+                    else (regular_energies[0], regular_energies[-1])
+                )
+                regular_forward_barrier = (
+                    regular_ts_energy - barrier_endpoints[0]
+                )
+                regular_reverse_barrier = (
+                    regular_ts_energy - barrier_endpoints[1]
+                )
+                if climb and min(
+                    regular_forward_barrier,
+                    regular_reverse_barrier,
+                ) < float(EA_MIN) - 1.0e-12:
+                    climb_skipped_low_barrier = True
+                    _log.warning(
+                        "Skipping CI-NEB because the converged ordinary band "
+                        "has a raw barrier below EA_MIN=%.3f eV "
+                        "(forward=%.6f eV, reverse=%.6f eV). The ordinary "
+                        "band is retained and the reversible KMC rate applies "
+                        "the common effective-TS barrier floor.",
+                        EA_MIN,
+                        regular_forward_barrier,
+                        regular_reverse_barrier,
+                    )
+            if climb and not climb_skipped_low_barrier:
                 neb.climb = True
                 _optimise_stage(
                     stage="CI-NEB",
@@ -1087,6 +1150,7 @@ def run_neb(
                     ),
                     target_fmax=float(fmax),
                 )
+                climb_performed = True
 
             energies = [float(image.get_potential_energy()) for image in images]
             interior = energies[1:-1]
@@ -1116,6 +1180,10 @@ def run_neb(
                 transition_index=transition_index,
                 n_interior=len(interior),
                 optimizer_steps=optimizer_steps,
+                climb_performed=climb_performed,
+                climb_skipped_low_barrier=climb_skipped_low_barrier,
+                regular_forward_barrier=regular_forward_barrier,
+                regular_reverse_barrier=regular_reverse_barrier,
                 path_energies=path_energies,
                 path_images=path_images,
             )

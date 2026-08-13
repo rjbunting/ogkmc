@@ -289,7 +289,11 @@ diffusion:
 
 Each new diffusion lateral class can trigger two endpoint relaxations, an
 ordinary NEB relaxation, and then a climbing-image NEB refinement of the same
-band. These are often among the most expensive parts of a run.
+band. When either ordinary forward/reverse barrier is below the 0.1 eV KMC
+floor, AutoKMC retains the ordinary band and skips the climbing stage. The rate
+layer applies the floor through one common effective TS level so reversible
+energy consistency is preserved. These calculations are often among the most
+expensive parts of a run.
 
 When `image_spacing` (or bond `neb_image_spacing`) is set, it also guards the
 optimized geometry: no unfrozen atom may move more than twice that distance

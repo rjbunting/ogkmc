@@ -109,14 +109,27 @@ because ASE does not recommend it for NEB. Defaults preserve the previous
 behavior: `lbfgs` for ordinary relaxations and `bfgs` for NEB.
 
 `neb_optimizer_kwargs` provides the same constructor-keyword interface for
-the ordinary NEB optimizer. `neb_climb_optimizer` optionally selects a separate
-optimizer after the ordinary band converges and the climbing image is enabled;
-`null` reuses `neb_optimizer`. `neb_climb_optimizer_kwargs` supplies that
-climbing optimizer's constructor keywords; `null` reuses
-`neb_optimizer_kwargs`. Each stage creates a fresh optimizer instance, so FIRE
-or MDMin velocity state is not carried from ordinary NEB into CI-NEB. All
-optimizer choices and constructor mappings are included in calculation-cache
-identities.
+the ordinary NEB optimizer. After ordinary convergence, AutoKMC compares the
+highest interior-image energy with both endpoint energies. If either raw
+directional barrier is below the shared `EA_MIN = 0.1` eV floor, CI-NEB is
+skipped and the ordinary band is retained. Otherwise,
+`neb_climb_optimizer` optionally selects a separate optimizer after the
+climbing image is enabled; `null` reuses `neb_optimizer`.
+`neb_climb_optimizer_kwargs` supplies that climbing optimizer's constructor
+keywords; `null` reuses `neb_optimizer_kwargs`. Each stage creates a fresh
+optimizer instance, so FIRE or MDMin velocity state is not carried from
+ordinary NEB into CI-NEB. All optimizer choices, constructor mappings, and the
+low-barrier climbing policy are included in calculation-cache identities.
+
+The retained ordinary transition energy remains the raw recorded value. At
+rate construction, both reversible directions use the same effective level,
+`max(E_ts, max(E_initial, E_final) + 0.1 eV)`. Thus the direction from the
+higher-energy endpoint receives the 0.1 eV minimum while the opposite barrier
+also includes the endpoint energy difference; this preserves detailed energy
+consistency rather than independently forcing both directions to 0.1 eV.
+Because the retained ordinary image is not a climbing-image stationary point,
+AutoKMC also skips its TS vibrational calculation and uses the existing
+average endpoint free-energy correction for that transition level.
 
 `neb_method` selects ASE's NEB force and tangent formulation for both the
 ordinary and climbing-image stages. Valid values are:
@@ -431,7 +444,7 @@ cache or resume contract being able to detect it.
 | `image_spacing` | `0.25` Å | Enable dynamic image selection and limit every adjacent-image atom displacement to twice this value. |
 | `min_images` | `6` | Minimum dynamically selected interior-image count, giving at least eight total frames. |
 | `max_images` | `8` | Maximum dynamically selected interior-image count, giving at most ten total frames. |
-| `climb` | `true` | Refine the converged ordinary NEB with a climbing image. |
+| `climb` | `true` | Refine the ordinary NEB with a climbing image unless either raw directional barrier is below 0.1 eV. |
 | `spring_k` | `5.0` eV/Å² | NEB spring constant used for both optimization stages. |
 | `interpolation` | `linear` | `linear` or `idpp`. |
 | `persist_neb_path` | `false` | Save both image sequences for successful runs; failed NEBs retain their initial and last-known bands automatically. |
@@ -484,7 +497,7 @@ halves `dt`; BFGS, which has no timestep, halves `maxstep`. Set the spacing to
 | `neb_image_spacing` | `0.25` Å | Enable dynamic bond-NEB selection and limit every adjacent-image atom displacement to twice this value. |
 | `neb_min_images` | `6` | Minimum dynamically selected bond-NEB interior-image count, giving at least eight total frames. |
 | `neb_max_images` | `8` | Maximum dynamically selected bond-NEB interior-image count, giving at most ten total frames. |
-| `neb_climb` | `true` | Refine the converged ordinary bond NEB with a climbing image. |
+| `neb_climb` | `true` | Refine the ordinary bond NEB with a climbing image unless either raw directional barrier is below 0.1 eV. |
 | `neb_spring_k` | `5.0` eV/Å² | Bond NEB spring constant used for both optimization stages. |
 | `neb_interpolation` | `idpp` | `linear` or `idpp`. |
 | `atom_matching` | `auto` | `auto`, `greedy`, `hungarian`, or `reactant_index`. |
