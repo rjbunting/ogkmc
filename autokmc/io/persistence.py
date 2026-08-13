@@ -429,6 +429,113 @@ def _finite_float(value) -> float | None:
     return out
 
 
+def _prepare_bond_gas_reference_assets(site, lateral_class) -> None:
+    """Attach reproducible gas-reference snapshots when they can be recovered.
+
+    Gas-product endpoint atoms always use ``[environment | gas molecule]``
+    ordering.  That lets persistence recover the relaxed empty environment
+    from ``atoms_c`` even when the run was loaded from an older calculation
+    cache that predates the explicit gas-reference fields.
+    """
+    if not bool(getattr(site, "gas_product", False)):
+        return
+
+    gas_reactant = getattr(site, "gas_reactant", None)
+    gas_atoms = getattr(gas_reactant, "atoms", None)
+    if (
+        getattr(lateral_class, "atoms_gas_molecule", None) is None
+        and isinstance(gas_atoms, Atoms)
+    ):
+        snapshot = gas_atoms.copy()
+        snapshot.calc = None
+        lateral_class.atoms_gas_molecule = snapshot
+
+    if getattr(lateral_class, "atoms_c_gas_reference", None) is None:
+        atoms_c = getattr(lateral_class, "atoms_c", None)
+        atoms_ab = getattr(lateral_class, "atoms_ab", None)
+        molecule = getattr(lateral_class, "atoms_gas_molecule", None)
+        if isinstance(atoms_c, Atoms) and isinstance(molecule, Atoms):
+            n_gas = len(molecule)
+            n_environment = (
+                len(atoms_ab) - n_gas
+                if isinstance(atoms_ab, Atoms) and len(atoms_ab) >= n_gas
+                else len(atoms_c) - n_gas
+            )
+            if n_environment > 0 and len(atoms_c) >= n_environment:
+                snapshot = atoms_c[:n_environment].copy()
+                snapshot.calc = None
+                lateral_class.atoms_c_gas_reference = snapshot
+
+    if getattr(lateral_class, "energy_c_gas_reference", None) is None:
+        energy_c = _finite_float(getattr(lateral_class, "energy_c", None))
+        energy_gas = _finite_float(getattr(gas_reactant, "energy", None))
+        if energy_c is not None and energy_gas is not None:
+            lateral_class.energy_c_gas_reference = energy_c - energy_gas
+
+
+def _write_missing_bond_gas_reference_assets(
+    folder: Path,
+    site,
+    lateral_class,
+) -> bool:
+    """Backfill missing independent gas-reference structure files."""
+    _prepare_bond_gas_reference_assets(site, lateral_class)
+    wrote = False
+    for filename, atoms in (
+        (
+            "state_c_gas_reference.extxyz",
+            getattr(lateral_class, "atoms_c_gas_reference", None),
+        ),
+        (
+            "gas_molecule.extxyz",
+            getattr(lateral_class, "atoms_gas_molecule", None),
+        ),
+    ):
+        path = folder / filename
+        if isinstance(atoms, Atoms) and not path.is_file():
+            _atomic_extxyz(path, _safe_atoms_copy(atoms))
+            wrote = True
+    return wrote
+
+
+def _write_missing_bond_result_assets(
+    folder: Path,
+    site,
+    lateral_class,
+) -> bool:
+    """Backfill every currently available bond-result structure."""
+    wrote = _write_missing_bond_gas_reference_assets(
+        folder,
+        site,
+        lateral_class,
+    )
+    for filename, attribute in (
+        ("state_ab_initial.extxyz", "atoms_ab_initial"),
+        ("state_c_initial.extxyz", "atoms_c_initial"),
+        ("state_ab.extxyz", "atoms_ab"),
+        ("state_c.extxyz", "atoms_c"),
+        ("ts.extxyz", "atoms_ts"),
+    ):
+        atoms = getattr(lateral_class, attribute, None)
+        path = folder / filename
+        if isinstance(atoms, Atoms) and not path.is_file():
+            _atomic_extxyz(path, _safe_atoms_copy(atoms))
+            wrote = True
+    for filename, attribute in (
+        ("neb_path_initial.extxyz", "atoms_neb_path_initial"),
+        ("neb_path.extxyz", "atoms_neb_path"),
+    ):
+        images = getattr(lateral_class, attribute, None)
+        path = folder / filename
+        if images and not path.is_file():
+            _atomic_extxyz(
+                path,
+                [_safe_atoms_copy(image) for image in images],
+            )
+            wrote = True
+    return wrote
+
+
 def _event_free_energetics(
     reaction,
     gas_free_energies: dict[str, float] | None = None,
@@ -644,6 +751,7 @@ class ReactionWriter:
         self._discovery_steps: dict[tuple[str, str, int, int], int] = {}
         self._pending_payloads: dict[tuple[str, str, int, int], dict[str, Any]] = {}
         self._reaction_definitions: dict[str, dict[str, Any]] = {}
+        self._reconciled_bond_keys: set[tuple[str, str, int, int]] = set()
         self._index: ReactionIndexWriter | None = None
         if append and checkpoint_step is not None:
             _quarantine_uncommitted_reaction_folders(
@@ -910,14 +1018,23 @@ class ReactionWriter:
 
         sub_root = self.reactions_root / sub
         folder = sub_root / species / _kind_folder_name(sub, iso, lat)
+        lc = reaction.lateral_class
+
+        if sub == "bond":
+            _prepare_bond_gas_reference_assets(reaction.site, lc)
 
         if key in self._folder_meta:
             self._folder_paths.setdefault(key, folder)
+            if sub == "bond":
+                _write_missing_bond_result_assets(
+                    folder,
+                    reaction.site,
+                    lc,
+                )
             return folder
 
         ensure_directory(folder)
 
-        lc = reaction.lateral_class
         if sub == "diffusion":
             atoms_a_initial = getattr(lc, "atoms_a_initial", None)
             atoms_b_initial = getattr(lc, "atoms_b_initial", None)
@@ -1214,6 +1331,65 @@ class ReactionWriter:
                 rate_energy_basis=event.get("rate_energy_basis"),
             )
 
+    def _refresh_bond_structure_document(
+        self,
+        folder: Path,
+        reaction,
+        key: tuple[str, str, int, int],
+        *,
+        step: int,
+        gas_energies: dict[str, float] | None,
+        gas_free_energies: dict[str, float] | None,
+    ) -> None:
+        """Rebuild static bond metadata after late asset reconciliation."""
+        metadata_path = folder / "reaction.json"
+        existing = self._pending_payloads.get(key)
+        pending = existing is not None
+        if existing is None:
+            if not metadata_path.is_file():
+                return
+            existing = json.loads(metadata_path.read_text(encoding="utf-8"))
+
+        iso = int(reaction.site.iso_class)
+        lat = int(reaction.lateral_class.lateral_class)
+        smiles = _reaction_smiles(reaction)
+        refreshed = build_reaction_payload(
+            reaction,
+            subdir="bond",
+            iso_class=iso,
+            lateral_class=lat,
+            discovery_step=self._discovery_steps[key],
+            smiles=smiles,
+            description=_reaction_description(reaction, smiles),
+            step=int(step),
+            fired=False,
+            stats=self._folder_meta[key],
+            calculator_meta=self._calc_meta,
+            run_id=self.run_id,
+            gas_energies=gas_energies,
+            gas_free_energies=gas_free_energies,
+        )
+        if existing.get("last_event") is not None:
+            refreshed["last_event"] = existing["last_event"]
+        if existing.get("rate_energy_bases"):
+            refreshed["rate_energy_bases"] = existing["rate_energy_bases"]
+
+        if refreshed == existing:
+            return
+        if pending:
+            self._pending_payloads[key] = refreshed
+        else:
+            _atomic_json(metadata_path, refreshed)
+        definition = reaction_definition_from_document(
+            refreshed,
+            folder=folder.relative_to(self.output_dir),
+            run_id=self.run_id,
+        )
+        reaction_id = str(definition["reaction_id"])
+        self._reaction_definitions[reaction_id] = definition
+        if self._index is not None:
+            self._index.register(definition)
+
     # ------------------------------------------------------------------
     def ensure_reaction(
         self,
@@ -1225,11 +1401,11 @@ class ReactionWriter:
     ) -> Path:
         """Ensure the on-disk folder + ``reaction.json`` exist for *reaction*.
 
-        Idempotent: the first call materialises the folder, writes
+        Idempotent: the first call materialises the folder and writes
         ``occupied.extxyz`` / ``unoccupied.extxyz`` and an initial
-        ``reaction.json`` (with ``stats.count = 0``).  Subsequent calls
-        with the same ``(kind, species, iso_class, lateral_class)`` key are
-        no-ops.
+        ``reaction.json`` (with ``stats.count = 0``). Subsequent bond calls
+        reconcile any structures that became available after the folder was
+        first registered, including across checkpoint resumes.
 
         Used by the KMC driver to persist **every** reaction in the
         current applicable list — not just the one chosen for execution —
@@ -1241,7 +1417,30 @@ class ReactionWriter:
         species = _smiles_to_dirname(_reaction_smiles(reaction))
         key     = (sub, species, iso, lat)
         if key in self._folder_meta:
-            return self.reactions_root / sub / species / _kind_folder_name(sub, iso, lat)
+            folder = self._folder_paths.get(
+                key,
+                self.reactions_root
+                / sub
+                / species
+                / _kind_folder_name(sub, iso, lat),
+            )
+            if sub == "bond":
+                wrote_assets = _write_missing_bond_result_assets(
+                    folder,
+                    reaction.site,
+                    reaction.lateral_class,
+                )
+                if wrote_assets or key not in self._reconciled_bond_keys:
+                    self._refresh_bond_structure_document(
+                        folder,
+                        reaction,
+                        key,
+                        step=int(step),
+                        gas_energies=gas_energies,
+                        gas_free_energies=gas_free_energies,
+                    )
+                    self._reconciled_bond_keys.add(key)
+            return folder
         folder = self._ensure_reaction_folder(
             reaction,
             discovery_step=int(step),
@@ -1249,6 +1448,8 @@ class ReactionWriter:
         self._write_reaction_json(
             folder, reaction, step, gas_energies, gas_free_energies, fired=False,
         )
+        if sub == "bond":
+            self._reconciled_bond_keys.add(key)
         return folder
 
     # ------------------------------------------------------------------
@@ -1523,10 +1724,8 @@ class ReactionWriter:
             / species
             / _kind_folder_name("bond", iso, lat)
         )
-        if key in self._folder_meta:
-            return self._folder_paths.get(key, folder)
-
         ensure_directory(folder)
+        _prepare_bond_gas_reference_assets(brs, lc)
         structure_specs = (
             ("state_ab_initial", "state_ab_initial.extxyz", getattr(lc, "atoms_ab_initial", None)),
             ("state_c_initial", "state_c_initial.extxyz", getattr(lc, "atoms_c_initial", None)),
@@ -1544,27 +1743,43 @@ class ReactionWriter:
             ),
             ("transition", "ts.extxyz", getattr(lc, "atoms_ts", None)),
         )
+        path_specs = (
+            (
+                "neb_path_initial",
+                "neb_path_initial.extxyz",
+                "atoms_neb_path_initial",
+            ),
+            ("neb_path", "neb_path.extxyz", "atoms_neb_path"),
+        )
+        if key in self._folder_meta:
+            missing_structure = any(
+                atoms is not None and not (folder / filename).is_file()
+                for _, filename, atoms in structure_specs
+            )
+            missing_path = any(
+                getattr(lc, attribute, None)
+                and not (folder / filename).is_file()
+                for _, filename, attribute in path_specs
+            )
+            if not missing_structure and not missing_path:
+                return self._folder_paths.get(key, folder)
+
         atom_assets: dict[str, str | None] = {}
         for key_name, filename, atoms in structure_specs:
-            if atoms is not None:
-                _atomic_extxyz(folder / filename, _safe_atoms_copy(atoms))
-                atom_assets[key_name] = filename
-            else:
-                atom_assets[key_name] = None
+            path = folder / filename
+            if atoms is not None and not path.is_file():
+                _atomic_extxyz(path, _safe_atoms_copy(atoms))
+            atom_assets[key_name] = filename if path.is_file() else None
 
-        for key_name, filename, attribute in (
-            ("neb_path_initial", "neb_path_initial.extxyz", "atoms_neb_path_initial"),
-            ("neb_path", "neb_path.extxyz", "atoms_neb_path"),
-        ):
+        for key_name, filename, attribute in path_specs:
             images = getattr(lc, attribute, None)
-            if images:
+            path = folder / filename
+            if images and not path.is_file():
                 _atomic_extxyz(
-                    folder / filename,
+                    path,
                     [_safe_atoms_copy(image) for image in images],
                 )
-                atom_assets[key_name] = filename
-            else:
-                atom_assets[key_name] = None
+            atom_assets[key_name] = filename if path.is_file() else None
 
         metadata_path = folder / "reaction.json"
         existing_discovery_step = (

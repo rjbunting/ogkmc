@@ -328,6 +328,104 @@ def test_reaction_writer_persists_initial_structures_and_neb_paths(
     )
 
 
+def test_resumed_successful_bond_backfills_late_structure_assets(tmp_path):
+    gas = Atoms(
+        "H2",
+        positions=[[0.0, 0.0, 0.0], [0.0, 0.0, 0.74]],
+    )
+    lateral = SimpleNamespace(
+        lateral_class=7,
+        energy_ab=None,
+        energy_c=None,
+        energy_ts=None,
+        atoms_ab_initial=None,
+        atoms_c_initial=None,
+        atoms_ab=None,
+        atoms_c=None,
+        atoms_ts=None,
+        atoms_neb_path_initial=None,
+        atoms_neb_path=None,
+    )
+    site = SimpleNamespace(
+        iso_class=5,
+        gas_product=True,
+        gas_reactant=SimpleNamespace(atoms=gas, energy=-0.6),
+        template=SimpleNamespace(
+            smiles_a="[H]",
+            smiles_b="[H]",
+            smiles_c="[H][H]",
+            bond_type="SINGLE",
+            source="test",
+        ),
+    )
+    reaction = SimpleNamespace(
+        kind="bond",
+        direction="couple",
+        site=site,
+        member_index=0,
+        lateral_class=lateral,
+        delta_e=0.0,
+        barrier=0.5,
+        rate=1.0,
+    )
+
+    first = ReactionWriter(tmp_path, run_id="run-a")
+    folder = first.ensure_reaction(reaction, step=0)
+    first.close()
+    assert (folder / "gas_molecule.extxyz").is_file()
+    assert not (folder / "state_c_gas_reference.extxyz").exists()
+
+    combined = Atoms(
+        "PtH2",
+        positions=[
+            [0.0, 0.0, 0.0],
+            [-0.37, 0.0, 3.0],
+            [0.37, 0.0, 3.0],
+        ],
+    )
+    lateral.energy_ab = -4.0
+    lateral.energy_c = -4.6
+    lateral.energy_ts = -3.5
+    lateral.atoms_ab_initial = combined.copy()
+    lateral.atoms_c_initial = combined.copy()
+    lateral.atoms_ab = combined.copy()
+    lateral.atoms_c = combined.copy()
+    lateral.atoms_ts = combined.copy()
+
+    resumed = ReactionWriter(
+        tmp_path,
+        append=True,
+        run_id="run-a",
+        checkpoint_step=0,
+    )
+    assert resumed.ensure_reaction(reaction, step=1) == folder
+    resumed.close()
+
+    for filename in (
+        "state_ab_initial.extxyz",
+        "state_c_initial.extxyz",
+        "state_ab.extxyz",
+        "state_c.extxyz",
+        "state_c_gas_reference.extxyz",
+        "gas_molecule.extxyz",
+        "ts.extxyz",
+    ):
+        assert (folder / filename).is_file()
+    assert len(ase_read(folder / "state_c_gas_reference.extxyz")) == 1
+    assert len(ase_read(folder / "gas_molecule.extxyz")) == 2
+    payload = json.loads((folder / "reaction.json").read_text())
+    assert payload["atoms"]["state_c_gas_reference"] == (
+        "state_c_gas_reference.extxyz"
+    )
+    assert payload["atoms"]["gas_molecule"] == "gas_molecule.extxyz"
+    assert payload["energies_ev"]["state_ab"] == pytest.approx(-4.0)
+    assert payload["energies_ev"]["state_c"] == pytest.approx(-4.6)
+    assert payload["energies_ev"]["transition_raw"] == pytest.approx(-3.5)
+    assert payload["energies_ev"]["state_c_gas_reference"] == pytest.approx(
+        -4.0
+    )
+
+
 def test_reaction_writer_reuses_folder_across_events(
     tmp_path, stub_reaction, tiny_atoms
 ):
@@ -1219,6 +1317,79 @@ def test_invalid_bond_record_writes_failed_endpoint_and_neb_paths(tmp_path):
     definitions = load_reaction_index(tmp_path / "reactions" / "index.jsonl")
     assert definitions[payload["reaction_id"]]["folder"].startswith(
         "diagnostics/invalid_bond/"
+    )
+
+
+def test_invalid_bond_backfills_structures_after_early_registration(tmp_path):
+    gas = Atoms(
+        "H2",
+        positions=[[0.0, 0.0, 0.0], [0.0, 0.0, 0.74]],
+    )
+    site = SimpleNamespace(
+        iso_class=8,
+        template=SimpleNamespace(
+            smiles_a="[H]",
+            smiles_b="[H]",
+            smiles_c="[H][H]",
+            bond_type="SINGLE",
+            source="test",
+        ),
+        gas_product=True,
+        gas_reactant=SimpleNamespace(atoms=gas, energy=-0.6),
+    )
+    lateral = SimpleNamespace(
+        lateral_class=2,
+        stable=None,
+        invalid_reason=None,
+        last_failure_reason="BondNEBNotConvergedError: early failure",
+        atoms_ab_initial=None,
+        atoms_c_initial=None,
+        atoms_ab=None,
+        atoms_c=None,
+        atoms_ts=None,
+        atoms_neb_path_initial=None,
+        atoms_neb_path=None,
+        energy_ab=None,
+        energy_c=None,
+        energy_ts=None,
+    )
+    writer = ReactionWriter(tmp_path)
+    folder = writer.write_invalid_bond(site, lateral, step=0)
+    assert (folder / "gas_molecule.extxyz").is_file()
+    assert not (folder / "state_c_gas_reference.extxyz").exists()
+    writer.close()
+
+    combined = Atoms(
+        "PtH2",
+        positions=[
+            [0.0, 0.0, 0.0],
+            [-0.37, 0.0, 3.0],
+            [0.37, 0.0, 3.0],
+        ],
+    )
+    lateral.atoms_ab = combined.copy()
+    lateral.atoms_c = combined.copy()
+    lateral.atoms_neb_path_initial = [combined.copy(), combined.copy()]
+    lateral.atoms_neb_path = [combined.copy(), combined.copy()]
+    lateral.energy_c = -4.6
+    resumed = ReactionWriter(
+        tmp_path,
+        append=True,
+        checkpoint_step=0,
+    )
+    resumed.write_invalid_bond(site, lateral, step=1)
+    resumed.close()
+
+    assert (folder / "state_ab.extxyz").is_file()
+    assert (folder / "state_c.extxyz").is_file()
+    assert (folder / "state_c_gas_reference.extxyz").is_file()
+    assert (folder / "neb_path_initial.extxyz").is_file()
+    assert (folder / "neb_path.extxyz").is_file()
+    assert len(ase_read(folder / "state_c_gas_reference.extxyz")) == 1
+    payload = json.loads((folder / "reaction.json").read_text())
+    assert payload["discovery_step"] == 0
+    assert payload["atoms"]["state_c_gas_reference"] == (
+        "state_c_gas_reference.extxyz"
     )
 
 
