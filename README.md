@@ -295,13 +295,6 @@ layer applies the floor through one common effective TS level so reversible
 energy consistency is preserved. These calculations are often among the most
 expensive parts of a run.
 
-Effectively barrierless bands can oscillate above the strict channel `fmax`
-because of their spring modes. Once the observed maximum NEB force is at or
-below `optimization.neb_low_barrier_fmax` (default 0.1 eV/Å), AutoKMC checks
-both raw directional barriers. If either is below 0.1 eV, the band is accepted
-without reaching the strict force target. The reaction JSON records this as a
-low-barrier early stop together with the observed force and both cutoffs.
-
 When `image_spacing` (or bond `neb_image_spacing`) is set, it also guards the
 optimized geometry: by default, no unfrozen atom may move more than three times
 that distance between adjacent images. A violating step restores the lowest-force valid band

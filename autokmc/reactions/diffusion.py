@@ -83,7 +83,6 @@ from autokmc.core.constants import (
     NEB_CLIMB,
     NEB_SPRING_K,
     NEB_INTERPOLATION,
-    NEB_LOW_BARRIER_FMAX,
     NEB_METHOD,
     NL_MULT_DEFAULT,
     LATERAL_SHELLS_DEFAULT,
@@ -411,7 +410,6 @@ def get_applicable_diffusion_for_member(
     neb_geometry_guard_multiplier: float = (
         NEB_MAX_ADJACENT_IMAGE_SPACING_MULTIPLIER
     ),
-    neb_low_barrier_fmax: float = NEB_LOW_BARRIER_FMAX,
     verbose: bool = False,
     lateral_interactions: bool = True,
     lateral_shells: int = LATERAL_SHELLS_DEFAULT,
@@ -452,7 +450,6 @@ def get_applicable_diffusion_for_member(
             "neb_method": neb_method,
             "neb_band_eval": neb_band_eval,
             "neb_geometry_guard_multiplier": neb_geometry_guard_multiplier,
-            "neb_low_barrier_fmax": neb_low_barrier_fmax,
             "verbose": verbose,
             "free_energy_options": free_energy_options,
             "free_energy_temperature_k": float(temperature),
@@ -702,7 +699,6 @@ def get_applicable_diffusions(
     neb_geometry_guard_multiplier: float = (
         NEB_MAX_ADJACENT_IMAGE_SPACING_MULTIPLIER
     ),
-    neb_low_barrier_fmax: float = NEB_LOW_BARRIER_FMAX,
     verbose: bool = False,
     lateral_interactions: bool = True,
     lateral_shells: int = LATERAL_SHELLS_DEFAULT,
@@ -759,7 +755,6 @@ def get_applicable_diffusions(
                 neb_method=neb_method,
                 neb_band_eval=neb_band_eval,
                 neb_geometry_guard_multiplier=neb_geometry_guard_multiplier,
-                neb_low_barrier_fmax=neb_low_barrier_fmax,
                 verbose=verbose,
                 lateral_interactions=lateral_interactions,
                 lateral_shells=lateral_shells,
@@ -817,7 +812,6 @@ def compute_all_diffusions(
     neb_geometry_guard_multiplier: float = (
         NEB_MAX_ADJACENT_IMAGE_SPACING_MULTIPLIER
     ),
-    neb_low_barrier_fmax: float = NEB_LOW_BARRIER_FMAX,
     verbose: bool = False,
     lateral_interactions: bool = True,
     lateral_shells: int = LATERAL_SHELLS_DEFAULT,
@@ -863,7 +857,6 @@ def compute_all_diffusions(
                     neb_geometry_guard_multiplier = (
                         neb_geometry_guard_multiplier
                     ),
-                    neb_low_barrier_fmax  = neb_low_barrier_fmax,
                     verbose                  = verbose,
                     lateral_interactions     = lateral_interactions,
                     lateral_shells           = lateral_shells,
@@ -909,7 +902,6 @@ def compute_all_diffusions(
             neb_method                = neb_method,
             neb_band_eval             = neb_band_eval,
             neb_geometry_guard_multiplier = neb_geometry_guard_multiplier,
-            neb_low_barrier_fmax     = neb_low_barrier_fmax,
             verbose                  = verbose,
             lateral_interactions     = lateral_interactions,
             lateral_shells           = lateral_shells,

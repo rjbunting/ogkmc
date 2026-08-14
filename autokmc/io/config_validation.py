@@ -352,11 +352,6 @@ class _Validator:
             "optimization.neb_geometry_guard_multiplier",
             strictly_positive=True,
         )
-        self.number(
-            cfg.neb_low_barrier_fmax,
-            "optimization.neb_low_barrier_fmax",
-            strictly_positive=True,
-        )
 
     def structure(self, cfg: Any) -> None:
         if cfg.kind not in {"surface", "nanoparticle", "file"}:

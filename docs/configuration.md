@@ -91,7 +91,6 @@ optimization:
   neb_method: improvedtangent
   neb_band_eval: images
   neb_geometry_guard_multiplier: 3.0
-  neb_low_barrier_fmax: 0.1
 ```
 
 `optimizer` controls calculator-backed ordinary relaxations, including
@@ -122,17 +121,6 @@ keywords; `null` reuses `neb_optimizer_kwargs`. Each stage creates a fresh
 optimizer instance, so FIRE or MDMin velocity state is not carried from
 ordinary NEB into CI-NEB. All optimizer choices, constructor mappings, and the
 low-barrier climbing policy are included in calculation-cache identities.
-
-`neb_low_barrier_fmax` provides an alternate stopping condition for small
-barriers whose spring modes oscillate above the strict diffusion or bond
-`fmax`. When the maximum NEB force is above the strict target but at or below
-this cutoff, AutoKMC compares the highest interior-image energy with both
-endpoint energies. If either raw directional barrier is lower than
-`EA_MIN = 0.1` eV, the current ordinary or climbing band is accepted. The
-default cutoff is 0.1 eV/Å. It must be finite and greater than zero. Reaction
-JSON stores the convergence mode, observed maximum force, force cutoff, energy
-cutoff, and NEB stage under `neb_convergence`; the cutoff and policy also enter
-calculation-cache identities.
 
 `neb_geometry_guard_multiplier` controls the geometric rollback threshold for
 both diffusion and bond NEBs. The maximum adjacent-image atom displacement is

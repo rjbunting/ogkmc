@@ -96,7 +96,6 @@ from autokmc.core.constants import (
     NEB_CLIMB,
     NEB_SPRING_K,
     NEB_METHOD,
-    NEB_LOW_BARRIER_FMAX,
     BOND_NEB_INTERPOLATION,
     BOND_ATOM_MATCHING,
     BOND_MATCHING_TRIALS,
@@ -459,7 +458,6 @@ def get_applicable_bond_reaction_for_member(
     neb_geometry_guard_multiplier: float = (
         NEB_MAX_ADJACENT_IMAGE_SPACING_MULTIPLIER
     ),
-    neb_low_barrier_fmax: float = NEB_LOW_BARRIER_FMAX,
     lateral_interactions: bool = True,
     lateral_shells: int = LATERAL_SHELLS_DEFAULT,
     verbose: bool = False,
@@ -504,7 +502,6 @@ def get_applicable_bond_reaction_for_member(
             "neb_method": neb_method,
             "neb_band_eval": neb_band_eval,
             "neb_geometry_guard_multiplier": neb_geometry_guard_multiplier,
-            "neb_low_barrier_fmax": neb_low_barrier_fmax,
             "verbose": verbose,
             "calculation_cache_root": calculation_cache_root,
             "calculation_cache_lookup_enabled": (
@@ -753,7 +750,6 @@ def get_applicable_bond_reactions(
     neb_geometry_guard_multiplier: float = (
         NEB_MAX_ADJACENT_IMAGE_SPACING_MULTIPLIER
     ),
-    neb_low_barrier_fmax: float = NEB_LOW_BARRIER_FMAX,
     lateral_interactions: bool = True,
     lateral_shells: int = LATERAL_SHELLS_DEFAULT,
     verbose: bool = False,
@@ -813,7 +809,6 @@ def get_applicable_bond_reactions(
                 neb_method=neb_method,
                 neb_band_eval=neb_band_eval,
                 neb_geometry_guard_multiplier=neb_geometry_guard_multiplier,
-                neb_low_barrier_fmax=neb_low_barrier_fmax,
                 lateral_interactions=lateral_interactions,
                 lateral_shells=lateral_shells,
                 verbose=verbose,
@@ -875,7 +870,6 @@ def compute_all_bond_reactions(
     neb_geometry_guard_multiplier: float = (
         NEB_MAX_ADJACENT_IMAGE_SPACING_MULTIPLIER
     ),
-    neb_low_barrier_fmax: float = NEB_LOW_BARRIER_FMAX,
     lateral_interactions: bool = True,
     lateral_shells: int = LATERAL_SHELLS_DEFAULT,
     verbose: bool = False,
@@ -926,7 +920,6 @@ def compute_all_bond_reactions(
                     neb_geometry_guard_multiplier = (
                         neb_geometry_guard_multiplier
                     ),
-                    neb_low_barrier_fmax  = neb_low_barrier_fmax,
                     lateral_interactions     = lateral_interactions,
                     lateral_shells           = lateral_shells,
                     verbose                  = verbose,
@@ -976,7 +969,6 @@ def compute_all_bond_reactions(
             neb_method                = neb_method,
             neb_band_eval             = neb_band_eval,
             neb_geometry_guard_multiplier = neb_geometry_guard_multiplier,
-            neb_low_barrier_fmax     = neb_low_barrier_fmax,
             lateral_interactions     = lateral_interactions,
             lateral_shells           = lateral_shells,
             verbose                  = verbose,

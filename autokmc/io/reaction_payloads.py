@@ -92,38 +92,6 @@ def _neb_image_payload(lateral_class) -> dict[str, Any]:
     }
 
 
-def _neb_convergence_payload(lateral_class) -> dict[str, Any]:
-    """Return the force or low-barrier NEB stopping provenance."""
-    return {
-        "mode": getattr(lateral_class, "neb_convergence_mode", None),
-        "observed_fmax_ev_per_ang": getattr(
-            lateral_class,
-            "neb_convergence_fmax",
-            None,
-        ),
-        "low_barrier_early_stop": getattr(
-            lateral_class,
-            "neb_converged_low_barrier",
-            None,
-        ),
-        "low_barrier_force_cutoff_ev_per_ang": getattr(
-            lateral_class,
-            "neb_low_barrier_fmax",
-            None,
-        ),
-        "low_barrier_energy_cutoff_ev": getattr(
-            lateral_class,
-            "neb_low_barrier_threshold",
-            None,
-        ),
-        "low_barrier_stage": getattr(
-            lateral_class,
-            "neb_low_barrier_stage",
-            None,
-        ),
-    }
-
-
 def build_diffusion_payload(
     reaction,
     *,
@@ -174,7 +142,6 @@ def build_diffusion_payload(
         "gas_product": False,
         "description": description,
         "neb_images": _neb_image_payload(lc),
-        "neb_convergence": _neb_convergence_payload(lc),
         "energies_ev": {
             "state_a": None if e_a is None else float(e_a),
             "state_b": None if e_b is None else float(e_b),
@@ -304,7 +271,6 @@ def build_bond_payload(
         "gas_product": bool(getattr(reaction.site, "gas_product", False)),
         "description": description,
         "neb_images": _neb_image_payload(lc),
-        "neb_convergence": _neb_convergence_payload(lc),
         "energies_ev": {
             "state_ab": None if e_ab is None else float(e_ab),
             "state_c": None if e_c is None else float(e_c),

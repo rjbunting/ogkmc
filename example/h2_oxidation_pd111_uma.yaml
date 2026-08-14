@@ -72,15 +72,15 @@ calculator:
 optimization:
   optimizer: fire
   optimizer_kwargs:
-    dt: 0.01
-    dtmax: 0.05
-    maxstep: 0.05
+    dt: 0.05
+    dtmax: 0.5
+    maxstep: 0.1
     downhill_check: true
   neb_optimizer: fire
   neb_optimizer_kwargs:
-    dt: 0.01
-    dtmax: 0.01
-    maxstep: 0.02
+    dt: 0.05
+    dtmax: 0.5
+    maxstep: 0.05
     downhill_check: true
   # Use a fresh MDMin instance after the ordinary band has converged and the
   # climbing image is enabled.
@@ -91,7 +91,6 @@ optimization:
   neb_method: improvedtangent
   neb_band_eval: batched
   neb_geometry_guard_multiplier: 3.0
-  neb_low_barrier_fmax: 0.1
 
 adsorbate_sites:
   prune_stable_only: true
@@ -126,11 +125,11 @@ diffusion:
   # band and halves FIRE dt/dtmax. n_images is the fixed fallback when null.
   n_images: 8
   image_spacing: 0.25
-  min_images: 6
-  max_images: 8
+  min_images: 4
+  max_images: 12
   # CI is skipped if either ordinary directional barrier is below 0.1 eV.
   climb: true
-  spring_k: 5.0
+  spring_k: 1.0
   interpolation: linear
   persist_neb_path: true
 
@@ -165,8 +164,8 @@ bond:
   # band and halves FIRE dt/dtmax. neb_n_images is the fallback when null.
   neb_n_images: 8
   neb_image_spacing: 0.25
-  neb_min_images: 6
-  neb_max_images: 8
+  neb_min_images: 4
+  neb_max_images: 12
   # CI is skipped if either ordinary directional barrier is below 0.1 eV.
   neb_climb: true
   neb_spring_k: 1.0
