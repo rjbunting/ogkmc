@@ -372,6 +372,9 @@ def resolve_channel_runtime(cfg, frozen_indices: list[int] | None) -> ChannelRun
             neb_geometry_guard_multiplier=(
                 cfg.optimization.neb_geometry_guard_multiplier
             ),
+            neb_low_barrier_fmax=(
+                cfg.optimization.neb_low_barrier_fmax
+            ),
         )
 
     bond = None
@@ -407,6 +410,9 @@ def resolve_channel_runtime(cfg, frozen_indices: list[int] | None) -> ChannelRun
             neb_band_eval=cfg.optimization.neb_band_eval,
             neb_geometry_guard_multiplier=(
                 cfg.optimization.neb_geometry_guard_multiplier
+            ),
+            neb_low_barrier_fmax=(
+                cfg.optimization.neb_low_barrier_fmax
             ),
         )
         bond_growth = BondGrowthOptions(

@@ -82,6 +82,7 @@ def test_load_yaml_ok(tmp_path):
     assert cfg.optimization.neb_optimizer == "bfgs"
     assert cfg.optimization.neb_method == "improvedtangent"
     assert cfg.optimization.neb_geometry_guard_multiplier == pytest.approx(3.0)
+    assert cfg.optimization.neb_low_barrier_fmax == pytest.approx(0.1)
 
 
 def test_loads_optimizer_choices(tmp_path):
@@ -109,6 +110,7 @@ optimization:
     downhill_check: false
   neb_method: aseneb
   neb_geometry_guard_multiplier: 4.0
+  neb_low_barrier_fmax: 0.15
 reactants:
   - smiles: "[O]"
 calculator:
@@ -139,6 +141,7 @@ calculator:
     }
     assert cfg.optimization.neb_method == "aseneb"
     assert cfg.optimization.neb_geometry_guard_multiplier == pytest.approx(4.0)
+    assert cfg.optimization.neb_low_barrier_fmax == pytest.approx(0.15)
 
 
 @pytest.mark.parametrize(
@@ -288,6 +291,29 @@ calculator:
     with pytest.raises(
         ConfigError,
         match="optimization.neb_geometry_guard_multiplier",
+    ):
+        load_config(path)
+
+
+@pytest.mark.parametrize("value", [0.0, -0.1])
+def test_rejects_nonpositive_neb_low_barrier_fmax(tmp_path, value):
+    pytest.importorskip("yaml")
+    path = _write(
+        tmp_path,
+        f"""
+schema_version: "1"
+optimization:
+  neb_low_barrier_fmax: {value}
+reactants:
+  - smiles: "[O]"
+calculator:
+  import_path: ase.calculators.emt.EMT
+""",
+    )
+
+    with pytest.raises(
+        ConfigError,
+        match="optimization.neb_low_barrier_fmax",
     ):
         load_config(path)
 

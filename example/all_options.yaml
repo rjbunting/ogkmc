@@ -147,6 +147,11 @@ optimization:
   # this multiple of diffusion.image_spacing or bond.neb_image_spacing.
   neb_geometry_guard_multiplier: 3.0
 
+  # Once the NEB force is below this value (eV/Å) but still above the strict
+  # channel fmax, accept the band if either raw directional barrier is below
+  # the shared 0.1 eV minimum barrier.
+  neb_low_barrier_fmax: 0.1
+
 
 # ---------------------------------------------------------------------------
 # Output files

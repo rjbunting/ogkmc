@@ -95,6 +95,11 @@ least 0.1 eV. Both forward and reverse rates are derived from one effective
 transition-state level so detailed energy consistency is preserved when the
 minimum barrier floor is applied.
 
+An ordinary or climbing band may also stop before its strict force target when
+its maximum NEB force is at most the configured low-barrier cutoff (0.1 eV/Å
+by default) and either raw directional barrier is below 0.1 eV. Reaction JSON
+retains that alternate convergence provenance.
+
 For a lateral environment containing neighbouring adsorbates, the reaction
 evaluator first ensures that the corresponding no-neighbour lateral class has
 an optimized NEB band. It calculates that bare class on demand, projects the

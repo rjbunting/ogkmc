@@ -153,6 +153,12 @@ class NEBRunResult:
     climb_skipped_low_barrier: bool = False
     regular_forward_barrier: float | None = None
     regular_reverse_barrier: float | None = None
+    convergence_mode: str = "force"
+    convergence_fmax: float | None = None
+    converged_low_barrier: bool = False
+    low_barrier_fmax: float | None = None
+    low_barrier_threshold: float | None = None
+    low_barrier_stage: str | None = None
 
 
 @dataclass(frozen=True)
@@ -187,6 +193,29 @@ class _NEBBandSpacingViolation(RuntimeError):
             f"{gap.distance:.6f} Å at image pair "
             f"{gap.left_image}-{gap.left_image + 1}, atom {gap.atom_index}; "
             f"limit={self.limit:.6f} Å"
+        )
+
+
+class _NEBLowBarrierConverged(RuntimeError):
+    """Internal signal for the looser-force, low-barrier stopping rule."""
+
+    def __init__(
+        self,
+        *,
+        stage: str,
+        fmax: float,
+        forward_barrier: float,
+        reverse_barrier: float,
+    ) -> None:
+        self.stage = str(stage)
+        self.fmax = float(fmax)
+        self.forward_barrier = float(forward_barrier)
+        self.reverse_barrier = float(reverse_barrier)
+        super().__init__(
+            f"{self.stage} reached fmax={self.fmax:.6f} eV/Å with "
+            "a raw directional barrier below "
+            f"EA_MIN={EA_MIN:.3f} eV (forward={self.forward_barrier:.6f} "
+            f"eV, reverse={self.reverse_barrier:.6f} eV)"
         )
 
 
@@ -760,6 +789,7 @@ def run_neb(
         NEB_MAX_ADJACENT_IMAGE_SPACING_MULTIPLIER
     ),
     barrier_endpoint_energies: tuple[float, float] | None = None,
+    low_barrier_fmax: float | None = None,
 ) -> NEBRunResult:
     """Optimise one NEB band and return a calculator-detached result.
 
@@ -799,6 +829,14 @@ def run_neb(
     as the raw result; the reversible rate layer raises its common effective
     TS level so that the affected KMC barrier is exactly the configured floor
     without violating detailed energy consistency.
+
+    When ``low_barrier_fmax`` is supplied, each stage also checks the band once
+    its maximum NEB force lies between the strict target and this looser force
+    threshold. If either raw directional barrier is below :data:`EA_MIN`, the
+    stage is accepted immediately. This is intended for effectively
+    barrierless paths whose spring modes oscillate above the strict force
+    target. The result records the alternate convergence mode and observed
+    force so persistence can distinguish it from strict force convergence.
     """
     build_band = band_factory or make_neb_band
     select_logfile = logfile_factory or neb_optimizer_logfile
@@ -829,6 +867,19 @@ def run_neb(
         )
         if not all(np.isfinite(value) for value in resolved_barrier_endpoints):
             raise ValueError("barrier_endpoint_energies must be finite")
+    resolved_low_barrier_fmax = None
+    if low_barrier_fmax is not None:
+        resolved_low_barrier_fmax = float(low_barrier_fmax)
+        if (
+            not np.isfinite(resolved_low_barrier_fmax)
+            or resolved_low_barrier_fmax <= 0.0
+        ):
+            raise ValueError("low_barrier_fmax must be finite and positive")
+        if resolved_barrier_endpoints is None:
+            raise ValueError(
+                "barrier_endpoint_energies are required when "
+                "low_barrier_fmax is enabled"
+            )
     if band_eval_mode == "images":
         _maybe_hint_batched_available(calculator)
     with acquire_calculator(calculator, purpose=purpose) as neb_calculator:
@@ -875,6 +926,10 @@ def run_neb(
                 initial_path_callback(initial_snapshot_path)
 
             optimizer_steps = 0
+            convergence_mode = "force"
+            convergence_fmax = None
+            converged_low_barrier = False
+            low_barrier_stage = None
 
             def _optimise_stage(
                 *,
@@ -884,6 +939,8 @@ def run_neb(
                 target_fmax: float,
             ) -> None:
                 nonlocal optimizer_steps
+                nonlocal convergence_mode, convergence_fmax
+                nonlocal converged_low_barrier, low_barrier_stage
                 climbing_stage = stage.startswith("CI-NEB")
                 optimizer_name = normalize_optimizer_name(
                     selected_optimizer,
@@ -1004,19 +1061,24 @@ def run_neb(
                         if hasattr(stage_optimizer, name)
                     }
 
-                    if spacing_limit is not None:
+                    if (
+                        spacing_limit is not None
+                        or resolved_low_barrier_fmax is not None
+                    ):
 
-                        def retain_lowest_force_valid_band() -> None:
+                        def monitor_band() -> None:
                             nonlocal best_fmax, best_positions
-                            gap = _maximum_adjacent_image_displacement(
-                                images,
-                                frozen_indices=frozen_indices,
-                            )
-                            if gap.distance > spacing_limit * (1.0 + 1.0e-12):
-                                raise _NEBBandSpacingViolation(
-                                    gap,
-                                    spacing_limit,
+                            nonlocal convergence_fmax
+                            if spacing_limit is not None:
+                                gap = _maximum_adjacent_image_displacement(
+                                    images,
+                                    frozen_indices=frozen_indices,
                                 )
+                                if gap.distance > spacing_limit * (1.0 + 1.0e-12):
+                                    raise _NEBBandSpacingViolation(
+                                        gap,
+                                        spacing_limit,
+                                    )
                             forces = np.asarray(neb.get_forces(), dtype=float)
                             force_norms = np.linalg.norm(
                                 forces.reshape((-1, 3)),
@@ -1027,15 +1089,58 @@ def run_neb(
                                 if len(force_norms)
                                 else 0.0
                             )
-                            if np.isfinite(current_fmax) and current_fmax < best_fmax:
+                            convergence_fmax = current_fmax
+                            if (
+                                spacing_limit is not None
+                                and np.isfinite(current_fmax)
+                                and current_fmax < best_fmax
+                            ):
                                 best_fmax = current_fmax
                                 best_positions = [
                                     np.asarray(image.positions, dtype=float).copy()
                                     for image in images
                                 ]
+                            if (
+                                resolved_low_barrier_fmax is None
+                                or not np.isfinite(current_fmax)
+                                or current_fmax > (
+                                    resolved_low_barrier_fmax * (1.0 + 1.0e-12)
+                                )
+                                or current_fmax <= (
+                                    float(target_fmax) * (1.0 + 1.0e-12)
+                                )
+                            ):
+                                return
+                            energies = [
+                                float(image.get_potential_energy())
+                                for image in images
+                            ]
+                            interior = energies[1:-1]
+                            if not interior:
+                                return
+                            assert resolved_barrier_endpoints is not None
+                            transition_energy = float(max(interior))
+                            forward_barrier = (
+                                transition_energy
+                                - resolved_barrier_endpoints[0]
+                            )
+                            reverse_barrier = (
+                                transition_energy
+                                - resolved_barrier_endpoints[1]
+                            )
+                            if min(
+                                forward_barrier,
+                                reverse_barrier,
+                            ) < float(EA_MIN) - 1.0e-12:
+                                raise _NEBLowBarrierConverged(
+                                    stage=stage,
+                                    fmax=current_fmax,
+                                    forward_barrier=forward_barrier,
+                                    reverse_barrier=reverse_barrier,
+                                )
 
                         stage_optimizer.attach(
-                            retain_lowest_force_valid_band,
+                            monitor_band,
                             interval=1,
                         )
 
@@ -1044,6 +1149,27 @@ def run_neb(
                             fmax=float(target_fmax),
                             steps=remaining_steps,
                         )
+                    except _NEBLowBarrierConverged as exc:
+                        steps_used = int(stage_optimizer.nsteps)
+                        optimizer_steps += steps_used
+                        remaining_steps -= steps_used
+                        convergence_mode = "low_barrier"
+                        convergence_fmax = exc.fmax
+                        converged_low_barrier = True
+                        low_barrier_stage = stage
+                        _log.warning(
+                            "Stopping %s under the low-barrier convergence "
+                            "rule: fmax=%.6f eV/Å <= %.6f eV/Å and the "
+                            "smaller raw barrier is below %.3f eV "
+                            "(forward=%.6f eV, reverse=%.6f eV).",
+                            stage,
+                            exc.fmax,
+                            resolved_low_barrier_fmax,
+                            EA_MIN,
+                            exc.forward_barrier,
+                            exc.reverse_barrier,
+                        )
+                        return
                     except _NEBBandSpacingViolation as exc:
                         steps_used = int(stage_optimizer.nsteps)
                         optimizer_steps += steps_used
@@ -1102,6 +1228,9 @@ def run_neb(
                             f"{stage} did not converge: fmax={target_fmax} "
                             f"eV/Å not reached in {max_steps} steps."
                         )
+                    convergence_mode = "force"
+                    converged_low_barrier = False
+                    low_barrier_stage = None
                     return
 
             climb_performed = False
@@ -1143,7 +1272,7 @@ def run_neb(
                 ) < float(EA_MIN) - 1.0e-12:
                     climb_skipped_low_barrier = True
                     _log.warning(
-                        "Skipping CI-NEB because the converged ordinary band "
+                        "Skipping CI-NEB because the accepted ordinary band "
                         "has a raw barrier below EA_MIN=%.3f eV "
                         "(forward=%.6f eV, reverse=%.6f eV). The ordinary "
                         "band is retained and the reversible KMC rate applies "
@@ -1198,6 +1327,16 @@ def run_neb(
                 climb_skipped_low_barrier=climb_skipped_low_barrier,
                 regular_forward_barrier=regular_forward_barrier,
                 regular_reverse_barrier=regular_reverse_barrier,
+                convergence_mode=convergence_mode,
+                convergence_fmax=convergence_fmax,
+                converged_low_barrier=converged_low_barrier,
+                low_barrier_fmax=resolved_low_barrier_fmax,
+                low_barrier_threshold=(
+                    float(EA_MIN)
+                    if resolved_low_barrier_fmax is not None
+                    else None
+                ),
+                low_barrier_stage=low_barrier_stage,
                 path_energies=path_energies,
                 path_images=path_images,
             )

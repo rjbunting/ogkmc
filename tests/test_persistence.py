@@ -218,6 +218,12 @@ def test_reaction_writer_persists_initial_structures_and_neb_paths(
         neb_climb_skipped_low_barrier=False,
         neb_regular_forward_barrier=1.0,
         neb_regular_reverse_barrier=0.8,
+        neb_convergence_mode="force",
+        neb_convergence_fmax=0.009,
+        neb_converged_low_barrier=False,
+        neb_low_barrier_fmax=0.1,
+        neb_low_barrier_threshold=0.1,
+        neb_low_barrier_stage=None,
     )
     diffusion_reaction = SimpleNamespace(
         kind="diffusion",
@@ -260,6 +266,12 @@ def test_reaction_writer_persists_initial_structures_and_neb_paths(
         neb_climb_skipped_low_barrier=True,
         neb_regular_forward_barrier=1.5,
         neb_regular_reverse_barrier=0.05,
+        neb_convergence_mode="low_barrier",
+        neb_convergence_fmax=0.08,
+        neb_converged_low_barrier=True,
+        neb_low_barrier_fmax=0.1,
+        neb_low_barrier_threshold=0.1,
+        neb_low_barrier_stage="NEB pre-climb relaxation",
     )
     bond_reaction = SimpleNamespace(
         kind="bond",
@@ -328,6 +340,14 @@ def test_reaction_writer_persists_initial_structures_and_neb_paths(
     assert bond_payload["neb_images"][
         "regular_reverse_barrier_ev"
     ] == pytest.approx(0.05)
+    assert bond_payload["neb_convergence"] == {
+        "mode": "low_barrier",
+        "observed_fmax_ev_per_ang": pytest.approx(0.08),
+        "low_barrier_early_stop": True,
+        "low_barrier_force_cutoff_ev_per_ang": pytest.approx(0.1),
+        "low_barrier_energy_cutoff_ev": pytest.approx(0.1),
+        "low_barrier_stage": "NEB pre-climb relaxation",
+    }
 
     diffusion_payload = json.loads(
         (diffusion_folder / "reaction.json").read_text()
@@ -337,6 +357,10 @@ def test_reaction_writer_persists_initial_structures_and_neb_paths(
     )
     assert diffusion_payload["neb_images"]["interior_images"] == 6
     assert diffusion_payload["neb_images"]["climb_performed"] is True
+    assert diffusion_payload["neb_convergence"]["mode"] == "force"
+    assert diffusion_payload["neb_convergence"][
+        "low_barrier_early_stop"
+    ] is False
     assert diffusion_payload["atoms"]["neb_path_initial"] == (
         "neb_path_initial.extxyz"
     )

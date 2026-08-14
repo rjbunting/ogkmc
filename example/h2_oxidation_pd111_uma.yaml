@@ -91,6 +91,7 @@ optimization:
   neb_method: improvedtangent
   neb_band_eval: batched
   neb_geometry_guard_multiplier: 3.0
+  neb_low_barrier_fmax: 0.1
 
 adsorbate_sites:
   prune_stable_only: true

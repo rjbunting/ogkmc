@@ -134,6 +134,7 @@ from autokmc.core.constants import (
     NEB_CLIMB,
     NEB_SPRING_K,
     NEB_INTERPOLATION,
+    NEB_LOW_BARRIER_FMAX,
     NEB_METHOD,
 )
 from autokmc.utils.logging import get_logger
@@ -935,6 +936,11 @@ def _apply_diffusion_thermochemistry(
             "neb_climb_skipped_low_barrier",
             False,
         )
+        and not getattr(
+            lateral_class,
+            "neb_converged_low_barrier",
+            False,
+        )
     ):
         ts_thermo = _harm(atoms_ts, "ts", energy_ts, True)
     else:
@@ -1121,6 +1127,36 @@ def _write_diffusion_calculation_cache(
                 "neb_regular_reverse_barrier",
                 None,
             ),
+            "neb_convergence_mode": getattr(
+                lateral_class,
+                "neb_convergence_mode",
+                None,
+            ),
+            "neb_convergence_fmax": getattr(
+                lateral_class,
+                "neb_convergence_fmax",
+                None,
+            ),
+            "neb_converged_low_barrier": getattr(
+                lateral_class,
+                "neb_converged_low_barrier",
+                None,
+            ),
+            "neb_low_barrier_fmax": getattr(
+                lateral_class,
+                "neb_low_barrier_fmax",
+                None,
+            ),
+            "neb_low_barrier_threshold": getattr(
+                lateral_class,
+                "neb_low_barrier_threshold",
+                None,
+            ),
+            "neb_low_barrier_stage": getattr(
+                lateral_class,
+                "neb_low_barrier_stage",
+                None,
+            ),
         },
     )
     write_calculation_record(
@@ -1161,6 +1197,7 @@ def check_diffusion_stability(
     neb_geometry_guard_multiplier: float = (
         NEB_MAX_ADJACENT_IMAGE_SPACING_MULTIPLIER
     ),
+    neb_low_barrier_fmax: float = NEB_LOW_BARRIER_FMAX,
     verbose: bool = False,
     free_energy_options=None,
     free_energy_temperature_k: float | None = None,
@@ -1323,6 +1360,7 @@ def check_diffusion_stability(
         "neb_geometry_guard_multiplier": float(
             neb_geometry_guard_multiplier
         ),
+        "neb_low_barrier_fmax": float(neb_low_barrier_fmax),
         "n_images": int(n_images),
         "image_spacing": (
             None if image_spacing is None else float(image_spacing)
@@ -1344,6 +1382,11 @@ def check_diffusion_stability(
         ),
         "neb_climb_policy": {
             "name": "skip_if_either_regular_barrier_below_ea_min_v1",
+            "minimum_barrier_ev": float(EA_MIN),
+        },
+        "neb_low_barrier_convergence_policy": {
+            "name": "accept_below_force_cutoff_if_either_barrier_below_ea_min_v1",
+            "force_cutoff_ev_per_ang": float(neb_low_barrier_fmax),
             "minimum_barrier_ev": float(EA_MIN),
         },
         "free_energy_enabled": bool(
@@ -1726,6 +1769,7 @@ def check_diffusion_stability(
         image_spacing=image_selection.target_spacing,
         geometry_guard_multiplier=neb_geometry_guard_multiplier,
         barrier_endpoint_energies=(float(E_a), float(E_b)),
+        low_barrier_fmax=float(neb_low_barrier_fmax),
         verbose=verbose,
         not_converged_error=NEBNotConvergedError,
         persist_path=persist_neb_path,
@@ -1767,6 +1811,18 @@ def check_diffusion_stability(
     lateral_class.neb_regular_reverse_barrier = (
         neb_result.regular_reverse_barrier
     )
+    lateral_class.neb_convergence_mode = neb_result.convergence_mode
+    lateral_class.neb_convergence_fmax = neb_result.convergence_fmax
+    lateral_class.neb_converged_low_barrier = (
+        neb_result.converged_low_barrier
+    )
+    lateral_class.neb_low_barrier_fmax = (
+        neb_result.low_barrier_fmax
+    )
+    lateral_class.neb_low_barrier_threshold = (
+        neb_result.low_barrier_threshold
+    )
+    lateral_class.neb_low_barrier_stage = neb_result.low_barrier_stage
     lateral_class.atoms_ts = atoms_ts
     # Keep the final path public until all post-NEB checks succeed.  An
     # exception leaves it attached for invalid-candidate persistence.
@@ -1794,7 +1850,10 @@ def check_diffusion_stability(
         e_ts       = E_ts,
         ts_index   = k_ts,
         n_interior = neb_result.n_interior,
-        allow_barrier_floor=neb_result.climb_skipped_low_barrier,
+        allow_barrier_floor=(
+            neb_result.climb_skipped_low_barrier
+            or neb_result.converged_low_barrier
+        ),
         )
 
     _apply_diffusion_thermochemistry(
