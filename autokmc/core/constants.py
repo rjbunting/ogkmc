@@ -275,6 +275,12 @@ NEB_MAX_IMAGES: int = 8
 #: :func:`autokmc.sites.stability.diffusion.check_diffusion_stability`.
 NEB_FMAX: float = 0.01
 
+#: Looser force threshold (eV/Å) at which an ordinary or climbing NEB may be
+#: accepted early when either raw directional barrier is below ``EA_MIN``.
+#: This avoids treating harmless spring oscillations on an effectively
+#: barrierless path as a numerical failure.
+NEB_LOW_BARRIER_FMAX: float = 0.1
+
 #: Maximum optimiser steps for the NEB band relaxation.
 NEB_MAX_STEPS: int = 200
 

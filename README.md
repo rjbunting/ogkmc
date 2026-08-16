@@ -117,8 +117,14 @@ structure:
   composition: Pt
   crystal_structure: fcc
   miller_index: [1, 1, 1]
+  lattice_constant: 3.92
+  # Four Pt(111) layers, repeated 3x3 in the primitive surface cell.
   min_slab_size: 8.0
   min_vacuum_size: 12.0
+  goal_x: 8.0
+  goal_y: 8.0
+  extra_kwargs:
+    orthogonalise: false
   n_freeze_layers: 2
 
 reactants:
@@ -294,6 +300,13 @@ floor, AutoKMC retains the ordinary band and skips the climbing stage. The rate
 layer applies the floor through one common effective TS level so reversible
 energy consistency is preserved. These calculations are often among the most
 expensive parts of a run.
+
+Effectively barrierless bands can oscillate above the strict channel `fmax`
+because of their spring modes. Once the observed maximum NEB force is at or
+below `optimization.neb_low_barrier_fmax` (default 0.1 eV/Å), AutoKMC checks
+both raw directional barriers. If either is below 0.1 eV, the band is accepted
+without reaching the strict force target. The reaction JSON records this as a
+low-barrier early stop together with the observed force and both cutoffs.
 
 When `image_spacing` (or bond `neb_image_spacing`) is set, it also guards the
 optimized geometry: by default, no unfrozen atom may move more than three times

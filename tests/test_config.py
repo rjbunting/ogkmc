@@ -82,6 +82,7 @@ def test_load_yaml_ok(tmp_path):
     assert cfg.optimization.neb_optimizer == "bfgs"
     assert cfg.optimization.neb_method == "improvedtangent"
     assert cfg.optimization.neb_geometry_guard_multiplier == pytest.approx(3.0)
+    assert cfg.optimization.neb_low_barrier_fmax == pytest.approx(0.1)
 
 
 def test_loads_optimizer_choices(tmp_path):
@@ -109,6 +110,7 @@ optimization:
     downhill_check: false
   neb_method: aseneb
   neb_geometry_guard_multiplier: 4.0
+  neb_low_barrier_fmax: 0.15
 reactants:
   - smiles: "[O]"
 calculator:
@@ -139,6 +141,7 @@ calculator:
     }
     assert cfg.optimization.neb_method == "aseneb"
     assert cfg.optimization.neb_geometry_guard_multiplier == pytest.approx(4.0)
+    assert cfg.optimization.neb_low_barrier_fmax == pytest.approx(0.15)
 
 
 @pytest.mark.parametrize(
@@ -292,6 +295,29 @@ calculator:
         load_config(path)
 
 
+@pytest.mark.parametrize("value", [0.0, -0.1])
+def test_rejects_nonpositive_neb_low_barrier_fmax(tmp_path, value):
+    pytest.importorskip("yaml")
+    path = _write(
+        tmp_path,
+        f"""
+schema_version: "1"
+optimization:
+  neb_low_barrier_fmax: {value}
+reactants:
+  - smiles: "[O]"
+calculator:
+  import_path: ase.calculators.emt.EMT
+""",
+    )
+
+    with pytest.raises(
+        ConfigError,
+        match="optimization.neb_low_barrier_fmax",
+    ):
+        load_config(path)
+
+
 def test_loads_every_shared_constant_and_site_geometry_control(tmp_path):
     pytest.importorskip("yaml")
     path = _write(
@@ -369,17 +395,34 @@ def test_all_options_template_lists_every_shared_constant():
     assert cfg.adsorbate_sites.max_pair_shells == 10
 
 
-def test_h2_oxidation_pd111_uma_example_is_four_gpu_and_batched():
+@pytest.mark.parametrize(
+    ("facet", "miller_index", "min_slab_size"),
+    [
+        ("111", (1, 1, 1), 8.0),
+        ("100", (1, 0, 0), 6.0),
+    ],
+)
+def test_h2_oxidation_pd_uma_examples_are_3x3_four_layer_and_batched(
+    facet,
+    miller_index,
+    min_slab_size,
+):
     pytest.importorskip("yaml")
     path = (
         Path(__file__).parents[1]
         / "example"
-        / "h2_oxidation_pd111_uma.yaml"
+        / f"h2_oxidation_pd{facet}_uma.yaml"
     )
 
     cfg = load_config(path)
 
     assert cfg.structure.composition == "Pd"
+    assert cfg.structure.miller_index == miller_index
+    assert cfg.structure.min_slab_size == pytest.approx(min_slab_size)
+    assert cfg.structure.goal_x == pytest.approx(8.0)
+    assert cfg.structure.goal_y == pytest.approx(8.0)
+    assert cfg.structure.extra_kwargs["orthogonalise"] is False
+    assert cfg.structure.n_freeze_layers == 2
     assert [reactant.smiles for reactant in cfg.reactants] == ["[H][H]", "O=O"]
     assert cfg.calculator.factory == "fairchem.core.FAIRChemCalculator"
     predictor = cfg.calculator.factory_kwargs["predict_unit"]

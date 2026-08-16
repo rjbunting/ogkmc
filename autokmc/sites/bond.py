@@ -93,6 +93,7 @@ from autokmc.sites.adsorbate import (
 from autokmc.sites.identity import SiteId, member_identifier, site_identifier
 from autokmc.sites.diffusion import _member_clique_union
 from autokmc.sites.stability.adsorption import _surface_bfs_shells
+from autokmc.species.smiles import canonical_atom_inventory_smiles
 from autokmc.core.constants import (
     BOND_MAX_HOPS,
     BOND_PAIR_N_SHELLS,
@@ -103,7 +104,6 @@ from autokmc.core.constants import (
 )
 from autokmc.utils.logging import get_logger
 from autokmc.utils.optimizers import DEFAULT_OPTIMIZER
-from autokmc.utils.rdkit_logging import silence_rdkit_warnings
 
 _log = get_logger(__name__)
 
@@ -113,18 +113,8 @@ _log = get_logger(__name__)
 # ---------------------------------------------------------------------------
 
 def _canon_smiles(smi: str) -> str:
-    """Return RDKit-canonical SMILES; falls back to the input string."""
-    if smi is None:
-        return ""
-    try:
-        silence_rdkit_warnings()
-        from rdkit import Chem
-    except ImportError:
-        return str(smi)
-    try:
-        return Chem.CanonSmiles(str(smi))
-    except Exception:
-        return str(smi)
+    """Return atom-inventory-safe canonical SMILES for bond chemistry."""
+    return canonical_atom_inventory_smiles(smi)
 
 
 # ---------------------------------------------------------------------------
@@ -258,6 +248,12 @@ class BondReactionLateral:
     neb_target_image_spacing: float | None = None
     neb_estimated_image_spacing: float | None = None
     neb_image_count_limited_by: str | None = None
+    neb_convergence_mode: str | None = None
+    neb_convergence_fmax: float | None = None
+    neb_converged_low_barrier: bool | None = None
+    neb_low_barrier_fmax: float | None = None
+    neb_low_barrier_threshold: float | None = None
+    neb_low_barrier_stage: str | None = None
     stable           : bool | None      = None
     invalid_reason   : str | None       = None
     last_failure_reason: str | None     = None

@@ -21,9 +21,10 @@ event and structural information for reproducible post-processing.
   and schema-change conventions.
 
 The repository [README](../README.md) remains the installation and quick-start
-entry point. The production-style palladium example is:
+entry point. The production-style four-layer, 3x3 palladium examples are:
 
 - [`h2_oxidation_pd111_uma.yaml`](../example/h2_oxidation_pd111_uma.yaml)
+- [`h2_oxidation_pd100_uma.yaml`](../example/h2_oxidation_pd100_uma.yaml)
 
 ## Command summary
 

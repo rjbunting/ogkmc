@@ -50,6 +50,7 @@ from autokmc.core.constants import (
     NEB_CLIMB,
     NEB_IMAGE_SPACING,
     NEB_INTERPOLATION,
+    NEB_LOW_BARRIER_FMAX,
     NEB_MAX_ADJACENT_IMAGE_SPACING_MULTIPLIER,
     NEB_MAX_IMAGES,
     NEB_METHOD,
@@ -150,6 +151,9 @@ class OptimizationCfg:
     neb_geometry_guard_multiplier: float = (
         NEB_MAX_ADJACENT_IMAGE_SPACING_MULTIPLIER
     )
+    #: Looser force threshold (eV/Å) at which a band below the shared
+    #: ``EA_MIN`` barrier floor may stop without reaching channel ``fmax``.
+    neb_low_barrier_fmax: float = NEB_LOW_BARRIER_FMAX
 
 
 @dataclass

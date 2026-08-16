@@ -45,7 +45,7 @@ Typical usage — combination
     # Reconnect fragments that already carry * attachment points
     products = combine_fragments("[CH3]*", "[OH]*")
     for s in products:
-        print(s.smiles)           # 'CO'  (methanol)
+        print(s.smiles)           # explicit-atom methanol SMILES
 
     # Enumerate every possible bond between two bare radicals
     products = combine_fragments("[CH3]", "[OH]")
@@ -142,7 +142,7 @@ class FragmentPair:
 # ---------------------------------------------------------------------------
 
 def _rdkit_mol_from_smiles(smiles: str, *, add_hydrogens: bool):
-    """Return an RDKit ``Mol`` from *smiles*, optionally with explicit H."""
+    """Return an RDKit ``Mol`` while retaining explicitly specified H."""
     try:
         from rdkit import Chem
         from rdkit.Chem import AllChem
@@ -151,17 +151,22 @@ def _rdkit_mol_from_smiles(smiles: str, *, add_hydrogens: bool):
             "RDKit is required.  Install with: conda install -c conda-forge rdkit"
         ) from exc
 
-    mol = Chem.MolFromSmiles(smiles)
+    parser = Chem.SmilesParserParams()
+    parser.removeHs = False
+    mol = Chem.MolFromSmiles(smiles, parser)
     if mol is None:
         raise ValueError(f"RDKit could not parse SMILES: {smiles!r}")
 
-    if add_hydrogens:
-        only_atoms = [
-            a.GetIdx() for a in mol.GetAtoms()
-            if a.GetNumImplicitHs() > 0 or a.GetNumExplicitHs() > 0
-        ]
-        if only_atoms:
-            mol = Chem.AddHs(mol, onlyOnAtoms=only_atoms)
+    only_atoms = [
+        atom.GetIdx()
+        for atom in mol.GetAtoms()
+        if (
+            atom.GetNumExplicitHs() > 0
+            or (add_hydrogens and atom.GetNumImplicitHs() > 0)
+        )
+    ]
+    if only_atoms:
+        mol = Chem.AddHs(mol, onlyOnAtoms=only_atoms)
 
     # Embed + quick MMFF pre-relax so positions are meaningful.
     params = AllChem.ETKDGv3()
@@ -732,6 +737,18 @@ def _available_valence_indices(mol) -> list[int]:
     return out
 
 
+def _bondable_real_atom_indices(mol) -> list[int]:
+    """Return heavy atoms plus free hydrogen radicals, excluding bound H."""
+    return [
+        atom.GetIdx()
+        for atom in mol.GetAtoms()
+        if (
+            atom.GetAtomicNum() > 1
+            or (atom.GetAtomicNum() == 1 and atom.GetDegree() == 0)
+        )
+    ]
+
+
 def _fix_overvalent_atoms(rw, pt=None) -> None:
     """Reduce bond orders to resolve over-valency introduced by a new bond.
 
@@ -842,7 +859,11 @@ def _join_mols(mol_a, mol_b, idx_a: int, idx_b: int, rdkit_bond_type) -> str | N
     try:
         mol = rw.GetMol()
         Chem.SanitizeMol(mol)
-        return Chem.MolToSmiles(mol)
+        # _set_no_implicit() above deliberately removes hydrogens that were
+        # only implicit in the input fragments.  Write all *remaining*
+        # hydrogens explicitly so a subsequent parse cannot collapse a real
+        # simulated H atom into implicit valence (for example H + O2 -> HO2).
+        return Chem.MolToSmiles(mol, allHsExplicit=True)
     except Exception:
         return None
 
@@ -863,14 +884,21 @@ def _parse_fragment_smiles(smiles_or_obj, add_hydrogens: bool = False):
     from rdkit.Chem import RWMol
 
     if isinstance(smiles_or_obj, str):
-        mol = Chem.MolFromSmiles(smiles_or_obj)
+        parser = Chem.SmilesParserParams()
+        parser.removeHs = False
+        mol = Chem.MolFromSmiles(smiles_or_obj, parser)
         if mol is None:
             raise ValueError(f"RDKit could not parse SMILES: {smiles_or_obj!r}")
-        if add_hydrogens:
-            only = [a.GetIdx() for a in mol.GetAtoms()
-                    if a.GetNumImplicitHs() > 0 or a.GetNumExplicitHs() > 0]
-            if only:
-                mol = Chem.AddHs(mol, onlyOnAtoms=only)
+        only = [
+            atom.GetIdx()
+            for atom in mol.GetAtoms()
+            if (
+                atom.GetNumExplicitHs() > 0
+                or (add_hydrogens and atom.GetNumImplicitHs() > 0)
+            )
+        ]
+        if only:
+            mol = Chem.AddHs(mol, onlyOnAtoms=only)
         rw = RWMol(mol)
         _set_no_implicit(rw)
         return rw.GetMol()
@@ -970,14 +998,14 @@ def combine_fragments(
 
         >>> from autokmc.species.bond_chemistry import combine_fragments
         >>> products = combine_fragments("[CH3]*", "*[OH]")
-        >>> [s.smiles for s in products]
-        ['CO']                  # methanol
+        >>> products[0].smiles  # methanol with explicit atom inventory
+        '[H][O][C]([H])([H])[H]'
 
     **Bare radical fragments (undirected mode)**::
 
         >>> products = combine_fragments("[CH3]", "[OH]")
-        >>> [s.smiles for s in products]
-        ['CO']                  # C radical + O radical → methanol
+        >>> products[0].smiles
+        '[H][O][C]([H])([H])[H]'
 
     **Round-trip: break CO double bond, recombine**::
 
@@ -1011,10 +1039,16 @@ def combine_fragments(
         if dummies_a and dummies_b:
             pairs_to_try = [(ia, ib) for ia in dummies_a for ib in dummies_b]
         elif dummies_a:
-            avail_b = _available_valence_indices(mol_b) or list(range(mol_b.GetNumAtoms()))
+            avail_b = (
+                _available_valence_indices(mol_b)
+                or _bondable_real_atom_indices(mol_b)
+            )
             pairs_to_try = [(ia, ib) for ia in dummies_a for ib in avail_b]
         else:
-            avail_a = _available_valence_indices(mol_a) or list(range(mol_a.GetNumAtoms()))
+            avail_a = (
+                _available_valence_indices(mol_a)
+                or _bondable_real_atom_indices(mol_a)
+            )
             pairs_to_try = [(ia, ib) for ia in avail_a for ib in dummies_b]
     else:
         # Undirected mode: for each radical atom in fragment A, try every
@@ -1022,13 +1056,12 @@ def combine_fragments(
         # radical" (rather than "both radicals") allows a radical atom to
         # attack a saturated site — the bond-order reduction in _join_mols
         # resolves any resulting over-valency.
-        # NOTE: filter is > 0 (exclude dummy * atoms only), NOT > 1 — using
-        # > 1 incorrectly excludes hydrogen (GetAtomicNum() == 1), which
-        # prevents homo-coupling of radical H atoms to form H₂ ([H][H]).
+        # Bound explicit H atoms are not recipients, but free radical H atoms
+        # remain eligible so homo-coupling can still form H₂ ([H][H]).
         avail_a = _available_valence_indices(mol_a)
         avail_b = _available_valence_indices(mol_b)
-        heavy_a = [a.GetIdx() for a in mol_a.GetAtoms() if a.GetAtomicNum() > 0]
-        heavy_b = [a.GetIdx() for a in mol_b.GetAtoms() if a.GetAtomicNum() > 0]
+        heavy_a = _bondable_real_atom_indices(mol_a)
+        heavy_b = _bondable_real_atom_indices(mol_b)
 
         seen_pairs: set[tuple[int, int]] = set()
         pairs_to_try = []

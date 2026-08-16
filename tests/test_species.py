@@ -10,7 +10,10 @@ from ase import Atoms
 
 from autokmc.species.bond_chemistry import _strip_dummy_atoms_from_smiles
 from autokmc.species.reactant import _smiles_to_atoms, find_anchor_atoms
-from autokmc.species.smiles import smiles_to_dirname
+from autokmc.species.smiles import (
+    canonical_atom_inventory_smiles,
+    smiles_to_dirname,
+)
 
 
 def test_smiles_to_atoms_fallback_embedding_is_deterministic_and_checked(monkeypatch):
@@ -73,6 +76,62 @@ def test_smiles_to_atoms_fallback_embedding_is_deterministic_and_checked(monkeyp
 def test_dummy_stripping_preserves_radical_style_for_reactant_cleanup():
     assert _strip_dummy_atoms_from_smiles("[CH3]*") == "[CH3]"
     assert _strip_dummy_atoms_from_smiles("*[OH]") == "[OH]"
+
+
+def test_bond_smiles_canonicalization_preserves_explicit_atom_inventory():
+    assert canonical_atom_inventory_smiles("[OH]") == "[H][O]"
+    assert canonical_atom_inventory_smiles("[H][O]") == "[H][O]"
+    assert canonical_atom_inventory_smiles("[H]O[O]") == "[H]O[O]"
+    assert canonical_atom_inventory_smiles("[O]O") == "[O]O"
+
+
+def test_h_plus_o2_coupling_preserves_hydrogen_through_bond_templates():
+    from autokmc.sites.bond import (
+        derive_coupling_templates,
+        derive_dissociation_templates,
+    )
+    from autokmc.species.reactant import build_reactant
+
+    templates = derive_coupling_templates(
+        ["[H]", "O=O"],
+        include_homo=False,
+        include_hetero=True,
+    )
+
+    assert len(templates) == 1
+    template = templates[0]
+    assert (
+        template.smiles_a,
+        template.smiles_b,
+        template.smiles_c,
+    ) == ("O=O", "[H]", "[H]O[O]")
+
+    endpoints = [
+        build_reactant(smiles, add_hydrogens=False, relax=False)
+        for smiles in (
+            template.smiles_a,
+            template.smiles_b,
+            template.smiles_c,
+        )
+    ]
+    assert len(endpoints[0].atoms) + len(endpoints[1].atoms) == 3
+    assert endpoints[2].atoms.get_chemical_formula() == "HO2"
+    assert len(endpoints[2].atoms) == 3
+
+    dissociation_templates = derive_dissociation_templates(
+        template.smiles_c,
+        add_hydrogens=False,
+    )
+    assert any(
+        {candidate.smiles_a, candidate.smiles_b} == {"[H][O]", "[O]"}
+        for candidate in dissociation_templates
+    )
+    for candidate in dissociation_templates:
+        fragments = [
+            build_reactant(smiles, add_hydrogens=False, relax=False)
+            for smiles in (candidate.smiles_a, candidate.smiles_b)
+        ]
+        assert sum(len(fragment.atoms) for fragment in fragments) == 3
 
 
 def test_species_package_exports_public_api():

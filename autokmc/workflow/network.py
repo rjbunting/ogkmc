@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 import networkx as nx
 
 from autokmc.core.graph_state import set_bond_reaction_sites
-from autokmc.species.smiles import canonical_smiles
+from autokmc.species.smiles import canonical_atom_inventory_smiles
 from autokmc.workflow.models import PreparedNetwork, RunIdentity, ThermoRuntime
 from autokmc.workflow.stages import (
     configured_adsorbate_site_kwargs,
@@ -152,12 +152,13 @@ class SpeciesNetworkBuilder:
             )
 
         reactant_by_smiles = {
-            canonical_smiles(reactant.smiles): reactant for reactant in reactants
+            canonical_atom_inventory_smiles(reactant.smiles): reactant
+            for reactant in reactants
         }
         sites_by_smiles: dict[str, list] = {}
         for site in sites:
             sites_by_smiles.setdefault(
-                canonical_smiles(site.reactant), []
+                canonical_atom_inventory_smiles(site.reactant), []
             ).append(site)
 
         self._build_leaf_species(
@@ -191,7 +192,7 @@ class SpeciesNetworkBuilder:
                 and bond_sites
             ):
                 species_by_smiles = {
-                    canonical_smiles(reactant.smiles): reactant
+                    canonical_atom_inventory_smiles(reactant.smiles): reactant
                     for reactant in reactants
                 }
                 bond_sites = prune_unstable_bond_sites(
@@ -253,7 +254,7 @@ class SpeciesNetworkBuilder:
                 template.smiles_b,
                 template.smiles_c,
             ):
-                canonical = canonical_smiles(smiles)
+                canonical = canonical_atom_inventory_smiles(smiles)
                 if (
                     canonical
                     and canonical not in reactant_by_smiles

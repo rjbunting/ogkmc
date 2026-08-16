@@ -147,6 +147,11 @@ optimization:
   # this multiple of diffusion.image_spacing or bond.neb_image_spacing.
   neb_geometry_guard_multiplier: 3.0
 
+  # Once the NEB force is below this value (eV/Å) but still above the strict
+  # channel fmax, accept the band if either raw directional barrier is below
+  # the shared 0.1 eV minimum barrier.
+  neb_low_barrier_fmax: 0.1
+
 
 # ---------------------------------------------------------------------------
 # Output files
@@ -262,22 +267,29 @@ structure:
   # the argument is supported by that builder and is not already listed above.
   # Surface examples include center_slab, orthogonalise, and composition_seed.
   # Nanoparticle examples include vacuum, composition_seed, and logfile.
-  extra_kwargs: {}
+  extra_kwargs:
+    # Preserve the primitive surface cell so goal_x/goal_y below select a
+    # literal 3x3 repeat.
+    orthogonalise: false
 
   # SURFACE-ONLY OPTIONS (active because kind is surface)
   #
-  # Three-index surface orientation.
+  # Three-index surface orientation. For the Cu lattice constant above,
+  # min_slab_size: 8.0 builds four Cu(111) layers. To use a four-layer Cu(100)
+  # slab instead, set miller_index: [1, 0, 0] and min_slab_size: 6.0.
   miller_index: [1, 1, 1]
 
   # Minimum slab and vacuum thicknesses in angstrom.
   min_slab_size: 8.0
   min_vacuum_size: 12.0
 
-  # Target lateral cell dimensions in angstrom.
-  goal_x: 12.0
-  goal_y: 12.0
+  # Target lateral cell dimensions in angstrom. The primitive Cu(111) and
+  # Cu(100) in-plane vectors are about 2.55 Å, so 7.5 Å selects a 3x3 repeat.
+  goal_x: 7.5
+  goal_y: 7.5
 
-  # Number of bottom atomic layers constrained during later calculations.
+  # Number of bottom atomic layers constrained during later calculations;
+  # this is distinct from the four total metal layers selected above.
   n_freeze_layers: 2
 
   # Slab face(s) classified as exposed: top | bottom | both.
