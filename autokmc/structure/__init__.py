@@ -44,6 +44,7 @@ from autokmc.structure.loading import (
     resolve_structure_path,
 )
 from autokmc.structure.slab import (
+    _align_slab_normal,
     _get_bottom_layer_indices,
     _orthogonalise_slab,
     build_surface,
@@ -88,6 +89,7 @@ __all__ = [
     "_fmt_lp",
     "_print_header",
     "_print_divider",
+    "_align_slab_normal",
     "_orthogonalise_slab",
     "_get_bottom_layer_indices",
 ]

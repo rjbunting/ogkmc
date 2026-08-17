@@ -233,6 +233,54 @@ def _clique_centroid(
     return _circular_centroid(positions, cell, cell_inv, pbc, use_mic)
 
 
+def _periodic_clique_is_contractible(
+    G: nx.Graph,
+    clique,
+    cell: np.ndarray,
+    pbc: np.ndarray,
+    use_mic: bool,
+    *,
+    atol: float = 1.0e-6,
+) -> bool:
+    """Return whether a periodic clique is one compact physical site.
+
+    Very small periodic surface graphs can contain graph-theoretic triangles
+    that wind around the torus (for example, three atoms spanning an entire
+    3×3 lattice row). Every pair is MIC-adjacent, but no single choice of
+    periodic images makes all clique atoms mutually local. Such a cycle is not
+    an adsorption hollow and must be rejected before iso classification.
+    """
+    nodes = list(clique)
+    if not use_mic or len(nodes) < 3:
+        return True
+
+    positions = np.asarray(
+        [G.nodes[node]["position"] for node in nodes],
+        dtype=float,
+    )
+    raw_pairs = positions[:, None, :] - positions[None, :, :]
+    mic_lengths = np.linalg.norm(
+        minimum_image_vectors(raw_pairs, cell, pbc),
+        axis=2,
+    )
+
+    # Try every atom as the image reference so exact half-cell ties in ASE's
+    # MIC choice cannot reject an otherwise compact local clique.
+    for reference in positions:
+        unwrapped = reference + minimum_image_vectors(
+            positions - reference,
+            cell,
+            pbc,
+        )
+        unwrapped_lengths = np.linalg.norm(
+            unwrapped[:, None, :] - unwrapped[None, :, :],
+            axis=2,
+        )
+        if np.allclose(unwrapped_lengths, mic_lengths, rtol=0.0, atol=atol):
+            return True
+    return False
+
+
 def _mic_distances(
     p: np.ndarray,
     ref: np.ndarray,
@@ -768,7 +816,11 @@ def _enumerate_cliques(
 ) -> dict[int, list[frozenset]]:
     """Return ``{k: [frozenset_of_node_ids, …]}`` for every clique size 1…k_max.
 
-    Two geometric filters drop spurious wrap-around / sub-surface cliques:
+    Three geometric filters drop spurious wrap-around / sub-surface cliques:
+
+    * **Periodic slabs** — graph-theoretic cliques that wind around a small
+      periodic cell are rejected unless all atoms can be unwrapped into one
+      mutually local cluster.
 
     * **Nanoparticles** — the convex hull of the *surface* atoms is used as
       the boundary of the particle.  A clique whose MIC-aware centroid sits
@@ -778,7 +830,7 @@ def _enumerate_cliques(
     * **Slabs** — a clique whose centroid sits below the lowest surface
       atom along the local outward normal is similarly buried beneath the
       surface and dropped.  The outward normal is just ``+z`` for the
-      orthogonalised slabs that :mod:`autokmc.structure` produces.
+      canonically aligned slabs that :mod:`autokmc.structure` produces.
     """
     if k_max is not None and int(k_max) < 1:
         raise ValueError("k_max must be at least 1 when supplied")
@@ -814,8 +866,8 @@ def _enumerate_cliques(
                 hull_eq = None
     else:
         # ── Slab: drop cliques whose centroid is below the surface ────
-        # All builders orthogonalise the slab cell (surface ‖ xy plane,
-        # outward normal = +z), so a simple z-floor is sufficient and
+        # All builders align the slab cell (surface ‖ xy plane, outward
+        # normal = +z), so a simple z-floor is sufficient and
         # cheap.  ``hull_tolerance`` is reused as the (negative) Å tolerance
         # below the lowest surface atom that we still accept.
         if len(surf_pos):
@@ -830,6 +882,8 @@ def _enumerate_cliques(
         if clique_limit is not None and k > clique_limit:
             break
         key = frozenset(clique)
+        if not _periodic_clique_is_contractible(G, key, cell, pbc, use_mic):
+            continue
         if key in seen:
             continue
         seen.add(key)

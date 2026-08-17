@@ -863,6 +863,31 @@ def test_find_bond_sites_allows_gas_product_without_c_surface_site():
     assert brs._member_cliques[0] == ((clique_a,), (clique_b,), tuple())
 
 
+def test_find_bond_sites_returns_empty_after_all_adsorbate_sites_are_pruned():
+    graph = nx.Graph()
+    graph.graph["adsorbate_sites"] = {"[O]": []}
+
+    result = find_bond_sites(
+        graph,
+        [],
+        [BondReactionTemplate("[O]", "[O]", "O=O")],
+    )
+
+    assert result == []
+    assert graph.graph["bond_reaction_sites"] == []
+    assert graph.graph["bond_clique_to_members"] == {}
+    assert graph.graph["bond_surface_node_to_members"] == {}
+
+
+def test_find_bond_sites_still_rejects_empty_input_before_site_discovery():
+    with pytest.raises(ValueError, match="no AdsorbateSites were supplied"):
+        find_bond_sites(
+            nx.Graph(),
+            [],
+            [BondReactionTemplate("[O]", "[O]", "O=O")],
+        )
+
+
 def test_geometry_refinement_retries_until_required_connectivity(monkeypatch):
     G = nx.Graph()
     G.graph["cell"] = np.eye(3) * 20.0

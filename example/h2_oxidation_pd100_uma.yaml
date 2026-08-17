@@ -1,0 +1,181 @@
+# autokmc - H2 oxidation on Pd(100) with FAIR-Chem UMA on 4 GPUs
+# Run with:    autokmc run example/h2_oxidation_pd100_uma.yaml
+schema_version: "1"
+
+output:
+  dir: ./runs/h2_oxidation_pd100_uma
+  trajectory_dump_every: 10
+  log_level: DEBUG
+
+checkpoint:
+  enabled: true
+  path: ./runs/h2_oxidation_pd100_uma/checkpoint.pkl
+  every_n_steps: 10
+  # To restart a stopped run, set:
+  # resume_from: ./runs/h2_oxidation_pd100_uma/checkpoint.pkl
+
+structure:
+  kind: surface
+  composition: Pd
+  crystal_structure: fcc
+  miller_index: [1, 0, 0]
+  lattice_constant: 3.89
+  # For Pd(100), 6.0 Å builds four metal layers. The primitive in-plane
+  # vectors are about 2.75 Å, so 8.0 Å targets tile the slab 3x3.
+  min_slab_size: 6.0
+  min_vacuum_size: 12.0
+  goal_x: 8.0
+  goal_y: 8.0
+  extra_kwargs:
+    orthogonalise: false
+  # Freeze the bottom two of the four metal layers.
+  n_freeze_layers: 2
+  fmax: 0.01
+  max_steps: 1000
+
+reactants:
+  # H2 feed.
+  - smiles: "[H][H]"
+    add_hydrogens: false
+    relax_in_gas: true
+    partial_pressure_bar: 10.0
+    geometry: linear
+
+  # O2 feed; bond dissociation templates produce O* + O* <=> O2.
+  - smiles: "O=O"
+    add_hydrogens: false
+    relax_in_gas: true
+    partial_pressure_bar: 10.0
+    geometry: linear
+    spin: 1.0
+
+# H* and O* can be auto-built as zero-pressure leaf species from dissociation
+# templates. The KMC bond-expansion hook then derives later surface reactions.
+
+# FAIR-Chem UMA setup. FAIR-Chem uses task_name="oc20" for heterogeneous
+# catalysis. The first run needs fairchem-core installed and Hugging Face access
+# to facebook/UMA, either through huggingface-cli login or HF_TOKEN.
+#
+# This builds four single-worker FAIRChemCalculator instances, each pinned to
+# one GPU. Up to four independent calculations can run concurrently; each NEB
+# leases one calculator/GPU for its complete lifecycle.
+calculator:
+  factory: fairchem.core.FAIRChemCalculator
+  factory_kwargs:
+    predict_unit:
+      factory: autokmc.io.fairchem.get_predict_unit_on_device
+      factory_kwargs:
+        name_or_path: uma-s-1p2
+        device: cuda
+        workers: 1
+    task_name: oc20
+  copies: 4
+  gpu_devices: [cuda:0, cuda:1, cuda:2, cuda:3]
+  gpu_device_arg: predict_unit.factory_kwargs.device
+  max_workers: 4
+
+optimization:
+  optimizer: fire
+  optimizer_kwargs:
+    dt: 0.05
+    dtmax: 0.5
+    maxstep: 0.1
+    downhill_check: true
+  neb_optimizer: fire
+  neb_optimizer_kwargs:
+    dt: 0.05
+    dtmax: 0.5
+    maxstep: 0.05
+    downhill_check: true
+  # Use a fresh MDMin instance after the ordinary band has converged and the
+  # climbing image is enabled.
+  neb_climb_optimizer: mdmin
+  neb_climb_optimizer_kwargs:
+    dt: 0.05
+    maxstep: 0.01
+  neb_method: improvedtangent
+  neb_band_eval: batched
+  neb_geometry_guard_multiplier: 3.0
+  neb_low_barrier_fmax: 0.1
+
+adsorbate_sites:
+  prune_stable_only: true
+  fmax: 0.05
+  max_steps: 500
+
+# Disable vibrational corrections for this long GPU debug run. Set enabled:
+# true once the reaction network is behaving as expected.
+free_energy:
+  enabled: false
+  pressure_bar: 1.0
+
+kmc:
+  temperature_k: 300.0
+  n_steps: 10000000
+  transmission_coefficient: 1.0
+  fmax: 0.05
+  max_steps: 1000
+  log_every: 10
+  random_seed: 69
+  lateral_interactions: true
+
+diffusion:
+  enabled: true
+  max_hops: 0
+  n_shells_pair: 1
+  prune_by_adsorption_pair: true
+  fmax: 0.05
+  max_steps: 1000
+  # Dynamically space images by maximum corresponding-atom displacement.
+  # During optimization, a gap above 0.75 Å restores the lowest-force valid
+  # band and halves FIRE dt/dtmax. n_images is the fixed fallback when null.
+  n_images: 8
+  image_spacing: 0.25
+  min_images: 4
+  max_images: 12
+  # CI is skipped if either ordinary directional barrier is below 0.1 eV.
+  climb: true
+  spring_k: 1.0
+  interpolation: linear
+  persist_neb_path: true
+
+bond:
+  enabled: true
+  bond_max_hops: 0
+  bond_types: ["SINGLE", "DOUBLE", "TRIPLE"]
+  include_ring_bonds: false
+  include_dissociation: true
+  include_coupling: true
+  include_homo_coupling: true
+  deduplicate_iso: true
+  auto_build_leaf_species: true
+
+  # For gas-fed dissociation (for example H2(g) -> 2H*), first place the
+  # intact molecule 2.5 Å from the surface and relax only the molecule while
+  # the slab is fixed. The resulting adsorbed precursor is the NEB endpoint;
+  # empty slab + gas remains the KMC thermodynamic reference.
+  gas_precursor_relax: true
+  gas_precursor_distance: 2.5
+
+  pair_n_shells: 1
+  prune_by_triple: true
+  prune_with_calculator: true
+  prune_fmax: 0.05
+  prune_max_steps: 1000
+
+  neb_fmax: 0.05
+  neb_max_steps: 1000
+  # Dynamically choose the band length from the relaxed endpoint distance.
+  # During optimization, a gap above 0.75 Å restores the lowest-force valid
+  # band and halves FIRE dt/dtmax. neb_n_images is the fallback when null.
+  neb_n_images: 8
+  neb_image_spacing: 0.25
+  neb_min_images: 4
+  neb_max_images: 12
+  # CI is skipped if either ordinary directional barrier is below 0.1 eV.
+  neb_climb: true
+  neb_spring_k: 1.0
+  neb_interpolation: linear
+  atom_matching: auto
+  matching_trials: 8
+  persist_neb_path: true

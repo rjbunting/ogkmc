@@ -10,7 +10,10 @@ from autokmc.core.pbc import (
 from autokmc.core.graph import build_graph
 from autokmc.io.atoms import atoms_from_graph
 from autokmc.sites.adsorbate import _mic_distance
-from autokmc.sites.anchors import _build_co_bond_graph
+from autokmc.sites.anchors import (
+    _build_co_bond_graph,
+    _periodic_clique_is_contractible,
+)
 from autokmc.sites.adsorbate import find_adsorbate_sites
 from autokmc.sites.anchors import find_anchor_sites
 from autokmc.species.reactant import build_reactant
@@ -98,6 +101,27 @@ def test_anchor_co_bond_graph_keeps_skew_boundary_pairs():
     cbg = _build_co_bond_graph(G, r_cov_ads=0.25, co_factor=1.0)
 
     assert cbg.has_edge(0, 1)
+
+
+def test_periodic_clique_filter_rejects_a_noncontractible_three_cycle():
+    graph = nx.Graph()
+    cell = np.diag([3.0, 10.0, 10.0])
+    graph.graph["cell"] = cell
+    graph.graph["pbc"] = np.array([True, False, False])
+    for node, x_position in enumerate([0.0, 1.0, 2.0]):
+        graph.add_node(
+            node,
+            type="surface",
+            position=np.array([x_position, 0.0, 0.0]),
+        )
+
+    assert not _periodic_clique_is_contractible(
+        graph,
+        frozenset({0, 1, 2}),
+        cell,
+        graph.graph["pbc"],
+        True,
+    )
 
 
 def test_materialised_site_positions_are_wrapped_for_skew_slab():

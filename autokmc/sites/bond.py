@@ -1387,8 +1387,15 @@ def find_bond_sites(
     """
     sites_list = list(adsorbate_sites)
     if not sites_list:
+        # An empty collection is a valid outcome after adsorbate discovery and
+        # stability pruning. Preserve an empty reaction network instead of
+        # misreporting that the required discovery stage was skipped.
+        if isinstance(G.graph.get("adsorbate_sites"), dict):
+            G.graph["bond_reaction_sites"] = []
+            rebuild_bond_reverse_indexes(G, [])
+            return []
         raise ValueError(
-            "find_bond_sites: no AdsorbateSite's were supplied. "
+            "find_bond_sites: no AdsorbateSites were supplied. "
             "Run `find_adsorbate_sites(G, reactant)` for every species "
             "referenced by your bond-reaction templates first — bond "
             "reactions need materialised adsorbate placements for A, B "
