@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 from ase import Atoms
+from ase.build import fcc111
 from ase.calculators.singlepoint import SinglePointCalculator
 from ase.constraints import FixAtoms, FixBondLength
 from ase.io import write
@@ -16,8 +17,13 @@ from autokmc.structure.loading import (
     load_structure_file,
     resolve_frozen_indices,
 )
-from autokmc.workflow.models import PreparedCalculator, RunIdentity
-from autokmc.workflow.stages import prepare_structure
+from autokmc.io.config import RunConfig, StructureCfg
+from autokmc.workflow.models import (
+    PreparedCalculator,
+    PreparedStructure,
+    RunIdentity,
+)
+from autokmc.workflow.stages import prepare_material_graph, prepare_structure
 
 
 def test_extxyz_frame_loading_is_config_relative_and_records_source(tmp_path):
@@ -156,6 +162,54 @@ def test_programmatic_file_config_resolves_relative_to_cwd(tmp_path, monkeypatch
 
     assert len(atoms) == 1
     assert source["path"] == str(structure_path.resolve())
+
+
+def test_file_workflow_rigidly_aligns_a_rotated_skew_slab(tmp_path):
+    atoms = fcc111(
+        "Cu",
+        size=(3, 3, 4),
+        vacuum=8.0,
+        orthogonal=False,
+    )
+    atoms.rotate(25.0, "y", rotate_cell=True)
+    original_gram = atoms.cell.array @ atoms.cell.array.T
+    original_distances = atoms.get_all_distances(mic=False)
+    atoms.set_constraint(FixAtoms(indices=[0]))
+    cfg = RunConfig(structure=StructureCfg(kind="file"))
+    identity = RunIdentity(
+        output_dir=tmp_path,
+        manifest_path=tmp_path / "run_manifest.json",
+        run_id="rotated-file-slab-test",
+    )
+
+    system = prepare_material_graph(
+        cfg,
+        identity,
+        PreparedStructure(
+            atoms=atoms,
+            frozen_indices=None,
+            structure_source={"kind": "file"},
+        ),
+    )
+
+    assert system.surface_result.indices.tolist() == list(range(27, 36))
+    np.testing.assert_allclose(
+        atoms.cell.array @ atoms.cell.array.T,
+        original_gram,
+        atol=1.0e-12,
+    )
+    np.testing.assert_allclose(
+        atoms.get_all_distances(mic=False),
+        original_distances,
+        atol=1.0e-12,
+    )
+    normal = np.cross(atoms.cell[0], atoms.cell[1])
+    normal /= np.linalg.norm(normal)
+    np.testing.assert_allclose(normal, [0.0, 0.0, 1.0], atol=1.0e-12)
+    frame = system.structure_source["surface_frame"]
+    assert frame["aligned_to_z"] is True
+    assert frame["rotation_applied"] is True
+    assert frame["periodic_connectivity_axes"] == [0, 1]
 
 
 @pytest.mark.parametrize(

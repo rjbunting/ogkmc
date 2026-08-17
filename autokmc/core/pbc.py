@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from itertools import product
+
 import numpy as np
 from ase.geometry import find_mic
 
@@ -67,6 +69,47 @@ def minimum_image_distances(vectors, cell, pbc) -> np.ndarray:
     """Return minimum-image lengths for any ``(..., 3)`` vector array."""
     mic = minimum_image_vectors(vectors, cell, pbc)
     return np.linalg.norm(mic, axis=-1)
+
+
+def periodic_image_offsets(cell, pbc, cutoff: float) -> np.ndarray:
+    """Return a complete integer-image search box for wrapped points.
+
+    The fixed ``{-1, 0, 1}`` image box is not complete for a skew,
+    non-reduced lattice: a short Cartesian vector can require an integer
+    coefficient whose magnitude exceeds one.  If both query and candidate
+    positions are wrapped into the primary cell, their raw fractional
+    difference is smaller than one along every periodic axis.  The reciprocal
+    basis then bounds every image coefficient that can yield a Cartesian
+    vector no longer than *cutoff*.
+
+    The returned box is deliberately conservative by one boundary image.
+    Callers must still apply their exact Cartesian/MIC distance criterion.
+    """
+    radius = float(cutoff)
+    if not np.isfinite(radius) or radius < 0.0:
+        raise ValueError("cutoff must be finite and non-negative")
+
+    cell_arr = np.asarray(cell, dtype=float)
+    pbc_arr = np.asarray(pbc, dtype=bool)
+    if cell_arr.shape != (3, 3) or pbc_arr.shape != (3,):
+        raise ValueError("cell must be 3x3 and pbc must contain three axes")
+    if not pbc_arr.any():
+        return np.zeros((1, 3), dtype=int)
+
+    try:
+        cell_inv = np.linalg.inv(cell_arr)
+    except np.linalg.LinAlgError as exc:
+        raise ValueError("periodic image generation requires a full-rank cell") from exc
+
+    reciprocal_norms = np.linalg.norm(cell_inv, axis=0)
+    ranges = []
+    for axis in range(3):
+        if not pbc_arr[axis]:
+            ranges.append(range(0, 1))
+            continue
+        bound = max(1, int(np.ceil(1.0 + radius * reciprocal_norms[axis])))
+        ranges.append(range(-bound, bound + 1))
+    return np.asarray(list(product(*ranges)), dtype=int)
 
 
 def unwrap_positions_about_reference(
@@ -147,6 +190,7 @@ __all__ = [
     "has_real_cell",
     "minimum_image_distances",
     "minimum_image_vectors",
+    "periodic_image_offsets",
     "set_full_pbc_if_cell",
     "unwrap_positions_about_reference",
     "wrap_positions_into_cell",

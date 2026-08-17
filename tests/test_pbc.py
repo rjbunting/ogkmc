@@ -5,17 +5,24 @@ from ase.build import fcc111
 
 from autokmc.core.pbc import (
     minimum_image_vectors,
+    periodic_image_offsets,
     unwrap_positions_about_reference,
+    wrap_positions_into_cell,
 )
 from autokmc.core.graph import build_graph
 from autokmc.io.atoms import atoms_from_graph
-from autokmc.sites.adsorbate import _mic_distance
+from autokmc.sites.adsorbate import (
+    _build_anchor_spatial_index,
+    _mic_distance,
+    _source_indices_within_radius,
+    find_adsorbate_sites,
+)
 from autokmc.sites.anchors import (
     _build_co_bond_graph,
+    _circular_centroid,
     _periodic_clique_is_contractible,
+    find_anchor_sites,
 )
-from autokmc.sites.adsorbate import find_adsorbate_sites
-from autokmc.sites.anchors import find_anchor_sites
 from autokmc.species.reactant import build_reactant
 from autokmc.structure import find_surface_atoms, find_surface_atoms_raycasting
 
@@ -101,6 +108,87 @@ def test_anchor_co_bond_graph_keeps_skew_boundary_pairs():
     cbg = _build_co_bond_graph(G, r_cov_ads=0.25, co_factor=1.0)
 
     assert cbg.has_edge(0, 1)
+
+
+def test_periodic_candidate_indexes_cover_unreduced_skew_cells():
+    cell = np.array(
+        [
+            [10.0, 0.0, 0.0],
+            [39.0, 1.0, 0.0],
+            [0.0, 0.0, 20.0],
+        ]
+    )
+    pbc = np.array([True, True, False])
+    origin = np.zeros(3)
+    across_boundary = np.array([0.0, 0.5, 0.0]) @ cell
+
+    # The nearest image uses 2*a - b, outside the historical ±1 image box.
+    offsets = periodic_image_offsets(cell, pbc, cutoff=1.0)
+    assert any(np.array_equal(offset, [2, -1, 0]) for offset in offsets)
+    np.testing.assert_allclose(
+        minimum_image_vectors(across_boundary - origin, cell, pbc),
+        [-0.5, 0.5, 0.0],
+    )
+
+    graph = nx.Graph()
+    graph.graph["cell"] = cell
+    graph.graph["pbc"] = pbc
+    for node, position in enumerate((origin, across_boundary)):
+        graph.add_node(
+            node,
+            type="surface",
+            element="X",
+            position=position,
+            covalent_radius=0.0,
+        )
+
+    co_bond_graph = _build_co_bond_graph(
+        graph,
+        r_cov_ads=0.5,
+        co_factor=1.0,
+    )
+    assert co_bond_graph.has_edge(0, 1)
+
+    spatial_index = _build_anchor_spatial_index(
+        [(frozenset({1}), across_boundary)],
+        cell,
+        pbc,
+        True,
+        cutoff=1.0,
+    )
+    assert _source_indices_within_radius(
+        spatial_index,
+        origin,
+        radius=1.0,
+    ) == [0]
+
+
+def test_compact_centroid_uses_true_mic_in_skew_cell():
+    cell = np.array(
+        [
+            [1.0, 0.0, 0.0],
+            [0.5, np.sqrt(3.0) / 2.0, 0.0],
+            [0.0, 0.0, 10.0],
+        ]
+    )
+    pbc = np.array([True, True, False])
+    positions = np.array([[0.0, 0.0, 0.0], [0.49, 0.49, 0.0]]) @ cell
+
+    centroid = _circular_centroid(
+        positions,
+        cell,
+        np.linalg.inv(cell),
+        pbc,
+        True,
+    )
+    expected = wrap_positions_into_cell(
+        unwrap_positions_about_reference(positions, cell, pbc).mean(axis=0),
+        cell,
+        pbc,
+    )
+
+    np.testing.assert_allclose(centroid, expected)
+    np.testing.assert_allclose(centroid, [0.8675, 0.21217622, 0.0])
 
 
 def test_periodic_clique_filter_rejects_a_noncontractible_three_cycle():
@@ -213,3 +301,27 @@ def test_raycasting_uses_connectivity_axes_for_tilted_z_axis():
     assert top_indices.tolist() == [1]
     assert bottom_mask.tolist() == [True, False]
     assert bottom_indices.tolist() == [0]
+
+
+def test_raycasting_is_invariant_to_rigid_rotation_of_skew_slab():
+    reference = fcc111(
+        "Cu",
+        size=(3, 3, 4),
+        vacuum=8.0,
+        orthogonal=False,
+    )
+    rotated = reference.copy()
+    rotated.rotate(25.0, "y", rotate_cell=True)
+    reference_cell = reference.cell.array.copy()
+    rotated_cell = rotated.cell.array.copy()
+
+    reference_result = find_surface_atoms(reference)
+    rotated_result = find_surface_atoms(rotated)
+
+    assert reference_result.indices.tolist() == list(range(27, 36))
+    np.testing.assert_array_equal(
+        rotated_result.indices,
+        reference_result.indices,
+    )
+    np.testing.assert_allclose(reference.cell.array, reference_cell)
+    np.testing.assert_allclose(rotated.cell.array, rotated_cell)

@@ -324,11 +324,16 @@ structure:
   frozen_indices: [0, 1, 2, 3]
 ```
 
-The selected frame enters the workflow as supplied: AutoKMC neither rebuilds
-nor relaxes a file-backed catalyst. Any calculator serialized with the input
-is detached; the configured calculator is used for subsequent chemistry.
-Provide cell vectors and periodic-boundary metadata appropriate for catalyst
-surface classification. `path` is required for this mode. Explicit
+AutoKMC neither rebuilds nor relaxes a file-backed catalyst. For a periodic
+slab, it detects the two connected lattice directions and, when necessary,
+applies one rigid rotation that aligns the surface normal with Cartesian +z.
+This supports skew and arbitrarily oriented input cells while preserving the
+cell Gram matrix, interatomic geometry, atom order, and frozen atoms. The
+transform and original surface normal are retained in catalyst-source
+provenance. Any calculator serialized with the input is detached; the
+configured calculator is used for subsequent chemistry. Provide cell vectors
+and periodic-boundary metadata appropriate for catalyst surface classification.
+`path` is required for this mode. Explicit
 `frozen_indices` are validated against the selected atom count and become the
 portable frozen mask used by subsequent chemistry, KMC, checkpoints, and
 trajectory output. Omit the field to use the union of

@@ -82,6 +82,8 @@ from autokmc.core.pbc import (
     full_pbc_for_cell,
     minimum_image_distances,
     minimum_image_vectors,
+    periodic_image_offsets,
+    unwrap_positions_about_reference,
     wrap_positions_into_cell,
 )
 from autokmc.utils.logging import get_logger
@@ -204,21 +206,12 @@ def _circular_centroid(
     pbc: np.ndarray,
     use_mic: bool,
 ) -> np.ndarray:
-    """Circular-mean MIC-robust centroid of *positions* (N×3)."""
+    """Cartesian centroid of one compact periodic group."""
     if not use_mic or cell_inv is None or not pbc.any():
         return positions.mean(axis=0)
-    frac = positions @ cell_inv
-    out = np.empty(3)
-    for ax in range(3):
-        if pbc[ax]:
-            theta = 2.0 * np.pi * frac[:, ax]
-            ang = np.arctan2(np.sin(theta).mean(), np.cos(theta).mean())
-            if ang < 0.0:
-                ang += 2.0 * np.pi
-            out[ax] = ang / (2.0 * np.pi)
-        else:
-            out[ax] = frac[:, ax].mean()
-    return out @ cell
+    unwrapped = unwrap_positions_about_reference(positions, cell, pbc)
+    centroid = unwrapped.mean(axis=0)
+    return wrap_positions_into_cell(centroid, cell, pbc)
 
 
 def _clique_centroid(
@@ -382,7 +375,8 @@ def _build_co_bond_graph(
         d(i, j) ≤ co_factor × (2·r_cov_ads + r_cov_i + r_cov_j)
 
     Uses a :class:`scipy.spatial.cKDTree` (orthogonal cells use native
-    ``boxsize``; non-orthogonal cells tile ±1 periodic images).
+    ``boxsize``; non-orthogonal cells use a cutoff-complete periodic image
+    box derived from the reciprocal lattice).
     """
     surf_nodes = [(n, d) for n, d in G.nodes(data=True)
                   if d["type"] == "surface"]
@@ -416,22 +410,16 @@ def _build_co_bond_graph(
         pairs = tree.query_pairs(r=r_query, output_type="ndarray")
 
     elif use_mic:
-        offsets = []
-        for dx in (-1, 0, 1):
-            for dy in (-1, 0, 1):
-                for dz in (-1, 0, 1):
-                    if dx and not pbc[0]: continue
-                    if dy and not pbc[1]: continue
-                    if dz and not pbc[2]: continue
-                    offsets.append(np.array([dx, dy, dz], dtype=int))
+        search_pos = wrap_positions_into_cell(pos, cell, pbc)
+        offsets = periodic_image_offsets(cell, pbc, r_query)
         tiled_pos: list[np.ndarray] = []
         tiled_idx: list[int]        = []
         for off in offsets:
-            tiled_pos.append(pos + off @ cell)
+            tiled_pos.append(search_pos + off @ cell)
             tiled_idx.extend(range(len(pos)))
         tree = cKDTree(np.concatenate(tiled_pos))
         raw: set[tuple[int, int]] = set()
-        for i, p in enumerate(pos):
+        for i, p in enumerate(search_pos):
             for hit in tree.query_ball_point(p, r=r_query):
                 j = tiled_idx[hit]
                 if j == i:

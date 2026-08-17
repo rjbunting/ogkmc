@@ -50,6 +50,7 @@ from autokmc.structure.slab import (
     build_surface,
 )
 from autokmc.structure.surface import (
+    align_periodic_slab_frame,
     find_surface_atoms,
     find_surface_atoms_convexhull,
     find_surface_atoms_raycasting,
@@ -71,6 +72,7 @@ __all__ = [
     "resolve_structure_path",
     "optimise_bulk",
     "optimise_structure",
+    "align_periodic_slab_frame",
     "find_surface_atoms",
     "find_surface_atoms_convexhull",
     "find_surface_atoms_raycasting",

@@ -50,7 +50,9 @@ Manifest schema version 3 records:
 - catalyst kind, composition, atom count, and surface-atom count,
 - for a file-backed catalyst, the resolved source path, selected frame,
   requested format, file SHA-256 and byte size, chemical formula, and
-  resolved frozen-atom indices and count,
+  resolved frozen-atom indices and count; periodic slabs also record the
+  detected connectivity axes, original surface normal, and whether a rigid
+  alignment to Cartesian +z was applied,
 - the initial occupied surface state,
 - preparing/running/terminal lifecycle state and the current stage,
 - one fully closed segment for each initial or resumed invocation,

@@ -234,7 +234,8 @@ def prepare_material_graph(
 ) -> PreparedSystem:
     """Classify surface atoms and build, or restore, the material graph."""
     from autokmc.core.graph import build_graph
-    from autokmc.structure import find_surface_atoms
+    from autokmc.structure import align_periodic_slab_frame, find_surface_atoms
+    from autokmc.structure.surface import _pbc_connectivity_axes
 
     atoms = structure.atoms
     if identity.resume_state is not None:
@@ -245,6 +246,24 @@ def prepare_material_graph(
             raise RuntimeError("fresh structure preparation produced no atoms")
         constants = cfg.constants
         structure_settings = cfg.structure
+        if structure_settings.kind == "file":
+            connectivity_axes = _pbc_connectivity_axes(
+                atoms,
+                nl_mult=constants.neighbor_list_multiplier,
+            )
+            if int(np.count_nonzero(connectivity_axes)) == 2:
+                frame_metadata = align_periodic_slab_frame(
+                    atoms,
+                    connectivity_axes,
+                )
+                source = dict(structure.structure_source or {})
+                source["surface_frame"] = frame_metadata
+                structure.structure_source = source
+                if verbose and frame_metadata["rotation_applied"]:
+                    print(
+                        "[autokmc]   file-backed slab rigidly aligned: "
+                        "surface normal → +z"
+                    )
         surface_result = find_surface_atoms(
             atoms,
             nl_mult=constants.neighbor_list_multiplier,

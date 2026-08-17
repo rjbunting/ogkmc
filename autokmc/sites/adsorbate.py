@@ -73,7 +73,7 @@ from __future__ import annotations
 
 import warnings
 from dataclasses import dataclass, field
-from itertools import combinations, product
+from itertools import combinations
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -83,6 +83,7 @@ from networkx.algorithms import isomorphism
 from autokmc.core.pbc import (
     full_pbc_for_cell,
     minimum_image_vectors,
+    periodic_image_offsets,
     unwrap_positions_about_reference,
     wrap_positions_into_cell,
 )
@@ -368,12 +369,24 @@ def _mic_distance(
     return float(np.linalg.norm(dv))
 
 
+@dataclass(frozen=True)
+class _AnchorCandidateSpatialIndex:
+    tree: Any
+    source: np.ndarray
+    tiled_positions: np.ndarray
+    cell: np.ndarray
+    pbc: np.ndarray
+    cutoff: float
+
+
 def _build_anchor_spatial_index(
     candidates: list[tuple[frozenset, np.ndarray]],
     cell: np.ndarray,
     pbc: np.ndarray,
     use_mic: bool,
-):
+    *,
+    cutoff: float,
+) -> _AnchorCandidateSpatialIndex | None:
     """Build a KD-tree over anchor candidates, including periodic images."""
     if not candidates:
         return None
@@ -382,23 +395,31 @@ def _build_anchor_spatial_index(
     except Exception:  # pragma: no cover - SciPy is expected but optional here
         return None
 
+    radius = float(cutoff)
+    if not np.isfinite(radius) or radius < 0.0:
+        raise ValueError("spatial-index cutoff must be finite and non-negative")
+
+    cell_arr = np.asarray(cell, dtype=float)
+    pbc_arr = np.asarray(pbc, dtype=bool)
     pos = np.asarray([p for _, p in candidates], dtype=float)
     source = np.arange(len(candidates), dtype=int)
     tiled = pos
 
-    if use_mic and np.asarray(pbc, dtype=bool).any():
-        active_axes = [i for i, is_periodic in enumerate(pbc) if is_periodic]
-        shifts: list[np.ndarray] = []
-        for offsets in product((-1, 0, 1), repeat=len(active_axes)):
-            shift = np.zeros(3, dtype=int)
-            for ax, off in zip(active_axes, offsets):
-                shift[ax] = int(off)
-            shifts.append(shift)
-        translations = np.asarray(shifts, dtype=float) @ np.asarray(cell, dtype=float)
+    if use_mic and pbc_arr.any():
+        pos = wrap_positions_into_cell(pos, cell_arr, pbc_arr)
+        shifts = periodic_image_offsets(cell_arr, pbc_arr, radius)
+        translations = shifts.astype(float) @ cell_arr
         tiled = (pos[None, :, :] + translations[:, None, :]).reshape(-1, 3)
         source = np.tile(source, len(shifts))
 
-    return cKDTree(tiled), source, tiled
+    return _AnchorCandidateSpatialIndex(
+        tree=cKDTree(tiled),
+        source=source,
+        tiled_positions=tiled,
+        cell=cell_arr,
+        pbc=pbc_arr,
+        cutoff=radius,
+    )
 
 
 def _source_indices_within_radius(
@@ -409,12 +430,20 @@ def _source_indices_within_radius(
     """Return source indexes with any tiled point inside *radius* of centers."""
     if spatial_index is None:
         return []
-    tree, source, _ = spatial_index
+    radius_value = max(0.0, float(radius))
+    if radius_value > spatial_index.cutoff + 1.0e-12:
+        raise ValueError("query radius exceeds the spatial-index cutoff")
     centers_arr = np.asarray(centers, dtype=float).reshape(-1, 3)
+    if spatial_index.pbc.any():
+        centers_arr = wrap_positions_into_cell(
+            centers_arr,
+            spatial_index.cell,
+            spatial_index.pbc,
+        )
     seen: set[int] = set()
     for center in centers_arr:
-        for h in tree.query_ball_point(center, max(0.0, float(radius))):
-            seen.add(int(source[h]))
+        for h in spatial_index.tree.query_ball_point(center, radius_value):
+            seen.add(int(spatial_index.source[h]))
     return sorted(seen)
 
 
@@ -427,9 +456,17 @@ def _candidate_indices_in_annulus(
     """Return source candidate indexes within a Cartesian annulus."""
     if spatial_index is None:
         return []
-    tree, source, tiled = spatial_index
     outer = max(0.0, float(target) + float(tolerance))
-    hits = tree.query_ball_point(np.asarray(center, dtype=float), outer)
+    if outer > spatial_index.cutoff + 1.0e-12:
+        raise ValueError("annulus radius exceeds the spatial-index cutoff")
+    center_arr = np.asarray(center, dtype=float)
+    if spatial_index.pbc.any():
+        center_arr = wrap_positions_into_cell(
+            center_arr,
+            spatial_index.cell,
+            spatial_index.pbc,
+        )
+    hits = spatial_index.tree.query_ball_point(center_arr, outer)
     if not hits:
         return []
 
@@ -437,10 +474,12 @@ def _candidate_indices_in_annulus(
     out: set[int] = set()
     for h in hits:
         if lower > 0.0:
-            d = float(np.linalg.norm(tiled[h] - center))
+            d = float(
+                np.linalg.norm(spatial_index.tiled_positions[h] - center_arr)
+            )
             if d < lower:
                 continue
-        out.add(int(source[h]))
+        out.add(int(spatial_index.source[h]))
     return sorted(out)
 
 
@@ -2318,8 +2357,18 @@ def find_adsorbate_sites(
         raw_by_elem: dict[str, list[tuple[frozenset, np.ndarray]]] = {
             el: _all_raw_sites_with_positions(G, el) for el in anchor_elements
         }
+        spatial_cutoff = max(
+            0.0,
+            float(D.max(initial=0.0)) + float(bond_tolerance),
+        )
         spatial_by_elem = {
-            el: _build_anchor_spatial_index(candidates, cell, pbc, use_mic)
+            el: _build_anchor_spatial_index(
+                candidates,
+                cell,
+                pbc,
+                use_mic,
+                cutoff=spatial_cutoff,
+            )
             for el, candidates in raw_by_elem.items()
         }
 
@@ -2839,11 +2888,16 @@ def optimise_adsorbate_site_positions(
         reactant,
         nl_mult=float(nl_mult),
     )
-    surface_spatial_index = _build_anchor_spatial_index(
-        [(frozenset(), p) for p in surf_pos],
-        cell,
-        pbc,
-        use_mic,
+    surface_spatial_index = (
+        _build_anchor_spatial_index(
+            [(frozenset(), p) for p in surf_pos],
+            cell,
+            pbc,
+            use_mic,
+            cutoff=float(repulsion_cutoff),
+        )
+        if repulsion_cutoff is not None
+        else None
     )
 
     def _refine(ms: AdsorbateSite) -> tuple[np.ndarray, float, float, int, int]:

@@ -187,8 +187,12 @@ Relative structure paths are resolved from the configuration file's directory,
 not the shell's working directory. `format` is optional when ASE can infer it
 from the filename, and `index: -1` selects the last frame. Use
 `frozen_indices` when selected catalyst atoms must remain fixed. File-backed
-catalysts are not rebuilt or relaxed; provide the intended cell and periodic
-boundary metadata for surface classification.
+catalysts are not rebuilt or relaxed. A periodic slab may use a skew cell and
+may be arbitrarily rotated: AutoKMC rigidly rotates its detected surface normal
+to Cartesian +z before site generation, without changing cell metrics or
+interatomic geometry. The applied frame transform is recorded in the run
+manifest. Provide the intended cell and periodic-boundary metadata for surface
+classification.
 
 [`example/all_options.yaml`](example/all_options.yaml) is a commented,
 valid-as-written template with every configuration option and commented
