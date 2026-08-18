@@ -161,7 +161,7 @@ class DiffusionLateral:
     stable        : bool | None      = None
     invalid_reason: str | None       = None
     last_failure_reason: str | None  = None
-    # ── Free-energy / vibrational fields (autokmc.thermo.free_energy) ────────────
+    # The free-energy module populates these vibrational fields.
     g_correction_a   : float | None = None
     g_correction_b   : float | None = None
     g_correction_ts  : float | None = None
@@ -663,23 +663,16 @@ def find_diffusion_sites(
 
                 n_pairs_kept += 1
 
-        # ── Optional: keep one DiffusionSite per adsorption-pair ────────────
+        # If requested, keep one diffusion site for each adsorption pair.
         if prune_by_adsorption_pair:
             diffusion_sites = _prune_one_per_adsorption_pair(
                 diffusion_sites, verbose=verbose, smiles=smiles,
             )
 
-        # ── Renumber iso_class sequentially ─────────────────────────────────
-        # NOTE: The earlier "one iso-class per (ads_iso_a, ads_iso_b) pair"
-        # pruning step has been removed.  That step assumed only one distinct
-        # hop type exists per ordered adsorbate-iso-class pair, but this is
-        # incorrect in general: hops in different crystallographic directions
-        # (or over different hop distances) between the same pair of adsorption
-        # site types can have genuinely different barriers.  Collapsing them
-        # into one DiffusionSite caused the lateral classifier to re-split them
-        # as spurious "lateral classes" with no second adsorbate present.
-        # The graph-isomorphism deduplication in the loop above already handles
-        # true equivalents, so no further collapse is needed.
+        # Finally, renumber the remaining iso-classes in sequence. Different
+        # crystallographic directions and hop distances can have different
+        # barriers even when they connect the same adsorption-site types. The
+        # graph-isomorphism check above removes only true equivalents.
         for new_idx, ds in enumerate(diffusion_sites):
             ds.iso_class = new_idx
 

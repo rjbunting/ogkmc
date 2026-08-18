@@ -201,7 +201,7 @@ class ReactantCfg:
     smiles: str
     add_hydrogens: bool = True
     relax_in_gas:  bool = True
-    # ── Gas feed and thermochemistry ──────────────────────────────
+    # These options describe the gas feed and thermochemistry.
     #: Partial pressure of the gas-phase reactant in bar.  Multiplies the
     #: adsorption rate so that ΔG / barriers stay at the 1-bar reference.
     #: This applies whether or not free-energy corrections are enabled.
@@ -329,7 +329,7 @@ class BondCfg:
     # has its adsorbate sites enumerated automatically.  When False, the
     # CLI raises if any template references a species without sites.
     auto_build_leaf_species: bool = True
-    # ── Pruning ────────────────────────────────────────────────────────────
+    # These options control bond-site pruning.
     #: BFS depth for the triple ego-graph used by Stage-2 iso-class pruning.
     pair_n_shells:           int  = BOND_PAIR_N_SHELLS
     #: Stage 2 — keep only the smallest-ego BondReactionSite per
@@ -344,7 +344,7 @@ class BondCfg:
     prune_fmax:              float = PRUNE_FMAX
     #: Maximum optimizer steps for the Stage-1 endpoint relaxation.
     prune_max_steps:         int  = PRUNE_MAX_STEPS
-    # ── NEB knobs (consumed by ``check_bond_site_stability`` via the KMC loop)
+    # These NEB options are passed to ``check_bond_site_stability`` by KMC.
     neb_fmax:                float = NEB_FMAX
     neb_max_steps:           int   = NEB_MAX_STEPS
     #: Fixed interior-image count used when ``neb_image_spacing`` is null.

@@ -266,8 +266,8 @@ def test_reaction_writer_persists_initial_structures_and_neb_paths(
         neb_climb_skipped_low_barrier=True,
         neb_regular_forward_barrier=1.5,
         neb_regular_reverse_barrier=0.05,
-        neb_convergence_mode="low_barrier",
-        neb_convergence_fmax=0.08,
+        neb_convergence_mode="low_barrier_max_steps",
+        neb_convergence_fmax=0.25,
         neb_converged_low_barrier=True,
         neb_low_barrier_fmax=0.1,
         neb_low_barrier_threshold=0.1,
@@ -341,8 +341,8 @@ def test_reaction_writer_persists_initial_structures_and_neb_paths(
         "regular_reverse_barrier_ev"
     ] == pytest.approx(0.05)
     assert bond_payload["neb_convergence"] == {
-        "mode": "low_barrier",
-        "observed_fmax_ev_per_ang": pytest.approx(0.08),
+        "mode": "low_barrier_max_steps",
+        "observed_fmax_ev_per_ang": pytest.approx(0.25),
         "low_barrier_early_stop": True,
         "low_barrier_force_cutoff_ev_per_ang": pytest.approx(0.1),
         "low_barrier_energy_cutoff_ev": pytest.approx(0.1),

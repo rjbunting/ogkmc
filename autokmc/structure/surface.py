@@ -251,7 +251,7 @@ def find_surface_atoms(
                    int(surface_mask.sum()), len(atoms))
         return result
 
-    # ── nanoparticle (convex hull) ────────────────────────────────────────
+    # A nanoparticle uses convex-hull surface classification.
     raw = find_surface_atoms_convexhull(
         atoms,
         hull_tol_factor=hull_tol_factor,

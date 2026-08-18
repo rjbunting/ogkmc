@@ -173,7 +173,7 @@ def _run_from_config(
         is_resume=identity.is_resume,
     )
 
-    # 1. Calculator
+    # First, prepare the calculator used by every later stage.
     update_run_manifest(
         identity.manifest_path,
         status="preparing",
@@ -196,9 +196,8 @@ def _run_from_config(
             calculators=calculators,
         )
     finally:
-        # Stage 1 transfers ownership of the pool to the configured pipeline.
-        # Keep cleanup scoped across every subsequent preparation stage, not
-        # only the KMC stage.
+        # The pipeline owns the calculator pool after Stage 1. Keep it open
+        # through every preparation stage, and release it when the run ends.
         _shutdown_calculator_resource(calc_resource)
 
 
@@ -218,7 +217,7 @@ def _run_after_calculator_preparation(
     resume_state = identity.resume_state
     calc_resource = calculators.resource
 
-    # 2. Structure
+    # Next, build or restore the catalyst structure.
     update_run_manifest(
         identity.manifest_path,
         current_stage="stage_2_structure",
@@ -261,10 +260,11 @@ def _run_after_calculator_preparation(
     G = system.graph
     frozen_indices = system.frozen_indices
 
-    # 3b. Free-energy options + persistent vibration cache root.
+    # After the material graph is ready, resolve the free-energy settings and
+    # the persistent vibration-cache location.
     thermo_runtime = resolve_thermo_runtime(cfg, identity)
 
-    # 4. Reactants
+    # The next stage builds the gas-phase reactants.
     update_run_manifest(
         identity.manifest_path,
         current_stage="stage_4_reactants",
@@ -283,7 +283,7 @@ def _run_after_calculator_preparation(
         verbose=verbose_run,
     )
 
-    # 5. Adsorbate sites for every reactant
+    # With the reactants built, enumerate and prune their adsorbate sites.
     update_run_manifest(
         identity.manifest_path,
         current_stage="stage_5_adsorbate_sites",
@@ -303,7 +303,8 @@ def _run_after_calculator_preparation(
         verbose=verbose_run,
     )
 
-    # 6. Optional reaction channels and runtime network
+    # The surface sites define the optional reaction channels and runtime
+    # network prepared in this stage.
     update_run_manifest(
         identity.manifest_path,
         current_stage="stage_6_reaction_network",
@@ -335,7 +336,7 @@ def _run_after_calculator_preparation(
                 f"t={resume.time_s:.4e} s"
             )
 
-    # 7. KMC and managed output finalization
+    # Finally, run KMC and finalize the managed outputs.
     update_run_manifest(
         identity.manifest_path,
         status="running",

@@ -113,15 +113,11 @@ def _maybe_hint_batched_available(calculator: Any) -> None:
 def normalize_band_eval(value: str) -> str:
     """Return a canonical band-eval mode or raise a useful error."""
     if not isinstance(value, str) or not value.strip():
-        raise ValueError(
-            f"neb_band_eval must be a non-empty string, got {value!r}"
-        )
+        raise ValueError(f"neb_band_eval must be a non-empty string, got {value!r}")
     name = value.strip().lower()
     if name not in NEB_BAND_EVALS:
         choices = ", ".join(sorted(NEB_BAND_EVALS))
-        raise ValueError(
-            f"neb_band_eval must be one of {choices}; got {value!r}"
-        )
+        raise ValueError(f"neb_band_eval must be one of {choices}; got {value!r}")
     return name
 
 
@@ -132,9 +128,7 @@ def normalize_neb_method(value: str) -> str:
     name = value.strip().lower()
     if name not in NEB_METHODS:
         choices = ", ".join(sorted(NEB_METHODS))
-        raise ValueError(
-            f"neb_method must be one of {choices}; got {value!r}"
-        )
+        raise ValueError(f"neb_method must be one of {choices}; got {value!r}")
     return name
 
 
@@ -197,7 +191,7 @@ class _NEBBandSpacingViolation(RuntimeError):
 
 
 class _NEBLowBarrierConverged(RuntimeError):
-    """Internal signal for the looser-force, low-barrier stopping rule."""
+    """Internal signal for the low-barrier stopping rules."""
 
     def __init__(
         self,
@@ -217,6 +211,17 @@ class _NEBLowBarrierConverged(RuntimeError):
             f"EA_MIN={EA_MIN:.3f} eV (forward={self.forward_barrier:.6f} "
             f"eV, reverse={self.reverse_barrier:.6f} eV)"
         )
+
+
+def _raw_directional_barriers(
+    transition_energy: float,
+    endpoint_energies: tuple[float, float],
+) -> tuple[float, float]:
+    """Return forward and reverse barriers from one shared energy reference."""
+    return (
+        float(transition_energy) - endpoint_energies[0],
+        float(transition_energy) - endpoint_energies[1],
+    )
 
 
 def _maximum_adjacent_image_displacement(
@@ -371,21 +376,14 @@ class _BatchedBandNEB(NEB):
             targets = list(self.images)
         if not targets:
             return
-        if any(
-            not isinstance(image.calc, BandImageCalculator)
-            for image in targets
-        ):
+        if any(not isinstance(image.calc, BandImageCalculator) for image in targets):
             # Foreign per-image calculators are attached (e.g. ASE's IDPP
             # interpolation temporarily swaps them in) — evaluate normally.
             return
         # ASE optimizers issue several ``get_forces`` per step and lean on
         # calculator caching to make the repeats free; batch only the images
         # whose geometry actually changed since their cached evaluation.
-        targets = [
-            image
-            for image in targets
-            if not image.calc.has_result_for(image)
-        ]
+        targets = [image for image in targets if not image.calc.has_result_for(image)]
         if not targets:
             self._endpoints_evaluated = True
             return
@@ -451,10 +449,7 @@ def project_neb_path(
     if n_reacting <= 0:
         return None
     n_source = n_slab + n_reacting
-    if any(
-        not isinstance(image, Atoms) or len(image) != n_source
-        for image in source_images
-    ):
+    if any(not isinstance(image, Atoms) or len(image) != n_source for image in source_images):
         return None
 
     target_cell = np.asarray(atoms_initial.cell.array, dtype=float)
@@ -485,14 +480,11 @@ def project_neb_path(
     ):
         return None
     for image in source_images[1:]:
-        if (
-            not np.array_equal(np.asarray(image.pbc, dtype=bool), source_pbc)
-            or not np.allclose(
-                np.asarray(image.cell.array, dtype=float),
-                source_cell,
-                rtol=0.0,
-                atol=1.0e-8,
-            )
+        if not np.array_equal(np.asarray(image.pbc, dtype=bool), source_pbc) or not np.allclose(
+            np.asarray(image.cell.array, dtype=float),
+            source_cell,
+            rtol=0.0,
+            atol=1.0e-8,
         ):
             return None
 
@@ -504,18 +496,14 @@ def project_neb_path(
         n_slab + n_lateral + n_reacting,
         dtype=int,
     )
-    target_common_indices = np.concatenate(
-        (np.arange(n_slab, dtype=int), target_reacting_indices)
-    )
+    target_common_indices = np.concatenate((np.arange(n_slab, dtype=int), target_reacting_indices))
     source_common_indices = np.arange(n_source, dtype=int)
     if (
         not np.array_equal(target_numbers_initial, target_numbers_final)
         or not np.array_equal(
             source_numbers,
             target_numbers_initial[
-                np.concatenate(
-                    (np.arange(n_slab, dtype=int), target_reacting_indices)
-                )
+                np.concatenate((np.arange(n_slab, dtype=int), target_reacting_indices))
             ],
         )
         or any(
@@ -525,13 +513,10 @@ def project_neb_path(
     ):
         return None
 
-    all_positions = (
-        [np.asarray(image.positions, dtype=float) for image in source_images]
-        + [
-            np.asarray(atoms_initial.positions, dtype=float),
-            np.asarray(atoms_final.positions, dtype=float),
-        ]
-    )
+    all_positions = [np.asarray(image.positions, dtype=float) for image in source_images] + [
+        np.asarray(atoms_initial.positions, dtype=float),
+        np.asarray(atoms_final.positions, dtype=float),
+    ]
     if not all(np.isfinite(positions).all() for positions in all_positions):
         return None
 
@@ -542,9 +527,7 @@ def project_neb_path(
         return np.asarray(mic_vectors, dtype=float)
 
     source_initial_positions = all_positions[0]
-    source_delta = _minimum_image(
-        all_positions[len(source_images) - 1] - source_initial_positions
-    )
+    source_delta = _minimum_image(all_positions[len(source_images) - 1] - source_initial_positions)
     target_initial_positions = all_positions[-2]
     target_delta = _minimum_image(all_positions[-1] - target_initial_positions)
 
@@ -557,9 +540,7 @@ def project_neb_path(
         source_residual = _minimum_image(
             np.asarray(source_image.positions, dtype=float) - source_linear
         )
-        target_positions[target_common_indices] += source_residual[
-            source_common_indices
-        ]
+        target_positions[target_common_indices] += source_residual[source_common_indices]
 
         image = atoms_initial.copy()
         image.set_positions(target_positions, apply_constraint=False)
@@ -644,9 +625,7 @@ def make_neb_band(
                     rtol=0.0,
                     atol=1.0e-8,
                 )
-                and np.isfinite(
-                    np.asarray(image.positions, dtype=float)
-                ).all()
+                and np.isfinite(np.asarray(image.positions, dtype=float)).all()
                 for image in candidates
             )
         )
@@ -711,10 +690,7 @@ def make_neb_band(
         # leaves coincident interior images, so the improved tangent has zero
         # norm and IDPP can spend all of its steps propagating NaNs.
         neb.interpolate("linear", mic=True)
-        linear_positions = [
-            np.asarray(image.positions, dtype=float).copy()
-            for image in images
-        ]
+        linear_positions = [np.asarray(image.positions, dtype=float).copy() for image in images]
         real_calculators = [image.calc for image in images]
         try:
             with warnings.catch_warnings():
@@ -729,12 +705,9 @@ def make_neb_band(
                     mic=True,
                 )
             if not all(
-                np.isfinite(np.asarray(image.positions, dtype=float)).all()
-                for image in images
+                np.isfinite(np.asarray(image.positions, dtype=float)).all() for image in images
             ):
-                raise FloatingPointError(
-                    "IDPP interpolation returned non-finite positions"
-                )
+                raise FloatingPointError("IDPP interpolation returned non-finite positions")
         except Exception as exc:
             for image, positions in zip(images, linear_positions):
                 image.set_positions(positions, apply_constraint=False)
@@ -785,9 +758,7 @@ def run_neb(
     logfile_factory=None,
     band_eval: str = DEFAULT_NEB_BAND_EVAL,
     image_spacing: float | None = None,
-    geometry_guard_multiplier: float = (
-        NEB_MAX_ADJACENT_IMAGE_SPACING_MULTIPLIER
-    ),
+    geometry_guard_multiplier: float = (NEB_MAX_ADJACENT_IMAGE_SPACING_MULTIPLIER),
     barrier_endpoint_energies: tuple[float, float] | None = None,
     low_barrier_fmax: float | None = None,
 ) -> NEBRunResult:
@@ -833,10 +804,12 @@ def run_neb(
     When ``low_barrier_fmax`` is supplied, each stage also checks the band once
     its maximum NEB force lies between the strict target and this looser force
     threshold. If either raw directional barrier is below :data:`EA_MIN`, the
-    stage is accepted immediately. This is intended for effectively
-    barrierless paths whose spring modes oscillate above the strict force
-    target. The result records the alternate convergence mode and observed
-    force so persistence can distinguish it from strict force convergence.
+    stage is accepted immediately. If the full step budget is exhausted before
+    reaching that force window, the final band receives the same barrier check
+    without a force-cutoff requirement. This is intended for effectively
+    barrierless paths whose spring modes cannot meet either force threshold.
+    The result records the alternate convergence mode and observed force so
+    persistence can distinguish both cases from strict force convergence.
     """
     build_band = band_factory or make_neb_band
     select_logfile = logfile_factory or neb_optimizer_logfile
@@ -848,37 +821,24 @@ def run_neb(
         if not np.isfinite(resolved_spacing) or resolved_spacing <= 0.0:
             raise ValueError("image_spacing must be finite and positive")
         resolved_guard_multiplier = float(geometry_guard_multiplier)
-        if (
-            not np.isfinite(resolved_guard_multiplier)
-            or resolved_guard_multiplier <= 0.0
-        ):
-            raise ValueError(
-                "geometry_guard_multiplier must be finite and positive"
-            )
-        spacing_limit = (
-            resolved_guard_multiplier * resolved_spacing
-        )
+        if not np.isfinite(resolved_guard_multiplier) or resolved_guard_multiplier <= 0.0:
+            raise ValueError("geometry_guard_multiplier must be finite and positive")
+        spacing_limit = resolved_guard_multiplier * resolved_spacing
     resolved_barrier_endpoints = None
     if barrier_endpoint_energies is not None:
         if len(barrier_endpoint_energies) != 2:
             raise ValueError("barrier_endpoint_energies must contain two values")
-        resolved_barrier_endpoints = tuple(
-            float(value) for value in barrier_endpoint_energies
-        )
+        resolved_barrier_endpoints = tuple(float(value) for value in barrier_endpoint_energies)
         if not all(np.isfinite(value) for value in resolved_barrier_endpoints):
             raise ValueError("barrier_endpoint_energies must be finite")
     resolved_low_barrier_fmax = None
     if low_barrier_fmax is not None:
         resolved_low_barrier_fmax = float(low_barrier_fmax)
-        if (
-            not np.isfinite(resolved_low_barrier_fmax)
-            or resolved_low_barrier_fmax <= 0.0
-        ):
+        if not np.isfinite(resolved_low_barrier_fmax) or resolved_low_barrier_fmax <= 0.0:
             raise ValueError("low_barrier_fmax must be finite and positive")
         if resolved_barrier_endpoints is None:
             raise ValueError(
-                "barrier_endpoint_energies are required when "
-                "low_barrier_fmax is enabled"
+                "barrier_endpoint_energies are required when low_barrier_fmax is enabled"
             )
     if band_eval_mode == "images":
         _maybe_hint_batched_available(calculator)
@@ -913,8 +873,7 @@ def run_neb(
             if isinstance(exc, not_converged_error):
                 raise
             raise not_converged_error(
-                "NEB band construction failed: "
-                f"{type(exc).__name__}: {exc}"
+                f"NEB band construction failed: {type(exc).__name__}: {exc}"
             ) from exc
         try:
             if initial_path_callback is not None:
@@ -931,6 +890,87 @@ def run_neb(
             converged_low_barrier = False
             low_barrier_stage = None
 
+            def _current_neb_fmax() -> float:
+                forces = np.asarray(neb.get_forces(), dtype=float)
+                force_norms = np.linalg.norm(
+                    forces.reshape((-1, 3)),
+                    axis=1,
+                )
+                return float(force_norms.max()) if len(force_norms) else 0.0
+
+            def _inspect_low_barrier(
+                *,
+                stage: str,
+                current_fmax: float,
+            ) -> _NEBLowBarrierConverged | None:
+                if resolved_low_barrier_fmax is None or not np.isfinite(current_fmax):
+                    return None
+                energies = [float(image.get_potential_energy()) for image in images]
+                interior = energies[1:-1]
+                if not interior:
+                    return None
+                assert resolved_barrier_endpoints is not None
+                transition_energy = float(max(interior))
+                forward_barrier, reverse_barrier = _raw_directional_barriers(
+                    transition_energy,
+                    resolved_barrier_endpoints,
+                )
+                if (
+                    min(
+                        forward_barrier,
+                        reverse_barrier,
+                    )
+                    >= float(EA_MIN) - 1.0e-12
+                ):
+                    return None
+                return _NEBLowBarrierConverged(
+                    stage=stage,
+                    fmax=current_fmax,
+                    forward_barrier=forward_barrier,
+                    reverse_barrier=reverse_barrier,
+                )
+
+            def _record_low_barrier_acceptance(
+                exc: _NEBLowBarrierConverged,
+                *,
+                exhausted_step_budget: bool,
+            ) -> None:
+                nonlocal convergence_mode, convergence_fmax
+                nonlocal converged_low_barrier, low_barrier_stage
+                convergence_mode = (
+                    "low_barrier_max_steps" if exhausted_step_budget else "low_barrier"
+                )
+                convergence_fmax = exc.fmax
+                converged_low_barrier = True
+                low_barrier_stage = exc.stage
+                if exhausted_step_budget:
+                    _log.warning(
+                        "Accepting %s after exhausting its %d-step budget "
+                        "under the low-barrier fallback: observed "
+                        "fmax=%.6f eV/Å, and the smaller raw barrier is "
+                        "below %.3f eV (forward=%.6f eV, reverse=%.6f eV).",
+                        exc.stage,
+                        max_steps,
+                        exc.fmax,
+                        EA_MIN,
+                        exc.forward_barrier,
+                        exc.reverse_barrier,
+                    )
+                    return
+                assert resolved_low_barrier_fmax is not None
+                _log.warning(
+                    "Stopping %s under the low-barrier convergence "
+                    "rule: fmax=%.6f eV/Å <= %.6f eV/Å and the "
+                    "smaller raw barrier is below %.3f eV "
+                    "(forward=%.6f eV, reverse=%.6f eV).",
+                    exc.stage,
+                    exc.fmax,
+                    resolved_low_barrier_fmax,
+                    EA_MIN,
+                    exc.forward_barrier,
+                    exc.reverse_barrier,
+                )
+
             def _optimise_stage(
                 *,
                 stage: str,
@@ -945,11 +985,7 @@ def run_neb(
                 optimizer_name = normalize_optimizer_name(
                     selected_optimizer,
                     allowed=NEB_OPTIMIZERS,
-                    setting=(
-                        "neb_climb_optimizer"
-                        if climbing_stage
-                        else "neb_optimizer"
-                    ),
+                    setting=("neb_climb_optimizer" if climbing_stage else "neb_optimizer"),
                 )
                 optimizer_cls = {
                     "bfgs": BFGS,
@@ -961,9 +997,7 @@ def run_neb(
                     selected_optimizer_kwargs,
                     allowed=NEB_OPTIMIZERS,
                     setting=(
-                        "neb_climb_optimizer_kwargs"
-                        if climbing_stage
-                        else "neb_optimizer_kwargs"
+                        "neb_climb_optimizer_kwargs" if climbing_stage else "neb_optimizer_kwargs"
                     ),
                 )
                 if (
@@ -991,9 +1025,7 @@ def run_neb(
                         and optimizer_name == "fire"
                         and constructor_kwargs.get("downhill_check", False)
                     ):
-                        user_reset_callback = constructor_kwargs.get(
-                            "position_reset_callback"
-                        )
+                        user_reset_callback = constructor_kwargs.get("position_reset_callback")
                         fire_recovery_state = {
                             "optimizer": None,
                             "initial_dt": None,
@@ -1016,11 +1048,7 @@ def run_neb(
                             state = fire_recovery_state
                             stage_fire = state["optimizer"]
                             initial_dt = state["initial_dt"]
-                            if (
-                                state["switched"]
-                                or stage_fire is None
-                                or initial_dt is None
-                            ):
+                            if state["switched"] or stage_fire is None or initial_dt is None:
                                 return
                             # FIRE applies fdec after this callback. Trigger
                             # after five rollback halvings and compensate for
@@ -1040,9 +1068,7 @@ def run_neb(
                                 initial_dt,
                             )
 
-                        constructor_kwargs["position_reset_callback"] = (
-                            recover_stalled_fire
-                        )
+                        constructor_kwargs["position_reset_callback"] = recover_stalled_fire
 
                     stage_optimizer = optimizer_cls(
                         neb,
@@ -1051,9 +1077,7 @@ def run_neb(
                     )
                     if fire_recovery_state is not None:
                         fire_recovery_state["optimizer"] = stage_optimizer
-                        fire_recovery_state["initial_dt"] = float(
-                            stage_optimizer.dt
-                        )
+                        fire_recovery_state["initial_dt"] = float(stage_optimizer.dt)
 
                     initial_controls = {
                         name: float(getattr(stage_optimizer, name))
@@ -1061,10 +1085,7 @@ def run_neb(
                         if hasattr(stage_optimizer, name)
                     }
 
-                    if (
-                        spacing_limit is not None
-                        or resolved_low_barrier_fmax is not None
-                    ):
+                    if spacing_limit is not None or resolved_low_barrier_fmax is not None:
 
                         def monitor_band() -> None:
                             nonlocal best_fmax, best_positions
@@ -1079,16 +1100,7 @@ def run_neb(
                                         gap,
                                         spacing_limit,
                                     )
-                            forces = np.asarray(neb.get_forces(), dtype=float)
-                            force_norms = np.linalg.norm(
-                                forces.reshape((-1, 3)),
-                                axis=1,
-                            )
-                            current_fmax = (
-                                float(force_norms.max())
-                                if len(force_norms)
-                                else 0.0
-                            )
+                            current_fmax = _current_neb_fmax()
                             convergence_fmax = current_fmax
                             if (
                                 spacing_limit is not None
@@ -1103,41 +1115,16 @@ def run_neb(
                             if (
                                 resolved_low_barrier_fmax is None
                                 or not np.isfinite(current_fmax)
-                                or current_fmax > (
-                                    resolved_low_barrier_fmax * (1.0 + 1.0e-12)
-                                )
-                                or current_fmax <= (
-                                    float(target_fmax) * (1.0 + 1.0e-12)
-                                )
+                                or current_fmax > (resolved_low_barrier_fmax * (1.0 + 1.0e-12))
+                                or current_fmax <= (float(target_fmax) * (1.0 + 1.0e-12))
                             ):
                                 return
-                            energies = [
-                                float(image.get_potential_energy())
-                                for image in images
-                            ]
-                            interior = energies[1:-1]
-                            if not interior:
-                                return
-                            assert resolved_barrier_endpoints is not None
-                            transition_energy = float(max(interior))
-                            forward_barrier = (
-                                transition_energy
-                                - resolved_barrier_endpoints[0]
+                            low_barrier = _inspect_low_barrier(
+                                stage=stage,
+                                current_fmax=current_fmax,
                             )
-                            reverse_barrier = (
-                                transition_energy
-                                - resolved_barrier_endpoints[1]
-                            )
-                            if min(
-                                forward_barrier,
-                                reverse_barrier,
-                            ) < float(EA_MIN) - 1.0e-12:
-                                raise _NEBLowBarrierConverged(
-                                    stage=stage,
-                                    fmax=current_fmax,
-                                    forward_barrier=forward_barrier,
-                                    reverse_barrier=reverse_barrier,
-                                )
+                            if low_barrier is not None:
+                                raise low_barrier
 
                         stage_optimizer.attach(
                             monitor_band,
@@ -1153,21 +1140,9 @@ def run_neb(
                         steps_used = int(stage_optimizer.nsteps)
                         optimizer_steps += steps_used
                         remaining_steps -= steps_used
-                        convergence_mode = "low_barrier"
-                        convergence_fmax = exc.fmax
-                        converged_low_barrier = True
-                        low_barrier_stage = stage
-                        _log.warning(
-                            "Stopping %s under the low-barrier convergence "
-                            "rule: fmax=%.6f eV/Å <= %.6f eV/Å and the "
-                            "smaller raw barrier is below %.3f eV "
-                            "(forward=%.6f eV, reverse=%.6f eV).",
-                            stage,
-                            exc.fmax,
-                            resolved_low_barrier_fmax,
-                            EA_MIN,
-                            exc.forward_barrier,
-                            exc.reverse_barrier,
+                        _record_low_barrier_acceptance(
+                            exc,
+                            exhausted_step_budget=False,
                         )
                         return
                     except _NEBBandSpacingViolation as exc:
@@ -1176,8 +1151,7 @@ def run_neb(
                         remaining_steps -= steps_used
                         if best_positions is None:
                             raise not_converged_error(
-                                f"{stage} has no geometrically valid band to "
-                                f"restore: {exc}"
+                                f"{stage} has no geometrically valid band to restore: {exc}"
                             ) from exc
                         for image, positions in zip(images, best_positions):
                             image.set_positions(
@@ -1185,6 +1159,16 @@ def run_neb(
                                 apply_constraint=False,
                             )
                         if remaining_steps <= 0:
+                            low_barrier = _inspect_low_barrier(
+                                stage=stage,
+                                current_fmax=best_fmax,
+                            )
+                            if low_barrier is not None:
+                                _record_low_barrier_acceptance(
+                                    low_barrier,
+                                    exhausted_step_budget=True,
+                                )
+                                return
                             raise not_converged_error(
                                 f"{stage} exceeded its adjacent-image spacing "
                                 f"limit and exhausted {max_steps} steps; the "
@@ -1194,17 +1178,12 @@ def run_neb(
                         reduced_controls: dict[str, float] = {}
                         for control in ("dt", "dtmax"):
                             if control in initial_controls:
-                                reduced_controls[control] = (
-                                    0.5 * initial_controls[control]
-                                )
+                                reduced_controls[control] = 0.5 * initial_controls[control]
                         if not reduced_controls and "maxstep" in initial_controls:
-                            reduced_controls["maxstep"] = (
-                                0.5 * initial_controls["maxstep"]
-                            )
+                            reduced_controls["maxstep"] = 0.5 * initial_controls["maxstep"]
                         stage_constructor_kwargs.update(reduced_controls)
                         controls = ", ".join(
-                            f"{name}={value:g}"
-                            for name, value in reduced_controls.items()
+                            f"{name}={value:g}" for name, value in reduced_controls.items()
                         )
                         _log.warning(
                             "%s exceeded the adjacent-image limit: %s. "
@@ -1224,6 +1203,22 @@ def run_neb(
                     optimizer_steps += steps_used
                     remaining_steps -= steps_used
                     if not stage_optimizer.converged():
+                        if (
+                            remaining_steps <= 0
+                            and resolved_low_barrier_fmax is not None
+                        ):
+                            final_fmax = _current_neb_fmax()
+                            convergence_fmax = final_fmax
+                            low_barrier = _inspect_low_barrier(
+                                stage=stage,
+                                current_fmax=final_fmax,
+                            )
+                            if low_barrier is not None:
+                                _record_low_barrier_acceptance(
+                                    low_barrier,
+                                    exhausted_step_budget=True,
+                                )
+                                return
                         raise not_converged_error(
                             f"{stage} did not converge: fmax={target_fmax} "
                             f"eV/Å not reached in {max_steps} steps."
@@ -1245,14 +1240,11 @@ def run_neb(
                     selected_optimizer_kwargs=optimizer_kwargs,
                     target_fmax=float(fmax),
                 )
-                regular_energies = [
-                    float(image.get_potential_energy()) for image in images
-                ]
+                regular_energies = [float(image.get_potential_energy()) for image in images]
                 regular_interior = regular_energies[1:-1]
                 if not regular_interior:
                     raise not_converged_error(
-                        "NEB band has no interior images (n_images=0); "
-                        "cannot identify a TS."
+                        "NEB band has no interior images (n_images=0); cannot identify a TS."
                     )
                 regular_ts_energy = float(max(regular_interior))
                 barrier_endpoints = (
@@ -1260,16 +1252,18 @@ def run_neb(
                     if resolved_barrier_endpoints is not None
                     else (regular_energies[0], regular_energies[-1])
                 )
-                regular_forward_barrier = (
-                    regular_ts_energy - barrier_endpoints[0]
+                regular_forward_barrier, regular_reverse_barrier = _raw_directional_barriers(
+                    regular_ts_energy,
+                    barrier_endpoints,
                 )
-                regular_reverse_barrier = (
-                    regular_ts_energy - barrier_endpoints[1]
-                )
-                if climb and min(
-                    regular_forward_barrier,
-                    regular_reverse_barrier,
-                ) < float(EA_MIN) - 1.0e-12:
+                if (
+                    climb
+                    and min(
+                        regular_forward_barrier,
+                        regular_reverse_barrier,
+                    )
+                    < float(EA_MIN) - 1.0e-12
+                ):
                     climb_skipped_low_barrier = True
                     _log.warning(
                         "Skipping CI-NEB because the accepted ordinary band "
@@ -1299,8 +1293,7 @@ def run_neb(
             interior = energies[1:-1]
             if not interior:
                 raise not_converged_error(
-                    "NEB band has no interior images (n_images=0); "
-                    "cannot identify a TS."
+                    "NEB band has no interior images (n_images=0); cannot identify a TS."
                 )
 
             transition_index = 1 + int(np.argmax(interior))
@@ -1332,9 +1325,7 @@ def run_neb(
                 converged_low_barrier=converged_low_barrier,
                 low_barrier_fmax=resolved_low_barrier_fmax,
                 low_barrier_threshold=(
-                    float(EA_MIN)
-                    if resolved_low_barrier_fmax is not None
-                    else None
+                    float(EA_MIN) if resolved_low_barrier_fmax is not None else None
                 ),
                 low_barrier_stage=low_barrier_stage,
                 path_energies=path_energies,
@@ -1357,8 +1348,7 @@ def run_neb(
             if isinstance(exc, (CalculatorConfigError, not_converged_error)):
                 raise
             raise not_converged_error(
-                "NEB optimization failed: "
-                f"{type(exc).__name__}: {exc}"
+                f"NEB optimization failed: {type(exc).__name__}: {exc}"
             ) from exc
         finally:
             for image in images:

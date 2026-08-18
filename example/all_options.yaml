@@ -149,7 +149,8 @@ optimization:
 
   # Once the NEB force is below this value (eV/Å) but still above the strict
   # channel fmax, accept the band if either raw directional barrier is below
-  # the shared 0.1 eV minimum barrier.
+  # the shared 0.1 eV minimum barrier. If the full step budget is exhausted
+  # first, apply the same barrier check to the final band regardless of force.
   neb_low_barrier_fmax: 0.1
 
 
@@ -269,7 +270,7 @@ structure:
   # Nanoparticle examples include vacuum, composition_seed, and logfile.
   extra_kwargs:
     # Preserve the primitive surface cell so goal_x/goal_y below select a
-    # literal 3x3 repeat.
+    # literal 4x4 repeat.
     orthogonalise: false
 
   # SURFACE-ONLY OPTIONS (active because kind is surface)
@@ -284,9 +285,9 @@ structure:
   min_vacuum_size: 12.0
 
   # Target lateral cell dimensions in angstrom. The primitive Cu(111) and
-  # Cu(100) in-plane vectors are about 2.55 Å, so 7.5 Å selects a 3x3 repeat.
-  goal_x: 7.5
-  goal_y: 7.5
+  # Cu(100) in-plane vectors are about 2.55 Å, so 10.0 Å selects a 4x4 repeat.
+  goal_x: 10.0
+  goal_y: 10.0
 
   # Number of bottom atomic layers constrained during later calculations;
   # this is distinct from the four total metal layers selected above.

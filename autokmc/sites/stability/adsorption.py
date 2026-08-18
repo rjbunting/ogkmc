@@ -236,7 +236,7 @@ def _build_lateral_ego_graph(
     visited_full = _surface_bfs_shells(G, seed_clique, n_shells)
     visited: set = set(visited_full) - self_ids
 
-    # ── Collect adsorbate leaves adjacent to the BFS surface set ────────────
+    # Next, collect the adsorbates attached to the local surface set.
     # Two categories are included:
     #   1. Genuinely occupied adsorbate nodes (neighbours of the BFS surface)
     #      — skipped when ``ignore_occupied_neighbours=True``.
@@ -398,10 +398,10 @@ def check_adsorbate_site_lateral(
             f"{len(adsorbate_site.member_node_ids)} member(s)."
         )
 
-    # ── Determine BFS depth ───────────────────────────────────────────────
+    # First, determine the breadth-first-search depth.
     depth: int = LATERAL_SHELLS_DEFAULT if n_shells is None else int(n_shells)
 
-    # ── Derive seed clique and self node ids ──────────────────────────────
+    # Next, find the seed clique and the nodes that belong to this adsorbate.
     node_ids: list[int] = adsorbate_site.member_node_ids[member_index]
 
     seed_clique: frozenset = frozenset(
@@ -421,7 +421,7 @@ def check_adsorbate_site_lateral(
 
     self_node_ids: frozenset = frozenset(nid for nid in node_ids if nid in G)
 
-    # ── Build lateral ego-graph ───────────────────────────────────────────
+    # With the seed defined, build the lateral ego graph.
     ego = _build_lateral_ego_graph(
         G, seed_clique, depth, self_node_ids=self_node_ids,
         ignore_occupied_neighbours=ignore_lateral,
@@ -429,12 +429,11 @@ def check_adsorbate_site_lateral(
 
     fkey = _lateral_fingerprint(ego)
 
-    # ── Compare against existing lateral classes ──────────────────────────
-    # Lateral classes are bucketed by their cached fingerprint on the parent
-    # site so we only run the GraphMatcher on collisions instead of scanning
-    # every existing class (suggestion.MD #5).  The fingerprint cache lives
-    # on a per-site dict-of-list; ``lc._fingerprint`` is set at creation and
-    # never recomputed.
+    # Compare this ego graph with the existing lateral classes.
+    # The cached fingerprint groups possible matches before the exact graph
+    # comparison. This limits GraphMatcher to fingerprint collisions instead
+    # of scanning every class. Each site owns its fingerprint index, and each
+    # lateral class receives its fingerprint when it is created.
     fp_index: dict = getattr(adsorbate_site, "_lateral_fp_index", None)
     if fp_index is None:
         fp_index = {}
@@ -465,7 +464,7 @@ def check_adsorbate_site_lateral(
             )
             return lc
 
-    # ── No match — create a new lateral class ──────────��─────────────────
+    # If no class matches, create a new lateral class.
     _drop_from_other_classes(new_lc=None)
     new_lc = AdsorbateSiteLateral(
         lateral_class = len(adsorbate_site.lateral_classes),
@@ -556,14 +555,14 @@ def _build_stability_atoms(
         — nodes in *self_node_ids* that are present in *G* at call time),
         occupying indices ``n_slab+n_lat … n_slab+n_lat+n_self-1`` in *atoms*.
     """
-    # ── 1. Slab atoms ────────────────────────────────────────────────────
+    # First, add the slab atoms.
     slab_nodes = sorted(
         (n for n, d in G.nodes(data=True)
          if d.get("type") in ("bulk", "surface")),
         key=lambda n: G.nodes[n].get("index", n),
     )
 
-    # ── 2. Lateral-neighbour adsorbate atoms ─────────────────────────────
+    # Next, add the neighboring adsorbate atoms.
     lat_seed: set[int] = set()
     if lateral_class.ego_graph is not None:
         for n, d in lateral_class.ego_graph.nodes(data=True):
@@ -571,7 +570,7 @@ def _build_stability_atoms(
                 lat_seed.add(n)
     lat_nodes: list[int] = sorted(_expand_to_full_placement(G, lat_seed))
 
-    # ── 3. Self atoms (conditionally) ────────────────────────────────────
+    # Finally, add this adsorbate when the requested state contains it.
     self_nodes: list[int] = (
         sorted(nid for nid in self_node_ids if nid in G)
         if include_self else []
@@ -1411,7 +1410,7 @@ def check_site_stability(
                 n_lat=n_lat,
             )
 
-            # ── Intended-coordination check (occupied state only) ─────────────
+            # An occupied state must preserve its intended coordination.
             # Verify each self-adsorbate atom is still bonded to its intended
             # surface clique in the relaxed structure.  The bonds_before/after
             # comparison above only catches changes relative to the *initial*
@@ -1431,7 +1430,7 @@ def check_site_stability(
                 print(
                     f"  [{state}]  E={energy:.4f} eV  "
                     f"bonds_after={len(bonds_after)}  "
-                    f"max|F|={max_force:.4f} eV/Å  ✓ stable"
+                    f"max|F|={max_force:.4f} eV/Å  stable"
                 )
             atoms_opt.calc = None
 

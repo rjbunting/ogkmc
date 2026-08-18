@@ -292,7 +292,7 @@ def initialise_bond_registry(
     """
     reg = _registry(G)
 
-    # Reactants
+    # First, register the known reactants.
     if isinstance(reactants, Reactant):
         items: list[tuple[str, Reactant]] = [(reactants.smiles, reactants)]
     elif isinstance(reactants, Mapping):
@@ -303,7 +303,7 @@ def initialise_bond_registry(
     for smi, r in items:
         reg["species"][_canon_smiles(smi)] = r
 
-    # Adsorbate sites
+    # Next, register their adsorbate sites.
     if adsorbate_sites is not None:
         if isinstance(adsorbate_sites, Mapping):
             for smi, sites in adsorbate_sites.items():
@@ -315,20 +315,21 @@ def initialise_bond_registry(
                     _canon_smiles(s.reactant), []
                 ).append(s)
 
-    # Templates
+    # The reaction templates are registered after their species and sites.
     if templates is not None:
         for t in templates:
             reg["templates"].add((t.smiles_a, t.smiles_b, t.smiles_c))
 
-    # Mark explicitly-expanded species so the on-the-fly expander won't
-    # needlessly re-derive their templates during the KMC loop.
+    # Species expanded during initialization do not need to be derived again
+    # during the KMC loop, so mark them here.
     if expanded_smiles is not None:
         for smi in expanded_smiles:
             cs = _canon_smiles(smi)
             if cs:
                 reg["expanded_species"].add(cs)
 
-    # Bond sites — primary store stays on G.graph for compatibility
+    # Finally, register the bond sites. The graph remains the primary store for
+    # compatibility with existing callers.
     if bond_sites is not None:
         set_bond_reaction_sites(G, bond_sites)
 
@@ -716,10 +717,10 @@ def expand_bond_sites_for_new_species(
         return []
     if cs in reg["expanded_species"]:
         if verbose:
-            print(f"  ⏭  species {cs!r} already expanded — no expansion needed")
+            print(f"  SKIPPED species {cs!r}: already expanded")
         return []
 
-    # 1–2. Build Reactant + sites for the newly-introduced species.
+    # First, build the new reactant and its surface sites.
     built_ok = ensure_species_known(cs)
     if not built_ok:
         # Only deterministic molecular-definition failures reach this path.
@@ -728,11 +729,11 @@ def expand_bond_sites_for_new_species(
         reg["expanded_species"].add(cs)
         return []
 
-    # 3. Derive new templates centred on cs.
+    # Next, derive every new template that contains this species.
     new_tpls: list[BondReactionTemplate] = []
     pending_template_keys: set[tuple[str, str, str]] = set()
 
-    # 3a. Dissociation: cs → X + Y
+    # Begin with dissociation templates in which this species forms X and Y.
     if include_dissociation:
         for t in derive_dissociation_templates(
             cs,
@@ -745,7 +746,8 @@ def expand_bond_sites_for_new_species(
                 pending_template_keys.add(key)
                 new_tpls.append(t)
 
-    # 3b. Coupling: cs + Z → W for every known Z (including cs itself).
+    # Then form coupling templates between this species and every known
+    # species, including itself.
     if include_coupling:
         known_smiles = [
             smi
@@ -762,7 +764,7 @@ def expand_bond_sites_for_new_species(
                 pair_inputs = [cs, z]
                 kwargs = dict(include_homo=False, include_hetero=True)
             for t in derive_coupling_templates(pair_inputs, **kwargs):
-                # Only keep templates that involve cs (skip Z+Z entries).
+                # Keep only templates that contain the species being expanded.
                 if cs not in (t.smiles_a, t.smiles_b):
                     continue
                 key = (t.smiles_a, t.smiles_b, t.smiles_c)
@@ -798,7 +800,8 @@ def expand_bond_sites_for_new_species(
             print(
                 f"  → species {cs!r}: no new templates generated"
             )
-        # Mark as expanded so we don't retry on future KMC steps.
+        # No new templates were found, so mark the species as complete and do
+        # not repeat this work on later KMC steps.
         reg["expanded_species"].add(cs)
         return []
 
@@ -811,7 +814,7 @@ def expand_bond_sites_for_new_species(
             f"({n_dissoc} dissociation, {n_couple} coupling)"
         )
 
-    # 4. Ensure every species referenced by new_tpls is known.
+    # After the templates are built, materialize every species they reference.
     newly_built: list[str] = []
     if cs in reg["adsorbate_sites"]:
         newly_built.append(cs)
@@ -866,11 +869,9 @@ def expand_bond_sites_for_new_species(
         reg["expanded_species"].add(cs)
         return []
 
-    # 4b. Discover diffusion site-pairs for every newly-introduced species
-    # so the KMC loop can hop them as soon as they appear on the surface.
-    # Only the new species' sites are passed to ``find_diffusion_sites`` —
-    # results are merged into ``G.graph["diffusion_sites"]`` rather than
-    # overwriting it.
+    # New species also need diffusion pairs before they can move on the
+    # surface. Enumerate pairs for only their sites, and merge the results into
+    # the existing graph store.
     if find_diffusion and newly_built:
         new_ads_sites: list[AdsorbateSite] = []
         seen_ids: set[SiteId] = set()
@@ -982,7 +983,8 @@ def expand_bond_sites_for_new_species(
                     f"species {newly_built}"
                 )
 
-    # 5. Enumerate bond-reaction iso-classes for the new templates.
+    # With every referenced species available, enumerate the new bond-reaction
+    # iso-classes.
     cumulative_sites: list[AdsorbateSite] = []
     for sites in reg["adsorbate_sites"].values():
         cumulative_sites.extend(sites)
@@ -993,8 +995,8 @@ def expand_bond_sites_for_new_species(
             "adsorbate iso-class(es)"
         )
 
-    # ``find_bond_sites`` overwrites G.graph["bond_reaction_sites"] with
-    # whatever it just enumerated.  Save → enumerate → splice → restore.
+    # The bond-site enumerator replaces the graph store. Save the existing
+    # sites, enumerate the new sites, merge both sets, and restore the store.
     existing_brs: list[BondReactionSite] = get_bond_reaction_sites(G)
     existing_bond_cliques = _preserve_reverse_index(
         G,
@@ -1075,14 +1077,15 @@ def expand_bond_sites_for_new_species(
         _enumerate_and_prune_bond_sites,
     )
 
-    # Splice + globally renumber so iso_class is unique across all expansions.
+    # Merge the new sites and renumber them so each iso-class remains unique
+    # across all expansions.
     combined = existing_brs + list(new_brs)
     for i, brs in enumerate(combined):
         brs.iso_class = i
     set_bond_reaction_sites(G, combined)
 
-    # The enumerators rebuild indexes for the new subset.  Preserve the
-    # already-indexed network and append only surviving new members.
+    # The enumerators build indexes for only the new subset. Preserve the
+    # existing indexes, and append the members that survived pruning.
     if (
         existing_bond_cliques is not None
         and existing_bond_surfaces is not None
@@ -1109,7 +1112,8 @@ def expand_bond_sites_for_new_species(
             (template.smiles_a, template.smiles_b, template.smiles_c)
         )
 
-    # Mark this species as fully expanded so future calls are no-ops.
+    # Finally, mark the species as fully expanded so later calls can return
+    # without repeating the work.
     reg["expanded_species"].add(cs)
 
     return list(new_brs)

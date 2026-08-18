@@ -505,12 +505,9 @@ def _kabsch_align_ego(
     rep_ego = _build_ego_graph(G, rep_seed, n_shells)
     mem_ego = _build_ego_graph(G, mem_seed, n_shells)
 
-    # Tag seed membership so the mapping is forced to send seed → seed.
-    # NOTE: we mutate ``_seed`` on the *copies* returned by
-    # :func:`_build_ego_graph` (which calls ``G.subgraph(...).copy()``).
-    # The parent graph *G* is therefore never touched; the egos themselves
-    # are throw-away locals and are not cached anywhere, so the stale
-    # ``_seed`` attribute cannot leak across calls.
+    # Tag the seed nodes so the mapping sends the representative seed to the
+    # member seed. The ego graphs are temporary copies, so these tags do not
+    # modify the parent graph or persist across calls.
     for n in rep_ego.nodes:
         rep_ego.nodes[n]["_seed"] = (n in rep_seed)
     for n in mem_ego.nodes:
@@ -841,7 +838,7 @@ def _enumerate_cliques(
     z_floor: float | None      = None
 
     if not use_mic:
-        # ── Nanoparticle: convex hull of surface atoms ────────────────
+        # For a nanoparticle, use the convex hull of its surface atoms.
         hull_eq = G.graph.get("hull_equations")
         if hull_eq is None and len(surf_pos) >= 4:
             try:
@@ -853,7 +850,7 @@ def _enumerate_cliques(
             except Exception:
                 hull_eq = None
     else:
-        # ── Slab: drop cliques whose centroid is below the surface ────
+        # For a slab, remove cliques with a centroid below the surface.
         # All builders align the slab cell (surface ‖ xy plane, outward
         # normal = +z), so a simple z-floor is sufficient and
         # cheap.  ``hull_tolerance`` is reused as the (negative) Å tolerance
@@ -1063,7 +1060,7 @@ def find_anchor_sites(
     # Remove stale anchor nodes from a previous call.
     _remove_anchor_nodes(G, element)
 
-    # ── Step 1: enumerate raw cliques ─────────────────────────────────────
+    # First, enumerate the raw surface cliques.
     sites_by_k = _enumerate_cliques(
         G,
         element,
@@ -1078,11 +1075,11 @@ def find_anchor_sites(
     _log.debug("find_anchor_sites: %r  %d raw cliques  k_max=%d",
                element, n_raw, max(sites_by_k) if sites_by_k else 0)
 
-    # ── Step 2: reduce by isomorphism ─────────────────────────────────────
+    # Next, reduce equivalent cliques by graph isomorphism.
     unique_by_k = _reduce_by_isomorphism(G, sites_by_k, n_shells=n_shells)
     n_iso = sum(len(v) for v in unique_by_k.values())
 
-    # ── Step 3: build clique → (k, index) reverse map ─────────────────────
+    # Then build the reverse map from each clique to its size and index.
     clique_to_loc: dict[frozenset, tuple[int, int]] = {}
     for k, cliques in sites_by_k.items():
         for idx, clq in enumerate(cliques):
@@ -1096,7 +1093,8 @@ def find_anchor_sites(
     cell, cell_inv, pbc, use_mic = _get_cell(G)
 
 
-    # ── Step 4 + 5: optimise representative, propagate to members ─────────
+    # Optimize one representative for each class, and propagate its geometry
+    # to the remaining members.
     all_sites: list[AnchorSite] = []
     for k, classes in sorted(unique_by_k.items()):
         n_prop     = 0
@@ -1167,7 +1165,7 @@ def find_anchor_sites(
         )
         all_sites.extend(classes)
 
-    # ── Step 6: materialise anchor nodes on G ─────────────────────────────
+    # After the geometries are available, materialize the anchor nodes.
     # Build a clique → position lookup from the just-filled arrays.
     clique_to_pos: dict[frozenset, np.ndarray] = {}
     for k, cliques in sites_by_k.items():
@@ -1210,7 +1208,7 @@ def find_anchor_sites(
         iso.node_ids = [node_ids_by_clique[m] for m in iso.members
                         if m in node_ids_by_clique]
 
-    # ── Persist to G.graph ────────────────────────────────────────────────
+    # Finally, store the anchor data on the graph.
     G.graph.setdefault("anchor_sites", {})[element]  = all_sites
     G.graph.setdefault("raw_cliques",  {})[element]  = sites_by_k
     G.graph.setdefault(ANCHOR_K_MAX_BY_ELEMENT, {})[element] = (

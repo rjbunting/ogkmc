@@ -195,7 +195,7 @@ class AdsorbateSiteLateral:
     #: relaxations. Persisted beside the relaxed structures for diagnostics.
     atoms_occupied_initial   : Any    = None
     atoms_unoccupied_initial : Any    = None
-    # ── Free-energy / vibrational fields (autokmc.thermo.free_energy) ────────────
+    # The free-energy module populates these vibrational fields.
     #: Gibbs/Helmholtz correction (eV) for the **occupied** state — added
     #: to ``energy_occupied`` to obtain the surface free energy at *T*.
     #: ``None`` when free-energy mode is disabled or vibrations failed.
@@ -1723,7 +1723,7 @@ def prune_unstable_adsorbate_sites(
         Run diagnostics directory. Rejected MLIP-pruning structures are
         written below ``invalid_adsorption`` when supplied.
     verbose : bool
-        Print per-iso-class outcomes (stable ✓ / pruned ✗) to stdout.
+        Print whether each iso-class is stable or pruned to stdout.
 
     Returns
     -------
@@ -1779,7 +1779,7 @@ def prune_unstable_adsorbate_sites(
         )
 
     for ms in adsorbate_sites:
-        # ── Build initial Atoms (already tagged + node_to_ase in hand) ────
+        # First, build the initial tagged structure and its node-to-atom map.
         try:
             atoms_init, n_slab, n_ads, node_to_ase = _build_pruning_atoms(
                 G, ms, react_sym, frozen_indices=frozen_indices,
@@ -1798,7 +1798,7 @@ def prune_unstable_adsorbate_sites(
             ms, reactant, n_slab, node_to_ase
         )
 
-        # ── ML relaxation ─────────────────────────────────────────────────
+        # Next, relax the structure with the configured calculator.
         try:
             with acquire_calculator(
                 calculator, purpose="adsorbate-site pruning"
@@ -1840,7 +1840,7 @@ def prune_unstable_adsorbate_sites(
                 ms.iso_class, exc,
             )
             if verbose:
-                print(f"  ✗ iso={ms.iso_class}: relaxation failed ({exc}) — pruned")
+                print(f"  PRUNED iso={ms.iso_class}: relaxation failed ({exc})")
             _persist_invalid(
                 ms,
                 atoms_init,
@@ -1857,12 +1857,13 @@ def prune_unstable_adsorbate_sites(
             _remove_iso_class_nodes(G, ms)
             continue
 
-        # ── Convergence check ─────────────────────────────────────────────
+        # After relaxation, reject structures that did not reach the requested
+        # force threshold.
         if max_force > fmax:
             if verbose:
                 print(
-                    f"  ✗ iso={ms.iso_class}: not converged "
-                    f"(max|F|={max_force:.4f} eV/Å > {fmax}) — pruned"
+                    f"  PRUNED iso={ms.iso_class}: not converged "
+                    f"(max|F|={max_force:.4f} eV/Å > {fmax})"
                 )
             _persist_invalid(
                 ms,
@@ -1877,13 +1878,11 @@ def prune_unstable_adsorbate_sites(
             _remove_iso_class_nodes(G, ms)
             continue
 
-        # ── Connectivity check via canonical build_graph ──────────────────
-        # Carry the intended ``surface`` tags forward (build_graph requires
-        # them) and build the full atom-connectivity graph of the relaxed
-        # structure, then compare its adsorbate-touching edges against the
-        # intended edge set.  Any mismatch — missing intramolecular or
-        # anchor bond, OR a brand-new edge from any adsorbate atom to a
-        # surface atom outside its intended clique — prunes the iso-class.
+        # A converged structure must also preserve the intended connectivity.
+        # Carry the surface tags into the relaxed graph, and compare every edge
+        # that touches the adsorbate with the intended edge set. Missing bonds
+        # and new bonds to atoms outside the intended clique both cause the
+        # iso-class to be pruned.
         atoms_for_graph = atoms_opt.copy()
         atoms_for_graph.arrays["surface"] = atoms_init.arrays["surface"]
         try:
@@ -1896,8 +1895,8 @@ def prune_unstable_adsorbate_sites(
             )
             if verbose:
                 print(
-                    f"  ✗ iso={ms.iso_class}: build_graph(relaxed) failed "
-                    f"({exc}) — pruned"
+                    f"  PRUNED iso={ms.iso_class}: build_graph(relaxed) failed "
+                    f"({exc})"
                 )
             _persist_invalid(
                 ms,
@@ -1924,7 +1923,7 @@ def prune_unstable_adsorbate_sites(
                 miss_s = ", ".join(_fmt(e) for e in list(missing)[:3])
                 extr_s = ", ".join(_fmt(e) for e in list(extra)[:3])
                 print(
-                    f"  ✗ iso={ms.iso_class}: adsorbate connectivity changed "
+                    f"  PRUNED iso={ms.iso_class}: adsorbate connectivity changed "
                     f"(missing={len(missing)} [{miss_s}"
                     f"{'…' if len(missing) > 3 else ''}], "
                     f"extra={len(extra)} [{extr_s}"
@@ -1944,12 +1943,9 @@ def prune_unstable_adsorbate_sites(
             _remove_iso_class_nodes(G, ms)
             continue
 
-        # ── Update positions from ML-relaxed geometry ─���───────────────────
-        # Extract the adsorbate atoms (last n_ads rows of atoms_opt), project
-        # them from the relaxed slab frame back onto the live graph's slab
-        # frame, then store them as the representative positions for this
-        # iso-class.  The ordering produced by _build_pruning_atoms matches
-        # reactant atom-index order.
+        # The relaxed adsorbate becomes the representative for this iso-class.
+        # Project its coordinates back into the live graph frame, and preserve
+        # the reactant atom order established when the structure was built.
         frame_depth = max(1, int(ms.n_shells_settled))
         new_pos: np.ndarray = _relaxed_adsorbate_positions_in_graph_frame(
             G,
@@ -1967,12 +1963,13 @@ def prune_unstable_adsorbate_sites(
         )
         ms.positions = new_pos
 
-        # ── Propagate to all members via Kabsch ego-alignment ─────────────
+        # Finally, propagate the representative geometry to the other members
+        # with the local Kabsch alignment.
         if ms.member_node_ids:
-            # Push representative (member 0) to G.
+            # First, write the representative member to the graph.
             push_member_positions_to_graph(G, ms, 0, new_pos)
 
-            # Kabsch-propagate to every other member.
+            # Then align and write every other member.
             rep_seed: frozenset = frozenset(
                 int(n)
                 for c in ms.atom_cliques if c is not None
@@ -2008,20 +2005,20 @@ def prune_unstable_adsorbate_sites(
                     n_propagated += 1
                 if verbose:
                     print(
-                        f"  ✓ iso={ms.iso_class}: stable  "
+                        f"  STABLE iso={ms.iso_class}: "
                         f"E={E:.4f} eV  max|F|={max_force:.4f} eV/Å  "
                         f"propagated {n_propagated}/{max(0, len(ms.members) - 1)} members"
                     )
             else:
                 if verbose:
                     print(
-                        f"  ✓ iso={ms.iso_class}: stable  "
+                        f"  STABLE iso={ms.iso_class}: "
                         f"E={E:.4f} eV  max|F|={max_force:.4f} eV/Å"
                     )
         else:
             if verbose:
                 print(
-                    f"  ✓ iso={ms.iso_class}: stable  "
+                    f"  STABLE iso={ms.iso_class}: "
                     f"E={E:.4f} eV  max|F|={max_force:.4f} eV/Å  (no members yet)"
                 )
 
@@ -2038,7 +2035,7 @@ def prune_unstable_adsorbate_sites(
         reactant.smiles, len(stable), len(adsorbate_sites),
     )
 
-    # Persist to graph so G is always consistent with the returned list.
+    # Store the surviving sites so the graph and the returned list agree.
     G.graph.setdefault("adsorbate_sites", {})[reactant.smiles] = stable
     rebuild_adsorbate_reverse_indexes(G)
     return stable
@@ -2142,7 +2139,7 @@ def find_adsorbate_sites(
     hull_tolerance: float = HULL_TOL,
     kabsch_max_mappings: int = KABSCH_MAX_MAPPINGS,
     nl_mult: float = NL_MULT_DEFAULT,
-    # ── Stability pruning ──────────────────────────────────────────────────
+    # If requested, prune the sites that do not remain stable.
     prune_stable_only: bool = True,
     calculator=None,
     frozen_indices: list[int] | None = None,
@@ -2278,19 +2275,19 @@ def find_adsorbate_sites(
             raise ValueError("Reactant has no anchor atoms.")
         return []
 
-    # Remove stale adsorbate nodes from a previous call on the same SMILES.
+    # First, remove adsorbate nodes left by an earlier call for this SMILES.
     _remove_adsorbate_nodes(G, reactant.smiles)
 
     elements: dict[int, str] = {
         i: reactant.graph.nodes[i]["element"] for i in range(n_atoms)
     }
     react_pos = np.asarray(reactant.atoms.get_positions(), dtype=float)
-    # (N, N) intramolecular distance matrix.
+    # This matrix contains every intramolecular atom-pair distance.
     D = np.linalg.norm(
         react_pos[:, None, :] - react_pos[None, :, :], axis=-1
     )
 
-    # Heuristic shell depth from molecular reach.
+    # If no shell depth was given, estimate it from the molecular reach.
     if n_shells_anchor is None:
         if len(anchors) >= 2:
             reach = float(max(D[i, j] for i in anchors for j in anchors if i < j))
@@ -2319,7 +2316,7 @@ def find_adsorbate_sites(
             f"tol={bond_tolerance} Å"
         )
 
-    # ── Orbit-canonicalised anchor subsets ───────────────────────────────
+    # Next, reduce the anchor subsets by their molecular symmetry orbits.
     if include_partial:
         all_subsets: list[tuple[int, ...]] = []
         for r in range(1, len(anchors) + 1):
@@ -2337,7 +2334,7 @@ def find_adsorbate_sites(
             seen_subset_keys.add(key)
             canonical_subsets.append(sub)
 
-    # ── Enumeration pass ─────────────────────────────────────────────────
+    # The enumeration pass builds candidate placements at the selected depth.
     def _run_pass(depth: int) -> list[AdsorbateSite]:
         anchor_elements = {elements[i] for i in anchors}
         for el in anchor_elements:
@@ -2386,7 +2383,8 @@ def find_adsorbate_sites(
             for i in bonded:
                 atom_cliques[i] = assigned_clique[i]
 
-            # Surface-connectivity guard.
+            # Reject a placement when its bonded cliques are too far apart on
+            # the surface graph.
             if apsp is not None:
                 bonded_cliques = [c for c in atom_cliques if c is not None]
                 needed = _min_ego_depth_for_connectivity(bonded_cliques, apsp)
@@ -2401,7 +2399,8 @@ def find_adsorbate_sites(
                 reactant, bonded, bonded_positions, G, pbc
             )
 
-            # Ego subgraph: n_shells_pair-shell BFS from union of bonded cliques.
+            # Build the local ego graph with a breadth-first search from the
+            # union of the bonded cliques.
             union: set[int] = set()
             for c in atom_cliques:
                 if c is not None:
@@ -2505,7 +2504,8 @@ def find_adsorbate_sites(
 
         return adsorbate_sites
 
-    # ── Retry loop: auto-grow n_shells_anchor ────────────────────────────
+    # Repeat the enumeration with a larger shell when the initial depth cannot
+    # contain every bonded clique.
     adsorbate_sites = _run_pass(n_shells_eff)
     retries = 0
     while auto_grow_shells and apsp is not None and retries < max_shell_retries:
@@ -2514,7 +2514,7 @@ def find_adsorbate_sites(
             break
         if verbose:
             print(
-                f"  ⚠  bonded cliques span {needed} hops but iso depth was "
+                f"  WARNING bonded cliques span {needed} hops but iso depth was "
                 f"{n_shells_eff} — growing to {needed} and re-enumerating"
             )
         n_shells_eff    = needed
@@ -2534,20 +2534,17 @@ def find_adsorbate_sites(
             f"{total_members} placements total"
         )
 
-    # ── Stage A: stamp shell depth, materialise nodes, persist ──────────
-    # Nodes must exist on G before geometric optimisation can run, so
-    # materialisation always happens here — before any pruning.
+    # First, record the selected shell depth and materialize the graph nodes.
+    # Geometry optimization needs these nodes, so this happens before pruning.
     for ms in adsorbate_sites:
         ms.n_shells_settled = int(n_shells_eff)
 
     _materialise_adsorbate_nodes(G, reactant, adsorbate_sites)
     G.graph.setdefault("adsorbate_sites", {})[reactant.smiles] = adsorbate_sites
 
-    # ── Reverse indexes for the KMC fast paths ─���───────────────────────────
-    # See suggestion.MD #4 / #8 / #9.  Every adsorbate node already carries
-    # its bonded surface clique as a frozenset under the "clique" attribute
-    # (set in :func:`_materialise_adsorbate_nodes`), so downstream code can
-    # use it directly without re-wrapping with ``frozenset(...)``.
+    # Next, build the reverse indexes used by the KMC update paths.
+    # Each adsorbate node already stores its bonded surface clique as a
+    # frozenset. The indexes below reuse that value directly.
     #
     #   G.graph["clique_to_members"]
     #       dict[frozenset, list[(AdsorbateSite, m_idx)]]
@@ -2580,13 +2577,13 @@ def find_adsorbate_sites(
     #       frozensets every KMC step.
     rebuild_adsorbate_reverse_indexes(G)
 
-    # ── Stage B: geometric optimisation → ML stability → prune → propagate
+    # After materialization, optimize the geometry, test its stability, prune
+    # invalid sites, and propagate each representative.
     if prune_stable_only:
         if calculator is not None:
-            # B-1: calculator-free rigid-body geometry optimisation.
-            # Refines representative positions and Kabsch-propagates to every
-            # member so that the ML relaxation in B-2 starts from a sensible
-            # geometry rather than the raw clique-centroid positions.
+            # First, refine the representative with a calculator-free rigid-body
+            # optimization. This gives the later calculator relaxation a useful
+            # starting geometry instead of the raw clique centroids.
             #
             # Skipped for single-atom reactants: a 1-atom adsorbate has no
             # rotational DOF and the anchor-node position is already the
@@ -2618,9 +2615,9 @@ def find_adsorbate_sites(
                     "\n  Stage B-1 skipped (single-atom reactant — no rigid-body DOF)"
                 )
 
-            # B-2: ML-potential stability check.  Prunes unstable iso-classes,
-            # extracts the relaxed adsorbate positions, updates ms.positions,
-            # and Kabsch-propagates the new geometry to every member.
+            # Then use the configured calculator to test stability. This prunes
+            # unstable iso-classes and propagates each relaxed representative
+            # to its remaining members.
             if verbose:
                 print(
                     "\n  ──────────────────────────────────────────────────────\n"

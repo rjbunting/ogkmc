@@ -1,8 +1,8 @@
 # ISAAC Reaction Database
 
-The reaction database avoids repeating expensive endpoint, vibrational, and
-NEB calculations. Record folders are the source of truth; SQLite is only a
-rebuildable search index.
+The reaction database reuses expensive endpoint, vibrational, and NEB
+calculations. AutoKMC writes each calculation to a record folder, which remains
+the source of truth. It then uses SQLite as a rebuildable search index.
 
 ## Layout
 
@@ -64,10 +64,10 @@ AutoKMC uses two lookup paths:
    a Weisfeiler-Lehman graph fingerprint, a normalized scientific-input
    fingerprint, and an explicit calculator/model digest.
 
-Every fallback candidate must then pass full labelled graph isomorphism. Before
-loading, AutoKMC validates the ISAAC document, resolves every asset within the
-record directory, verifies every SHA-256, checks the required state set, and
-reads the `.extxyz` structures.
+For a fallback candidate, AutoKMC first checks full labelled graph isomorphism.
+It then validates the ISAAC document, resolves every asset within the record
+directory, verifies every SHA-256, checks the required state set, and reads the
+`.extxyz` structures. A candidate is reusable only after every check succeeds.
 
 The local-geometry fingerprint uses element/fixed-state-labelled pair
 distances under the minimum-image convention and the full lattice Gram matrix.
@@ -79,24 +79,24 @@ state. Model checkpoint files and directory-valued model artifacts are
 identified recursively by SHA-256 content rather than a machine-local path;
 identical copied artifacts match and modified artifacts do not.
 
-The scientific-input fingerprint replaces each `Atoms` input with that
-invariant geometry description and retains every other input recursively.
-Scalar gas energies, charge, spin declarations, and similar inputs therefore
-cannot change without causing a miss. Only an explicit allowlist of run-local
-enumeration identifiers (for example node ids, `iso_class`, and
-`lateral_class`) is omitted.
+To build the scientific-input fingerprint, AutoKMC first replaces each `Atoms`
+input with its invariant geometry description. It then retains every other
+input recursively. A change to a scalar gas energy, charge, spin declaration,
+or similar input therefore causes a miss. Only an explicit allowlist of
+run-local enumeration identifiers, such as node ids, `iso_class`, and
+`lateral_class`, is omitted.
 
 For gas-product bond reactions, the gas molecule geometry and every gas
 thermochemistry value consumed by the endpoint calculation are scientific
 inputs. The feed partial pressure is intentionally not cached: it is restamped
 from the current reactant and used only when the live KMC rate is evaluated.
 
-Invariant geometry proves that two requests describe the same local shape; it
-does not define how stored output coordinates should be moved into a new
-coordinate frame. Records with endpoint structures or NEB paths therefore
-also require an exact input-frame fingerprint before portable reuse. A rigidly
-translated, rotated, wrapped, or atom-permuted query is conservatively
-recomputed rather than receiving structures in the wrong frame.
+Invariant geometry shows that two requests describe the same local shape, but
+it does not define how to move stored outputs into a new coordinate frame.
+AutoKMC therefore requires an exact input-frame fingerprint before reusing an
+endpoint structure or NEB path. If a query is translated, rotated, wrapped, or
+atom-permuted, AutoKMC recomputes the calculation instead of returning
+structures in the wrong frame.
 
 Calculator/optimizer/NEB/free-energy settings participate in compatibility.
 Temperature- and pressure-dependent KMC rates are recomputed for the current
@@ -134,9 +134,9 @@ labels.
 
 ## Index recovery
 
-If `index.sqlite3` is absent or unreadable, lookup automatically rebuilds it by
-scanning record folders and accepting only records whose schemas and assets
-verify. Invalid or tampered records are skipped.
+If `index.sqlite3` is absent or unreadable, AutoKMC scans the record folders. It
+first verifies each schema and asset, keeps only valid records, and then builds
+a new index. Invalid or tampered records are skipped.
 
 Manual recovery uses:
 
@@ -158,14 +158,13 @@ output:
   isaac_export_filename: isaac_records.json
 ```
 
-Disable database reads/writes with `calculation_cache_enabled: false`. This
-does not disable reaction-folder `.extxyz` persistence in the run directory.
-By default, `calculation_cache_lookup_enabled: false` skips calculation-record
-lookups while continuing to write ISAAC records and update the SQLite index.
-Set it to `true` to reuse matching records. The default write-only mode is
-useful when generating a database for later upload or reuse elsewhere.
-The portable, potentially expensive aggregate export is opt-in; set
-`isaac_export_enabled: true` when an `isaac_records.json` bundle is needed.
+Set `calculation_cache_enabled: false` to disable database reads and writes.
+Reaction-folder `.extxyz` files in the run directory are still written. By
+default, `calculation_cache_lookup_enabled: false` skips record lookup while
+continuing to write ISAAC records and update the SQLite index. Set it to `true`
+to reuse matching records. This write-only default is useful when generating a
+database for later upload or reuse. Finally, set `isaac_export_enabled: true`
+only when a portable `isaac_records.json` bundle is needed.
 
 ## Portability checklist
 

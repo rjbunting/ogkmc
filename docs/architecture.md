@@ -19,18 +19,18 @@ flowchart TD
     G -. "reuse/write" .-> K
 ```
 
-`autokmc/cli/pipeline.py` is a thin coordinator.  The configured workflow is
-implemented by `autokmc/workflow`: `stages.py` prepares the calculator,
-structure, graph, reactants, and adsorption sites; `network.py` constructs the
-optional diffusion/bond network; `runtime.py` resolves cache, channel, restart,
-and output collaborators; and `simulation.py` owns KMC launch and finalization.
-The main stages are:
+`autokmc/cli/pipeline.py` coordinates the workflow. The implementation is split
+across `autokmc/workflow`. First, `stages.py` prepares the calculator, structure,
+graph, reactants, and adsorption sites. Next, `network.py` constructs the
+optional diffusion and bond network, while `runtime.py` resolves the cache,
+channel, restart, and output collaborators. Finally, `simulation.py` launches
+KMC and finalizes the run. The complete sequence is:
 
 1. Build an ASE-compatible calculator or calculator pool.
 2. Construct and relax a periodic surface or nanoparticle, or load a selected
    frame from any ASE-readable catalyst file without rebuilding or relaxing
    it. The supplied production examples use built platinum structures.
-3. classify surface atoms and build the atom-connectivity graph.
+3. Classify surface atoms and build the atom-connectivity graph.
 4. Build gas-phase reactants from SMILES. With `relax_in_gas: false`, AutoKMC
    skips geometry relaxation but still requires a finite single-point energy.
 5. Enumerate adsorption placements and optionally prune unstable classes.
@@ -39,38 +39,38 @@ The main stages are:
    on-the-fly network expansion.
 8. Persist cumulative outputs and, separately, post-process the event log.
 
-The internal KMC boundary is one `KMCRunRequest` producing one `KMCRunResult`;
-configured workflows construct the typed `KMCSession` directly.  The public
-`autokmc.kmc.engine.run_kmc_steps` signature remains solely as a compatibility
-adapter.  Session initialization, local recomputation, dynamic network
-expansion, output/checkpoint handling, and canonical RNG restart state live in
-separate KMC modules.  Each result also carries run-scoped counters, gauges,
-and accumulated wall-clock timings.
+The internal KMC boundary accepts one `KMCRunRequest` and returns one
+`KMCRunResult`. Configured workflows construct the typed `KMCSession` directly.
+The public `autokmc.kmc.engine.run_kmc_steps` signature remains as a
+compatibility adapter. Separate KMC modules handle session initialization,
+local recomputation, dynamic network expansion, outputs, checkpoints, and the
+canonical RNG restart state. Each result also carries run-scoped counters,
+gauges, and accumulated wall-clock timings.
 
 ## Graph state
 
-The live NetworkX graph contains catalyst atoms, materialized adsorbate atoms,
-and site bookkeeping. Occupancy is attached to concrete adsorbate placements.
-Reverse indexes connect occupied surface cliques to affected adsorption,
-diffusion, and bond-reaction members so the KMC engine can update only the
-local rate neighborhood after an event.
-Each adsorption, diffusion, and bond site has a persisted `site_id`; a concrete
-member is addressed by `(site_id, member_index)`.  These stable in-run handles
-survive checkpoint copying and let dynamic discovery recognise a reconstructed
-site without relying on a Python object address.  Dynamic expansion appends
-only new leaves to the reaction-rate index, retaining all existing reaction
-objects and rates; the segment tree expands geometrically only when its current
-capacity is exhausted.
-Site membership is immutable once a site enters the reaction index.  New
-network discoveries therefore add complete sites rather than appending members
-to an indexed site; a future member-growth feature must replace the site
-atomically or extend the index and invalidate its stable identity together.
-Common graph metadata is accessed through `autokmc/core/graph_state.py`; the
-underlying NetworkX dictionaries remain inspectable for notebooks and
-checkpoint compatibility.
-Site-model cache attributes are declared for static checking but remain lazily
-materialized at runtime.  Keeping them out of dataclass serialization preserves
-older checkpoints and the established `asdict`/equality surface.
+The live NetworkX graph contains the catalyst atoms, materialized adsorbate
+atoms, and site bookkeeping. Each concrete adsorbate placement stores its own
+occupancy. Reverse indexes then connect occupied surface cliques to the affected
+adsorption, diffusion, and bond-reaction members. After an event, the KMC engine
+uses these indexes to update only the local rate neighborhood.
+
+Each adsorption, diffusion, and bond site has a persisted `site_id`, and
+`(site_id, member_index)` identifies one concrete member. These stable in-run
+handles survive checkpoint copying and allow dynamic discovery to recognize a
+reconstructed site without using a Python object address. When the network
+expands, AutoKMC appends only new leaves to the reaction-rate index and retains
+the existing reaction objects and rates. The segment tree expands only when it
+runs out of capacity.
+
+Site membership becomes immutable when a site enters the reaction index. A new
+network discovery therefore adds a complete site instead of appending members
+to an indexed site. Common graph metadata is accessed through
+`autokmc/core/graph_state.py`, while the underlying NetworkX dictionaries remain
+inspectable for notebooks and checkpoint compatibility. Site-model cache
+attributes are declared for static checking and materialized only when needed.
+Keeping them out of dataclass serialization preserves older checkpoints and the
+established `asdict` and equality behavior.
 
 Run-local identifiers such as `site_id`, graph node ids, adsorption
 `iso_class`, and `lateral_class` are stable across restart and reconstruction
@@ -88,24 +88,26 @@ by the configured partial pressure in bar.
 
 ### Diffusion
 
-Diffusion connects two placements of the same species. Endpoint relaxation and
-ordinary NEB populate state A, state B, and transition-state energies. CI-NEB
-refines the transition only when both raw ordinary directional barriers are at
-least 0.1 eV. Both forward and reverse rates are derived from one effective
-transition-state level so detailed energy consistency is preserved when the
-minimum barrier floor is applied.
+Diffusion connects two placements of the same species. AutoKMC first relaxes
+state A and state B. It then optimizes an ordinary NEB band to obtain the
+transition-state energy. CI-NEB refines that transition only when both raw
+ordinary directional barriers are at least 0.1 eV. Finally, AutoKMC derives the
+forward and reverse rates from one effective transition-state level, preserving
+energy consistency when it applies the minimum barrier floor.
 
 An ordinary or climbing band may also stop before its strict force target when
 its maximum NEB force is at most the configured low-barrier cutoff (0.1 eV/Å
 by default) and either raw directional barrier is below 0.1 eV. Reaction JSON
-retains that alternate convergence provenance.
+retains that alternate convergence provenance. A stage that exhausts its full
+step budget receives the same barrier check even if its final force remains
+above the cutoff; acceptance is recorded as `low_barrier_max_steps`.
 
-For a lateral environment containing neighbouring adsorbates, the reaction
-evaluator first ensures that the corresponding no-neighbour lateral class has
-an optimized NEB band. It calculates that bare class on demand, projects the
-bare band curvature onto the lateral endpoints, and then performs the normal
-full NEB optimization. Bare failures and projection incompatibilities degrade
-to the channel's configured interpolation.
+For a lateral environment containing neighboring adsorbates, the reaction
+evaluator first obtains an optimized band for the corresponding no-neighbor
+class. It calculates that bare class on demand when necessary. Next, it projects
+the bare-band curvature onto the lateral endpoints and performs the full NEB
+optimization. If the bare calculation fails or the projection is incompatible,
+the channel uses its configured interpolation.
 
 ### Bond changes
 
@@ -182,5 +184,5 @@ in favor of the configured calculator. Cell and periodic-boundary metadata are
 therefore input responsibilities and must be suitable for surface
 classification.
 
-This prevents a run from silently continuing with `NaN` energetics, incomplete
-provenance, or a checkpoint that was never written.
+Together, these rules prevent a run from silently continuing with `NaN`
+energetics, incomplete provenance, or a checkpoint that was never written.

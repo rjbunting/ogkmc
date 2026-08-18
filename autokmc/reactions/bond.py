@@ -183,7 +183,7 @@ def _cliques_blocked(
                 return True
         return False
 
-    # Fallback path — slow but functional.
+    # If the reverse index is unavailable, scan the graph directly.
     target_cliques = set(cliques)
     if not target_cliques:
         return False
@@ -223,10 +223,8 @@ def is_bond_applicable(
     2. The cliques that the firing direction needs to occupy are not
        claimed by any *third-party* adsorbate.
     """
-    # Read node IDs live from the AdsorbateSite objects so that we always see
-    # the current graph-node ids, even after _materialise_adsorbate_nodes has
-    # re-run for a species and invalidated the cached copies in
-    # brs.member_node_ids.
+    # First, read the node IDs from the current AdsorbateSite objects. A later
+    # materialization can replace these IDs and make the cached copies stale.
     gas_product = bool(getattr(brs, "gas_product", False))
     site_a, m_a, site_b, m_b, site_c, m_c = brs.members[member_index]
     a_nids = list(site_a.member_node_ids[m_a])
@@ -248,8 +246,8 @@ def is_bond_applicable(
         dissoc_state = (c_occ and not a_occ and not b_occ)
 
     if couple_state == dissoc_state:
-        # Either both true (impossible — A+B+C can't all be in the right state)
-        # or neither — wrong occupancy pattern for this reaction.
+        # Both values being equal means that the occupancy does not describe
+        # one valid side of this reaction.
         return False, None
 
     cliques_a, cliques_b, cliques_c = brs._member_cliques[member_index]
@@ -265,14 +263,14 @@ def is_bond_applicable(
     c_set = frozenset(c_nids)
 
     if couple_state:
-        # Direction: A + B → C.  C will become occupied — its cliques
-        # must be free except for what A or B already (themselves) hold.
+        # For A + B to form C, the cliques used by C must be free except for
+        # the atoms already occupied by A and B.
         if (not gas_product) and _cliques_blocked(G, cliques_c, a_set | b_set | c_set):
             return False, None
         return True, "couple"
     else:
-        # Direction: C → A + B.  A and B will become occupied — their
-        # cliques must be free except for what C already holds.
+        # For C to form A + B, the cliques used by A and B must be free except
+        # for the atoms already occupied by C.
         if _cliques_blocked(G, cliques_a, a_set | b_set | c_set):
             return False, None
         if _cliques_blocked(G, cliques_b, a_set | b_set | c_set):
@@ -538,7 +536,7 @@ def get_applicable_bond_reaction_for_member(
             brs._member_lc.pop(index, None)
             if verbose:
                 print(
-                    f"  ⚠  bond_iso={brs.iso_class} m={index}: "
+                    f"  WARNING bond_iso={brs.iso_class} m={index}: "
                     f"lateral check skipped ({exc})"
                 )
         else:
@@ -661,7 +659,7 @@ def get_applicable_bond_reaction_for_member(
                     )
                     if verbose:
                         print(
-                            f"  ⚠  bond_iso={brs.iso_class} m={index} "
+                            f"  WARNING bond_iso={brs.iso_class} m={index} "
                             f"lat={lc.lateral_class}: {reason}\n"
                             "     → omitted from this KMC sweep "
                             "(will be retried when recomputed)"
@@ -678,7 +676,7 @@ def get_applicable_bond_reaction_for_member(
                     )
                     if verbose:
                         print(
-                            f"  ⚠  bond_iso={brs.iso_class} m={index} "
+                            f"  WARNING bond_iso={brs.iso_class} m={index} "
                             f"lat={lc.lateral_class}: {reason}\n"
                             "     → marked as invalid "
                             "(will not be admitted to KMC)"
