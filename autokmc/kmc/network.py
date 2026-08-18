@@ -157,7 +157,7 @@ class DynamicNetworkExpander:
             return
         if direction == "couple":
             print(
-                "[KMC]  ⚡ Bond coupling fired: "
+                "[KMC] Bond coupling fired: "
                 f"{template.smiles_a} + {template.smiles_b} → {template.smiles_c}"
                 f"  (iso={reaction.site.iso_class} m={reaction.member_index})"
             )
@@ -167,7 +167,7 @@ class DynamicNetworkExpander:
             )
         else:
             print(
-                "[KMC]  ⚡ Bond dissociation fired: "
+                "[KMC] Bond dissociation fired: "
                 f"{template.smiles_c} → {template.smiles_a} + {template.smiles_b}"
                 f"  (iso={reaction.site.iso_class} m={reaction.member_index})"
             )
@@ -213,7 +213,7 @@ class DynamicNetworkExpander:
         if new_sites and self.settings.verbose:
             species = sorted({site.reactant for site in new_sites})
             print(
-                f"[KMC]  🆕 New adsorbate iso-class(es) discovered: "
+                f"[KMC] New adsorbate iso-class(es) discovered: "
                 f"{len(new_sites)} class(es) across species {species}"
             )
             for smiles in species:
@@ -311,7 +311,7 @@ class DynamicNetworkExpander:
                 new_sites.append(site)
         if new_sites and self.settings.verbose:
             print(
-                f"[KMC]  🆕 New diffusion iso-class(es) discovered: "
+                f"[KMC] New diffusion iso-class(es) discovered: "
                 f"{len(new_sites)} site-pair(s)"
             )
         return new_sites
@@ -355,7 +355,7 @@ class DynamicNetworkExpander:
         if not (self.settings.verbose and sites):
             return
         print(
-            f"[KMC]  🆕 New bond-reaction iso-class(es) enumerated: "
+            f"[KMC] New bond-reaction iso-class(es) enumerated: "
             f"{len(sites)} iso-class(es)  "
             f"(total bond iso-classes now: {len(self.channels.bond_sites)})"
         )

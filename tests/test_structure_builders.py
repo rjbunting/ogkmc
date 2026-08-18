@@ -22,11 +22,11 @@ from autokmc.structure.slab import build_surface
 from autokmc.workflow.stages import configured_adsorbate_site_kwargs
 
 
-def _build_pd_example_surface(facet: str):
+def _build_example_surface(filename: str):
     cfg = load_config(
         Path(__file__).parents[1]
         / "example"
-        / f"h2_oxidation_pd{facet}_uma.yaml"
+        / filename
     )
     structure = cfg.structure
     atoms = build_surface(
@@ -46,6 +46,10 @@ def _build_pd_example_surface(facet: str):
         **structure.extra_kwargs,
     )
     return cfg, atoms
+
+
+def _build_pd_example_surface(facet: str):
+    return _build_example_surface(f"h2_oxidation_pd{facet}_uma.yaml")
 
 
 def test_apply_composition_uses_exact_constrained_largest_remainder_counts():
@@ -71,17 +75,25 @@ def test_surface_builder_requires_an_explicit_calculator(monkeypatch):
         slab_module.build_surface(calculator=None)
 
 
-@pytest.mark.parametrize("facet", ["111", "100"])
-def test_pd_surface_examples_build_3x3_four_layer_slabs(facet):
-    _cfg, atoms = _build_pd_example_surface(facet)
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "h2_oxidation_pd111_uma.yaml",
+        "h2_oxidation_pd100_uma.yaml",
+        "h2_oxidation_pd111_dft.yaml",
+        "all_options.yaml",
+    ],
+)
+def test_surface_examples_build_4x4_four_layer_slabs(filename):
+    cfg, atoms = _build_example_surface(filename)
 
     fractional_layers = np.unique(
         np.round(atoms.get_scaled_positions(wrap=False)[:, 2], decimals=8)
     )
-    assert len(atoms) == 3 * 3 * 4
+    assert len(atoms) == 4 * 4 * 4
     assert len(fractional_layers) == 4
-    assert len(atoms.info["frozen_indices"]) == 3 * 3 * 2
-    if facet == "111":
+    assert len(atoms.info["frozen_indices"]) == 4 * 4 * 2
+    if cfg.structure.miller_index == (1, 1, 1):
         np.testing.assert_allclose(atoms.cell.angles(), [90.0, 90.0, 60.0])
         normal = np.cross(atoms.cell[0], atoms.cell[1])
         normal /= np.linalg.norm(normal)
@@ -117,7 +129,7 @@ def test_skew_pd111_o_sites_are_local_and_connectivity_consistent():
     )
 
     assert sorted(len(site.atom_cliques[0]) for site in sites) == [1, 2, 3, 3]
-    assert len(graph.graph["raw_cliques"]["O"][3]) == 18
+    assert len(graph.graph["raw_cliques"]["O"][3]) == 32
     assert all(
         _geometry_connectivity_mismatch(
             graph,

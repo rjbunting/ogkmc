@@ -23,20 +23,21 @@ RUN_DIR/
   analysis/                      # after `autokmc analyze`
 ```
 
-JSON documents are written atomically where replacement is appropriate and
-reject nonfinite numeric output. `events.jsonl` is append-only. Event rows may
-remain in the process buffer between checkpoints; they are flushed and synced
-before a checkpoint publishes its exact committed byte offset and again when
-the writer closes.
+AutoKMC writes complete JSON documents by atomic replacement and rejects
+nonfinite numeric output. It treats `events.jsonl` differently because that file
+is append-only. Event rows may remain in the process buffer between checkpoints.
+Before publishing a checkpoint, AutoKMC flushes and syncs those rows and records
+the exact committed byte offset. It flushes and syncs them again when the writer
+closes.
 
-A fresh configured run refuses any existing managed artifacts in its
-`output.dir`; it never truncates or mixes an earlier event log, manifest,
-summary, trajectory, checkpoint, reaction tree, cache, analysis, or diagnostics
-tree. Use a new output directory for a new trajectory. A checkpoint resume is
-the explicit continuation path and retains the reconciliation behavior below.
-One filesystem lock is held for the complete configured run, so concurrent
-processes cannot write the same output directory. `autokmc preflight CONFIG`
-checks both conditions without creating configured outputs.
+Before a fresh run starts, AutoKMC checks `output.dir` for managed artifacts. If
+it finds an existing event log, manifest, summary, trajectory, checkpoint,
+reaction tree, cache, analysis, or diagnostics tree, it stops instead of
+truncating or mixing the earlier run. Use a new output directory for a new
+trajectory, or use checkpoint resume to continue the existing trajectory.
+AutoKMC also holds one filesystem lock for the complete run so another process
+cannot write the same directory. `autokmc preflight CONFIG` checks both
+conditions without creating configured outputs.
 
 ## `run_manifest.json`
 
@@ -140,23 +141,24 @@ reactions/
     neb_path.extxyz              # optional
 ```
 
-`reaction.json` contains discovery metadata, electronic/free energetics,
-vibrational results, KMC barriers, calculator identity, validity, and
-cumulative firing statistics. The `.extxyz` files preserve the structures
-behind those values. Its immutable `discovery_step` records when the folder
-first became part of the discovered network.
-For a gas-product bond reaction, the thermodynamic C-state geometry is stored
-as two independent calculation inputs: `state_c_gas_reference.extxyz` contains
-the relaxed surface/lateral environment without a molecule in the vacuum, and
+`reaction.json` records discovery metadata, electronic and free energetics,
+vibrational results, KMC barriers, calculator identity, validity, and cumulative
+firing statistics. Its immutable `discovery_step` records when the reaction
+entered the discovered network. The `.extxyz` files preserve the structures
+behind these values.
+
+For a gas-product bond reaction, AutoKMC stores the thermodynamic C state as two
+independent calculation inputs. `state_c_gas_reference.extxyz` contains the
+relaxed surface and lateral environment without a molecule in the vacuum.
 `gas_molecule.extxyz` contains only the optimized gas molecule. Their energies
-sum to `energies_ev.state_c`; `state_c.extxyz` remains the molecular precursor
-used as the NEB endpoint.
-Endpoint files ending in `_initial.extxyz` contain the exact structures passed
-to relaxation. When an optimization fails, its corresponding non-`_initial`
-endpoint file contains the last-known atomic geometry. When
-`persist_neb_path` is enabled,
-`neb_path_initial.extxyz` contains the interpolated band before NEB
-optimization and `neb_path.extxyz` contains the optimized band.
+sum to `energies_ev.state_c`, while `state_c.extxyz` contains the molecular
+precursor used as the NEB endpoint.
+
+Files ending in `_initial.extxyz` contain the exact endpoint structures passed
+to relaxation. If an optimization fails, the corresponding non-`_initial` file
+contains the last-known geometry. When `persist_neb_path` is enabled,
+`neb_path_initial.extxyz` contains the band before NEB optimization and
+`neb_path.extxyz` contains the optimized band.
 
 `reactions/index.jsonl` is the versioned network index. Each stable
 `reaction_id` records validity, discovery step, supported directions, firing
@@ -202,18 +204,18 @@ mask should be used when reconstructing constraints from the file.
 
 ## Checkpoint continuation
 
-Schema-v4 checkpoints are compact restart snapshots. They contain the live
-graph, all currently known sites/reactants, occupancy, reaction counts, frozen
-indices, RNG state, a scientific-config fingerprint, and the exact committed
-`events.jsonl` count and byte offset. The compatibility `history` field remains
-present but is empty in routine checkpoints: committed event history is
-reconstructed from `events.jsonl` instead of being copied into every snapshot.
-Standalone API runs that attach a checkpoint writer without an event writer
-retain history in the checkpoint because no reconstructible event source
-exists.
-Calculator objects are removed and rebuilt from the current config. Large,
-reconstructible graph caches (`surface_apsp`, surface-shell BFS data, and
-geometry lookup arrays) are also omitted and rebuilt lazily.
+Schema-v4 checkpoints are compact restart snapshots. They store the live graph,
+known sites and reactants, occupancy, reaction counts, frozen indices, RNG
+state, scientific-config fingerprint, and exact committed `events.jsonl` count
+and byte offset. Routine checkpoints leave the compatibility `history` field
+empty because AutoKMC reconstructs committed history from `events.jsonl`
+instead of copying it into every snapshot. A standalone API run keeps history
+only when it has a checkpoint writer but no event writer.
+
+Before writing a checkpoint, AutoKMC removes calculator objects and large
+reconstructible graph caches. On resume, it rebuilds the calculators from the
+current configuration and rebuilds `surface_apsp`, surface-shell BFS data, and
+geometry lookup arrays only when they are needed.
 
 To continue the same run, keep `output.dir` unchanged and set `resume_from`:
 
@@ -315,11 +317,11 @@ into equal-duration blocks for stationarity inspection.
 
 ### Mechanism reconstruction
 
-For each product desorption, the analyzer follows its consumed placement
-backward through formation events. Diffusion relocates the same lineage and is
-omitted from the chemical mechanism. Bond formation joins both precursor
-histories. Immediate reversible bond recrossings cancel before mechanisms are
-fingerprinted and grouped.
+For each product desorption, the analyzer first identifies the consumed
+placement and follows it backward through the formation events. Diffusion moves
+the same lineage and is omitted from the chemical mechanism. Bond formation
+joins both precursor histories. Finally, immediate reversible bond recrossings
+are removed before the mechanisms are fingerprinted and grouped.
 
 Analysis is transactional: all five outputs are staged first, and existing
 analysis files remain unchanged if strict validation or writing fails.

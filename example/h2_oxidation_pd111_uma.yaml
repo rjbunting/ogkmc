@@ -21,11 +21,11 @@ structure:
   miller_index: [1, 1, 1]
   lattice_constant: 3.89
   # For Pd(111), 8.0 Å builds four metal layers. The primitive in-plane
-  # vectors are about 2.75 Å, so 8.0 Å targets tile the slab 3x3.
+  # vectors are about 2.75 Å, so 10.0 Å targets tile the slab 4x4.
   min_slab_size: 8.0
   min_vacuum_size: 12.0
-  goal_x: 8.0
-  goal_y: 8.0
+  goal_x: 10.0
+  goal_y: 10.0
   extra_kwargs:
     orthogonalise: false
   # Freeze the bottom two of the four metal layers.
@@ -96,6 +96,10 @@ optimization:
   neb_method: improvedtangent
   neb_band_eval: batched
   neb_geometry_guard_multiplier: 3.0
+  # First barrier gate: while ordinary NEB is still above its strict 0.05
+  # eV/angstrom target, check at 0.10 eV/angstrom and stop if either raw
+  # directional barrier is below 0.10 eV. If the full step budget is exhausted
+  # before reaching that gate, check the final band using the same barrier rule.
   neb_low_barrier_fmax: 0.1
 
 adsorbate_sites:
@@ -124,6 +128,8 @@ diffusion:
   max_hops: 0
   n_shells_pair: 1
   prune_by_adsorption_pair: true
+  # If the 0.10 eV/angstrom early gate does not stop ordinary NEB, continue to
+  # this strict target, recompute both barriers, and skip CI if either is low.
   fmax: 0.05
   max_steps: 1000
   # Dynamically space images by maximum corresponding-atom displacement.
@@ -163,6 +169,7 @@ bond:
   prune_fmax: 0.05
   prune_max_steps: 1000
 
+  # The bond NEB uses the same 0.10 early gate and 0.05 strict target workflow.
   neb_fmax: 0.05
   neb_max_steps: 1000
   # Dynamically choose the band length from the relaxed endpoint distance.

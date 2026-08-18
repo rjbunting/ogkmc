@@ -159,9 +159,7 @@ def test_shared_neb_skips_ci_when_either_regular_barrier_is_below_floor(
     assert result.climb_skipped_low_barrier is expected_skip
     assert result.climb_performed is (not expected_skip)
     assert result.regular_forward_barrier == pytest.approx(transition_energy)
-    assert result.regular_reverse_barrier == pytest.approx(
-        transition_energy - 0.40
-    )
+    assert result.regular_reverse_barrier == pytest.approx(transition_energy - 0.40)
     if expected_skip:
         assert "Skipping CI-NEB" in caplog.text
 
@@ -170,8 +168,8 @@ def test_shared_neb_accepts_low_barrier_at_loose_force_cutoff(
     monkeypatch,
     caplog,
 ):
-    # The ordinary band is above the strict 0.01 eV/Ang force target, but its
-    # reverse barrier is only 0.05 eV at an observed fmax of 0.08 eV/Ang.
+    # The ordinary band reaches the loose 0.10 eV/Ang force gate while still
+    # above the strict 0.05 eV/Ang target. Its reverse barrier is only 0.05 eV.
     images = [_image(0.0), _image(0.45), _image(0.40)]
 
     class ControlledNEB:
@@ -179,7 +177,7 @@ def test_shared_neb_accepts_low_barrier_at_loose_force_cutoff(
 
         @staticmethod
         def get_forces():
-            return np.asarray([[0.08, 0.0, 0.0]])
+            return np.asarray([[0.10, 0.0, 0.0]])
 
     neb = ControlledNEB()
     observed_stages = []
@@ -196,7 +194,7 @@ def test_shared_neb_accepts_low_barrier_at_loose_force_cutoff(
             self.observers.append(function)
 
         def run(self, *, fmax, steps):
-            assert fmax == pytest.approx(0.01)
+            assert fmax == pytest.approx(0.05)
             assert steps == 20
             self.nsteps = 7
             for observer in self.observers:
@@ -218,7 +216,7 @@ def test_shared_neb_accepts_low_barrier_at_loose_force_cutoff(
         spring_k=1.0,
         climb=True,
         frozen_indices=None,
-        fmax=0.01,
+        fmax=0.05,
         max_steps=20,
         barrier_endpoint_energies=(0.0, 0.40),
         low_barrier_fmax=0.10,
@@ -230,7 +228,7 @@ def test_shared_neb_accepts_low_barrier_at_loose_force_cutoff(
     assert observed_stages == [False]
     assert result.optimizer_steps == 7
     assert result.convergence_mode == "low_barrier"
-    assert result.convergence_fmax == pytest.approx(0.08)
+    assert result.convergence_fmax == pytest.approx(0.10)
     assert result.converged_low_barrier is True
     assert result.low_barrier_fmax == pytest.approx(0.10)
     assert result.low_barrier_threshold == pytest.approx(0.10)
@@ -240,6 +238,278 @@ def test_shared_neb_accepts_low_barrier_at_loose_force_cutoff(
     assert result.regular_forward_barrier == pytest.approx(0.45)
     assert result.regular_reverse_barrier == pytest.approx(0.05)
     assert "low-barrier convergence rule" in caplog.text
+
+
+def test_shared_neb_rechecks_barrier_after_strict_force_convergence(
+    monkeypatch,
+    caplog,
+):
+    # At the loose 0.10 eV/Ang force gate both barriers are at least 0.10 eV,
+    # so ordinary NEB must continue. By strict 0.05 eV/Ang convergence the
+    # reverse barrier has fallen to 0.05 eV, so CI-NEB must not start.
+    images = [_image(0.0), _image(0.55), _image(0.40)]
+
+    class ControlledNEB:
+        climb = False
+        current_fmax = 0.10
+
+        def get_forces(self):
+            return np.asarray([[self.current_fmax, 0.0, 0.0]])
+
+    neb = ControlledNEB()
+    observed_stages = []
+
+    class TwoGateOptimizer:
+        def __init__(self, stage_neb, *, logfile):
+            del logfile
+            observed_stages.append(stage_neb.climb)
+            self.nsteps = 0
+            self.observers = []
+
+        def attach(self, function, interval=1):
+            assert interval == 1
+            self.observers.append(function)
+
+        def run(self, *, fmax, steps):
+            assert fmax == pytest.approx(0.05)
+            assert steps == 20
+
+            # Gate 1: force is 0.10 eV/Ang, but the reverse barrier is 0.15 eV.
+            for observer in self.observers:
+                observer()
+
+            # Gate 2: ordinary NEB reaches its strict force target. The
+            # optimized band now has a 0.05 eV reverse barrier.
+            neb.current_fmax = 0.049
+            images[1].calc = SinglePointCalculator(images[1], energy=0.45)
+            self.nsteps = 9
+            for observer in self.observers:
+                observer()
+
+        def converged(self) -> bool:
+            return True
+
+    monkeypatch.setattr(neb_module, "acquire_calculator", _calculator_context)
+    monkeypatch.setattr(neb_module, "BFGS", TwoGateOptimizer)
+
+    result = neb_module.run_neb(
+        images[0],
+        images[-1],
+        calculator=object(),
+        purpose="two-gate low-barrier NEB",
+        n_images=1,
+        interpolation="linear",
+        spring_k=1.0,
+        climb=True,
+        frozen_indices=None,
+        fmax=0.05,
+        max_steps=20,
+        barrier_endpoint_energies=(0.0, 0.40),
+        low_barrier_fmax=0.10,
+        verbose=False,
+        not_converged_error=RuntimeError,
+        band_factory=lambda *_args, **_kwargs: (neb, images),
+    )
+
+    assert observed_stages == [False]
+    assert result.optimizer_steps == 9
+    assert result.convergence_mode == "force"
+    assert result.convergence_fmax == pytest.approx(0.049)
+    assert result.converged_low_barrier is False
+    assert result.climb_skipped_low_barrier is True
+    assert result.climb_performed is False
+    assert result.regular_forward_barrier == pytest.approx(0.45)
+    assert result.regular_reverse_barrier == pytest.approx(0.05)
+    assert "low-barrier convergence rule" not in caplog.text
+    assert "Skipping CI-NEB" in caplog.text
+
+
+@pytest.mark.parametrize(
+    (
+        "endpoint_energies",
+        "transition_energy",
+        "expected_barriers",
+        "expected_acceptance",
+    ),
+    [
+        ((0.0, 0.40), 0.45, (0.45, 0.05), True),
+        ((0.40, 0.0), 0.45, (0.05, 0.45), True),
+        # A barrier exactly at EA_MIN remains ineligible.
+        ((0.0, 0.40), 0.50, (0.50, 0.10), False),
+    ],
+)
+def test_shared_neb_checks_both_barriers_after_max_steps(
+    monkeypatch,
+    caplog,
+    endpoint_energies,
+    transition_energy,
+    expected_barriers,
+    expected_acceptance,
+):
+    # The force never reaches the loose 0.10 eV/Ang gate. The final band must
+    # still receive the same directional-barrier check after all steps are used.
+    images = [
+        _image(endpoint_energies[0]),
+        _image(transition_energy),
+        _image(endpoint_energies[1]),
+    ]
+
+    class ControlledNEB:
+        climb = False
+
+        @staticmethod
+        def get_forces():
+            return np.asarray([[0.25, 0.0, 0.0]])
+
+    neb = ControlledNEB()
+    observed_stages = []
+
+    class ExhaustedOptimizer:
+        def __init__(self, stage_neb, *, logfile):
+            del logfile
+            observed_stages.append(stage_neb.climb)
+            self.nsteps = 0
+            self.observers = []
+
+        def attach(self, function, interval=1):
+            assert interval == 1
+            self.observers.append(function)
+
+        def run(self, *, fmax, steps):
+            assert fmax == pytest.approx(0.05)
+            assert steps == 20
+            self.nsteps = steps
+            for observer in self.observers:
+                observer()
+
+        def converged(self) -> bool:
+            return False
+
+    monkeypatch.setattr(neb_module, "acquire_calculator", _calculator_context)
+    monkeypatch.setattr(neb_module, "BFGS", ExhaustedOptimizer)
+
+    run_kwargs = {
+        "calculator": object(),
+        "purpose": "max-step low-barrier NEB",
+        "n_images": 1,
+        "interpolation": "linear",
+        "spring_k": 1.0,
+        "climb": True,
+        "frozen_indices": None,
+        "fmax": 0.05,
+        "max_steps": 20,
+        "barrier_endpoint_energies": endpoint_energies,
+        "low_barrier_fmax": 0.10,
+        "verbose": False,
+        "not_converged_error": RuntimeError,
+        "band_factory": lambda *_args, **_kwargs: (neb, images),
+    }
+    if not expected_acceptance:
+        with pytest.raises(RuntimeError, match="did not converge"):
+            neb_module.run_neb(images[0], images[-1], **run_kwargs)
+        assert observed_stages == [False]
+        assert "low-barrier fallback" not in caplog.text
+        return
+
+    result = neb_module.run_neb(images[0], images[-1], **run_kwargs)
+
+    assert observed_stages == [False]
+    assert result.optimizer_steps == 20
+    assert result.convergence_mode == "low_barrier_max_steps"
+    assert result.convergence_fmax == pytest.approx(0.25)
+    assert result.converged_low_barrier is True
+    assert result.low_barrier_stage == "NEB pre-climb relaxation"
+    assert result.climb_skipped_low_barrier is True
+    assert result.climb_performed is False
+    assert result.regular_forward_barrier == pytest.approx(expected_barriers[0])
+    assert result.regular_reverse_barrier == pytest.approx(expected_barriers[1])
+    assert "after exhausting its 20-step budget" in caplog.text
+    assert "Skipping CI-NEB" in caplog.text
+
+
+def test_shared_neb_checks_restored_valid_band_when_guard_uses_final_step(
+    monkeypatch,
+    caplog,
+):
+    images = [_image(0.0), _image(0.45), _image(0.40)]
+
+    class ControlledNEB:
+        climb = False
+
+        @staticmethod
+        def get_forces():
+            return np.asarray([[0.25, 0.0, 0.0]])
+
+    neb = ControlledNEB()
+    gaps = iter(
+        [
+            neb_module._NEBBandGap(0.10, 0, 0),
+            neb_module._NEBBandGap(0.80, 0, 0),
+        ]
+    )
+
+    def controlled_gap(_images, *, frozen_indices):
+        del frozen_indices
+        return next(gaps)
+
+    class FinalStepGuardViolation:
+        def __init__(self, _stage_neb, *, logfile):
+            del logfile
+            self.nsteps = 0
+            self.observers = []
+
+        def attach(self, function, interval=1):
+            assert interval == 1
+            self.observers.append(function)
+
+        def run(self, *, fmax, steps):
+            assert fmax == pytest.approx(0.05)
+            assert steps == 20
+            self.nsteps = 19
+            for observer in self.observers:
+                observer()  # Save the valid band and its observed force.
+            self.nsteps = 20
+            for observer in self.observers:
+                observer()  # The final step violates the geometry guard.
+
+        def converged(self) -> bool:
+            return False
+
+    monkeypatch.setattr(neb_module, "acquire_calculator", _calculator_context)
+    monkeypatch.setattr(neb_module, "BFGS", FinalStepGuardViolation)
+    monkeypatch.setattr(
+        neb_module,
+        "_maximum_adjacent_image_displacement",
+        controlled_gap,
+    )
+
+    result = neb_module.run_neb(
+        images[0],
+        images[-1],
+        calculator=object(),
+        purpose="guard-exhausted low-barrier NEB",
+        n_images=1,
+        interpolation="linear",
+        spring_k=1.0,
+        climb=True,
+        frozen_indices=None,
+        fmax=0.05,
+        max_steps=20,
+        image_spacing=0.25,
+        geometry_guard_multiplier=3.0,
+        barrier_endpoint_energies=(0.0, 0.40),
+        low_barrier_fmax=0.10,
+        verbose=False,
+        not_converged_error=RuntimeError,
+        band_factory=lambda *_args, **_kwargs: (neb, images),
+    )
+
+    assert result.optimizer_steps == 20
+    assert result.convergence_mode == "low_barrier_max_steps"
+    assert result.convergence_fmax == pytest.approx(0.25)
+    assert result.climb_skipped_low_barrier is True
+    assert result.regular_reverse_barrier == pytest.approx(0.05)
+    assert "after exhausting its 20-step budget" in caplog.text
 
 
 @pytest.mark.parametrize(
@@ -396,10 +666,7 @@ def test_shared_neb_restores_best_valid_band_and_halves_fire_timestep(
     expected_optimizer_steps,
 ):
     energies = [0.0, 1.0, 0.0]
-    images = [
-        Atoms("H", positions=[[position, 0.0, 0.0]])
-        for position in (0.0, 0.10, 0.20)
-    ]
+    images = [Atoms("H", positions=[[position, 0.0, 0.0]]) for position in (0.0, 0.10, 0.20)]
 
     class ControlledNEB:
         def __init__(self):
@@ -913,8 +1180,7 @@ def test_idpp_starts_from_linear_band_without_shared_artifacts(
 
     def fake_idpp(neb, traj="idpp.traj", log="idpp.log", mic=False):
         observed["positions"] = [
-            np.asarray(image.positions, dtype=float).copy()
-            for image in neb.images
+            np.asarray(image.positions, dtype=float).copy() for image in neb.images
         ]
         observed["traj"] = traj
         observed["log"] = log
@@ -974,15 +1240,16 @@ def test_nonfinite_idpp_output_restores_linear_band_and_calculators(monkeypatch)
         frozen_indices=None,
     )
 
-    assert [image.positions[0, 0] for image in images] == pytest.approx(
-        [0.0, 1.0, 2.0, 3.0]
-    )
+    assert [image.positions[0, 0] for image in images] == pytest.approx([0.0, 1.0, 2.0, 3.0])
     assert all(np.isfinite(image.positions).all() for image in images)
     assert all(image.calc is calculator for image in images)
-    assert all(image.calc is not replacement for image, replacement in zip(
-        images,
-        replacement_calculators,
-    ))
+    assert all(
+        image.calc is not replacement
+        for image, replacement in zip(
+            images,
+            replacement_calculators,
+        )
+    )
 
 
 def test_make_neb_band_uses_compatible_seed_without_interpolation(monkeypatch):
@@ -1249,13 +1516,16 @@ def test_project_neb_path_rejects_incompatible_inputs(mutate):
     final = initial.copy()
     mutate(source, initial, final)
 
-    assert neb_module.project_neb_path(
-        source,
-        initial,
-        final,
-        n_slab=2,
-        n_lateral=1,
-    ) is None
+    assert (
+        neb_module.project_neb_path(
+            source,
+            initial,
+            final,
+            n_slab=2,
+            n_lateral=1,
+        )
+        is None
+    )
 
 
 def test_neb_uses_only_one_pool_calculator_and_propagates_its_exception():
@@ -1545,9 +1815,7 @@ def test_gas_product_endpoint_uses_periodic_reacting_centroid():
     gas_centroid = gas_positions.mean(axis=0)
     assert gas_centroid[0] == pytest.approx(10.0)
     assert gas_centroid[1] == pytest.approx(4.0)
-    assert gas_centroid[2] == pytest.approx(
-        2.0 + diagnostics["selected_lift_height_ang"]
-    )
+    assert gas_centroid[2] == pytest.approx(2.0 + diagnostics["selected_lift_height_ang"])
     assert np.linalg.norm(gas_positions[1] - gas_positions[0]) == pytest.approx(0.4)
 
 
@@ -1711,14 +1979,8 @@ def test_gas_product_cache_identity_includes_atoms_but_not_live_pressure():
         include_thermochemistry=True,
     )
 
-    assert (
-        scientific_input_fingerprint(first)
-        != scientific_input_fingerprint(changed_geometry)
-    )
-    assert (
-        scientific_input_fingerprint(first)
-        == scientific_input_fingerprint(changed_pressure)
-    )
+    assert scientific_input_fingerprint(first) != scientific_input_fingerprint(changed_geometry)
+    assert scientific_input_fingerprint(first) == scientific_input_fingerprint(changed_pressure)
     assert "partial_pressure_bar" not in first
 
 
@@ -1731,9 +1993,12 @@ def test_gas_product_pressure_is_restamped_from_current_reactant():
     site = type(
         "BondSite",
         (),
-        {"gas_product": True, "gas_reactant": _gas_reactant(
-            partial_pressure_bar=0.35,
-        )},
+        {
+            "gas_product": True,
+            "gas_reactant": _gas_reactant(
+                partial_pressure_bar=0.35,
+            ),
+        },
     )()
 
     bond_module._stamp_gas_product_runtime_state(lateral, site)

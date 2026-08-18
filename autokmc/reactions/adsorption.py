@@ -236,7 +236,7 @@ def is_clique_blocked(
                 return True
         return False
 
-    # ── Legacy fallback: full graph scan (only hit if reverse index not built)
+    # If the reverse index is unavailable, scan the full graph.
     member_cliques_set: set[frozenset] = set()
     for nid in node_ids:
         if nid not in G:
@@ -442,7 +442,7 @@ def get_applicable_reaction_for_member(
     if is_clique_blocked(G, site, index):
         site._member_lc.pop(index, None)
         if verbose:
-            print(f"  ⛔ iso={site.iso_class} m={index}: clique blocked")
+            print(f"  BLOCKED iso={site.iso_class} m={index}: clique blocked")
     else:
         try:
             lc = check_adsorbate_site_lateral(
@@ -456,7 +456,7 @@ def get_applicable_reaction_for_member(
             site._member_lc.pop(index, None)
             if verbose:
                 print(
-                    f"  ⚠  iso={site.iso_class} m={index}: "
+                    f"  WARNING iso={site.iso_class} m={index}: "
                     f"lateral check skipped ({exc})"
                 )
         else:
@@ -487,7 +487,7 @@ def get_applicable_reaction_for_member(
                     lc.invalid_reason = f"{type(exc).__name__}: {exc}"
                     if verbose:
                         print(
-                            f"  ✗  iso={site.iso_class} m={index} "
+                            f"  INVALID iso={site.iso_class} m={index} "
                             f"lat={lc.lateral_class}: "
                             f"{type(exc).__name__}: {exc}"
                         )

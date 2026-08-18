@@ -1,8 +1,9 @@
 # Configuration Reference
 
-AutoKMC accepts YAML (`.yaml` or `.yml`) and TOML (`.toml`). The top-level
-`schema_version` is currently `"1"`. Unknown keys, coercible string booleans,
-nonfinite values, invalid enums, and out-of-range values are rejected.
+AutoKMC reads YAML (`.yaml` or `.yml`) and TOML (`.toml`) configuration files.
+Every file begins with the top-level `schema_version`, which is currently
+`"1"`. The loader rejects unknown keys, coercible string booleans, nonfinite
+values, invalid enums, and out-of-range values.
 
 Always validate before launching an expensive run:
 
@@ -11,23 +12,22 @@ autokmc validate-config CONFIG.yaml
 autokmc preflight CONFIG.yaml
 ```
 
-Validation rejects empty feeds, invalid or duplicate canonical SMILES,
-unsupported bond types, non-mapping calculator arguments, ambiguous
+First, `validate-config` rejects empty feeds, invalid or duplicate canonical
+SMILES, unsupported bond types, non-mapping calculator arguments, ambiguous
 `import_path`/`factory` declarations, inconsistent calculator
-copies/workers/devices, and unsafe or overlapping managed output names.
-`preflight` is read-only with respect to configured outputs and additionally
-checks output collisions and active locks, checkpoint compatibility,
+copies/workers/devices, and unsafe or overlapping managed output names. Next,
+`preflight` checks output collisions and active locks, checkpoint compatibility,
 file-backed catalyst readability, calculator imports, and the effective
-worker/device assignment. Use
-`autokmc preflight CONFIG.yaml --check-calculator` to construct the calculator
-in a temporary directory and require finite probe energy and forces.
+worker/device assignment. It does not write configured outputs. Add
+`--check-calculator` to construct the calculator in a temporary directory and
+require finite probe energy and forces.
 
-[`example/all_options.yaml`](../example/all_options.yaml) is a commented,
-valid-as-written input template containing every public option. Competing
-structure and calculator modes are shown as commented alternatives. The
-palladium examples in [`example/`](../example/) are the recommended
-production-style starting points. Although some internal dataclasses retain
-generic legacy defaults, production configurations should set the catalyst,
+Start with [`example/all_options.yaml`](../example/all_options.yaml) when you
+need a complete input. It is valid as written, documents every public option,
+and includes competing structure and calculator modes as commented
+alternatives. Then use the palladium examples in [`example/`](../example/) as
+production-style starting points. Some internal dataclasses retain generic
+legacy defaults, so a production configuration should set its catalyst,
 calculator, thermochemistry, and convergence settings explicitly.
 
 ## `output`
@@ -49,10 +49,10 @@ calculator, thermochemistry, and convergence settings explicitly.
 
 ## `constants`
 
-This section exposes the scientific and algorithmic defaults shared across
-multiple stages. Values are captured in the resolved configuration and run
-manifest. Controls local to one channel, such as NEB image counts and
-optimization thresholds, remain in that channel's section.
+This section contains scientific and algorithmic values shared by several
+stages. AutoKMC first resolves these values and then records them in the run
+manifest. Controls used by only one channel, such as NEB image counts and force
+thresholds, remain in that channel's section.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
@@ -110,29 +110,33 @@ Valid values are `bfgs`, `fire`, and `mdmin`. `lbfgs` is intentionally excluded
 because ASE does not recommend it for NEB. Defaults preserve the previous
 behavior: `lbfgs` for ordinary relaxations and `bfgs` for NEB.
 
-`neb_optimizer_kwargs` provides the same constructor-keyword interface for
-the ordinary NEB optimizer. After ordinary convergence, AutoKMC compares the
-highest interior-image energy with both endpoint energies. If either raw
-directional barrier is below the shared `EA_MIN = 0.1` eV floor, CI-NEB is
-skipped and the ordinary band is retained. Otherwise,
-`neb_climb_optimizer` optionally selects a separate optimizer after the
-climbing image is enabled; `null` reuses `neb_optimizer`.
-`neb_climb_optimizer_kwargs` supplies that climbing optimizer's constructor
-keywords; `null` reuses `neb_optimizer_kwargs`. Each stage creates a fresh
-optimizer instance, so FIRE or MDMin velocity state is not carried from
-ordinary NEB into CI-NEB. All optimizer choices, constructor mappings, and the
-low-barrier climbing policy are included in calculation-cache identities.
+`neb_optimizer_kwargs` provides the same constructor-keyword interface for the
+ordinary NEB optimizer. AutoKMC first optimizes the ordinary band and compares
+its highest interior-image energy with both endpoint energies. If either raw
+directional barrier is below the shared `EA_MIN = 0.1` eV floor, it retains the
+ordinary band and skips CI-NEB. Otherwise, it enables the climbing image and
+uses `neb_climb_optimizer`; `null` reuses `neb_optimizer`.
+`neb_climb_optimizer_kwargs` supplies the climbing optimizer's constructor
+keywords, while `null` reuses `neb_optimizer_kwargs`. Each stage creates a fresh
+optimizer instance, so FIRE or MDMin velocity state does not pass from ordinary
+NEB into CI-NEB. The calculation-cache identity includes every optimizer
+choice, constructor mapping, and low-barrier climbing decision.
 
-`neb_low_barrier_fmax` provides an alternate stopping condition for small
-barriers whose spring modes oscillate above the strict diffusion or bond
-`fmax`. When the maximum NEB force is above the strict target but at or below
-this cutoff, AutoKMC compares the highest interior-image energy with both
-endpoint energies. If either raw directional barrier is lower than
-`EA_MIN = 0.1` eV, the current ordinary or climbing band is accepted. The
-default cutoff is 0.1 eV/Å. It must be finite and greater than zero. Reaction
-JSON stores the convergence mode, observed maximum force, force cutoff, energy
-cutoff, and NEB stage under `neb_convergence`; the cutoff and policy also enter
-calculation-cache identities.
+`neb_low_barrier_fmax` provides an alternate stopping condition for a small
+barrier whose spring modes remain above the strict diffusion or bond `fmax`.
+AutoKMC first checks that the maximum NEB force is above the strict target but
+at or below this cutoff. It then compares the highest interior-image energy
+with both endpoint energies. If either raw directional barrier is below
+`EA_MIN = 0.1` eV, AutoKMC accepts the current ordinary or climbing band. The
+default cutoff is 0.1 eV/Å and must be finite and greater than zero. If a stage
+uses its entire step budget without converging or entering that force window,
+AutoKMC applies the same two-direction barrier check to the final band without
+requiring its force to be below the loose cutoff. A low final barrier is
+accepted with convergence mode `low_barrier_max_steps`; a non-low final barrier
+retains the normal non-convergence failure. The reaction JSON stores the mode,
+observed force, force cutoff, energy cutoff, and NEB stage under
+`neb_convergence`. The calculation-cache identity also includes this cutoff
+and versioned policy.
 
 `neb_geometry_guard_multiplier` controls the geometric rollback threshold for
 both diffusion and bond NEBs. The maximum adjacent-image atom displacement is
@@ -249,16 +253,13 @@ keywords such as `restart` and `trajectory` are also forwarded, but a single
 global path is reused by many relaxations and can collide in concurrent runs;
 omit those keywords unless the path lifecycle is managed externally.
 
-`neb_band_eval` controls how the NEB band's images are evaluated on each
-optimizer step. `images` (the default, and the previous behavior) issues one
-calculator call per image, serially through the one calculator leased by that
-NEB. `batched`
-evaluates the whole band in a single stacked model forward per step when the
-leased calculator supports it, which lets a single-GPU MLIP amortize dispatch and
-host-device overhead across the band. The NEB physics, optimizer, and
-constraint handling are unchanged — only the force-evaluation access pattern
-differs — and unsupported calculators fall back to `images` with a logged
-warning.
+`neb_band_eval` controls how AutoKMC evaluates the band during each optimizer
+step. The default `images` mode sends one image at a time through the calculator
+leased by that NEB. The `batched` mode sends the whole band through one stacked
+model call when the calculator supports it. This allows a single-GPU MLIP to
+amortize dispatch and host-device overhead across the band. The NEB physics,
+optimizer, and constraints do not change; only the force-evaluation access
+pattern changes. An unsupported calculator logs a warning and uses `images`.
 
 **When to use `batched`.** It helps when the calculator is a GPU machine-learned
 potential and the barriers are real (multi-step NEBs). On UMA (`uma-s-1p2`) it
@@ -324,25 +325,25 @@ structure:
   frozen_indices: [0, 1, 2, 3]
 ```
 
-AutoKMC neither rebuilds nor relaxes a file-backed catalyst. For a periodic
-slab, it detects the two connected lattice directions and, when necessary,
-applies one rigid rotation that aligns the surface normal with Cartesian +z.
-This supports skew and arbitrarily oriented input cells while preserving the
-cell Gram matrix, interatomic geometry, atom order, and frozen atoms. The
-transform and original surface normal are retained in catalyst-source
-provenance. Any calculator serialized with the input is detached; the
-configured calculator is used for subsequent chemistry. Provide cell vectors
-and periodic-boundary metadata appropriate for catalyst surface classification.
-`path` is required for this mode. Explicit
-`frozen_indices` are validated against the selected atom count and become the
-portable frozen mask used by subsequent chemistry, KMC, checkpoints, and
-trajectory output. Omit the field to use the union of
-`atoms.info["frozen_indices"]` and ASE `FixAtoms` constraints from the selected
-frame; other constraint types are not treated as fully frozen atoms. Set it to
-`[]` to override imported metadata with no frozen atoms.
-`autokmc preflight CONFIG.yaml` resolves the source path and parses the selected
-frame before calculator checks, then reports the resolved path, frame index,
-atom count, and frozen count.
+AutoKMC does not rebuild or relax a file-backed catalyst. It first loads the
+selected frame and detaches any serialized calculator. For a periodic slab, it
+then detects the two connected lattice directions and, when necessary, applies
+one rigid rotation that aligns the surface normal with Cartesian +z. This
+preserves the cell Gram matrix, interatomic geometry, atom order, and frozen
+atoms for skew and arbitrarily oriented cells. The catalyst provenance records
+the original surface normal and the applied transform. Subsequent chemistry
+uses the configured calculator.
+
+The `path` is required, and the file must provide cell vectors and
+periodic-boundary metadata suitable for surface classification. Explicit
+`frozen_indices` are checked against the selected atom count and become the
+portable frozen mask used by chemistry, KMC, checkpoints, and trajectory
+output. Omit the field to combine `atoms.info["frozen_indices"]` with ASE
+`FixAtoms` constraints from the selected frame. Other constraint types do not
+mark atoms as fully frozen. Set `frozen_indices: []` to discard imported frozen
+metadata. During preflight, AutoKMC resolves the source path, parses the frame,
+and reports the resolved path, frame index, atom count, and frozen count before
+it checks the calculator.
 
 ## `reactants`
 
@@ -401,19 +402,19 @@ calculator:
 | `gpu_device_arg` | `device` | Constructor/factory argument that receives a device. |
 | `max_workers` | `null` | Maximum concurrent calculator tasks; defaults to the number of copies. |
 
-These settings expose two distinct levels of concurrency. `copies` and
-`max_workers` create independent calculator objects and schedule concurrent
-AutoKMC tasks. A NEB never fans its images out across those copies: separate
-NEBs may run concurrently, but each uses one calculator. Calculator-specific
-factory arguments control any parallelism inside one calculator; the bundled
-FAIR-Chem helper requires one worker so its calculator stays on one device.
-For independent FAIR-Chem UMA work, configure one copy per GPU and inject each
-ordinal into the nested
-`get_predict_unit_on_device` factory as shown above. The helper selects that
-ordinal while constructing FAIR-Chem's `device: cuda` predictor and verifies
-the resolved device. FAIR-Chem's own `workers` option instead distributes one
-predictor calculation internally; do not combine it with per-GPU AutoKMC
-copies.
+These settings define two levels of concurrency. First, `copies` creates
+independent calculator objects, and `max_workers` limits the number of
+concurrent AutoKMC tasks. Separate NEBs may run concurrently, but each NEB keeps
+one calculator for its complete lifecycle and does not distribute its images
+across the pool. Second, calculator-specific factory arguments control
+parallelism inside one calculator.
+
+For FAIR-Chem UMA, configure one AutoKMC copy per GPU and pass each ordinal to
+the nested `get_predict_unit_on_device` factory. The helper selects that ordinal
+while constructing the `device: cuda` predictor and verifies the resolved
+device. It requires one FAIR-Chem worker so each calculator remains on one
+device. FAIR-Chem's own `workers` option distributes one predictor calculation
+internally and should not be combined with per-GPU AutoKMC copies.
 
 Every configuration must set exactly one of `calculator.import_path` or
 `calculator.factory`. Omitting both is a validation error. EMT is used only
@@ -476,16 +477,16 @@ cache or resume contract being able to detect it.
 | `interpolation` | `linear` | `linear` or `idpp`. |
 | `persist_neb_path` | `false` | Save both image sequences for successful runs; failed NEBs retain their initial and last-known bands automatically. |
 
-Dynamic image selection is evaluated after both endpoints have relaxed and
-atom correspondence is fixed. Let `d_max` be the largest minimum-image
-displacement of any corresponding atom between the endpoints. AutoKMC chooses
-`ceil(d_max / image_spacing) - 1` interior images, clips that value to
-`min_images`/`max_images`, and constructs two additional endpoint frames. Set
-`image_spacing: null` to recover the exact fixed `n_images` behavior. If the
-maximum bound is reached, the persisted `estimated_linear_spacing_ang` can be
-larger than the requested target and `count_limited_by` is `maximum`.
-The bond channel uses the same rule through the `neb_image_spacing`,
-`neb_min_images`, `neb_max_images`, and `neb_n_images` names.
+Dynamic image selection begins after both endpoints are relaxed and their atoms
+are paired. AutoKMC first finds `d_max`, the largest minimum-image displacement
+between corresponding atoms. It then calculates
+`ceil(d_max / image_spacing) - 1`, clips the result to
+`min_images`/`max_images`, and adds the two endpoint frames. Set
+`image_spacing: null` to use exactly `n_images`. If the maximum bound limits the
+count, the persisted `estimated_linear_spacing_ang` can exceed the requested
+target and `count_limited_by` becomes `maximum`. The bond channel follows the
+same sequence through `neb_image_spacing`, `neb_min_images`, `neb_max_images`,
+and `neb_n_images`.
 
 Dynamic spacing also supplies a geometric guard during both the ordinary and
 climbing-image stages. After every optimizer step, AutoKMC measures the
@@ -532,14 +533,14 @@ halves `dt`; BFGS, which has no timestep, halves `maxstep`. Set the spacing to
 | `matching_trials` | `8` | Number of mapping trials used by automatic matching. |
 | `persist_neb_path` | `false` | Save both bond NEB paths for successful runs; failed NEBs retain them automatically. |
 
-For a gas-fed bond dissociation such as H2(g) to 2H*, the default workflow
-does not interpolate directly from a far gas molecule to dissociated
-adsorbates. It aligns the intact molecule above the reacting site, lowers it
-to `gas_precursor_distance`, fixes the slab and lateral adsorbates, and relaxes
-the molecule. The relaxed molecular precursor is then the physical endpoint
-of the bond NEB. `energy_c` remains the empty-surface plus gas-phase energy
-used for KMC thermodynamics, while the distinct precursor energy is persisted
-as `energy_c_precursor` / `energies_ev.state_c_precursor` for diagnostics.
+For a gas-fed bond dissociation such as H2(g) to 2H*, AutoKMC does not
+interpolate directly from a distant gas molecule to the dissociated adsorbates.
+It first aligns the intact molecule above the reacting site and lowers it to
+`gas_precursor_distance`. It then fixes the slab and lateral adsorbates and
+relaxes the molecule. The relaxed precursor becomes the physical endpoint of
+the bond NEB. For KMC thermodynamics, `energy_c` remains the sum of the empty
+surface and gas-phase energies. The separate precursor energy is stored as
+`energy_c_precursor` and `energies_ev.state_c_precursor` for diagnostics.
 
 When lateral interactions are enabled, diffusion and bond channels
 automatically retain the optimized no-neighbour NEB band as an internal
@@ -589,9 +590,8 @@ scientifically necessary.
 | `every_n_steps` | `1` | Checkpoint cadence. |
 | `resume_from` | `null` | Checkpoint to continue. |
 
-On resume, event and trajectory files are reconciled to the checkpoint before
-they are appended. Trajectory frames beyond the checkpoint's KMC step are
-removed atomically; malformed or non-monotonic committed `kmc_step` metadata is
-rejected. Reaction-folder counters are restored, cumulative summary state is
-reconstructed from `events.jsonl`, and the saved NumPy or Python RNG state
-continues the random stream.
+On resume, AutoKMC first reconciles the event and trajectory files to the
+checkpoint. It atomically removes trajectory frames beyond the checkpoint step
+and rejects malformed or non-monotonic committed `kmc_step` metadata. It then
+restores the reaction-folder counters, reconstructs the cumulative summary from
+`events.jsonl`, and continues with the saved NumPy or Python RNG state.

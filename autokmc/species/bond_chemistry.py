@@ -28,7 +28,7 @@ Typical usage — fragmentation
     for p in pairs:
         print(p.bond_type, p.smiles_a, p.smiles_b)
 
-    # Water ��� break every O-H bond
+    # For water, break each O-H bond.
     pairs = get_all_fragments("O", bond_types=("SINGLE",))
 
     # Build Reactant objects for each fragment (requires RDKit)
@@ -482,7 +482,7 @@ def get_all_fragments(
             "RDKit is required.  Install with: conda install -c conda-forge rdkit"
         ) from exc
 
-    # ── Build the RDKit molecule ─────────────────────────────────────────────
+    # First, build the RDKit molecule.
     try:
         from ase import Atoms as _ASEAtoms
         _ase_available = True
@@ -518,7 +518,7 @@ def get_all_fragments(
 
     _bt_name_map = {v: k for k, v in _bt_map.items()}
 
-    # ── Iterate over bonds ───────────────────────────────────────────────────
+    # Next, consider each bond in the molecule.
     results: list[FragmentPair] = []
     seen_smiles_pairs: set[frozenset] = set()
 
@@ -539,7 +539,7 @@ def get_all_fragments(
         elem_b   = atom_b.GetSymbol()
         bt_name  = _bt_name_map.get(bond.GetBondType(), str(bond.GetBondType()))
 
-        # ── Fragment the molecule at this bond ────────────────────────────
+        # Break this bond to form a candidate fragment pair.
         try:
             frag_mol = Chem.FragmentOnBonds(
                 mol,
@@ -587,7 +587,7 @@ def get_all_fragments(
         frag_a = _mark_dummy_nbrs(frag_a)
         frag_b = _mark_dummy_nbrs(frag_b)
 
-        # ── Convert to SMILES ─────────────────────────────────────────────
+        # Convert the two fragments to SMILES.
         if strip_dummies:
             smi_a = _strip_dummy_atoms(frag_a)
             smi_b = _strip_dummy_atoms(frag_b)
@@ -595,7 +595,7 @@ def get_all_fragments(
             smi_a = Chem.MolToSmiles(frag_a)
             smi_b = Chem.MolToSmiles(frag_b)
 
-        # ── Optional deduplication by {smi_a, smi_b} ─────────────────────
+        # If requested, remove duplicate unordered SMILES pairs.
         if deduplicate:
             key = frozenset({smi_a, smi_b})
             if key in seen_smiles_pairs:
@@ -618,7 +618,7 @@ def get_all_fragments(
         input_label, len(results),
     )
 
-    # ── Optionally build Reactant objects for each fragment ──────────────────
+    # Finally, build Reactant objects for the fragments when requested.
     if as_reactants:
         from autokmc.species.reactant import build_reactant
 
@@ -1029,7 +1029,7 @@ def combine_fragments(
     dummies_a = _dummy_indices(mol_a)
     dummies_b = _dummy_indices(mol_b)
 
-    # ── Choose mode ──────────────────────────────────────────────────────────
+    # First, choose the requested coupling mode.
     directed = bool(dummies_a or dummies_b)
 
     if directed:
@@ -1076,7 +1076,7 @@ def combine_fragments(
                     seen_pairs.add((ia, ib))
                     pairs_to_try.append((ia, ib))
 
-    # ── Always form a single bond ─────────────────────────────────────────────
+    # Every coupling candidate begins with a single bond.
     # The equilibrium bond order (single/double/triple) is a property of the
     # electronic structure — determining it is the job of the downstream
     # calculator, not the enumerator.
@@ -1124,7 +1124,7 @@ def combine_fragments(
         len(results),
     )
 
-    # ── Optionally build Reactant objects ────────────────────────────────────
+    # Finally, build Reactant objects for the products when requested.
     if as_reactants:
         from autokmc.species.reactant import build_reactant
 

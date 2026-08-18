@@ -162,6 +162,7 @@ _log = get_logger(__name__)
 # The tag is ``"endpoint"`` for both A and B, so the iso match remains
 # symmetric under A↔B (a hop is intrinsically reversible).
 
+
 def _diffusion_lateral_node_match(d1: dict, d2: dict) -> bool:
     """Lateral-iso predicate for the diffusion ego-graph.
 
@@ -190,24 +191,27 @@ def _diffusion_lateral_node_match(d1: dict, d2: dict) -> bool:
 
 def _diffusion_lateral_fingerprint(g: nx.Graph) -> tuple:
     """Cheap pre-filter mirroring :func:`_diffusion_lateral_node_match`."""
-    node_sigs = tuple(sorted(
-        (
-            d.get("type",      "X"),
-            d.get("element",   "X"),
-            int(d.get("iso_class",      -1)) if d.get("type") == "adsorbate" else -1,
-            str(d.get("reactant",       "")) if d.get("type") == "adsorbate" else "",
-            int(d.get("reactant_index", -1)) if d.get("type") == "adsorbate" else -1,
-            str(d.get("endpoint_role",  "")) if d.get("type") == "adsorbate" else "",
-            g.degree(n),
+    node_sigs = tuple(
+        sorted(
+            (
+                d.get("type", "X"),
+                d.get("element", "X"),
+                int(d.get("iso_class", -1)) if d.get("type") == "adsorbate" else -1,
+                str(d.get("reactant", "")) if d.get("type") == "adsorbate" else "",
+                int(d.get("reactant_index", -1)) if d.get("type") == "adsorbate" else -1,
+                str(d.get("endpoint_role", "")) if d.get("type") == "adsorbate" else "",
+                g.degree(n),
+            )
+            for n, d in g.nodes(data=True)
         )
-        for n, d in g.nodes(data=True)
-    ))
+    )
     return (g.number_of_nodes(), g.number_of_edges(), node_sigs)
 
 
 # ---------------------------------------------------------------------------
 # Error hierarchy
 # ---------------------------------------------------------------------------
+
 
 class DiffusionStabilityError(Exception):
     """Base class for diffusion (NEB) stability failures."""
@@ -244,6 +248,7 @@ _neb_optimizer_logfile = neb_optimizer_logfile
 # ---------------------------------------------------------------------------
 # Lateral ego-graph (diffusion variant)
 # ---------------------------------------------------------------------------
+
 
 def _build_diffusion_lateral_ego_graph(
     G: nx.Graph,
@@ -311,16 +316,16 @@ def _build_diffusion_lateral_ego_graph(
         if nid not in result:
             result.add_node(
                 nid,
-                element        = d.get("element"),
-                type           = d.get("type", "adsorbate"),
-                iso_class      = int(d.get("iso_class", -1)),
-                reactant       = str(d.get("reactant",  "")),
-                reactant_index = int(d.get("reactant_index", -1)),
-                occupied       = True,
-                endpoint_role  = "endpoint",
+                element=d.get("element"),
+                type=d.get("type", "adsorbate"),
+                iso_class=int(d.get("iso_class", -1)),
+                reactant=str(d.get("reactant", "")),
+                reactant_index=int(d.get("reactant_index", -1)),
+                occupied=True,
+                endpoint_role="endpoint",
             )
         else:
-            result.nodes[nid]["occupied"]      = True
+            result.nodes[nid]["occupied"] = True
             result.nodes[nid]["endpoint_role"] = "endpoint"
         for sib in d.get("siblings", ()):
             sib = int(sib)
@@ -338,6 +343,7 @@ def _build_diffusion_lateral_ego_graph(
 # ---------------------------------------------------------------------------
 # Public — lateral classifier
 # ---------------------------------------------------------------------------
+
 
 def check_diffusion_site_lateral(
     G: nx.Graph,
@@ -386,7 +392,7 @@ def check_diffusion_site_lateral(
     depth: int = LATERAL_SHELLS_DEFAULT if n_shells is None else int(n_shells)
 
     site_a, m_a, site_b, m_b = diffusion_site.members[member_index]
-    a_node_ids, b_node_ids   = diffusion_site.member_node_ids[member_index]
+    a_node_ids, b_node_ids = diffusion_site.member_node_ids[member_index]
 
     clq_a = _member_clique_union(site_a, m_a)
     clq_b = _member_clique_union(site_b, m_b)
@@ -403,10 +409,12 @@ def check_diffusion_site_lateral(
     endpoint_b_ids = frozenset(int(n) for n in b_node_ids if n in G)
 
     ego = _build_diffusion_lateral_ego_graph(
-        G, frozenset(seed), depth,
-        endpoint_a_ids              = endpoint_a_ids,
-        endpoint_b_ids              = endpoint_b_ids,
-        ignore_occupied_neighbours  = ignore_lateral,
+        G,
+        frozenset(seed),
+        depth,
+        endpoint_a_ids=endpoint_a_ids,
+        endpoint_b_ids=endpoint_b_ids,
+        ignore_occupied_neighbours=ignore_lateral,
     )
 
     fkey = _diffusion_lateral_fingerprint(ego)
@@ -432,7 +440,9 @@ def check_diffusion_site_lateral(
         if lc.n_shells != depth or lc.ego_graph is None:
             continue
         gm = isomorphism.GraphMatcher(
-            ego, lc.ego_graph, node_match=_diffusion_lateral_node_match,
+            ego,
+            lc.ego_graph,
+            node_match=_diffusion_lateral_node_match,
         )
         if gm.is_isomorphic():
             if _assign_member:
@@ -441,18 +451,19 @@ def check_diffusion_site_lateral(
                     lc.members.append(member_index)
                 lc._seed_only = False
             _log.debug(
-                "check_diffusion_site_lateral: diff_iso=%d member=%d "
-                "→ existing lateral_class=%d",
-                diffusion_site.iso_class, member_index, lc.lateral_class,
+                "check_diffusion_site_lateral: diff_iso=%d member=%d → existing lateral_class=%d",
+                diffusion_site.iso_class,
+                member_index,
+                lc.lateral_class,
             )
             return lc
 
     _drop_from_other_classes(new_lc=None)
     new_lc = DiffusionLateral(
-        lateral_class = len(diffusion_site.lateral_classes),
-        ego_graph     = ego,
-        n_shells      = depth,
-        members       = [member_index] if _assign_member else [],
+        lateral_class=len(diffusion_site.lateral_classes),
+        ego_graph=ego,
+        n_shells=depth,
+        members=[member_index] if _assign_member else [],
     )
     new_lc._seed_only = not _assign_member
     new_lc._fingerprint = fkey
@@ -460,10 +471,11 @@ def check_diffusion_site_lateral(
     fp_index.setdefault(fkey, []).append(new_lc)
 
     _log.debug(
-        "check_diffusion_site_lateral: diff_iso=%d member=%d "
-        "→ new lateral_class=%d  (total=%d)",
-        diffusion_site.iso_class, member_index,
-        new_lc.lateral_class, len(diffusion_site.lateral_classes),
+        "check_diffusion_site_lateral: diff_iso=%d member=%d → new lateral_class=%d  (total=%d)",
+        diffusion_site.iso_class,
+        member_index,
+        new_lc.lateral_class,
+        len(diffusion_site.lateral_classes),
     )
     return new_lc
 
@@ -497,6 +509,7 @@ def get_diffusion_bare_lateral(
 # ---------------------------------------------------------------------------
 # Atoms-builder helpers
 # ---------------------------------------------------------------------------
+
 
 def _ordered_endpoint_nodes(G: nx.Graph, endpoint_ids) -> list[int]:
     """Order endpoint adsorbate nodes by ``reactant_index`` (SMILES atom index).
@@ -558,9 +571,7 @@ def _build_diffusion_atoms(
         :func:`_check_intended_coordination_stable` check).
     """
     if endpoint_position not in ("a", "b"):
-        raise ValueError(
-            f"endpoint_position must be 'a' or 'b', got {endpoint_position!r}"
-        )
+        raise ValueError(f"endpoint_position must be 'a' or 'b', got {endpoint_position!r}")
 
     a_ordered = _ordered_endpoint_nodes(G, endpoint_a_ids)
     b_ordered = _ordered_endpoint_nodes(G, endpoint_b_ids)
@@ -572,14 +583,13 @@ def _build_diffusion_atoms(
 
     endpoint_id_set: frozenset = frozenset(a_ordered) | frozenset(b_ordered)
 
-    # ── 1. Slab atoms ───────────────────────────────────────────────────
+    # First, add the slab atoms.
     slab_nodes = sorted(
-        (n for n, d in G.nodes(data=True)
-         if d.get("type") in ("bulk", "surface")),
+        (n for n, d in G.nodes(data=True) if d.get("type") in ("bulk", "surface")),
         key=lambda n: G.nodes[n].get("index", n),
     )
 
-    # ── 2. Lateral neighbours (excluding both endpoints) ────────────────
+    # Next, add the lateral neighbors without either endpoint.
     lat_seed: set[int] = set()
     if lateral_class.ego_graph is not None:
         for n, d in lateral_class.ego_graph.nodes(data=True):
@@ -587,22 +597,19 @@ def _build_diffusion_atoms(
                 lat_seed.add(int(n))
     lat_nodes: list[int] = sorted(_expand_to_full_placement(G, lat_seed))
 
-    # ── 3. Migrating molecule ───────────────────────────────────────────
-    chosen_nodes  = a_ordered if endpoint_position == "a" else b_ordered
-    symbols_mig   = [G.nodes[n]["element"] for n in a_ordered]   # always A
-    positions_mig = [
-        np.asarray(G.nodes[n]["position"], dtype=float)
-        for n in chosen_nodes
-    ]
+    # Then add the migrating molecule at the selected endpoint.
+    chosen_nodes = a_ordered if endpoint_position == "a" else b_ordered
+    symbols_mig = [G.nodes[n]["element"] for n in a_ordered]  # always A
+    positions_mig = [np.asarray(G.nodes[n]["position"], dtype=float) for n in chosen_nodes]
 
-    # ── Assemble ────────────────────────────────────────────────────────
+    # Finally, assemble the complete structure.
     slab_lat_nodes = slab_nodes + lat_nodes
     n_slab = len(slab_nodes)
-    n_lat  = len(lat_nodes)
-    n_mig  = len(symbols_mig)
+    n_lat = len(lat_nodes)
+    n_mig = len(symbols_mig)
 
     cell = np.array(G.graph["cell"], dtype=float)
-    pbc  = full_pbc_for_cell(cell)
+    pbc = full_pbc_for_cell(cell)
 
     if base_atoms is not None:
         # Reuse the relaxed slab+lat positions from a prior endpoint
@@ -617,20 +624,21 @@ def _build_diffusion_atoms(
         atoms = base_atoms.copy()
         positions = atoms.get_positions()
         positions[n_slab + n_lat : n_slab + n_lat + n_mig] = np.asarray(
-            positions_mig, dtype=float,
+            positions_mig,
+            dtype=float,
         )
         atoms.set_positions(positions)
         atoms.set_pbc(pbc)
     else:
-        symbols   = [G.nodes[n]["element"] for n in slab_lat_nodes] + symbols_mig
+        symbols = [G.nodes[n]["element"] for n in slab_lat_nodes] + symbols_mig
         positions = [
             np.asarray(G.nodes[n]["position"], dtype=float) for n in slab_lat_nodes
         ] + positions_mig
         atoms = Atoms(
-            symbols   = symbols,
-            positions = np.asarray(positions, dtype=float),
-            cell      = cell,
-            pbc       = pbc,
+            symbols=symbols,
+            positions=np.asarray(positions, dtype=float),
+            cell=cell,
+            pbc=pbc,
         )
 
     if frozen_indices:
@@ -650,6 +658,7 @@ def _build_diffusion_atoms(
 # ---------------------------------------------------------------------------
 # Endpoint relaxation helper
 # ---------------------------------------------------------------------------
+
 
 def _relax_endpoint(
     atoms_init: Atoms,
@@ -682,17 +691,15 @@ def _relax_endpoint(
 
     atoms_opt: Atoms | None = None
     try:
-        with acquire_calculator(
-            calculator, purpose=f"diffusion {state_label} relaxation"
-        ) as calc:
+        with acquire_calculator(calculator, purpose=f"diffusion {state_label} relaxation") as calc:
             atoms_opt = optimise_structure(
                 atoms_init,
-                calculator = calc,
-                fmax       = fmax,
-                steps      = max_steps,
-                optimizer  = optimizer,
-                optimizer_kwargs = optimizer_kwargs,
-                verbose    = verbose,
+                calculator=calc,
+                fmax=fmax,
+                steps=max_steps,
+                optimizer=optimizer,
+                optimizer_kwargs=optimizer_kwargs,
+                verbose=verbose,
             )
 
             forces = atoms_opt.get_forces()
@@ -716,36 +723,37 @@ def _relax_endpoint(
             n_ads = n_lat + n_mig
             ads_indices = set(range(n_slab, n_slab + n_ads))
             _check_connectivity_stable(
-                atoms_init, atoms_opt, n_slab, n_ads, state_label, nl_mult,
+                atoms_init,
+                atoms_opt,
+                n_slab,
+                n_ads,
+                state_label,
+                nl_mult,
                 relevant_indices=ads_indices,
                 n_lat=n_lat,
             )
             _check_intended_coordination_stable(
-                atoms_opt, G, self_node_ids,
-                n_slab, n_lat, nl_mult,
+                atoms_opt,
+                G,
+                self_node_ids,
+                n_slab,
+                n_lat,
+                nl_mult,
                 self_node_order=self_node_order,
             )
 
             if verbose:
-                print(
-                    f"  [{state_label}] E={energy:.4f} eV  "
-                    f"max|F|={max_force:.4f} eV/Å  ✓ stable"
-                )
+                print(f"  [{state_label}] E={energy:.4f} eV  max|F|={max_force:.4f} eV/Å  stable")
             atoms_opt.calc = None
         return atoms_opt, energy
 
     except StructureOptimisationError as exc:
-        wrapped = EndpointStabilityError(
-            f"Endpoint '{state_label}' relaxation failed: {exc}"
-        )
+        wrapped = EndpointStabilityError(f"Endpoint '{state_label}' relaxation failed: {exc}")
         wrapped.atoms = exc.atoms
         wrapped.state_label = state_label
         raise wrapped from exc
-    except (SurfaceConnectivityError, AdsorbateDissociationError,
-            OptimisationFailedError) as exc:
-        wrapped = EndpointStabilityError(
-            f"Endpoint '{state_label}' relaxation failed: {exc}"
-        )
+    except (SurfaceConnectivityError, AdsorbateDissociationError, OptimisationFailedError) as exc:
+        wrapped = EndpointStabilityError(f"Endpoint '{state_label}' relaxation failed: {exc}")
         if atoms_opt is not None:
             wrapped.atoms = atoms_opt.copy()
             wrapped.atoms.calc = None
@@ -756,6 +764,7 @@ def _relax_endpoint(
 # ---------------------------------------------------------------------------
 # NEB band construction + TS validity
 # ---------------------------------------------------------------------------
+
 
 def _check_ts_validity(
     atoms_ts: Atoms,
@@ -799,8 +808,7 @@ def _check_ts_validity(
     # 1. Energy ordering.
     if not (np.isfinite(e_ts) and np.isfinite(e_a) and np.isfinite(e_b)):
         raise TransitionStateInvalidError(
-            f"TS / endpoint energies are not finite "
-            f"(E_a={e_a}, E_b={e_b}, E_ts={e_ts})."
+            f"TS / endpoint energies are not finite (E_a={e_a}, E_b={e_b}, E_ts={e_ts})."
         )
     e_max_endpoint = max(float(e_a), float(e_b))
     if float(e_ts) < e_max_endpoint - float(energy_tol):
@@ -812,7 +820,9 @@ def _check_ts_validity(
             "NEB has no genuine saddle: E_ts=%.4f eV is below "
             "max(E_a, E_b)=%.4f eV (tol=%.3f). "
             "The KMC barrier will be floored at EA_MIN.",
-            e_ts, e_max_endpoint, energy_tol,
+            e_ts,
+            e_max_endpoint,
+            energy_tol,
         )
 
     # 2. Endpoint collapse — TS sits at the band edge and matches its
@@ -836,19 +846,18 @@ def _check_ts_validity(
     # the migrating atoms are compared.  TS must match A *or* B.
     if n_mig >= 2:
         mig_indices = set(range(n_slab + n_lat, n_slab + n_lat + n_mig))
-        bonds_a  = _bond_set(atoms_a,  nl_mult=nl_mult, relevant_indices=mig_indices)
-        bonds_b  = _bond_set(atoms_b,  nl_mult=nl_mult, relevant_indices=mig_indices)
+        bonds_a = _bond_set(atoms_a, nl_mult=nl_mult, relevant_indices=mig_indices)
+        bonds_b = _bond_set(atoms_b, nl_mult=nl_mult, relevant_indices=mig_indices)
         bonds_ts = _bond_set(atoms_ts, nl_mult=nl_mult, relevant_indices=mig_indices)
+
         # Restrict the comparison to *intra*-migrating bonds (both ends in
         # the mig block) so that surface↔mig bond rearrangement at the saddle
         # is not flagged as fragmentation.
         def _intra(bonds: set) -> set:
-            return {
-                b for b in bonds
-                if all(int(i) in mig_indices for i in b)
-            }
-        bonds_a_in  = _intra(bonds_a)
-        bonds_b_in  = _intra(bonds_b)
+            return {b for b in bonds if all(int(i) in mig_indices for i in b)}
+
+        bonds_a_in = _intra(bonds_a)
+        bonds_b_in = _intra(bonds_b)
         bonds_ts_in = _intra(bonds_ts)
         if bonds_ts_in != bonds_a_in and bonds_ts_in != bonds_b_in:
             raise TransitionStateInvalidError(
@@ -863,6 +872,7 @@ def _check_ts_validity(
 # ---------------------------------------------------------------------------
 # Public — stability + NEB
 # ---------------------------------------------------------------------------
+
 
 def _apply_diffusion_thermochemistry(
     lateral_class: DiffusionLateral,
@@ -900,16 +910,11 @@ def _apply_diffusion_thermochemistry(
             n_slab + n_lateral + n_migrating,
         )
     )
-    cache_dir_root = (
-        _Path(vib_cache_root) if vib_cache_root is not None else None
-    )
+    cache_dir_root = _Path(vib_cache_root) if vib_cache_root is not None else None
     per_lat_dir = (
         cache_dir_root
         / f"diff_{smiles_to_dirname(diffusion_site.reactant)}"
-        / (
-            f"diff_iso{diffusion_site.iso_class}_"
-            f"lat{lateral_class.lateral_class}"
-        )
+        / (f"diff_iso{diffusion_site.iso_class}_lat{lateral_class.lateral_class}")
         if cache_dir_root is not None
         else None
     )
@@ -1167,6 +1172,7 @@ def _write_diffusion_calculation_cache(
         fingerprint_memo=fingerprint_memo,
     )
 
+
 def check_diffusion_stability(
     G: nx.Graph,
     diffusion_site: DiffusionSite,
@@ -1194,9 +1200,7 @@ def check_diffusion_stability(
     neb_climb_optimizer_kwargs: dict[str, Any] | None = None,
     neb_method: str = NEB_METHOD,
     neb_band_eval: str = NEB_BAND_EVAL,
-    neb_geometry_guard_multiplier: float = (
-        NEB_MAX_ADJACENT_IMAGE_SPACING_MULTIPLIER
-    ),
+    neb_geometry_guard_multiplier: float = (NEB_MAX_ADJACENT_IMAGE_SPACING_MULTIPLIER),
     neb_low_barrier_fmax: float = NEB_LOW_BARRIER_FMAX,
     verbose: bool = False,
     free_energy_options=None,
@@ -1295,7 +1299,7 @@ def check_diffusion_stability(
         )
 
     site_a, m_a, site_b, m_b = diffusion_site.members[member_index]
-    a_node_ids, b_node_ids   = diffusion_site.member_node_ids[member_index]
+    a_node_ids, b_node_ids = diffusion_site.member_node_ids[member_index]
 
     clq_a = _member_clique_union(site_a, m_a)
     clq_b = _member_clique_union(site_b, m_b)
@@ -1320,18 +1324,13 @@ def check_diffusion_stability(
     seed_fingerprint = (
         None
         if not seed_images
-        else input_coordinate_frame_fingerprint(
-            {"neb_seed_path": seed_images}
-        )
+        else input_coordinate_frame_fingerprint({"neb_seed_path": seed_images})
     )
     try:
         seed_member_index = int(neb_seed_member_index)
     except (TypeError, ValueError, OverflowError):
         seed_member_index = None
-    same_member_seed = (
-        seed_images is not None
-        and seed_member_index == int(member_index)
-    )
+    same_member_seed = seed_images is not None and seed_member_index == int(member_index)
     if not same_member_seed:
         seed_images = None
         seed_fingerprint = None
@@ -1348,23 +1347,17 @@ def check_diffusion_stability(
         "optimizer_kwargs": dict(optimizer_kwargs or {}),
         "neb_optimizer": str(neb_optimizer).strip().lower(),
         "neb_optimizer_kwargs": dict(neb_optimizer_kwargs or {}),
-        "neb_climb_optimizer": str(
-            neb_climb_optimizer or neb_optimizer
-        ).strip().lower(),
+        "neb_climb_optimizer": str(neb_climb_optimizer or neb_optimizer).strip().lower(),
         "neb_climb_optimizer_kwargs": dict(
             (neb_optimizer_kwargs or {})
             if neb_climb_optimizer_kwargs is None
             else neb_climb_optimizer_kwargs
         ),
         "neb_method": str(neb_method).strip().lower(),
-        "neb_geometry_guard_multiplier": float(
-            neb_geometry_guard_multiplier
-        ),
+        "neb_geometry_guard_multiplier": float(neb_geometry_guard_multiplier),
         "neb_low_barrier_fmax": float(neb_low_barrier_fmax),
         "n_images": int(n_images),
-        "image_spacing": (
-            None if image_spacing is None else float(image_spacing)
-        ),
+        "image_spacing": (None if image_spacing is None else float(image_spacing)),
         "min_images": int(min_images),
         "max_images": int(max_images),
         "climb": bool(climb),
@@ -1385,17 +1378,15 @@ def check_diffusion_stability(
             "minimum_barrier_ev": float(EA_MIN),
         },
         "neb_low_barrier_convergence_policy": {
-            "name": "accept_below_force_cutoff_if_either_barrier_below_ea_min_v1",
+            "name": "accept_at_force_cutoff_or_max_steps_if_either_barrier_below_ea_min_v2",
             "force_cutoff_ev_per_ang": float(neb_low_barrier_fmax),
             "minimum_barrier_ev": float(EA_MIN),
         },
         "free_energy_enabled": bool(
-            free_energy_options is not None
-            and getattr(free_energy_options, "enabled", False)
+            free_energy_options is not None and getattr(free_energy_options, "enabled", False)
         ),
         "temperature_k": (
-            None if free_energy_temperature_k is None
-            else float(free_energy_temperature_k)
+            None if free_energy_temperature_k is None else float(free_energy_temperature_k)
         ),
     }
     if free_energy_options is not None:
@@ -1409,11 +1400,14 @@ def check_diffusion_stability(
             "default_geometry": str(free_energy_options.default_geometry),
         }
 
-    # ── 1. Endpoint A relaxation ────────────────────────────────────────
+    # First, relax endpoint A.
     atoms_a_init, n_slab, n_lat, mig_idx_a, mig_node_order_a = _build_diffusion_atoms(
-        G, lateral_class, list(a_node_ids), list(b_node_ids),
-        endpoint_position = "a",
-        frozen_indices    = frozen_indices,
+        G,
+        lateral_class,
+        list(a_node_ids),
+        list(b_node_ids),
+        endpoint_position="a",
+        frozen_indices=frozen_indices,
     )
     lateral_class.atoms_a_initial = atoms_a_init.copy()
     lateral_class.atoms_a_initial.calc = None
@@ -1425,7 +1419,10 @@ def check_diffusion_stability(
             cache_graph = normalise_reaction_graph(lateral_class.ego_graph)
             cache_graph.graph["n_shells"] = int(lateral_class.n_shells)
             atoms_b_seed, _, _, _, _ = _build_diffusion_atoms(
-                G, lateral_class, list(a_node_ids), list(b_node_ids),
+                G,
+                lateral_class,
+                list(a_node_ids),
+                list(b_node_ids),
                 endpoint_position="b",
                 frozen_indices=frozen_indices,
             )
@@ -1447,9 +1444,7 @@ def check_diffusion_stability(
                         else "configured_interpolation"
                     ),
                     "projection_scope": (
-                        seed_projection_scope
-                        if seed_fingerprint is not None
-                        else None
+                        seed_projection_scope if seed_fingerprint is not None else None
                     ),
                     "path_sha256": seed_fingerprint,
                 },
@@ -1484,26 +1479,17 @@ def check_diffusion_stability(
                 include_properties=cached.get("_cache_match") != "electronic",
             ):
                 if capture_neb_path:
-                    cached_path = list(
-                        getattr(lateral_class, "atoms_neb_path", None) or []
-                    )
+                    cached_path = list(getattr(lateral_class, "atoms_neb_path", None) or [])
                     cached_interior = len(cached_path) - 2
-                    compatible_count = (
-                        cached_interior >= 1
-                        and (
-                            image_spacing is not None
-                            or cached_interior == int(n_images)
-                        )
+                    compatible_count = cached_interior >= 1 and (
+                        image_spacing is not None or cached_interior == int(n_images)
                     )
                     if not compatible_count:
                         lateral_class.stable = None
                         raise ValueError(
-                            "cached bare diffusion result has no compatible "
-                            "optimized NEB path"
+                            "cached bare diffusion result has no compatible optimized NEB path"
                         )
-                    lateral_class._warm_start_neb_path = [
-                        image.copy() for image in cached_path
-                    ]
+                    lateral_class._warm_start_neb_path = [image.copy() for image in cached_path]
                     for image in lateral_class._warm_start_neb_path:
                         image.calc = None
                     lateral_class._warm_start_neb_energies = list(
@@ -1605,87 +1591,86 @@ def check_diffusion_stability(
 
     if verbose:
         print(
-            f"  [endpoint A] atoms={len(atoms_a_init)}  "
-            f"(slab={n_slab}, lat={n_lat}, mig={n_mig})"
+            f"  [endpoint A] atoms={len(atoms_a_init)}  (slab={n_slab}, lat={n_lat}, mig={n_mig})"
         )
 
     try:
         atoms_a_opt, E_a = _relax_endpoint(
             atoms_a_init,
-            calculator      = calculator,
-            fmax            = fmax,
-            max_steps       = max_steps,
-            optimizer       = optimizer,
-            optimizer_kwargs = optimizer_kwargs,
-            frozen_indices  = frozen_indices,
-            nl_mult         = nl_mult,
-            n_slab          = n_slab,
-            n_lat           = n_lat,
-            n_mig           = n_mig,
-            G               = G,
-            self_node_ids   = self_a,
-            self_node_order = mig_node_order_a,
-            state_label     = "endpoint_a",
-            verbose         = verbose,
+            calculator=calculator,
+            fmax=fmax,
+            max_steps=max_steps,
+            optimizer=optimizer,
+            optimizer_kwargs=optimizer_kwargs,
+            frozen_indices=frozen_indices,
+            nl_mult=nl_mult,
+            n_slab=n_slab,
+            n_lat=n_lat,
+            n_mig=n_mig,
+            G=G,
+            self_node_ids=self_a,
+            self_node_order=mig_node_order_a,
+            state_label="endpoint_a",
+            verbose=verbose,
         )
     except EndpointStabilityError as exc:
         failed_atoms = getattr(exc, "atoms", None)
         if failed_atoms is not None:
             lateral_class.atoms_a = failed_atoms
         raise
-    # Store A immediately so it survives any later exception.
+    # Store endpoint A immediately so a later failure does not discard it.
     lateral_class.energy_a = E_a
-    lateral_class.atoms_a  = atoms_a_opt
+    lateral_class.atoms_a = atoms_a_opt
 
-    # ── 2. Endpoint B relaxation ────────────────────────────────────────
-    # Reuse A's relaxed slab + lateral-neighbour positions as B's starting
-    # geometry: only the migrating-molecule block is overwritten with B's
-    # coordinates.  Both endpoints then sit in the same surface basin, which
-    # makes the linear / IDPP NEB interpolation between them well-posed.
+    # Next, relax endpoint B. Start from the relaxed slab and lateral neighbors
+    # of endpoint A, and replace only the migrating molecule. This keeps both
+    # endpoints in the same surface basin for the NEB interpolation.
     atoms_b_init, _, _, mig_idx_b, mig_node_order_b = _build_diffusion_atoms(
-        G, lateral_class, list(a_node_ids), list(b_node_ids),
-        endpoint_position = "b",
-        frozen_indices    = frozen_indices,
-        base_atoms        = atoms_a_opt,
+        G,
+        lateral_class,
+        list(a_node_ids),
+        list(b_node_ids),
+        endpoint_position="b",
+        frozen_indices=frozen_indices,
+        base_atoms=atoms_a_opt,
     )
     lateral_class.atoms_b_initial = atoms_b_init.copy()
     lateral_class.atoms_b_initial.calc = None
 
     if verbose:
         print(
-            f"  [endpoint B] atoms={len(atoms_b_init)}  "
-            f"(slab={n_slab}, lat={n_lat}, mig={n_mig})"
+            f"  [endpoint B] atoms={len(atoms_b_init)}  (slab={n_slab}, lat={n_lat}, mig={n_mig})"
         )
 
     try:
         atoms_b_opt, E_b = _relax_endpoint(
             atoms_b_init,
-            calculator      = calculator,
-            fmax            = fmax,
-            max_steps       = max_steps,
-            optimizer       = optimizer,
-            optimizer_kwargs = optimizer_kwargs,
-            frozen_indices  = frozen_indices,
-            nl_mult         = nl_mult,
-            n_slab          = n_slab,
-            n_lat           = n_lat,
-            n_mig           = n_mig,
-            G               = G,
-            self_node_ids   = self_b,
-            self_node_order = mig_node_order_b,
-            state_label     = "endpoint_b",
-            verbose         = verbose,
+            calculator=calculator,
+            fmax=fmax,
+            max_steps=max_steps,
+            optimizer=optimizer,
+            optimizer_kwargs=optimizer_kwargs,
+            frozen_indices=frozen_indices,
+            nl_mult=nl_mult,
+            n_slab=n_slab,
+            n_lat=n_lat,
+            n_mig=n_mig,
+            G=G,
+            self_node_ids=self_b,
+            self_node_order=mig_node_order_b,
+            state_label="endpoint_b",
+            verbose=verbose,
         )
     except EndpointStabilityError as exc:
         failed_atoms = getattr(exc, "atoms", None)
         if failed_atoms is not None:
             lateral_class.atoms_b = failed_atoms
         raise
-    # Store B immediately so it survives any later exception.
+    # Store endpoint B immediately so a later failure does not discard it.
     lateral_class.energy_b = E_b
-    lateral_class.atoms_b  = atoms_b_opt
+    lateral_class.atoms_b = atoms_b_opt
 
-    # ── 3-4. NEB band ───────────────────────────────────────────────────
+    # With both endpoints relaxed, build and optimize the NEB band.
     image_selection = resolve_neb_image_count(
         atoms_a_opt,
         atoms_b_opt,
@@ -1697,13 +1682,9 @@ def check_diffusion_stability(
     resolved_n_images = image_selection.n_images
     lateral_class.neb_n_images = resolved_n_images
     lateral_class.neb_n_frames = image_selection.n_frames
-    lateral_class.neb_max_endpoint_displacement = (
-        image_selection.max_endpoint_displacement
-    )
+    lateral_class.neb_max_endpoint_displacement = image_selection.max_endpoint_displacement
     lateral_class.neb_target_image_spacing = image_selection.target_spacing
-    lateral_class.neb_estimated_image_spacing = (
-        image_selection.estimated_linear_spacing
-    )
+    lateral_class.neb_estimated_image_spacing = image_selection.estimated_linear_spacing
     lateral_class.neb_image_count_limited_by = image_selection.limited_by
     projected_seed_path = None
     if seed_images:
@@ -1714,20 +1695,13 @@ def check_diffusion_stability(
             n_slab=n_slab,
             n_lateral=n_lat,
         )
-        if (
-            projected_seed_path is not None
-            and len(projected_seed_path) != resolved_n_images + 2
-        ):
+        if projected_seed_path is not None and len(projected_seed_path) != resolved_n_images + 2:
             projected_seed_path = None
     lateral_class.neb_seed_fingerprint = seed_fingerprint
     lateral_class.neb_initialization = (
         "bare_transfer"
         if projected_seed_path is not None
-        else (
-            "configured_interpolation_fallback"
-            if seed_images
-            else "configured_interpolation"
-        )
+        else ("configured_interpolation_fallback" if seed_images else "configured_interpolation")
     )
     if verbose:
         print(
@@ -1738,15 +1712,9 @@ def check_diffusion_stability(
             f"fmax={float(fmax):.4f} eV/Å  max_steps={int(max_steps)}"
         )
         if projected_seed_path is not None:
-            print(
-                "  [NEB] initialization=bare optimized path "
-                f"({seed_projection_scope})"
-            )
+            print(f"  [NEB] initialization=bare optimized path ({seed_projection_scope})")
         elif seed_images:
-            print(
-                "  [NEB] bare path incompatible; using "
-                f"{interpolation} interpolation"
-            )
+            print(f"  [NEB] bare path incompatible; using {interpolation} interpolation")
 
     neb_result = run_neb(
         atoms_a_opt,
@@ -1773,9 +1741,9 @@ def check_diffusion_stability(
         verbose=verbose,
         not_converged_error=NEBNotConvergedError,
         persist_path=persist_neb_path,
-        # Always snapshot the completed band long enough to retain it if TS
-        # validation or thermochemistry fails.  Successful non-persistent runs
-        # clear the public snapshots below.
+        # Keep the completed band until transition-state validation and
+        # thermochemistry finish. A successful non-persistent run clears it
+        # below.
         capture_path=True,
         initial_path=projected_seed_path,
         initial_path_callback=(
@@ -1798,63 +1766,48 @@ def check_diffusion_stability(
     atoms_ts = neb_result.atoms_ts
     k_ts = neb_result.transition_index
 
-    # Store TS and NEB path immediately — they remain available if the
-    # channel-specific validity check below rejects the transition state.
+    # Store the transition state and path before validation so they remain
+    # available when a channel-specific check rejects the result.
     lateral_class.energy_ts = E_ts
     lateral_class.neb_climb_performed = neb_result.climb_performed
-    lateral_class.neb_climb_skipped_low_barrier = (
-        neb_result.climb_skipped_low_barrier
-    )
-    lateral_class.neb_regular_forward_barrier = (
-        neb_result.regular_forward_barrier
-    )
-    lateral_class.neb_regular_reverse_barrier = (
-        neb_result.regular_reverse_barrier
-    )
+    lateral_class.neb_climb_skipped_low_barrier = neb_result.climb_skipped_low_barrier
+    lateral_class.neb_regular_forward_barrier = neb_result.regular_forward_barrier
+    lateral_class.neb_regular_reverse_barrier = neb_result.regular_reverse_barrier
     lateral_class.neb_convergence_mode = neb_result.convergence_mode
     lateral_class.neb_convergence_fmax = neb_result.convergence_fmax
-    lateral_class.neb_converged_low_barrier = (
-        neb_result.converged_low_barrier
-    )
-    lateral_class.neb_low_barrier_fmax = (
-        neb_result.low_barrier_fmax
-    )
-    lateral_class.neb_low_barrier_threshold = (
-        neb_result.low_barrier_threshold
-    )
+    lateral_class.neb_converged_low_barrier = neb_result.converged_low_barrier
+    lateral_class.neb_low_barrier_fmax = neb_result.low_barrier_fmax
+    lateral_class.neb_low_barrier_threshold = neb_result.low_barrier_threshold
     lateral_class.neb_low_barrier_stage = neb_result.low_barrier_stage
     lateral_class.atoms_ts = atoms_ts
-    # Keep the final path public until all post-NEB checks succeed.  An
-    # exception leaves it attached for invalid-candidate persistence.
+    # Keep the final path public until every post-NEB check succeeds. If a
+    # check fails, the path remains available for invalid-candidate output.
     lateral_class.neb_path_energies = neb_result.path_energies
     lateral_class.atoms_neb_path = neb_result.path_images
     if capture_neb_path and neb_result.path_images:
-        lateral_class._warm_start_neb_path = [
-            image.copy() for image in neb_result.path_images
-        ]
+        lateral_class._warm_start_neb_path = [image.copy() for image in neb_result.path_images]
         for image in lateral_class._warm_start_neb_path:
             image.calc = None
-        lateral_class._warm_start_neb_energies = list(
-            neb_result.path_energies or []
-        )
+        lateral_class._warm_start_neb_energies = list(neb_result.path_energies or [])
         lateral_class._warm_start_member_index = int(member_index)
 
     _check_ts_validity(
-        atoms_ts, atoms_a_opt, atoms_b_opt,
-        n_slab     = n_slab,
-        n_lat      = n_lat,
-        n_mig      = n_mig,
-        nl_mult    = nl_mult,
-        e_a        = E_a,
-        e_b        = E_b,
-        e_ts       = E_ts,
-        ts_index   = k_ts,
-        n_interior = neb_result.n_interior,
+        atoms_ts,
+        atoms_a_opt,
+        atoms_b_opt,
+        n_slab=n_slab,
+        n_lat=n_lat,
+        n_mig=n_mig,
+        nl_mult=nl_mult,
+        e_a=E_a,
+        e_b=E_b,
+        e_ts=E_ts,
+        ts_index=k_ts,
+        n_interior=neb_result.n_interior,
         allow_barrier_floor=(
-            neb_result.climb_skipped_low_barrier
-            or neb_result.converged_low_barrier
+            neb_result.climb_skipped_low_barrier or neb_result.converged_low_barrier
         ),
-        )
+    )
 
     _apply_diffusion_thermochemistry(
         lateral_class,
@@ -1877,26 +1830,29 @@ def check_diffusion_stability(
         lateral_class.atoms_neb_path_initial = None
         lateral_class.atoms_neb_path = None
         lateral_class.neb_path_energies = None
-    # ── 6. Mark stable only after all requested thermochemistry succeeds ──
+    # Finally, mark the class stable after the requested thermochemistry has
+    # succeeded.
     lateral_class.stable = True
     if verbose:
         print(
             f"  [NEB] converged=True steps={neb_result.optimizer_steps}  "
             f"E_ts={E_ts:.4f} eV  "
-            f"image={k_ts}/{neb_result.n_interior}  ✓ stable"
+            f"image={k_ts}/{neb_result.n_interior}  stable"
         )
 
     _log.debug(
         "check_diffusion_stability: diff_iso=%d member=%d lat=%d  "
         "E_a=%.4f  E_b=%.4f  E_ts=%.4f eV  Ea_fwd=%.4f  Ea_rev=%.4f",
-        diffusion_site.iso_class, member_index, lateral_class.lateral_class,
-        E_a, E_b, E_ts, E_ts - E_a, E_ts - E_b,
+        diffusion_site.iso_class,
+        member_index,
+        lateral_class.lateral_class,
+        E_a,
+        E_b,
+        E_ts,
+        E_ts - E_a,
+        E_ts - E_b,
     )
-    if (
-        calculation_cache_root is not None
-        and cache_key is not None
-        and cache_graph is not None
-    ):
+    if calculation_cache_root is not None and cache_key is not None and cache_graph is not None:
         _write_diffusion_calculation_cache(
             calculation_cache_root,
             cache_key,

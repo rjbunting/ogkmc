@@ -21,11 +21,11 @@ structure:
   miller_index: [1, 0, 0]
   lattice_constant: 3.89
   # For Pd(100), 6.0 Å builds four metal layers. The primitive in-plane
-  # vectors are about 2.75 Å, so 8.0 Å targets tile the slab 3x3.
+  # vectors are about 2.75 Å, so 10.0 Å targets tile the slab 4x4.
   min_slab_size: 6.0
   min_vacuum_size: 12.0
-  goal_x: 8.0
-  goal_y: 8.0
+  goal_x: 10.0
+  goal_y: 10.0
   extra_kwargs:
     orthogonalise: false
   # Freeze the bottom two of the four metal layers.

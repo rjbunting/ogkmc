@@ -9,12 +9,13 @@ python -m pip install --upgrade pip
 python -m pip install -e ".[cli,test,dev]"
 ```
 
-Calculator-specific production dependencies, models, credentials, and GPU
-runtimes are not installed by the base package.
+These commands install the base development environment. Install
+calculator-specific production dependencies, models, credentials, and GPU
+runtimes separately.
 
 ## Checks
 
-The local equivalents of CI are:
+After installing the environment, run the local equivalents of CI:
 
 ```bash
 python -m compileall -q autokmc
@@ -128,7 +129,8 @@ write non-standard JSON `NaN`/`Infinity` values.
 
 ## Adding persisted event data
 
-Update the event transition/record model, resume reconstruction if relevant,
-analysis reader, schema version when compatibility breaks, and round-trip
-tests. Product and mechanism tracking should remain offline unless the
-scientific model itself changes.
+First update the event transition and record model. Then update resume
+reconstruction, when relevant, and the analysis reader. If compatibility
+breaks, increment the affected schema version. Finally, add round-trip tests.
+Product and mechanism tracking should remain offline unless the scientific
+model itself changes.

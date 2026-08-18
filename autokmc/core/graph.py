@@ -120,8 +120,8 @@ def build_graph(
         )
 
     declared_pbc = np.asarray(atoms.get_pbc(), dtype=bool)
-    # Neighbor-list construction needs the material cell to be fully periodic,
-    # but callers must not see their Atoms object mutated as a side effect.
+    # First, make a private periodic copy for the neighbor list. This keeps the
+    # caller's Atoms object unchanged.
     atoms = atoms.copy()
     atoms.arrays["surface"] = np.asarray(surface_mask).copy()
     graph_pbc = graph_pbc_for_atoms(atoms)
@@ -156,14 +156,13 @@ def build_graph(
             covalent_radius = float(ASE_COVALENT_RADII[atomic_numbers[i]]),
         )
 
-    # Track per-axis whether *any* bond crosses an image. This is diagnostic
-    # connectivity metadata; material graph structures keep full PBC when
-    # they have a real cell, while adsorbate-only reactants stay non-periodic.
+    # Next, record whether a bond crosses each periodic boundary. Material
+    # graphs keep full PBC when they have a cell, while isolated reactants
+    # remain non-periodic.
     pbc_effective = np.zeros(3, dtype=bool)
 
-    # Walk the bothways=True neighbour list and add each bond once (i<j),
-    # recording the integer cell offset of the partner atom and the MIC
-    # bond distance so downstream code can avoid re-deriving them.
+    # The neighbor list contains both directions. Add each bond once, and
+    # store its cell offset and minimum-image distance for later use.
     for i in range(len(atoms)):
         neighbours, offsets = nl.get_neighbors(i)
         for jj, off in zip(map(int, neighbours), offsets):
@@ -172,7 +171,8 @@ def build_graph(
                 pbc_effective |= (off != 0)
             if jj <= i:
                 continue
-            # Cartesian displacement of the partner image relative to atom i.
+            # This is the Cartesian displacement from atom i to the selected
+            # periodic image of its neighbor.
             dv = positions[jj] + off @ cell_arr - positions[i]
             d = float(np.linalg.norm(dv))
             G.add_edge(i, jj,
@@ -181,10 +181,9 @@ def build_graph(
 
     G.graph["connectivity_pbc"] = pbc_effective
 
-    # Warn if the caller's original PBC declaration hid cross-image bonds.
-    # Material structures with a real cell are stored with full PBC, but this
-    # still catches too-small vacuum gaps or cells in inputs that arrived with
-    # a partially/non-periodic PBC setting.
+    # After the bonds are built, warn when the original PBC declaration hid a
+    # cross-image bond. This identifies small cells, small vacuum gaps, and
+    # partially periodic inputs.
     if not np.array_equal(declared_pbc, pbc_effective):
         unexpected = (~declared_pbc) & pbc_effective
         if unexpected.any():
@@ -198,9 +197,8 @@ def build_graph(
                 stacklevel=2,
             )
 
-    # Re-use any hull computed by find_surface_atoms (nanoparticle path) so
-    # downstream code need not rebuild it.  Stored as the (n_facets, 4)
-    # equations array on the graph directly.
+    # Finally, copy any nanoparticle hull calculated during surface detection.
+    # Storing the facet equations on the graph avoids rebuilding the hull.
     hull_eq = atoms.info.get("_hull_equations")
     if hull_eq is not None:
         G.graph["hull_equations"] = np.asarray(hull_eq, dtype=float)

@@ -258,7 +258,7 @@ class BondReactionLateral:
     invalid_reason   : str | None       = None
     last_failure_reason: str | None     = None
     gas_precursor_relaxed: bool | None  = None
-    # ── Free-energy / vibrational fields (autokmc.thermo.free_energy) ────────────
+    # The free-energy module populates these vibrational fields.
     g_correction_ab  : float | None = None
     g_correction_c   : float | None = None
     g_correction_ts  : float | None = None
@@ -1472,7 +1472,7 @@ def find_bond_sites(
                     ) if not lst
                 ]
                 print(
-                    f"  ⏭  template {tpl.smiles_a!r}+{tpl.smiles_b!r}"
+                    f"  SKIPPED template {tpl.smiles_a!r}+{tpl.smiles_b!r}"
                     f"⇌{tpl.smiles_c!r}: no sites for {missing}"
                 )
             continue
@@ -1732,13 +1732,13 @@ def find_bond_sites(
         if verbose:
             n_iso = len(out) - template_out_start
             print(
-                f"  ✓ template {tpl.smiles_a!r}+{tpl.smiles_b!r}"
+                f"  template {tpl.smiles_a!r}+{tpl.smiles_b!r}"
                 f"⇌{tpl.smiles_c!r} ({tpl.source}): "
                 f"{n_iso} iso-class(es), {n_kept} triple(s) kept "
                 f"from {n_considered} pair(s) considered"
             )
 
-    # ── Optional: keep one BondReactionSite per adsorption triple ──────────
+    # If requested, keep one bond-reaction site for each adsorption triple.
     if prune_by_triple and out:
         before = len(out)
         out = _prune_one_per_adsorption_triple(
@@ -1749,7 +1749,7 @@ def find_bond_sites(
                 f"  prune_by_triple: {before} → {len(out)} iso-class(es)"
             )
 
-    # ── Renumber iso_class globally and build reverse index ────────────────
+    # Finally, renumber the iso-classes and build the reverse index.
     for new_idx, brs in enumerate(out):
         brs.iso_class = new_idx
 
@@ -2139,12 +2139,12 @@ def prune_unstable_bond_sites(
             survivors.append(brs)
             if verbose:
                 print(
-                    f"  ✓ bond_iso={brs.iso_class}: A+B endpoint stable"
+                    f"  STABLE bond_iso={brs.iso_class}: A+B endpoint stable"
                 )
         else:
             if verbose:
                 print(
-                    f"  ✗ bond_iso={brs.iso_class}: A+B endpoint changes "
+                    f"  PRUNED bond_iso={brs.iso_class}: A+B endpoint changes "
                     f"bonding — pruned"
                 )
 

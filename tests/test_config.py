@@ -391,6 +391,9 @@ def test_all_options_template_lists_every_shared_constant():
     assert set(raw["optimization"]) == {
         item.name for item in fields(OptimizationCfg)
     }
+    assert cfg.structure.goal_x == pytest.approx(10.0)
+    assert cfg.structure.goal_y == pytest.approx(10.0)
+    assert cfg.structure.extra_kwargs["orthogonalise"] is False
     assert cfg.structure.surface_side == "top"
     assert cfg.adsorbate_sites.max_pair_shells == 10
 
@@ -402,7 +405,7 @@ def test_all_options_template_lists_every_shared_constant():
         ("100", (1, 0, 0), 6.0),
     ],
 )
-def test_h2_oxidation_pd_uma_examples_are_3x3_four_layer_and_batched(
+def test_h2_oxidation_pd_uma_examples_are_4x4_four_layer_and_batched(
     facet,
     miller_index,
     min_slab_size,
@@ -419,8 +422,8 @@ def test_h2_oxidation_pd_uma_examples_are_3x3_four_layer_and_batched(
     assert cfg.structure.composition == "Pd"
     assert cfg.structure.miller_index == miller_index
     assert cfg.structure.min_slab_size == pytest.approx(min_slab_size)
-    assert cfg.structure.goal_x == pytest.approx(8.0)
-    assert cfg.structure.goal_y == pytest.approx(8.0)
+    assert cfg.structure.goal_x == pytest.approx(10.0)
+    assert cfg.structure.goal_y == pytest.approx(10.0)
     assert cfg.structure.extra_kwargs["orthogonalise"] is False
     assert cfg.structure.n_freeze_layers == 2
     assert [reactant.smiles for reactant in cfg.reactants] == ["[H][H]", "O=O"]

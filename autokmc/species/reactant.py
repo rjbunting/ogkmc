@@ -130,7 +130,7 @@ class Reactant:
     unique_nodes : dict                        = field(default_factory=dict)
     anchor_atoms : list                        = field(default_factory=list)
     anchor_orbit : dict                        = field(default_factory=dict)
-    # ── Free-energy / vibrational fields (populated by autokmc.thermo.free_energy) ──
+    # The free-energy module populates these vibrational fields.
     #: Gibbs free-energy correction relative to ``energy`` (eV) at the
     #: simulation T / p.  ``nan`` when free-energy mode is disabled.
     g_correction : float                       = field(default=float("nan"))

@@ -165,9 +165,8 @@ def _target_blocked(
     """
     member_cliques = getattr(target_site, "_member_cliques", None)
     occupied_by_clique = G.graph.get("occupied_by_clique")
-    # Set of node ids we *don't* count as conflicts (source vacates as the
-    # hop fires, target's own current state is irrelevant — we already know
-    # it is unoccupied because direction was determined by XOR).
+    # Exclude the source because it becomes empty when the hop occurs. The
+    # target is also excluded because the XOR check already showed it is empty.
     target_node_ids = frozenset(target_site.member_node_ids[target_m_idx])
     excluded: frozenset = target_node_ids | frozenset(source_node_ids)
 
@@ -225,12 +224,12 @@ def is_diffusion_applicable(
 
     site_a, m_a, site_b, m_b = ds.members[member_index]
     if a_occ:
-        # A → B hop.  Source = A, target = B.
+        # In this direction, A is the source and B is the target.
         if _target_blocked(G, site_b, m_b, list(a_nids)):
             return False, None
         return True, "a_to_b"
     else:
-        # B → A hop.
+        # Otherwise, B is the source and A is the target.
         if _target_blocked(G, site_a, m_a, list(b_nids)):
             return False, None
         return True, "b_to_a"
@@ -291,9 +290,9 @@ def _diffusion_energetics_cached(
             f"diffusion energies must be finite, got {(e_a, e_b, e_ts)!r}"
         )
 
-    # Raise the effective TS so it is at least EA_MIN above the higher
-    # endpoint.  Deriving both barriers from the same e_ts_eff preserves
-    # energy consistency: Ea_fwd − Ea_rev = E_b − E_a.
+    # First, place the effective transition state at least EA_MIN above the
+    # higher endpoint. Both barriers then come from the same transition-state
+    # energy, which preserves Ea_fwd - Ea_rev = E_b - E_a.
     e_ts_eff = max(e_ts, max(e_a, e_b) + EA_MIN)
 
     prefactor, kT = _eyring_prefactor(temperature, transmission_coefficient)
@@ -486,7 +485,7 @@ def get_applicable_diffusion_for_member(
             ds._member_lc.pop(index, None)
             if verbose:
                 print(
-                    f"  ⚠  diff_iso={ds.iso_class} m={index}: "
+                    f"  WARNING diff_iso={ds.iso_class} m={index}: "
                     f"lateral check skipped ({exc})"
                 )
         else:
@@ -614,7 +613,7 @@ def get_applicable_diffusion_for_member(
                     )
                     if verbose:
                         print(
-                            f"  ⚠  diff_iso={ds.iso_class} m={index} "
+                            f"  WARNING diff_iso={ds.iso_class} m={index} "
                             f"lat={lc.lateral_class}: {reason}\n"
                             "     → omitted from this KMC sweep "
                             "(will be retried when recomputed)"
@@ -631,7 +630,7 @@ def get_applicable_diffusion_for_member(
                     )
                     if verbose:
                         print(
-                            f"  ⚠  diff_iso={ds.iso_class} m={index} "
+                            f"  WARNING diff_iso={ds.iso_class} m={index} "
                             f"lat={lc.lateral_class}: {reason}\n"
                             "     → marked as invalid "
                             "(will not be admitted to KMC)"
