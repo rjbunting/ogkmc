@@ -453,6 +453,30 @@ def test_h2_oxidation_pd_uma_examples_are_4x4_four_layer_and_batched(
     assert cfg.optimization.neb_method == "improvedtangent"
 
 
+def test_co_cu111_example_enables_only_intact_co_diffusion_chemistry():
+    pytest.importorskip("yaml")
+    path = (
+        Path(__file__).parents[1]
+        / "example"
+        / "co_adsorption_diffusion_cu111_uma.yaml"
+    )
+
+    cfg = load_config(path)
+
+    assert cfg.structure.composition == "Cu"
+    assert cfg.structure.miller_index == (1, 1, 1)
+    assert cfg.structure.goal_x == pytest.approx(10.0)
+    assert cfg.structure.goal_y == pytest.approx(10.0)
+    assert cfg.structure.extra_kwargs["orthogonalise"] is False
+    assert [reactant.smiles for reactant in cfg.reactants] == ["[C-]#[O+]"]
+    assert cfg.reactants[0].partial_pressure_bar == pytest.approx(1.0)
+    assert cfg.diffusion.enabled is True
+    assert cfg.diffusion.max_hops == 1
+    assert cfg.bond.enabled is False
+    assert cfg.kmc.lateral_interactions is False
+    assert cfg.optimization.neb_band_eval == "batched"
+
+
 def test_load_toml_ok(tmp_path):
     body = """\
     schema_version = "1"

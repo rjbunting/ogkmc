@@ -22,10 +22,11 @@ reproducible post-processing.
   and schema-change conventions.
 
 Start with the repository [README](../README.md) for installation and a first
-run. Then use these production-style four-layer, 4x4 palladium examples:
+run. Then use these production-style surface examples:
 
 - [`h2_oxidation_pd111_uma.yaml`](../example/h2_oxidation_pd111_uma.yaml)
 - [`h2_oxidation_pd100_uma.yaml`](../example/h2_oxidation_pd100_uma.yaml)
+- [`co_adsorption_diffusion_cu111_uma.yaml`](../example/co_adsorption_diffusion_cu111_uma.yaml)
 
 ## Command summary
 

@@ -81,6 +81,7 @@ def test_surface_builder_requires_an_explicit_calculator(monkeypatch):
         "h2_oxidation_pd111_uma.yaml",
         "h2_oxidation_pd100_uma.yaml",
         "h2_oxidation_pd111_dft.yaml",
+        "co_adsorption_diffusion_cu111_uma.yaml",
         "all_options.yaml",
     ],
 )

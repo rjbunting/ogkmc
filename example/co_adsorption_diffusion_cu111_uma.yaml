@@ -1,0 +1,131 @@
+# autokmc - CO adsorption, desorption, and diffusion on Cu(111) with UMA
+# Run with: autokmc run example/co_adsorption_diffusion_cu111_uma.yaml
+schema_version: "1"
+
+output:
+  dir: ./runs/co_adsorption_diffusion_cu111_uma
+  trajectory_dump_every: 10
+  log_level: INFO
+
+checkpoint:
+  enabled: true
+  path: ./runs/co_adsorption_diffusion_cu111_uma/checkpoint.pkl
+  every_n_steps: 100
+  # To continue the same trajectory, uncomment:
+  # resume_from: ./runs/co_adsorption_diffusion_cu111_uma/checkpoint.pkl
+
+structure:
+  kind: surface
+  composition: Cu
+  crystal_structure: fcc
+  miller_index: [1, 1, 1]
+  lattice_constant: 3.615
+  # Four Cu(111) layers in a primitive 4x4 surface cell.
+  min_slab_size: 8.0
+  min_vacuum_size: 12.0
+  goal_x: 10.0
+  goal_y: 10.0
+  extra_kwargs:
+    orthogonalise: false
+  # Freeze the bottom two metal layers.
+  n_freeze_layers: 2
+  fmax: 0.01
+  max_steps: 1000
+
+reactants:
+  # CO is the only gas feed. With the bond channel disabled below, intact CO
+  # can only adsorb, desorb, and diffuse; it cannot dissociate or couple.
+  - smiles: "[C-]#[O+]"
+    add_hydrogens: false
+    relax_in_gas: true
+    partial_pressure_bar: 1.0
+    spin: 0.0
+    geometry: linear
+
+# One-GPU FAIR-Chem UMA calculator for heterogeneous catalysis.
+# The first run requires fairchem-core and access to facebook/UMA.
+calculator:
+  factory: fairchem.core.FAIRChemCalculator
+  factory_kwargs:
+    predict_unit:
+      factory: autokmc.io.fairchem.get_predict_unit_on_device
+      factory_kwargs:
+        name_or_path: uma-s-1p2
+        device: cuda
+        workers: 1
+    task_name: oc20
+  copies: 1
+  gpu_devices: [cuda:0]
+  gpu_device_arg: predict_unit.factory_kwargs.device
+  max_workers: 1
+
+optimization:
+  optimizer: fire
+  optimizer_kwargs:
+    dt: 0.05
+    dtmax: 0.5
+    maxstep: 0.1
+    downhill_check: true
+  neb_optimizer: fire
+  neb_optimizer_kwargs:
+    dt: 0.05
+    dtmax: 0.5
+    maxstep: 0.05
+    downhill_check: true
+  neb_climb_optimizer: mdmin
+  neb_climb_optimizer_kwargs:
+    dt: 0.05
+    maxstep: 0.01
+  neb_method: improvedtangent
+  neb_band_eval: batched
+  neb_geometry_guard_multiplier: 3.0
+  # Check low barriers at 0.10 eV/angstrom and again if the step budget is
+  # exhausted before reaching that force threshold.
+  neb_low_barrier_fmax: 0.1
+
+adsorbate_sites:
+  prune_stable_only: true
+  fmax: 0.05
+  max_steps: 500
+  anchor_k_max: 4
+  pair_n_shells: 1
+  max_pair_shells: 10
+
+# Electronic-energy smoke-test mode. Pressure still scales CO adsorption.
+free_energy:
+  enabled: false
+  pressure_bar: 1.0
+
+kmc:
+  temperature_k: 500.0
+  n_steps: 10000
+  transmission_coefficient: 1.0
+  fmax: 0.05
+  max_steps: 1000
+  log_every: 100
+  random_seed: 69
+  # Keep this example focused on the isolated-CO channel set.
+  lateral_interactions: false
+
+diffusion:
+  enabled: true
+  # Include adjacent surface-anchor cliques so intact CO can hop between sites.
+  max_hops: 1
+  n_shells_pair: 1
+  prune_by_adsorption_pair: true
+  fmax: 0.05
+  max_steps: 1000
+  # Dynamically choose the band length from endpoint displacement.
+  n_images: 8
+  image_spacing: 0.25
+  min_images: 4
+  max_images: 12
+  climb: true
+  spring_k: 1.0
+  interpolation: linear
+  persist_neb_path: true
+
+# Explicitly disable all bond-changing chemistry. No CO dissociation,
+# association, coupling, or other product-forming reactions are generated.
+bond:
+  enabled: false
