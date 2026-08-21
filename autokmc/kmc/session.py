@@ -217,7 +217,7 @@ class KMCSession:
                 sync()
             _log.info(
                 "KMC partial-output flush: persisted %d completed reaction "
-                "instance(s) and %d invalid/retryable lateral diagnostic(s) "
+                "instance(s) and %d invalid/numerical lateral diagnostic(s) "
                 "before re-raising %s",
                 n_completed,
                 n_invalid,

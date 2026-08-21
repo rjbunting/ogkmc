@@ -130,13 +130,13 @@ def test_typed_request_returns_typed_result_with_run_telemetry():
     assert result.to_legacy_dict()["time"] == result.time_s
 
 
-def test_initialisation_failure_flushes_reactions_and_retryable_bond_diagnostics(
+def test_initialisation_failure_flushes_reactions_and_numerical_bond_diagnostics(
     monkeypatch,
 ):
     completed_reaction = SimpleNamespace(kind="adsorption")
     adsorption_site = _site(iso_class=0, member_nodes=[[10]])
     adsorption_site.applicable_reactions = [completed_reaction]
-    retryable_lateral = SimpleNamespace(
+    unresolved_lateral = SimpleNamespace(
         lateral_class=2,
         members=[0],
         stable=None,
@@ -145,7 +145,7 @@ def test_initialisation_failure_flushes_reactions_and_retryable_bond_diagnostics
         ),
     )
     bond_site = SimpleNamespace(
-        lateral_classes=[retryable_lateral],
+        lateral_classes=[unresolved_lateral],
         applicable_reactions=[],
     )
 
@@ -195,12 +195,12 @@ def test_initialisation_failure_flushes_reactions_and_retryable_bond_diagnostics
 
     assert calls == [
         ("reaction", completed_reaction, 0),
-        ("invalid_bond", bond_site, retryable_lateral, 0),
+        ("invalid_bond", bond_site, unresolved_lateral, 0),
         ("sync",),
     ]
 
 
-def test_retryable_transition_omission_does_not_block_kmc_step(monkeypatch):
+def test_unresolved_transition_omission_does_not_block_kmc_step(monkeypatch):
     adsorption_site = _site(iso_class=0, member_nodes=[[10]])
     adsorption_reaction = SimpleNamespace(
         kind="adsorption",
@@ -211,7 +211,7 @@ def test_retryable_transition_omission_does_not_block_kmc_step(monkeypatch):
         barrier=0.2,
         rate=1.0,
     )
-    retryable_lateral = SimpleNamespace(
+    unresolved_lateral = SimpleNamespace(
         lateral_class=1,
         members=[0],
         stable=None,
@@ -230,7 +230,7 @@ def test_retryable_transition_omission_does_not_block_kmc_step(monkeypatch):
             is_symmetric=True,
         ),
         member_node_ids=[([20], [21], [22])],
-        lateral_classes=[retryable_lateral],
+        lateral_classes=[unresolved_lateral],
         applicable_reactions=[],
         site_id="",
     )
@@ -239,7 +239,7 @@ def test_retryable_transition_omission_does_not_block_kmc_step(monkeypatch):
         adsorption_site.applicable_reactions = [adsorption_reaction]
         return [adsorption_reaction]
 
-    def omit_retryable_bond(_graph, sites, *_args, **_kwargs):
+    def omit_unresolved_bond(_graph, sites, *_args, **_kwargs):
         assert sites == [bond_site]
         bond_site.applicable_reactions = []
         return []
@@ -247,7 +247,7 @@ def test_retryable_transition_omission_does_not_block_kmc_step(monkeypatch):
     monkeypatch.setattr(
         initialization_module,
         "compute_all_bond_reactions",
-        omit_retryable_bond,
+        omit_unresolved_bond,
     )
     monkeypatch.setattr(
         session_module,

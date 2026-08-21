@@ -510,7 +510,12 @@ def get_applicable_diffusion_for_member(
                 elif bare_lc.stable is not True:
                     bare_seed_path = None
                     bare_seed_member_index = None
-                if capture_lc.stable is None:
+                if (
+                    capture_lc.stable is None
+                    and not getattr(
+                        capture_lc, "last_failure_reason", None,
+                    )
+                ):
                     try:
                         check_diffusion_stability(
                             G,
@@ -523,17 +528,23 @@ def get_applicable_diffusion_for_member(
                         )
                     except NEBNotConvergedError as exc:
                         # This bare calculation is only an optional warm start
-                        # for the current lateral event. Keep the bare class
-                        # undecided and let the lateral NEB use interpolation.
+                        # for the current lateral event.  Keep the bare class
+                        # undecided, latch the numerical failure against
+                        # automatic retries, and let a distinct lateral class
+                        # use interpolation.
+                        reason = f"{type(exc).__name__}: {exc}"
+                        if not preserve_bare_result:
+                            bare_lc.last_failure_reason = reason
                         bare_seed_path = None
                         bare_seed_member_index = None
                         _log.warning(
                             "diff_iso=%d m=%d bare warm-start NEB did not "
-                            "converge: %s; lateral calculation will use %s "
+                            "converge: %s; automatic retry is disabled and "
+                            "a distinct lateral calculation will use %s "
                             "interpolation",
                             ds.iso_class,
                             index,
-                            exc,
+                            reason,
                             interpolation,
                         )
                     except DiffusionStabilityError as exc:
@@ -577,8 +588,10 @@ def get_applicable_diffusion_for_member(
                                 bare_seed_member_index
                             )
 
-            if lc.stable is None:
-                lc.last_failure_reason = None
+            if (
+                lc.stable is None
+                and not getattr(lc, "last_failure_reason", None)
+            ):
                 try:
                     check_diffusion_stability(
                         G,
@@ -596,16 +609,18 @@ def get_applicable_diffusion_for_member(
                     )
                 except NEBNotConvergedError as exc:
                     # Preserve stable=None: a numerical search failure is
-                    # retryable, not evidence that the event is impossible.
-                    # Omit only this candidate from the current rate index;
-                    # aborting the full initial sweep would prevent otherwise
-                    # valid KMC reactions from executing at all.
+                    # not evidence that the event is impossible.  The stored
+                    # failure reason is also a latch: this lateral class stays
+                    # out of the rate index and is not tried again
+                    # automatically during this run or after checkpoint
+                    # resume.
                     reason = f"{type(exc).__name__}: {exc}"
                     lc.last_failure_reason = reason
                     _log.warning(
                         "diff_iso=%d m=%d lat=%d: %s — excluding this "
-                        "reaction from the current KMC sweep; the lateral "
-                        "class remains retryable",
+                        "reaction from KMC; the unresolved lateral class "
+                        "will be retained for diagnostics without automatic "
+                        "retry",
                         ds.iso_class,
                         index,
                         lc.lateral_class,
@@ -615,8 +630,8 @@ def get_applicable_diffusion_for_member(
                         print(
                             f"  WARNING diff_iso={ds.iso_class} m={index} "
                             f"lat={lc.lateral_class}: {reason}\n"
-                            "     → omitted from this KMC sweep "
-                            "(will be retried when recomputed)"
+                            "     → omitted from KMC and retained as an "
+                            "unresolved diagnostic (automatic retry disabled)"
                         )
                 except DiffusionStabilityError as exc:
                     reason = f"{type(exc).__name__}: {exc}"
@@ -724,7 +739,7 @@ def get_applicable_diffusions(
     """
     reactions: list[DiffusionReaction] = []
     # Keep completed members visible while the initial sweep is in progress.
-    # A later retryable NEB failure must not hide earlier valid reactions from
+    # A later numerical NEB failure must not hide earlier valid reactions from
     # the emergency persistence pass.
     ds.applicable_reactions = reactions
 

@@ -122,14 +122,16 @@ class DiffusionLateral:
     stable : bool | None
         ``True`` when both endpoint relaxations and the NEB converged
         without changing surface / adsorbate connectivity; ``False`` on
-        any stability failure; ``None`` until the check has run.
+        a demonstrated stability failure; ``None`` before evaluation or
+        after an unresolved numerical failure.
     invalid_reason : str | None
         Human-readable explanation of why this lateral class is invalid
         (set when ``stable=False``).  ``None`` when ``stable`` is ``True``
         or not yet evaluated.
     last_failure_reason : str | None
-        Most recent retryable numerical failure.  This is diagnostic state;
-        :attr:`stable` remains ``None`` so a later evaluation can retry it.
+        Most recent numerical failure.  This is diagnostic state;
+        :attr:`stable` remains ``None``, while the non-empty failure reason
+        suppresses automatic reevaluation of this lateral class.
     """
     lateral_class : int
     ego_graph     : Any              = None

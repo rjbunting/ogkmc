@@ -171,6 +171,38 @@ def test_checkpoint_preserves_shared_site_and_registry_identity(tmp_path):
     assert loaded.reactants[0].atoms.calc is None
 
 
+def test_checkpoint_preserves_numerical_failure_retry_latches(tmp_path):
+    diffusion_lateral = SimpleNamespace(
+        stable=None,
+        last_failure_reason="DiffusionNEBNotConvergedError: pre-climb failed",
+    )
+    bond_lateral = SimpleNamespace(
+        stable=None,
+        last_failure_reason="BondNEBNotConvergedError: pre-climb failed",
+    )
+
+    state = make_checkpoint_state(
+        step=2,
+        time_s=0.5,
+        graph=nx.Graph(),
+        adsorbate_sites=[],
+        diffusion_sites=[SimpleNamespace(lateral_classes=[diffusion_lateral])],
+        bond_sites=[SimpleNamespace(lateral_classes=[bond_lateral])],
+    )
+    loaded = load_checkpoint(save_checkpoint(tmp_path / "failed-neb.pkl", state))
+
+    restored_diffusion = loaded.diffusion_sites[0].lateral_classes[0]
+    restored_bond = loaded.bond_sites[0].lateral_classes[0]
+    assert restored_diffusion.stable is None
+    assert restored_diffusion.last_failure_reason == (
+        "DiffusionNEBNotConvergedError: pre-climb failed"
+    )
+    assert restored_bond.stable is None
+    assert restored_bond.last_failure_reason == (
+        "BondNEBNotConvergedError: pre-climb failed"
+    )
+
+
 def test_checkpoint_root_collections_never_alias_from_temporary_id_reuse(tmp_path):
     adsorbate = SimpleNamespace(kind="adsorbate")
     diffusion = SimpleNamespace(kind="diffusion")

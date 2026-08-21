@@ -1611,8 +1611,9 @@ class ReactionWriter:
         )
         failure_reason = getattr(lc, "last_failure_reason", None)
         invalid_reason = getattr(lc, "invalid_reason", None) or failure_reason
-        retryable = bool(
-            getattr(lc, "stable", None) is not False and failure_reason
+        stable = getattr(lc, "stable", None)
+        numerical_failure = bool(
+            stable is None and failure_reason
         )
         payload = {
             "artifact_type": REACTION_DOCUMENT_ARTIFACT_TYPE,
@@ -1623,19 +1624,22 @@ class ReactionWriter:
             "lateral_class":   lat,
             "reactant_smiles": smiles,
             "valid":           False,
+            "stable":          stable,
             "invalid_reason":  invalid_reason,
             "diagnostic_status": (
-                "retryable_failure" if retryable else "invalid"
+                "numerical_failure" if numerical_failure else "invalid"
             ),
-            "retryable": retryable,
+            "retryable": False,
+            "automatic_retry": False,
             "kind_directions": ["a_to_b", "b_to_a"],
             "description": (
                 "Invalid diffusion candidate"
                 if invalid_reason is None
                 else (
-                    "Diffusion candidate evaluation failed (retryable): "
+                    "Diffusion candidate evaluation stopped after a "
+                    "numerical failure (automatic retry disabled): "
                     f"{invalid_reason}"
-                    if retryable
+                    if numerical_failure
                     else f"Invalid diffusion candidate: {invalid_reason}"
                 )
             ),
@@ -1794,8 +1798,9 @@ class ReactionWriter:
         )
         failure_reason = getattr(lc, "last_failure_reason", None)
         invalid_reason = getattr(lc, "invalid_reason", None) or failure_reason
-        retryable = bool(
-            getattr(lc, "stable", None) is not False and failure_reason
+        stable = getattr(lc, "stable", None)
+        numerical_failure = bool(
+            stable is None and failure_reason
         )
         payload = {
             "artifact_type": REACTION_DOCUMENT_ARTIFACT_TYPE,
@@ -1806,19 +1811,22 @@ class ReactionWriter:
             "lateral_class": lat,
             "reactant_smiles": smiles,
             "valid": False,
+            "stable": stable,
             "invalid_reason": invalid_reason,
             "diagnostic_status": (
-                "retryable_failure" if retryable else "invalid"
+                "numerical_failure" if numerical_failure else "invalid"
             ),
-            "retryable": retryable,
+            "retryable": False,
+            "automatic_retry": False,
             "kind_directions": ["couple", "dissoc"],
             "description": (
                 "Invalid bond candidate"
                 if invalid_reason is None
                 else (
-                    "Bond candidate evaluation failed (retryable): "
+                    "Bond candidate evaluation stopped after a numerical "
+                    "failure (automatic retry disabled): "
                     f"{invalid_reason}"
-                    if retryable
+                    if numerical_failure
                     else f"Invalid bond candidate: {invalid_reason}"
                 )
             ),

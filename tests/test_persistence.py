@@ -1206,7 +1206,9 @@ def test_invalid_diffusion_record_tolerates_missing_energies(tmp_path):
     atoms = Atoms("H", positions=[[0.0, 0.0, 0.0]])
     lc = SimpleNamespace(
         lateral_class=2,
-        invalid_reason="NEB failed early",
+        stable=None,
+        invalid_reason=None,
+        last_failure_reason="NEBNotConvergedError: NEB failed early",
         atoms_a_initial=atoms.copy(),
         atoms_b_initial=atoms.copy(),
         atoms_neb_path_initial=[atoms.copy(), atoms.copy()],
@@ -1226,7 +1228,13 @@ def test_invalid_diffusion_record_tolerates_missing_energies(tmp_path):
     )
     payload = json.loads((folder / "reaction.json").read_text())
     assert payload["valid"] is False
-    assert payload["invalid_reason"] == "NEB failed early"
+    assert payload["stable"] is None
+    assert payload["diagnostic_status"] == "numerical_failure"
+    assert payload["retryable"] is False
+    assert payload["automatic_retry"] is False
+    assert payload["invalid_reason"] == (
+        "NEBNotConvergedError: NEB failed early"
+    )
     assert payload["energies_ev"] == {
         "state_a": None,
         "state_b": None,
@@ -1339,8 +1347,10 @@ def test_invalid_bond_record_writes_failed_endpoint_and_neb_paths(tmp_path):
     payload = json.loads((folder / "reaction.json").read_text())
     assert payload["kind"] == "bond"
     assert payload["valid"] is False
-    assert payload["diagnostic_status"] == "retryable_failure"
-    assert payload["retryable"] is True
+    assert payload["stable"] is None
+    assert payload["diagnostic_status"] == "numerical_failure"
+    assert payload["retryable"] is False
+    assert payload["automatic_retry"] is False
     assert payload["invalid_reason"] == (
         "BondNEBNotConvergedError: forced failure"
     )

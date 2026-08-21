@@ -206,7 +206,7 @@ def test_reactions_package_exports_public_models():
     assert BondReaction.__name__ == "BondReaction"
 
 
-def test_bond_sweep_continues_past_retryable_neb_failure(
+def test_bond_sweep_continues_past_numerical_neb_failure(
     monkeypatch,
 ):
     completed_before = object()
@@ -617,8 +617,207 @@ def test_neb_nonconvergence_is_not_permanently_classified_invalid(
         )
 
     assert bare.stable is None
+    if failure_scope == "bare":
+        assert bare.last_failure_reason == (
+            f"{nonconvergence_error.__name__}: forced numerical NEB failure"
+        )
     assert not hasattr(bare, "invalid_reason")
     assert not hasattr(lateral, "invalid_reason")
+
+
+@pytest.mark.parametrize(
+    (
+        "reaction_module",
+        "applicability_name",
+        "classifier_name",
+        "stability_name",
+        "entrypoint_name",
+        "nonconvergence_error",
+        "direction",
+    ),
+    [
+        (
+            diffusion_module,
+            "is_diffusion_applicable",
+            "check_diffusion_site_lateral",
+            "check_diffusion_stability",
+            "get_applicable_diffusion_for_member",
+            diffusion_module.NEBNotConvergedError,
+            "a_to_b",
+        ),
+        (
+            bond_module,
+            "is_bond_applicable",
+            "check_bond_site_lateral",
+            "check_bond_site_stability",
+            "get_applicable_bond_reaction_for_member",
+            bond_module.BondNEBNotConvergedError,
+            "couple",
+        ),
+    ],
+)
+def test_recorded_neb_nonconvergence_is_not_retried_automatically(
+    monkeypatch,
+    reaction_module,
+    applicability_name,
+    classifier_name,
+    stability_name,
+    entrypoint_name,
+    nonconvergence_error,
+    direction,
+):
+    lateral = SimpleNamespace(stable=None, members=[0], lateral_class=0)
+    site = SimpleNamespace(
+        iso_class=12,
+        _member_lc={},
+        applicable_reactions=[],
+    )
+    calls = 0
+
+    monkeypatch.setattr(
+        reaction_module,
+        applicability_name,
+        lambda *_args: (True, direction),
+    )
+    monkeypatch.setattr(
+        reaction_module,
+        classifier_name,
+        lambda *_args, **_kwargs: lateral,
+    )
+
+    def fail_once(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        raise nonconvergence_error("forced numerical NEB failure")
+
+    monkeypatch.setattr(reaction_module, stability_name, fail_once)
+    entrypoint = getattr(reaction_module, entrypoint_name)
+
+    first = entrypoint(
+        nx.Graph(),
+        site,
+        0,
+        object(),
+        temperature=500.0,
+        n_images=1,
+        lateral_interactions=False,
+    )
+    recomputed = entrypoint(
+        nx.Graph(),
+        site,
+        0,
+        object(),
+        temperature=500.0,
+        n_images=1,
+        lateral_interactions=False,
+    )
+
+    assert first is None
+    assert recomputed is None
+    assert calls == 1
+    assert lateral.stable is None
+    assert lateral.last_failure_reason == (
+        f"{nonconvergence_error.__name__}: forced numerical NEB failure"
+    )
+
+
+@pytest.mark.parametrize(
+    (
+        "reaction_module",
+        "applicability_name",
+        "bare_getter_name",
+        "classifier_name",
+        "stability_name",
+        "entrypoint_name",
+        "nonconvergence_error",
+        "direction",
+    ),
+    [
+        (
+            diffusion_module,
+            "is_diffusion_applicable",
+            "get_diffusion_bare_lateral",
+            "check_diffusion_site_lateral",
+            "check_diffusion_stability",
+            "get_applicable_diffusion_for_member",
+            diffusion_module.NEBNotConvergedError,
+            "a_to_b",
+        ),
+        (
+            bond_module,
+            "is_bond_applicable",
+            "get_bond_bare_lateral",
+            "check_bond_site_lateral",
+            "check_bond_site_stability",
+            "get_applicable_bond_reaction_for_member",
+            bond_module.BondNEBNotConvergedError,
+            "couple",
+        ),
+    ],
+)
+def test_failed_bare_neb_is_not_immediately_repeated_for_same_class(
+    monkeypatch,
+    reaction_module,
+    applicability_name,
+    bare_getter_name,
+    classifier_name,
+    stability_name,
+    entrypoint_name,
+    nonconvergence_error,
+    direction,
+):
+    bare = SimpleNamespace(
+        stable=None,
+        members=[0],
+        lateral_class=0,
+        atoms_neb_path=None,
+    )
+    site = SimpleNamespace(
+        iso_class=13,
+        _member_lc={},
+        applicable_reactions=[],
+    )
+    calls = 0
+
+    monkeypatch.setattr(
+        reaction_module,
+        applicability_name,
+        lambda *_args: (True, direction),
+    )
+    monkeypatch.setattr(
+        reaction_module,
+        bare_getter_name,
+        lambda *_args, **_kwargs: bare,
+    )
+    monkeypatch.setattr(
+        reaction_module,
+        classifier_name,
+        lambda *_args, **_kwargs: bare,
+    )
+
+    def fail_once(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        raise nonconvergence_error("forced bare NEB failure")
+
+    monkeypatch.setattr(reaction_module, stability_name, fail_once)
+
+    reaction = getattr(reaction_module, entrypoint_name)(
+        nx.Graph(),
+        site,
+        0,
+        object(),
+        temperature=500.0,
+        n_images=1,
+        lateral_interactions=True,
+    )
+
+    assert reaction is None
+    assert calls == 1
+    assert bare.stable is None
+    assert bare.last_failure_reason == (
+        f"{nonconvergence_error.__name__}: forced bare NEB failure"
+    )
 
 
 @pytest.mark.parametrize(

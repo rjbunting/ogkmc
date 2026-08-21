@@ -216,12 +216,14 @@ class BondReactionLateral:
     stable : bool | None
         ``True`` when both endpoint relaxations and the NEB converged
         without changing surface / adsorbate connectivity; ``False`` on
-        any stability failure; ``None`` until the check has run.
+        a demonstrated stability failure; ``None`` before evaluation or
+        after an unresolved numerical failure.
     invalid_reason : str | None
         Human-readable explanation of why this lateral class is invalid.
     last_failure_reason : str | None
-        Most recent retryable numerical failure.  Unlike
-        :attr:`invalid_reason`, this does not set :attr:`stable` to ``False``.
+        Most recent numerical failure.  Unlike :attr:`invalid_reason`, this
+        does not set :attr:`stable` to ``False``; instead, the non-empty value
+        suppresses automatic reevaluation of this lateral class.
     """
     lateral_class    : int
     ego_graph        : Any              = None

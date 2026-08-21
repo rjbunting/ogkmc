@@ -63,11 +63,11 @@ class KMCOutputManager:
                     getattr(lateral_class, "_seed_only", False)
                     and not getattr(lateral_class, "members", None)
                 )
-                failed_retryably = bool(
+                failed_numerically = bool(
                     getattr(lateral_class, "last_failure_reason", None)
                 )
                 if (
-                    lateral_class.stable is False or failed_retryably
+                    lateral_class.stable is False or failed_numerically
                 ) and not seed_only:
                     if writer is not None:
                         writer.write_invalid_diffusion(
@@ -117,11 +117,11 @@ class KMCOutputManager:
                     getattr(lateral_class, "_seed_only", False)
                     and not getattr(lateral_class, "members", None)
                 )
-                failed_retryably = bool(
+                failed_numerically = bool(
                     getattr(lateral_class, "last_failure_reason", None)
                 )
                 if (
-                    lateral_class.stable is False or failed_retryably
+                    lateral_class.stable is False or failed_numerically
                 ) and not seed_only:
                     write_invalid = getattr(writer, "write_invalid_bond", None)
                     if callable(write_invalid):
