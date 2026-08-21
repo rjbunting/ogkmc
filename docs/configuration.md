@@ -5,6 +5,13 @@ Every file begins with the top-level `schema_version`, which is currently
 `"1"`. The loader rejects unknown keys, coercible string booleans, nonfinite
 values, invalid enums, and out-of-range values.
 
+The adsorption controls now live in one top-level `adsorption` section.
+Configs using the former `adsorbate_sites` section must rename it and replace
+`fmax`/`max_steps` with `prune_fmax`/`prune_max_steps`. The former
+`kmc.fmax`/`kmc.max_steps` controls are now
+`adsorption.endpoint_fmax`/`adsorption.endpoint_max_steps`. These retired keys
+are rejected rather than silently ignored.
+
 Always validate before launching an expensive run:
 
 ```bash
@@ -354,6 +361,8 @@ it checks the calculator.
 | `smiles` | required | Input SMILES; canonicalized internally. |
 | `add_hydrogens` | `true` | Add implicit hydrogens during molecular construction. |
 | `relax_in_gas` | `true` | Relax gas geometry. If false, a finite single-point energy is still computed. |
+| `fmax` | `0.05` eV/Å | Force threshold for the optional gas-phase relaxation. |
+| `max_steps` | `500` | Optimizer step limit for the optional gas-phase relaxation. |
 | `partial_pressure_bar` | `null` | Species partial pressure; when omitted, inherits `free_energy.pressure_bar`. Zero prevents gas adsorption. |
 | `symmetry_number` | `null` | Optional ideal-gas symmetry-number override. By default it is inferred from the final gas geometry with pymatgen. |
 | `spin` | `null` | Spin value used by ideal-gas thermochemistry. |
@@ -433,13 +442,15 @@ Use an immutable model revision, commit, or digest rather than a mutable alias
 such as `latest`; otherwise a remote artifact could change without the local
 cache or resume contract being able to detect it.
 
-## `adsorbate_sites`
+## `adsorption`
 
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `prune_stable_only` | `true` | Relax one representative per candidate class and retain stable classes. |
-| `fmax` | `0.05` eV/Å | Pruning relaxation threshold. |
-| `max_steps` | `500` | Pruning step limit. |
+| `prune_fmax` | `0.05` eV/Å | Site-pruning relaxation threshold. |
+| `prune_max_steps` | `500` | Site-pruning step limit. |
+| `endpoint_fmax` | `0.05` eV/Å | Occupied/unoccupied endpoint threshold used to construct adsorption/desorption rates. |
+| `endpoint_max_steps` | `200` | Occupied/unoccupied endpoint step limit. |
 | `anchor_k_max` | `4` | Maximum anchor clique size. Four covers atop, bridge, three-fold, and four-fold sites while bounding dense-graph enumeration; set to `null` for legacy unbounded enumeration. |
 | `n_shells_anchor` | `null` | Anchor-environment graph depth; `null` selects it automatically from molecular reach. |
 | `pair_n_shells` | `1` | Local graph depth used to classify multi-anchor molecular placements. |
@@ -452,8 +463,6 @@ cache or resume contract being able to detect it.
 | `temperature_k` | `500.0` K | KMC temperature; must be positive. |
 | `n_steps` | `1000` | Steps to execute in this invocation; may be zero. |
 | `transmission_coefficient` | `1.0` | Non-negative Eyring coefficient. |
-| `fmax` | `0.05` eV/Å | Adsorption endpoint threshold during KMC discovery. |
-| `max_steps` | `200` | Adsorption endpoint step limit. |
 | `log_every` | `100` | Concise KMC progress cadence; `0` disables step messages. |
 | `random_seed` | `69` | Initial random seed. Checkpoint resume restores RNG state. |
 | `lateral_interactions` | `true` | Reclassify local lateral environments after events. |

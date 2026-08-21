@@ -13,6 +13,7 @@ from ase.calculators.singlepoint import SinglePointCalculator
 from ase.io import read as ase_read
 
 from autokmc.sites.anchors import (
+    _build_ego_graph,
     _enumerate_cliques,
     _get_cell,
     _optimise_position,
@@ -46,6 +47,7 @@ from autokmc.sites.diffusion import (
 from autokmc.sites.stability.adsorption import check_adsorbate_site_lateral
 from autokmc.sites.stability.adsorption import check_site_stability
 from autokmc.sites.stability.bond import _select_c_to_ab_mapping
+from autokmc.sites.stability.diffusion import check_diffusion_site_lateral
 
 
 def test_sites_package_exports_public_api():
@@ -750,6 +752,136 @@ def test_diffusion_enumeration_uses_local_surface_shell_without_apsp():
 
     assert sum(len(group) for group in found.values()) == 1
     assert "surface_apsp" not in graph.graph
+
+
+def test_base_adsorption_ego_graph_ignores_live_adsorbate_occupancy():
+    graph = nx.Graph()
+    graph.add_node(1, type="surface", element="Pt")
+    graph.add_node(2, type="surface", element="Pt")
+    graph.add_edge(1, 2)
+    graph.add_node(
+        10,
+        type="adsorbate",
+        element="H",
+        reactant="[H]",
+        iso_class=0,
+        reactant_index=0,
+        clique=frozenset({2}),
+        occupied=False,
+        siblings=(),
+    )
+    graph.add_edge(2, 10, anchor_bond=True)
+
+    bare = _build_ego_graph(graph, frozenset({1}), 2)
+    graph.nodes[10]["occupied"] = True
+    occupied = _build_ego_graph(graph, frozenset({1}), 2)
+
+    assert set(bare) == {1, 2}
+    assert nx.utils.graphs_equal(bare, occupied)
+
+
+def test_diffusion_base_isomorphs_ignore_occupancy_but_lateral_classes_keep_it():
+    graph = nx.cycle_graph(range(1, 7))
+    for surface_id in graph:
+        graph.nodes[surface_id].update(
+            type="surface",
+            element="Pt",
+            position=np.array([float(surface_id), 0.0, 0.0]),
+        )
+
+    site = AdsorbateSite(
+        reactant="[O]",
+        n_atoms=1,
+        atom_cliques=[frozenset({1})],
+        positions=np.zeros((1, 3)),
+        iso_class=0,
+    )
+    site.members = []
+    site.member_node_ids = []
+    site._member_cliques = []
+    for member_index, surface_id in enumerate(range(1, 7)):
+        node_id = 10 + member_index
+        clique = frozenset({surface_id})
+        graph.add_node(
+            node_id,
+            type="adsorbate",
+            element="O",
+            reactant="[O]",
+            iso_class=0,
+            reactant_index=0,
+            clique=clique,
+            occupied=False,
+            siblings=(),
+            position=np.array([float(surface_id), 0.0, 1.8]),
+        )
+        graph.add_edge(node_id, surface_id, anchor_bond=True)
+        site.members.append([clique])
+        site.member_node_ids.append([node_id])
+        site._member_cliques.append((clique,))
+
+    graph.add_node(
+        100,
+        type="adsorbate",
+        element="H",
+        reactant="[H]",
+        iso_class=1,
+        reactant_index=0,
+        clique=frozenset({1}),
+        occupied=False,
+        siblings=(),
+        position=np.array([1.0, 0.0, 1.8]),
+    )
+    graph.add_edge(100, 1, anchor_bond=True)
+
+    bare = find_diffusion_sites(
+        graph,
+        [site],
+        max_hops=1,
+        n_shells_pair=1,
+        prune_by_adsorption_pair=True,
+    )["[O]"]
+    graph.nodes[100]["occupied"] = True
+    occupied = find_diffusion_sites(
+        graph,
+        [site],
+        max_hops=1,
+        n_shells_pair=1,
+        prune_by_adsorption_pair=True,
+    )["[O]"]
+
+    assert len(bare) == len(occupied) == 1
+    assert [len(ds.members) for ds in bare] == [6]
+    assert [len(ds.members) for ds in occupied] == [6]
+
+    diffusion_site = occupied[0]
+    def _member_surface_union(member):
+        site_a, member_a, site_b, member_b = member
+        return (
+            frozenset().union(*site_a._member_cliques[member_a])
+            | frozenset().union(*site_b._member_cliques[member_b])
+        )
+
+    near_index = next(
+        index
+        for index, member in enumerate(diffusion_site.members)
+        if 1 in _member_surface_union(member)
+    )
+    far_index = next(
+        index
+        for index, member in enumerate(diffusion_site.members)
+        if 1 not in _member_surface_union(member)
+    )
+    near_lateral = check_diffusion_site_lateral(
+        graph, diffusion_site, near_index, n_shells=0,
+    )
+    far_lateral = check_diffusion_site_lateral(
+        graph, diffusion_site, far_index, n_shells=0,
+    )
+
+    assert near_lateral is not far_lateral
+    assert sorted(
+        len(lateral.ego_graph) for lateral in diffusion_site.lateral_classes
+    ) == [4, 5]
 
 
 def test_rebuild_bond_reverse_indexes_replaces_old_entries():

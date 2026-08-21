@@ -132,6 +132,8 @@ reactants:
   - smiles: "[C-]#[O+]"
     add_hydrogens: false
     relax_in_gas: true
+    fmax: 0.05
+    max_steps: 500
     partial_pressure_bar: 1.0
     geometry: linear
 
@@ -139,10 +141,12 @@ calculator:
   import_path: ase.calculators.emt.EMT
   kwargs: {}
 
-adsorbate_sites:
+adsorption:
   prune_stable_only: true
-  fmax: 0.05
-  max_steps: 200
+  prune_fmax: 0.05
+  prune_max_steps: 200
+  endpoint_fmax: 0.05
+  endpoint_max_steps: 200
   anchor_k_max: 4
 
 free_energy:
@@ -228,7 +232,8 @@ AutoKMC configs are YAML or TOML files. The main sections are:
 - `reactants`: gas-phase species, SMILES strings, pressures, and gas
   thermochemistry metadata.
 - `calculator`: ASE calculator construction.
-- `adsorbate_sites`: adsorption-site enumeration and stability pruning.
+- `adsorption`: adsorption-site enumeration, stability pruning, and runtime
+  endpoint relaxations.
 - `diffusion`: optional diffusion hops and CI-NEB settings.
 - `bond`: optional bond-changing templates and CI-NEB settings.
 - `free_energy`: optional vibrational thermochemistry.

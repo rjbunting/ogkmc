@@ -201,6 +201,11 @@ class ReactantCfg:
     smiles: str
     add_hydrogens: bool = True
     relax_in_gas:  bool = True
+    #: Force convergence threshold (eV/Å) for the optional gas-phase
+    #: calculator relaxation.
+    fmax: float = 0.05
+    #: Maximum optimizer steps for the optional gas-phase relaxation.
+    max_steps: int = 500
     # These options describe the gas feed and thermochemistry.
     #: Partial pressure of the gas-phase reactant in bar.  Multiplies the
     #: adsorption rate so that ΔG / barriers stay at the 1-bar reference.
@@ -220,10 +225,17 @@ class ReactantCfg:
 
 
 @dataclass
-class AdsorbateSitesCfg:
+class AdsorptionCfg:
+    """Adsorption-site discovery and runtime endpoint controls."""
+
     prune_stable_only: bool = True
-    fmax:              float = PRUNE_FMAX
-    max_steps:         int   = PRUNE_MAX_STEPS
+    prune_fmax:        float = PRUNE_FMAX
+    prune_max_steps:   int   = PRUNE_MAX_STEPS
+    #: Force convergence threshold for occupied/unoccupied lateral-class
+    #: endpoint relaxations used to construct adsorption/desorption rates.
+    endpoint_fmax:      float = 0.05
+    #: Maximum optimizer steps for each adsorption endpoint relaxation.
+    endpoint_max_steps: int = 200
     #: Hard cap on surface anchor-clique size.  Four covers atop, bridge,
     #: three-fold, and four-fold coordination while preventing combinatorial
     #: growth on unusually dense graphs.  Explicit ``null`` restores legacy
@@ -243,8 +255,6 @@ class KMCCfg:
     temperature_k: float = 500.0
     n_steps: int = 1000
     transmission_coefficient: float = DEFAULT_TRANSMISSION_COEFFICIENT
-    fmax: float = 0.05
-    max_steps: int = 200
     log_every: int = 100
     random_seed: int = RANDOM_SEED
     lateral_interactions: bool = True
@@ -420,7 +430,7 @@ class RunConfig:
     structure:        StructureCfg       = field(default_factory=StructureCfg)
     reactants:        list[ReactantCfg]  = field(default_factory=list)
     calculator:       CalculatorCfg      = field(default_factory=CalculatorCfg)
-    adsorbate_sites:  AdsorbateSitesCfg  = field(default_factory=AdsorbateSitesCfg)
+    adsorption:       AdsorptionCfg      = field(default_factory=AdsorptionCfg)
     kmc:              KMCCfg             = field(default_factory=KMCCfg)
     diffusion:        DiffusionCfg       = field(default_factory=DiffusionCfg)
     bond:             BondCfg            = field(default_factory=BondCfg)
@@ -457,7 +467,7 @@ def _coerce(cls, value: Any, *, path: str = ""):
             "optimization":    OptimizationCfg,
             "structure":       StructureCfg,
             "calculator":      CalculatorCfg,
-            "adsorbate_sites": AdsorbateSitesCfg,
+            "adsorption":      AdsorptionCfg,
             "kmc":             KMCCfg,
             "diffusion":       DiffusionCfg,
             "bond":            BondCfg,

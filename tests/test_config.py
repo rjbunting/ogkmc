@@ -9,8 +9,10 @@ from pathlib import Path
 import pytest
 
 from autokmc.io.config import (
+    AdsorptionCfg,
     ConstantsCfg,
     OptimizationCfg,
+    ReactantCfg,
     RunConfig,
     ConfigError,
     load_config,
@@ -63,6 +65,8 @@ def test_load_yaml_ok(tmp_path):
     assert cfg.output.dir == "./out"
     assert cfg.structure.miller_index == (1, 1, 1)
     assert cfg.reactants[0].smiles == "[C-]#[O+]"
+    assert cfg.reactants[0].fmax == pytest.approx(0.05)
+    assert cfg.reactants[0].max_steps == 500
     assert cfg.calculator.import_path == "ase.calculators.emt.EMT"
     assert cfg.kmc.n_steps == 10
     assert cfg.diffusion.enabled is False
@@ -75,7 +79,9 @@ def test_load_yaml_ok(tmp_path):
     assert cfg.bond.neb_min_images == 6
     assert cfg.bond.neb_max_images == 8
     assert cfg.free_energy.symmetry_tolerance == pytest.approx(0.3)
-    assert cfg.adsorbate_sites.anchor_k_max == 4
+    assert cfg.adsorption.anchor_k_max == 4
+    assert cfg.adsorption.endpoint_fmax == pytest.approx(0.05)
+    assert cfg.adsorption.endpoint_max_steps == 200
     assert cfg.output.calculation_cache_lookup_enabled is False
     assert cfg.output.isaac_export_enabled is False
     assert cfg.optimization.optimizer == "lbfgs"
@@ -344,7 +350,7 @@ structure:
   surface_side: both
   surface_radius_factor: 1.1
   nanoparticle_hull_tolerance_factor: 0.6
-adsorbate_sites:
+adsorption:
   n_shells_anchor: 2
   pair_n_shells: 3
   max_pair_shells: 12
@@ -375,9 +381,9 @@ calculator:
     assert cfg.structure.surface_side == "both"
     assert cfg.structure.surface_radius_factor == pytest.approx(1.1)
     assert cfg.structure.nanoparticle_hull_tolerance_factor == pytest.approx(0.6)
-    assert cfg.adsorbate_sites.n_shells_anchor == 2
-    assert cfg.adsorbate_sites.pair_n_shells == 3
-    assert cfg.adsorbate_sites.max_pair_shells == 12
+    assert cfg.adsorption.n_shells_anchor == 2
+    assert cfg.adsorption.pair_n_shells == 3
+    assert cfg.adsorption.max_pair_shells == 12
 
 
 def test_all_options_template_lists_every_shared_constant():
@@ -391,11 +397,17 @@ def test_all_options_template_lists_every_shared_constant():
     assert set(raw["optimization"]) == {
         item.name for item in fields(OptimizationCfg)
     }
+    assert set(raw["adsorption"]) == {
+        item.name for item in fields(AdsorptionCfg)
+    }
+    assert set(raw["reactants"][0]) == {
+        item.name for item in fields(ReactantCfg)
+    }
     assert cfg.structure.goal_x == pytest.approx(10.0)
     assert cfg.structure.goal_y == pytest.approx(10.0)
     assert cfg.structure.extra_kwargs["orthogonalise"] is False
     assert cfg.structure.surface_side == "top"
-    assert cfg.adsorbate_sites.max_pair_shells == 10
+    assert cfg.adsorption.max_pair_shells == 10
 
 
 @pytest.mark.parametrize(
@@ -563,6 +575,35 @@ def test_unknown_key_raises(tmp_path):
         load_config(p)
 
 
+@pytest.mark.parametrize(
+    ("fragment", "message"),
+    [
+        ("adsorbate_sites:\n  prune_stable_only: true\n", "adsorbate_sites"),
+        ("adsorption:\n  fmax: 0.05\n", "adsorption.*fmax"),
+        ("adsorption:\n  max_steps: 200\n", "adsorption.*max_steps"),
+        ("kmc:\n  fmax: 0.05\n", "kmc.*fmax"),
+        ("kmc:\n  max_steps: 200\n", "kmc.*max_steps"),
+    ],
+)
+def test_retired_adsorption_convergence_keys_are_rejected(
+    tmp_path,
+    fragment,
+    message,
+):
+    pytest.importorskip("yaml")
+    path = _write(
+        tmp_path,
+        "schema_version: '1'\n"
+        "reactants:\n"
+        "  - smiles: '[O]'\n"
+        + CALCULATOR_YAML
+        + fragment,
+    )
+
+    with pytest.raises(ConfigError, match=message):
+        load_config(path)
+
+
 def test_schema_version_mismatch(tmp_path):
     pytest.importorskip("yaml")
     p = _write(tmp_path, YAML_OK.replace('"1"', '"99"'))
@@ -697,14 +738,20 @@ def test_missing_file():
         "bond:\n  neb_image_spacing: -0.1\n",
         "bond:\n  neb_min_images: 5\n  neb_max_images: 4\n",
         "kmc:\n  temperature_k: 0\n",
+        "reactants:\n  - smiles: '[O]'\n    fmax: 0\n",
+        "reactants:\n  - smiles: '[O]'\n    max_steps: 0\n",
         "free_energy:\n  vibration_nfree: 3\n",
         "free_energy:\n  symmetry_tolerance: 0\n",
         "free_energy:\n  pressure_bar: -0.1\n",
-        "adsorbate_sites:\n  anchor_k_max: 0\n",
-        "adsorbate_sites:\n  anchor_k_max: true\n",
-        "adsorbate_sites:\n  n_shells_anchor: -1\n",
-        "adsorbate_sites:\n  pair_n_shells: -1\n",
-        "adsorbate_sites:\n  max_pair_shells: -1\n",
+        "adsorption:\n  anchor_k_max: 0\n",
+        "adsorption:\n  anchor_k_max: true\n",
+        "adsorption:\n  n_shells_anchor: -1\n",
+        "adsorption:\n  pair_n_shells: -1\n",
+        "adsorption:\n  max_pair_shells: -1\n",
+        "adsorption:\n  prune_fmax: 0\n",
+        "adsorption:\n  prune_max_steps: 0\n",
+        "adsorption:\n  endpoint_fmax: 0\n",
+        "adsorption:\n  endpoint_max_steps: 0\n",
         "structure:\n  miller_index: [1, 1, 1.0]\n",
         "structure:\n  surface_side: sideways\n",
         "structure:\n  surface_radius_factor: 0\n",
@@ -801,13 +848,13 @@ def test_explicit_null_anchor_clique_cap_restores_unbounded_mode(tmp_path):
         "reactants:\n"
         "  - smiles: '[O]'\n"
         + CALCULATOR_YAML
-        + "adsorbate_sites:\n"
+        + "adsorption:\n"
         "  anchor_k_max: null\n",
     )
 
     cfg = load_config(path)
 
-    assert cfg.adsorbate_sites.anchor_k_max is None
+    assert cfg.adsorption.anchor_k_max is None
 
 
 def test_zero_default_partial_pressure_is_allowed(tmp_path):

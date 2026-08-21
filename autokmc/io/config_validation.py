@@ -495,6 +495,8 @@ class _Validator:
                 self.fail(f"{prefix}.smiles must be a non-empty string")
             self.boolean(reactant.add_hydrogens, f"{prefix}.add_hydrogens")
             self.boolean(reactant.relax_in_gas, f"{prefix}.relax_in_gas")
+            self.number(reactant.fmax, f"{prefix}.fmax", strictly_positive=True)
+            self.integer(reactant.max_steps, f"{prefix}.max_steps", minimum=1)
             if reactant.partial_pressure_bar is not None:
                 self.number(
                     reactant.partial_pressure_bar,
@@ -543,41 +545,51 @@ class _Validator:
                 )
             seen[canonical] = index
 
-    def adsorbate_sites(self, cfg: Any) -> None:
+    def adsorption(self, cfg: Any) -> None:
         self.boolean(
             cfg.prune_stable_only,
-            "adsorbate_sites.prune_stable_only",
+            "adsorption.prune_stable_only",
         )
         self.number(
-            cfg.fmax,
-            "adsorbate_sites.fmax",
+            cfg.prune_fmax,
+            "adsorption.prune_fmax",
             strictly_positive=True,
         )
         self.integer(
-            cfg.max_steps,
-            "adsorbate_sites.max_steps",
+            cfg.prune_max_steps,
+            "adsorption.prune_max_steps",
+            minimum=1,
+        )
+        self.number(
+            cfg.endpoint_fmax,
+            "adsorption.endpoint_fmax",
+            strictly_positive=True,
+        )
+        self.integer(
+            cfg.endpoint_max_steps,
+            "adsorption.endpoint_max_steps",
             minimum=1,
         )
         if cfg.anchor_k_max is not None:
             self.integer(
                 cfg.anchor_k_max,
-                "adsorbate_sites.anchor_k_max",
+                "adsorption.anchor_k_max",
                 minimum=1,
             )
         if cfg.n_shells_anchor is not None:
             self.integer(
                 cfg.n_shells_anchor,
-                "adsorbate_sites.n_shells_anchor",
+                "adsorption.n_shells_anchor",
                 minimum=0,
             )
         self.integer(
             cfg.pair_n_shells,
-            "adsorbate_sites.pair_n_shells",
+            "adsorption.pair_n_shells",
             minimum=0,
         )
         self.integer(
             cfg.max_pair_shells,
-            "adsorbate_sites.max_pair_shells",
+            "adsorption.max_pair_shells",
             minimum=0,
         )
 
@@ -593,8 +605,6 @@ class _Validator:
             "kmc.transmission_coefficient",
             minimum=0.0,
         )
-        self.number(cfg.fmax, "kmc.fmax", strictly_positive=True)
-        self.integer(cfg.max_steps, "kmc.max_steps", minimum=1)
         self.integer(cfg.log_every, "kmc.log_every", minimum=0)
         self.integer(cfg.random_seed, "kmc.random_seed", minimum=0)
         self.boolean(cfg.lateral_interactions, "kmc.lateral_interactions")
@@ -842,7 +852,7 @@ class _Validator:
         self.optimization(cfg.optimization)
         self.structure(cfg.structure)
         self.reactants(cfg.reactants)
-        self.adsorbate_sites(cfg.adsorbate_sites)
+        self.adsorption(cfg.adsorption)
         self.kmc(cfg.kmc)
         self.diffusion(cfg.diffusion)
         self.bond(cfg.bond)

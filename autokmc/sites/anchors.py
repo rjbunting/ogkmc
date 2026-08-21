@@ -305,7 +305,7 @@ def _mic_unwrap(
 
 
 # ---------------------------------------------------------------------------
-# Ego-graph (BFS ignoring invisible nodes)
+# Ego-graph (substrate-only BFS)
 # ---------------------------------------------------------------------------
 
 def _build_ego_graph(
@@ -320,8 +320,10 @@ def _build_ego_graph(
 
     * ``type == "anchor"``          — anchor bookkeeping nodes; would
       short-circuit between every clique that touches the same surface atom.
-    * ``type == "adsorbate"`` **and** ``occupied == False`` — unoccupied
-      adsorbate placeholder; becomes visible once ``occupied=True``.
+    * ``type == "adsorbate"`` — both occupied adsorbates and unoccupied
+      placeholders.  Base adsorption iso-classes describe the substrate;
+      live adsorbate occupancy is classified separately by the lateral-site
+      machinery.
     """
     frontier: set = set(clique)
     visited:  set = set(clique)
@@ -331,9 +333,7 @@ def _build_ego_graph(
             for nb in G.neighbors(n):
                 d = G.nodes[nb]
                 t = d.get("type")
-                if t == "anchor":
-                    continue
-                if t == "adsorbate" and not d.get("occupied", False):
+                if t in ("anchor", "adsorbate"):
                     continue
                 nxt.add(nb)
         frontier = nxt - visited

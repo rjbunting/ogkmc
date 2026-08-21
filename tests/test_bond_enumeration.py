@@ -9,6 +9,7 @@ import autokmc.sites.bond as bond_module
 from autokmc.sites.adsorbate import AdsorbateSite
 from autokmc.sites.bond import BondReactionTemplate, find_bond_sites
 from autokmc.sites.identity import site_identifier
+from autokmc.sites.stability.bond import check_bond_site_lateral
 
 
 _LEGACY_PATH_IDENTIFIERS = [
@@ -128,6 +129,49 @@ def test_equivalent_triples_materialise_one_full_graph_per_iso_class(
 
     assert sum(len(site.members) for site in found) == 20
     assert full_graph_builds == len(found) == 10
+
+
+def test_bond_base_isomorphs_ignore_occupancy_but_lateral_classes_keep_it():
+    graph, sites, template = _path_triple_fixture()
+    bare = _enumerate_path_fixture(graph, sites, template)
+    bare_ids = [site_identifier(site) for site in bare]
+    bare_member_counts = [len(site.members) for site in bare]
+
+    graph.add_node(
+        99,
+        type="adsorbate",
+        element="H",
+        reactant="[H]",
+        iso_class=1,
+        reactant_index=0,
+        clique=frozenset({1}),
+        occupied=True,
+        siblings=(),
+        position=np.array([1.0, 0.0, 1.0]),
+    )
+    graph.add_edge(99, 1, anchor_bond=True)
+
+    occupied = _enumerate_path_fixture(graph, sites, template)
+
+    assert [site_identifier(site) for site in occupied] == bare_ids
+    assert [len(site.members) for site in occupied] == bare_member_counts
+
+    pruned = bond_module._prune_one_per_adsorption_triple(occupied)
+    assert len(pruned) == 1
+    assert len(pruned[0].members) == 2
+
+    bond_site = pruned[0]
+    near_lateral = check_bond_site_lateral(
+        graph, bond_site, 0, n_shells=0,
+    )
+    far_lateral = check_bond_site_lateral(
+        graph, bond_site, 1, n_shells=0,
+    )
+
+    assert near_lateral is not far_lateral
+    assert sorted(
+        len(lateral.ego_graph) for lateral in bond_site.lateral_classes
+    ) == [5, 6]
 
 
 def test_forced_wl_collision_still_uses_exact_graph_matcher(monkeypatch):

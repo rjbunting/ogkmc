@@ -333,8 +333,6 @@ def execute_kmc_stage(
                 n_steps=settings.n_steps,
                 transmission_coefficient=settings.transmission_coefficient,
                 frozen_indices=context.frozen_indices,
-                fmax=settings.fmax,
-                max_steps=settings.max_steps,
                 log_every=settings.log_every,
                 progress=progress_enabled,
                 verbose=verbose,
@@ -344,6 +342,7 @@ def execute_kmc_stage(
                 optimizer_kwargs=cfg.optimization.optimizer_kwargs,
             ),
             channels=KMCChannels(
+                adsorption_options=channels.adsorption,
                 diffusion_sites=network.diffusion_sites,
                 diffusion_options=(
                     channels.diffusion or DiffusionChannelOptions()
@@ -395,8 +394,8 @@ def execute_kmc_stage(
                 n_steps=settings.n_steps,
                 transmission_coefficient=settings.transmission_coefficient,
                 frozen_indices=context.frozen_indices,
-                fmax=settings.fmax,
-                max_steps=settings.max_steps,
+                fmax=channels.adsorption.fmax,
+                max_steps=channels.adsorption.max_steps,
                 rng=settings.random_seed,
                 log_every=settings.log_every,
                 verbose=verbose,

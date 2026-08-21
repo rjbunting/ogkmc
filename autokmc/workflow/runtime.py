@@ -28,6 +28,7 @@ from autokmc.workflow.models import (
     ThermoRuntime,
 )
 from autokmc.kmc.models import (
+    AdsorptionChannelOptions,
     BondChannelOptions,
     BondGrowthOptions,
     DiffusionChannelOptions,
@@ -343,7 +344,11 @@ def resolve_thermo_runtime(cfg, identity: RunIdentity) -> ThermoRuntime:
 
 
 def resolve_channel_runtime(cfg, frozen_indices: list[int] | None) -> ChannelRuntimeOptions:
-    """Build the three typed keyword groups formerly assembled in the CLI."""
+    """Build the typed reaction-channel option groups."""
+    adsorption = AdsorptionChannelOptions(
+        fmax=cfg.adsorption.endpoint_fmax,
+        max_steps=cfg.adsorption.endpoint_max_steps,
+    )
     diffusion = None
     if cfg.diffusion.enabled:
         d = cfg.diffusion
@@ -425,9 +430,9 @@ def resolve_channel_runtime(cfg, frozen_indices: list[int] | None) -> ChannelRun
                 cfg.constants.adsorbate_bond_tolerance
             ),
             adsorbate_n_shells_anchor=(
-                cfg.adsorbate_sites.n_shells_anchor
+                cfg.adsorption.n_shells_anchor
             ),
-            adsorbate_n_shells_pair=cfg.adsorbate_sites.pair_n_shells,
+            adsorbate_n_shells_pair=cfg.adsorption.pair_n_shells,
             co_bond_factor=cfg.constants.co_bond_factor,
             anchor_bond_factor=cfg.constants.anchor_bond_factor,
             anchor_repulsion_weight=(
@@ -447,16 +452,18 @@ def resolve_channel_runtime(cfg, frozen_indices: list[int] | None) -> ChannelRun
                 cfg.constants.typical_neighbor_distance
             ),
             adsorbate_max_pair_shells=(
-                cfg.adsorbate_sites.max_pair_shells
+                cfg.adsorption.max_pair_shells
             ),
             anchor_hull_tolerance=cfg.constants.anchor_hull_tolerance,
             kabsch_max_mappings=cfg.constants.kabsch_max_mappings,
             bond_pair_n_shells=b.pair_n_shells,
             bond_prune_by_triple=b.prune_by_triple,
             bond_prune_with_calculator=b.prune_with_calculator,
-            prune_fmax=b.prune_fmax,
-            prune_max_steps=b.prune_max_steps,
-            anchor_k_max=cfg.adsorbate_sites.anchor_k_max,
+            adsorption_prune_fmax=cfg.adsorption.prune_fmax,
+            adsorption_prune_max_steps=cfg.adsorption.prune_max_steps,
+            bond_prune_fmax=b.prune_fmax,
+            bond_prune_max_steps=b.prune_max_steps,
+            anchor_k_max=cfg.adsorption.anchor_k_max,
             bond_types=tuple(b.bond_types),
             include_ring_bonds=b.include_ring_bonds,
             include_homo_coupling=b.include_homo_coupling,
@@ -474,6 +481,7 @@ def resolve_channel_runtime(cfg, frozen_indices: list[int] | None) -> ChannelRun
         )
 
     return ChannelRuntimeOptions(
+        adsorption=adsorption,
         diffusion=diffusion,
         bond=bond,
         bond_growth=bond_growth,

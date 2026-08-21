@@ -265,9 +265,9 @@ class AdsorbateSite:
             [G.nodes[n] for n in member_node_ids[k]]
 
     ego_graph : nx.Graph | None
-        The ``n_shells_pair`` ego-subgraph (built around the union of
-        bonded cliques *plus* occupied neighbour chains) that defines this
-        iso-class.
+        The substrate-only ``n_shells_pair`` ego-subgraph built around the
+        union of bonded cliques.  Live occupied neighbours are deliberately
+        excluded here and represented by :class:`AdsorbateSiteLateral`.
     """
 
     reactant        : str

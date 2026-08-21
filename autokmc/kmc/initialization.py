@@ -83,6 +83,7 @@ def normalise_channels(
             free_energy_temperature_k = float(legacy_temperature)
 
     normalised = KMCChannels(
+        adsorption_options=channels.adsorption_options,
         diffusion_sites=list(channels.diffusion_sites),
         diffusion_options=channels.diffusion_options,
         bond_sites=list(channels.bond_sites),
@@ -161,8 +162,8 @@ def initialise_runtime(
         temperature=settings.temperature,
         transmission_coefficient=settings.transmission_coefficient,
         frozen_indices=settings.frozen_indices,
-        fmax=settings.fmax,
-        max_steps=settings.max_steps,
+        fmax=channels.adsorption_options.fmax,
+        max_steps=channels.adsorption_options.max_steps,
         optimizer=settings.optimizer,
         optimizer_kwargs=settings.optimizer_kwargs,
         verbose=settings.verbose,

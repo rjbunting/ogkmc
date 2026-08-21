@@ -14,7 +14,7 @@ from autokmc.analysis.products import analyze_run
 from autokmc.cli.pipeline import run_from_config
 from autokmc.io.calculators import CalculatorCfg
 from autokmc.io.config import (
-    AdsorbateSitesCfg,
+    AdsorptionCfg,
     ConstantsCfg,
     FreeEnergyCfg,
     KMCCfg,
@@ -282,6 +282,8 @@ def test_fresh_run_from_config_orchestrates_all_nonoptional_stages(
     def build_reactant(smiles, **kwargs):
         calls.append("build_reactant")
         assert kwargs["relax"] is False
+        assert kwargs["fmax"] == pytest.approx(0.012)
+        assert kwargs["steps"] == 77
         assert kwargs["nl_mult"] == pytest.approx(0.77)
         assert kwargs["random_seed"] == 19
         return Reactant(
@@ -296,6 +298,8 @@ def test_fresh_run_from_config_orchestrates_all_nonoptional_stages(
         nonlocal built_site
         calls.append("find_adsorbate_sites")
         assert kwargs["prune_stable_only"] is False
+        assert kwargs["prune_fmax"] == pytest.approx(0.023)
+        assert kwargs["prune_max_steps"] == 88
         assert kwargs["anchor_k_max"] == 4
         assert {
             key: kwargs[key]
@@ -359,6 +363,8 @@ def test_fresh_run_from_config_orchestrates_all_nonoptional_stages(
         assert sites == [built_site]
         assert len(reactants) == 1
         assert kwargs["n_steps"] == 2
+        assert kwargs["fmax"] == pytest.approx(0.034)
+        assert kwargs["max_steps"] == 99
         assert kwargs["diffusion_sites"] == []
         assert kwargs["bond_sites"] is None
         assert kwargs["calculation_cache_root"] is None
@@ -444,12 +450,18 @@ def test_fresh_run_from_config_orchestrates_all_nonoptional_stages(
                 smiles="[O]",
                 add_hydrogens=False,
                 relax_in_gas=False,
+                fmax=0.012,
+                max_steps=77,
                 partial_pressure_bar=None,
             )
         ],
         calculator=CalculatorCfg(import_path="ase.calculators.emt.EMT"),
-        adsorbate_sites=AdsorbateSitesCfg(
+        adsorption=AdsorptionCfg(
             prune_stable_only=False,
+            prune_fmax=0.023,
+            prune_max_steps=88,
+            endpoint_fmax=0.034,
+            endpoint_max_steps=99,
             n_shells_anchor=2,
             pair_n_shells=3,
             max_pair_shells=6,

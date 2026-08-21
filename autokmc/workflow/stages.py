@@ -45,7 +45,7 @@ def summarize_sites(sites: list) -> tuple[int, int]:
 def configured_adsorbate_site_kwargs(cfg) -> dict:
     """Resolve every configured adsorbate-site discovery control."""
     constants = cfg.constants
-    settings = cfg.adsorbate_sites
+    settings = cfg.adsorption
     return {
         "bond_tolerance": constants.adsorbate_bond_tolerance,
         "n_shells_anchor": settings.n_shells_anchor,
@@ -64,8 +64,8 @@ def configured_adsorbate_site_kwargs(cfg) -> dict:
         "kabsch_max_mappings": constants.kabsch_max_mappings,
         "nl_mult": constants.neighbor_list_multiplier,
         "prune_stable_only": settings.prune_stable_only,
-        "prune_fmax": settings.fmax,
-        "prune_max_steps": settings.max_steps,
+        "prune_fmax": settings.prune_fmax,
+        "prune_max_steps": settings.prune_max_steps,
         "optimizer": cfg.optimization.optimizer,
         "optimizer_kwargs": cfg.optimization.optimizer_kwargs,
     }
@@ -370,6 +370,8 @@ def prepare_reactants(
                 add_hydrogens=reactant_cfg.add_hydrogens,
                 calculator=calculator_resource,
                 relax=reactant_cfg.relax_in_gas,
+                fmax=reactant_cfg.fmax,
+                steps=reactant_cfg.max_steps,
                 nl_mult=cfg.constants.neighbor_list_multiplier,
                 random_seed=cfg.kmc.random_seed,
                 free_energy_options=(
@@ -415,7 +417,7 @@ def prepare_adsorbate_sites(
     if identity.resume_state is not None:
         return list(identity.resume_state.adsorbate_sites)
 
-    settings = cfg.adsorbate_sites
+    settings = cfg.adsorption
     site_kwargs = configured_adsorbate_site_kwargs(cfg)
     all_sites: list = []
     for reactant in reactants:

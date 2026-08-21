@@ -38,6 +38,8 @@ reactants:
   - smiles: "[C-]#[O+]"
     add_hydrogens: false
     relax_in_gas: true
+    fmax: 0.05
+    max_steps: 500
     partial_pressure_bar: 1.0
     spin: 0.0
     geometry: linear
@@ -83,10 +85,12 @@ optimization:
   # exhausted before reaching that force threshold.
   neb_low_barrier_fmax: 0.1
 
-adsorbate_sites:
+adsorption:
   prune_stable_only: true
-  fmax: 0.05
-  max_steps: 500
+  prune_fmax: 0.05
+  prune_max_steps: 500
+  endpoint_fmax: 0.05
+  endpoint_max_steps: 1000
   anchor_k_max: 4
   pair_n_shells: 1
   max_pair_shells: 10
@@ -100,8 +104,6 @@ kmc:
   temperature_k: 500.0
   n_steps: 10000
   transmission_coefficient: 1.0
-  fmax: 0.05
-  max_steps: 1000
   log_every: 100
   random_seed: 69
   # Keep this example focused on the isolated-CO channel set.

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from autokmc.kmc.models import (
+    AdsorptionChannelOptions,
     BondChannelOptions,
     BondGrowthOptions,
     DiffusionChannelOptions,
@@ -82,6 +83,9 @@ class ThermoRuntime:
 class ChannelRuntimeOptions:
     """Typed home for the keyword groups consumed by reaction channels."""
 
+    adsorption: AdsorptionChannelOptions = field(
+        default_factory=AdsorptionChannelOptions
+    )
     diffusion: DiffusionChannelOptions | None = None
     bond: BondChannelOptions | None = None
     bond_growth: BondGrowthOptions | None = None

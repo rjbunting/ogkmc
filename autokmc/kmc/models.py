@@ -102,6 +102,24 @@ def _options_from_mapping(cls, values: Mapping[str, Any] | None):
 
 
 @dataclass(frozen=True)
+class AdsorptionChannelOptions:
+    """Occupied/unoccupied endpoint controls for adsorption rates."""
+
+    fmax: float = 0.05
+    max_steps: int = 200
+
+    @classmethod
+    def from_mapping(
+        cls,
+        values: Mapping[str, Any] | None,
+    ) -> AdsorptionChannelOptions:
+        return _options_from_mapping(cls, values)
+
+    def to_kwargs(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class DiffusionChannelOptions:
     """Typed NEB and rate controls for the diffusion channel."""
 
@@ -192,8 +210,12 @@ class BondGrowthOptions:
     bond_max_hops: int = BOND_MAX_HOPS
     nl_mult: float = NL_MULT_DEFAULT
     random_seed: int = RANDOM_SEED
-    prune_fmax: float = PRUNE_FMAX
-    prune_max_steps: int = PRUNE_MAX_STEPS
+    adsorption_prune_fmax: float = PRUNE_FMAX
+    adsorption_prune_max_steps: int = PRUNE_MAX_STEPS
+    bond_prune_fmax: float = PRUNE_FMAX
+    bond_prune_max_steps: int = PRUNE_MAX_STEPS
+    reactant_fmax: float = 0.05
+    reactant_max_steps: int = 500
     anchor_k_max: int | None = None
     adsorbate_bond_tolerance: float = BOND_TOLERANCE
     adsorbate_n_shells_anchor: int | None = None
@@ -246,8 +268,6 @@ class KMCSettings:
     n_steps: int
     transmission_coefficient: float = DEFAULT_TRANSMISSION_COEFFICIENT
     frozen_indices: list[int] | None = None
-    fmax: float = 0.05
-    max_steps: int = 200
     log_every: int = 100
     progress: bool | None = None
     verbose: bool = True
@@ -281,6 +301,7 @@ class KMCChannels:
     dataclass.
     """
 
+    adsorption_options: AdsorptionChannelOptions
     diffusion_sites: list[DiffusionSite]
     diffusion_options: DiffusionChannelOptions
     bond_sites: list[BondReactionSite]
@@ -295,6 +316,7 @@ class KMCChannels:
 
     def __init__(
         self,
+        adsorption_options: AdsorptionChannelOptions | None = None,
         diffusion_sites: Iterable[DiffusionSite] | None = None,
         diffusion_options: DiffusionChannelOptions | None = None,
         bond_sites: Iterable[BondReactionSite] | None = None,
@@ -343,6 +365,7 @@ class KMCChannels:
             for key in tuple(growth_values)
             if key in growth_reserved
         }
+        self.adsorption_options = adsorption_options or AdsorptionChannelOptions()
         self.diffusion_sites = list(diffusion_sites or [])
         self.diffusion_options = diffusion_options or DiffusionChannelOptions.from_mapping(
             diffusion_values
@@ -501,6 +524,7 @@ class KMCRunResult:
 
 
 __all__ = [
+    "AdsorptionChannelOptions",
     "BondChannelOptions",
     "BondGrowthOptions",
     "CalculatorResource",

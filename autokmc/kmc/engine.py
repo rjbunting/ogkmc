@@ -11,6 +11,7 @@ import numpy as np
 from autokmc.kmc.execute import execute_reaction
 from autokmc.kmc.expansion import expand_bond_sites_after_event
 from autokmc.kmc.models import (
+    AdsorptionChannelOptions,
     BondChannelOptions,
     DiffusionChannelOptions,
     KMCChannels,
@@ -157,8 +158,6 @@ def run_kmc_steps(
             n_steps=n_steps,
             transmission_coefficient=transmission_coefficient,
             frozen_indices=frozen_indices,
-            fmax=fmax,
-            max_steps=max_steps,
             log_every=log_every,
             progress=verbose if progress is None else progress,
             verbose=verbose,
@@ -166,6 +165,10 @@ def run_kmc_steps(
             lateral_shells=lateral_shells,
         ),
         channels=KMCChannels(
+            adsorption_options=AdsorptionChannelOptions(
+                fmax=fmax,
+                max_steps=max_steps,
+            ),
             diffusion_sites=list(diffusion_sites or []),
             diffusion_options=DiffusionChannelOptions.from_mapping(
                 diffusion_values

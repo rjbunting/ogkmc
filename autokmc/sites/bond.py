@@ -872,19 +872,8 @@ def _build_triple_ego_graph(
     visited_c = _surface_bfs_shells(G, c_clique_union, n_shells_c)
     visited: set = (set(visited_a) | set(visited_b) | set(visited_c)) - endpoint_ids
 
-    # Other occupied adsorbate leaves adjacent to the BFS set.
-    ads_leaves: set = set()
-    for n in visited:
-        for nb in G.neighbors(n):
-            if nb in visited or nb in endpoint_ids:
-                continue
-            d = G.nodes[nb]
-            if d.get("type") != "adsorbate":
-                continue
-            if d.get("occupied", False):
-                ads_leaves.add(nb)
-
-    result = G.subgraph(visited | ads_leaves).copy()
+    # Other occupied adsorbates belong to the later lateral classification.
+    result = G.subgraph(visited).copy()
 
     # Stamp each endpoint placement with its role label.
     for ids, role in endpoint_lists:
@@ -961,27 +950,6 @@ def _triple_match_label(
     )
 
 
-def _occupied_adsorbates_by_surface(
-    G: nx.Graph,
-) -> dict[int, tuple[int, ...]]:
-    """Precompute occupied adsorbate leaves adjacent to each surface node."""
-    result: dict[int, tuple[int, ...]] = {}
-    for node_id, data in G.nodes(data=True):
-        if data.get("type") != "surface":
-            continue
-        occupied = tuple(sorted(
-            int(neighbour)
-            for neighbour in G.neighbors(node_id)
-            if (
-                G.nodes[neighbour].get("type") == "adsorbate"
-                and G.nodes[neighbour].get("occupied", False)
-            )
-        ))
-        if occupied:
-            result[int(node_id)] = occupied
-    return result
-
-
 def _build_triple_ego_blueprint(
     G: nx.Graph,
     record_a: _PlacementRecord,
@@ -989,9 +957,8 @@ def _build_triple_ego_blueprint(
     record_c: _PlacementRecord | None,
     *,
     is_symmetric: bool,
-    occupied_by_surface: dict[int, tuple[int, ...]],
 ) -> _TripleEgoBlueprint:
-    """Build the labelled topology of a triple without copying a graph."""
+    """Build an occupancy-independent triple topology without copying a graph."""
     role_a = "ab" if is_symmetric else "a"
     role_b = "ab" if is_symmetric else "b"
     endpoint_records = (
@@ -1011,12 +978,7 @@ def _build_triple_ego_blueprint(
         | set(record_b.surface_shell)
         | (set(record_c.surface_shell) if record_c is not None else set())
     ) - endpoint_ids
-    occupied_leaves: set[int] = set()
-    for surface_id in visited:
-        occupied_leaves.update(occupied_by_surface.get(int(surface_id), ()))
-    occupied_leaves.difference_update(endpoint_ids)
-
-    base_nodes = visited | occupied_leaves
+    base_nodes = visited
     labels: dict[int, tuple[str, str, int, str, int, str]] = {}
     for node_id in base_nodes:
         labels[int(node_id)] = _triple_match_label(G.nodes[node_id])
@@ -1429,7 +1391,6 @@ def find_bond_sites(
         for smiles, records in records_by_smiles.items()
     }
     nearby_lookup = _NearbyPlacementLookup(G, surface_index_by_smiles)
-    occupied_by_surface = _occupied_adsorbates_by_surface(G)
 
     def _full_ego_graph(
         record_a: _PlacementRecord,
@@ -1549,7 +1510,6 @@ def find_bond_sites(
                     record_b,
                     record_c,
                     is_symmetric=tpl.is_symmetric,
-                    occupied_by_surface=occupied_by_surface,
                 )
             except Exception as exc:  # pragma: no cover
                 _log.debug(

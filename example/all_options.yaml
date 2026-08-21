@@ -341,6 +341,11 @@ reactants:
     # Relax the isolated molecule. false still evaluates a single-point energy.
     relax_in_gas: true
 
+    # Force threshold in eV/angstrom and optimizer step limit for the optional
+    # gas-phase calculator relaxation.
+    fmax: 0.05
+    max_steps: 500
+
     # Species partial pressure in bar. null inherits free_energy.pressure_bar;
     # an explicit value overrides it, and zero disables gas adsorption.
     partial_pressure_bar: null
@@ -404,15 +409,20 @@ calculator:
 
 
 # ---------------------------------------------------------------------------
-# Adsorption-site discovery
+# Adsorption-site discovery and runtime endpoints
 # ---------------------------------------------------------------------------
-adsorbate_sites:
+adsorption:
   # Relax one representative of each candidate class and retain stable classes.
   prune_stable_only: true
 
   # Force threshold in eV/angstrom and optimizer step limit for pruning.
-  fmax: 0.05
-  max_steps: 500
+  prune_fmax: 0.05
+  prune_max_steps: 500
+
+  # Force threshold and optimizer step limit for the occupied/unoccupied
+  # endpoint relaxations used to construct adsorption/desorption rates.
+  endpoint_fmax: 0.05
+  endpoint_max_steps: 200
 
   # Maximum surface anchor-clique size. Four covers atop, bridge, three-fold,
   # and four-fold sites. null restores unbounded enumeration and may be costly.
@@ -484,11 +494,6 @@ kmc:
 
   # Non-negative transmission coefficient in the Eyring rate expression.
   transmission_coefficient: 1.0
-
-  # Force threshold in eV/angstrom and optimizer step limit used for adsorption
-  # endpoint discovery during KMC.
-  fmax: 0.05
-  max_steps: 200
 
   # Print concise progress every N events; zero disables progress messages.
   log_every: 10

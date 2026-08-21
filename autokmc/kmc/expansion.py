@@ -424,8 +424,10 @@ def _ensure_species_known(
     frozen_indices: list[int] | None,
     nl_mult: float,
     random_seed: int,
-    prune_fmax: float,
-    prune_max_steps: int,
+    adsorption_prune_fmax: float,
+    adsorption_prune_max_steps: int,
+    reactant_fmax: float,
+    reactant_max_steps: int,
     optimizer: str,
     optimizer_kwargs: dict[str, Any] | None,
     anchor_k_max: int | None,
@@ -495,6 +497,8 @@ def _ensure_species_known(
                     smi,
                     calculator=calculator,
                     add_hydrogens=add_hydrogens,
+                    fmax=reactant_fmax,
+                    steps=reactant_max_steps,
                     nl_mult=nl_mult,
                     random_seed=random_seed,
                     partial_pressure_bar=0.0,
@@ -542,8 +546,8 @@ def _ensure_species_known(
             prune_stable_only=True,
             calculator=calculator,
             frozen_indices=frozen_indices,
-            prune_fmax=prune_fmax,
-            prune_max_steps=prune_max_steps,
+            prune_fmax=adsorption_prune_fmax,
+            prune_max_steps=adsorption_prune_max_steps,
             optimizer=optimizer,
             optimizer_kwargs=optimizer_kwargs,
             verbose=verbose,
@@ -572,8 +576,12 @@ def expand_bond_sites_for_new_species(
     bond_max_hops: int = BOND_MAX_HOPS,
     nl_mult: float = NL_MULT_DEFAULT,
     random_seed: int = RANDOM_SEED,
-    prune_fmax: float = PRUNE_FMAX,
-    prune_max_steps: int = PRUNE_MAX_STEPS,
+    adsorption_prune_fmax: float = PRUNE_FMAX,
+    adsorption_prune_max_steps: int = PRUNE_MAX_STEPS,
+    bond_prune_fmax: float = PRUNE_FMAX,
+    bond_prune_max_steps: int = PRUNE_MAX_STEPS,
+    reactant_fmax: float = 0.05,
+    reactant_max_steps: int = 500,
     optimizer: str = DEFAULT_OPTIMIZER,
     optimizer_kwargs: dict[str, Any] | None = None,
     anchor_k_max: int | None = None,
@@ -649,9 +657,12 @@ def expand_bond_sites_for_new_species(
     calculator
         ASE calculator handed to :func:`autokmc.species.reactant.build_reactant`
         and :func:`autokmc.sites.adsorbate.find_adsorbate_sites`.
-    frozen_indices, nl_mult, prune_fmax, prune_max_steps, anchor_k_max,
+    frozen_indices, nl_mult, adsorption_prune_fmax,
+    adsorption_prune_max_steps, bond_prune_fmax, bond_prune_max_steps,
+    reactant_fmax, reactant_max_steps, anchor_k_max,
     add_hydrogens
-        Forwarded to the per-species reactant + site enumeration.
+        Forwarded to the per-species reactant, adsorption-site enumeration,
+        and bond-site pruning stages as applicable.
     bond_max_hops
         Forwarded to :func:`find_bond_sites`.
     bond_types, include_ring_bonds
@@ -686,8 +697,10 @@ def expand_bond_sites_for_new_species(
             frozen_indices=frozen_indices,
             nl_mult=nl_mult,
             random_seed=random_seed,
-            prune_fmax=prune_fmax,
-            prune_max_steps=prune_max_steps,
+            adsorption_prune_fmax=adsorption_prune_fmax,
+            adsorption_prune_max_steps=adsorption_prune_max_steps,
+            reactant_fmax=reactant_fmax,
+            reactant_max_steps=reactant_max_steps,
             optimizer=optimizer,
             optimizer_kwargs=optimizer_kwargs,
             anchor_k_max=anchor_k_max,
@@ -979,7 +992,7 @@ def expand_bond_sites_for_new_species(
             if verbose:
                 added = sum(len(v) for v in new_diff.values())
                 print(
-                    f"  → diffusion: +{added} site-pair(s) across "
+                    f"  → diffusion: +{added} diffusion iso-class(es) across "
                     f"species {newly_built}"
                 )
 
@@ -1039,8 +1052,8 @@ def expand_bond_sites_for_new_species(
                     reg["species"],
                     calculator,
                     frozen_indices=frozen_indices,
-                    fmax=prune_fmax,
-                    max_steps=prune_max_steps,
+                    fmax=bond_prune_fmax,
+                    max_steps=bond_prune_max_steps,
                     nl_mult=nl_mult,
                     optimizer=optimizer,
                     optimizer_kwargs=optimizer_kwargs,

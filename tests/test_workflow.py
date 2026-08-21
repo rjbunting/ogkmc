@@ -15,7 +15,7 @@ from autokmc.io.checkpoint import make_checkpoint_state, save_checkpoint
 from autokmc.io.event_log import EventHistory, EventLogCommit, EventLogRecovery
 from autokmc.io.calculators import CalculatorCfg, CalculatorConfigError
 from autokmc.io.config import (
-    AdsorbateSitesCfg,
+    AdsorptionCfg,
     BondCfg,
     CheckpointCfg,
     DiffusionCfg,
@@ -83,9 +83,17 @@ def test_channel_runtime_propagates_anchor_clique_cap(
     expected_cap,
 ):
     cfg = RunConfig(
-        adsorbate_sites=AdsorbateSitesCfg(anchor_k_max=configured_cap),
+        adsorption=AdsorptionCfg(
+            anchor_k_max=configured_cap,
+            prune_fmax=0.021,
+            prune_max_steps=111,
+            endpoint_fmax=0.032,
+            endpoint_max_steps=222,
+        ),
         bond=BondCfg(
             enabled=True,
+            prune_fmax=0.043,
+            prune_max_steps=333,
             gas_precursor_relax=False,
             gas_precursor_distance=2.2,
         ),
@@ -93,11 +101,17 @@ def test_channel_runtime_propagates_anchor_clique_cap(
 
     runtime = resolve_channel_runtime(cfg, frozen_indices=None)
 
+    assert runtime.adsorption.fmax == pytest.approx(0.032)
+    assert runtime.adsorption.max_steps == 222
     assert runtime.bond is not None
     assert runtime.bond.gas_precursor_relax is False
     assert runtime.bond.gas_precursor_distance == pytest.approx(2.2)
     assert runtime.bond_growth is not None
     assert runtime.bond_growth.anchor_k_max == expected_cap
+    assert runtime.bond_growth.adsorption_prune_fmax == pytest.approx(0.021)
+    assert runtime.bond_growth.adsorption_prune_max_steps == 111
+    assert runtime.bond_growth.bond_prune_fmax == pytest.approx(0.043)
+    assert runtime.bond_growth.bond_prune_max_steps == 333
 
 
 def test_channel_runtime_propagates_optimizer_choices():

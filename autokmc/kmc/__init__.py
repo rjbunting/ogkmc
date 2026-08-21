@@ -20,6 +20,7 @@ from autokmc.kmc.expansion import (
     initialise_bond_registry,
 )
 from autokmc.kmc.models import (
+    AdsorptionChannelOptions,
     BondChannelOptions,
     BondGrowthOptions,
     DiffusionChannelOptions,
@@ -37,6 +38,7 @@ from autokmc.kmc.sampling import choose_reaction, sample_tau, total_rate
 from autokmc.kmc.session import KMCSession
 
 __all__ = [
+    "AdsorptionChannelOptions",
     "BondChannelOptions",
     "BondGrowthOptions",
     "CalculatorLike",

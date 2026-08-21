@@ -543,7 +543,12 @@ def test_bond_expansion_defers_triple_prune_until_after_stability(monkeypatch):
         return [kept, dropped]
 
     def fake_prune_unstable(*args, **kwargs):
-        calls.append(("stability", [site.iso_class for site in args[1]]))
+        calls.append((
+            "stability",
+            [site.iso_class for site in args[1]],
+            kwargs["fmax"],
+            kwargs["max_steps"],
+        ))
         return [kept]
 
     def fake_prune_triple(sites, **kwargs):
@@ -565,13 +570,15 @@ def test_bond_expansion_defers_triple_prune_until_after_stability(monkeypatch):
         calculator=object(),
         bond_prune_by_triple=True,
         bond_prune_with_calculator=True,
+        bond_prune_fmax=0.041,
+        bond_prune_max_steps=321,
         deduplicate_iso=False,
     )
 
     assert out == [kept]
     assert calls == [
         ("find", False, False),
-        ("stability", [-1, -1]),
+        ("stability", [-1, -1], pytest.approx(0.041), 321),
         ("triple", [-1]),
         ("rebuild", 1),
     ]
@@ -654,21 +661,28 @@ def test_runtime_species_build_retries_transient_failures(monkeypatch):
     def flaky_build(*args, **kwargs):
         nonlocal attempts
         attempts += 1
+        assert kwargs["fmax"] == pytest.approx(0.012)
+        assert kwargs["steps"] == 123
         if attempts < 3:
             raise RuntimeError("calculator service unavailable")
         return reactant
 
     monkeypatch.setattr(expansion, "build_reactant", flaky_build)
-    monkeypatch.setattr(
-        expansion,
-        "find_adsorbate_sites",
-        lambda *args, **kwargs: [],
-    )
+    def find_sites(*args, **kwargs):
+        assert kwargs["prune_fmax"] == pytest.approx(0.023)
+        assert kwargs["prune_max_steps"] == 234
+        return []
+
+    monkeypatch.setattr(expansion, "find_adsorbate_sites", find_sites)
 
     assert expand_bond_sites_for_new_species(
         G,
         "C",
         calculator=object(),
+        reactant_fmax=0.012,
+        reactant_max_steps=123,
+        adsorption_prune_fmax=0.023,
+        adsorption_prune_max_steps=234,
         include_dissociation=False,
         include_coupling=False,
     ) == []

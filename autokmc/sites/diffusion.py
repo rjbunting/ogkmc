@@ -16,9 +16,9 @@ that share
 
 Pairs are deduplicated into iso-classes by graph-isomorphism of the union
 ego-graph (the surface-only ``n_shells_pair``-shell BFS around the union of
-both endpoints' bonded cliques, with the two adsorbate placements stamped on
-as labelled occupied leaves — consistent with the adsorption lateral
-ego-graph convention).
+both endpoints' bonded cliques, with only the two adsorbate placements stamped
+on as labelled endpoint leaves).  Other occupied adsorbates are excluded from
+this base classification and represented later by diffusion lateral classes.
 
 There is **no ML pruning** at this stage — the underlying
 :class:`AdsorbateSite`'s have already been pruned by
@@ -339,18 +339,15 @@ def _build_pair_ego_graph(
 ) -> nx.Graph:
     """Build the iso-class ego-graph for a diffusion pair.
 
-    Uses **surface-only BFS** — consistent with the adsorption lateral
-    ego-graph (:func:`autokmc.sites.stability.adsorption._build_lateral_ego_graph`).
     Two cached surface-only BFS expansions are run (one per endpoint's
     bonded-clique union, at that endpoint's own iso-class shell depth) and
-    their results are unioned.
-
-    After the BFS, any *other* occupied adsorbate nodes adjacent to the
-    surface set are collected as leaves (but not traversed further).
+    their results are unioned.  Other occupied adsorbates are deliberately
+    omitted because they belong to the later lateral-environment
+    classification, not the base diffusion iso-class.
 
     Both endpoint placements are then added as labelled occupied leaves with
     ``endpoint_role="endpoint"`` so the iso-match treats A↔B symmetrically
-    and endpoints cannot be confused with third-party adsorbate neighbours.
+    and the two endpoints retain their reaction role during isomorphism.
 
     G is **not mutated** — no temporary occupancy changes are made.
     """
@@ -362,22 +359,9 @@ def _build_pair_ego_graph(
     visited_b = _surface_bfs_shells(G, b_clique_union, n_shells_b)
     visited: set = (set(visited_a) | set(visited_b)) - endpoint_ids
 
-    # 2. Collect *other* occupied adsorbate leaves adjacent to the BFS set;
-    #    endpoints are added explicitly afterwards with their role label.
-    ads_leaves: set = set()
-    for n in visited:
-        for nb in G.neighbors(n):
-            if nb in visited or nb in endpoint_ids:
-                continue
-            d = G.nodes[nb]
-            if d.get("type") != "adsorbate":
-                continue
-            if d.get("occupied", False):
-                ads_leaves.add(nb)
+    result = G.subgraph(visited).copy()
 
-    result = G.subgraph(visited | ads_leaves).copy()
-
-    # 3. Add endpoint nodes as labelled occupied leaves with endpoint_role.
+    # 2. Add endpoint nodes as labelled occupied leaves with endpoint_role.
     for nid in all_endpoint_nids:
         if nid not in G:
             continue
@@ -689,7 +673,7 @@ def find_diffusion_sites(
                 f"{n_pairs_considered} candidate pair(s) considered, "
                 f"{n_pairs_kept} kept (max_hops={max_hops}) → "
                 f"{len(diffusion_sites)} iso-class(es), "
-                f"{n_members} placement(s)"
+                f"{n_members} pair member(s)"
             )
 
         out[smiles] = diffusion_sites
