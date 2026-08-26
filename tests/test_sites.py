@@ -321,6 +321,76 @@ def test_bond_atom_matching_uses_mic_assignment(method):
     assert diag["selected"]["max_distance_ang"] == pytest.approx(0.4)
 
 
+@pytest.mark.parametrize(
+    "method",
+    ["auto", "hungarian", "greedy", "reactant_index"],
+)
+def test_bond_atom_matching_preserves_reactant_connectivity(method):
+    graph = nx.Graph()
+    graph.graph["cell"] = np.eye(3) * 20.0
+
+    # AB is OH + O.  The first O is bonded to H and the second O is free.
+    ab_nodes = [1, 2, 3]
+    ab_symbols = ["O", "H", "O"]
+    ab_positions = [
+        np.array([0.0, 0.0, 0.0]),
+        np.array([0.0, 1.0, 0.0]),
+        np.array([3.0, 0.0, 0.0]),
+    ]
+    for node, symbol, position in zip(ab_nodes, ab_symbols, ab_positions):
+        graph.add_node(
+            node,
+            type="adsorbate",
+            element=symbol,
+            position=position,
+            reactant_index=node - 1,
+        )
+    graph.add_edge(1, 2, intra_adsorbate=True)
+
+    # C is HOO.  Pure nearest-distance matching maps C node 10 onto AB's
+    # hydroxyl O even though H is bonded to C node 12.  That swaps the oxygen
+    # identities and turns the unchanged O-H bond into an apparent bond
+    # breaking/forming event.
+    graph.add_node(
+        10,
+        type="adsorbate",
+        element="O",
+        position=np.array([0.2, 0.0, 0.0]),
+        reactant_index=0,
+    )
+    graph.add_node(
+        11,
+        type="adsorbate",
+        element="H",
+        position=np.array([3.0, 1.0, 0.0]),
+        reactant_index=1,
+    )
+    graph.add_node(
+        12,
+        type="adsorbate",
+        element="O",
+        position=np.array([3.0, 0.0, 0.0]),
+        reactant_index=2,
+    )
+    graph.add_edge(10, 12, intra_adsorbate=True)
+    graph.add_edge(11, 12, intra_adsorbate=True)
+
+    order, diagnostics = _select_c_to_ab_mapping(
+        graph,
+        ab_symbols,
+        ab_positions,
+        [10, 11, 12],
+        atom_matching=method,
+        matching_trials=8,
+        ab_node_order=ab_nodes,
+    )
+
+    assert order == [12, 11, 10]
+    assert diagnostics["selected"]["reactant_bonds_preserved"] == 1
+    assert diagnostics["selected"]["reactant_bonds_total"] == 1
+    assert diagnostics["selected"]["connectivity_preserved"] is True
+
+
 def test_multi_anchor_adsorbate_kabsch_unwraps_periodic_targets():
     graph = nx.Graph()
     graph.graph["cell"] = np.diag([10.0, 10.0, 10.0])

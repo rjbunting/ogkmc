@@ -371,13 +371,16 @@ bond:
 ```
 
 `atom_matching` controls how the initial and final bond-reaction atoms are
-paired before interpolation. The default `auto` mode first tries several
-same-element mappings and then keeps the path with the smallest displacement.
-With a non-null image spacing, AutoKMC uses the largest MIC-aware displacement
-between corresponding atoms to choose the interior-image count. If the spacing
-is `null`, it uses the configured fixed `n_images` or `neb_n_images` value.
-`hungarian` applies the global same-element assignment directly, while `greedy`
-and `reactant_index` provide comparison modes.
+paired before interpolation. Every unchanged bond within A and B must connect
+the same atom indices in C; this prevents same-element atoms from exchanging
+identities merely to shorten the path. The default `auto` mode tries several
+connectivity-preserving mappings and then keeps the path with the smallest
+displacement. With a non-null image spacing, AutoKMC uses the largest MIC-aware
+displacement between corresponding atoms to choose the interior-image count.
+If the spacing is `null`, it uses the configured fixed `n_images` or
+`neb_n_images` value. `hungarian`, `greedy`, and `reactant_index` choose the
+geometric seed, but fall back to a connectivity-preserving mapping if that seed
+would change atom-index connectivity.
 
 Bond NEBs use the same automatic bare-first initialization as diffusion NEBs:
 the no-neighbour lateral class is calculated on demand and its optimized band

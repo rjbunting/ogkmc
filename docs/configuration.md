@@ -538,8 +538,8 @@ halves `dt`; BFGS, which has no timestep, halves `maxstep`. Set the spacing to
 | `neb_climb` | `true` | Refine the ordinary bond NEB with a climbing image unless either raw directional barrier is below 0.1 eV. |
 | `neb_spring_k` | `5.0` eV/Å² | Bond NEB spring constant used for both optimization stages. |
 | `neb_interpolation` | `idpp` | `linear` or `idpp`. |
-| `atom_matching` | `auto` | `auto`, `greedy`, `hungarian`, or `reactant_index`. |
-| `matching_trials` | `8` | Number of mapping trials used by automatic matching. |
+| `atom_matching` | `auto` | Atom correspondence seed (`auto`, `greedy`, `hungarian`, or `reactant_index`); all modes preserve unchanged A/B bond connectivity. |
+| `matching_trials` | `8` | Maximum connectivity-preserving mapping trials used to minimize endpoint displacement. |
 | `persist_neb_path` | `false` | Save both bond NEB paths for successful runs; failed NEBs retain them automatically. |
 
 For a gas-fed bond dissociation such as H2(g) to 2H*, AutoKMC does not

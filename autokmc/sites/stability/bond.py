@@ -54,8 +54,10 @@ reacting block holds C's atoms in an order chosen by the configured
 same-element matching strategy.  The default ``auto`` mode tries the legacy
 greedy order, a global Hungarian assignment using minimum-image distances,
 reactant-index order when chemically valid, and bounded same-element swap
-trials, then keeps the lowest-displacement pre-NEB path.  This pairing is
-what enables ASE's NEB interpolators to draw a smooth A+B → C path.
+trials.  Every unchanged A/B bond is first required to connect the same atom
+indices in C; geometric displacement only ranks mappings that satisfy that
+connectivity invariant.  This pairing enables ASE's NEB interpolators to draw
+a smooth A+B → C path without introducing artificial identity swaps.
 
 Public API
 ----------
@@ -521,6 +523,8 @@ class _MappingCandidate:
     rms_distance: float
     max_distance: float
     score: float
+    reactant_bonds_preserved: int | None = None
+    reactant_bonds_total: int | None = None
 
     def to_dict(self, G: nx.Graph) -> dict:
         return {
@@ -535,7 +539,85 @@ class _MappingCandidate:
             "rms_distance_ang": float(self.rms_distance),
             "max_distance_ang": float(self.max_distance),
             "score": float(self.score),
+            "reactant_bonds_preserved": self.reactant_bonds_preserved,
+            "reactant_bonds_total": self.reactant_bonds_total,
+            "connectivity_preserved": (
+                None
+                if self.reactant_bonds_total is None
+                else self.reactant_bonds_preserved == self.reactant_bonds_total
+            ),
         }
+
+
+def _endpoint_connectivity_edges(
+    G: nx.Graph,
+    node_order: Sequence[int],
+) -> set[frozenset[int]]:
+    """Return endpoint-internal edges expressed as indices into *node_order*."""
+    ordered = [int(node) for node in node_order]
+    index_by_node = {node: index for index, node in enumerate(ordered)}
+    return {
+        frozenset((index_by_node[int(left)], index_by_node[int(right)]))
+        for left, right in G.subgraph(ordered).edges()
+    }
+
+
+def _connectivity_preserving_orders(
+    source_symbols: Sequence[str],
+    source_edges: set[frozenset[int]],
+    target_symbols: Sequence[str],
+    target_edges: set[frozenset[int]],
+    *,
+    limit: int,
+) -> list[list[int]]:
+    """Map source atoms to target slots without changing target connectivity.
+
+    The source is the combined product and may contain additional edges.  A
+    subgraph monomorphism therefore preserves every bond already present in
+    the disconnected A+B endpoint while allowing the bond reaction to add an
+    edge in C.
+    """
+    source_symbols = [str(symbol) for symbol in source_symbols]
+    target_symbols = [str(symbol) for symbol in target_symbols]
+    if len(source_symbols) != len(target_symbols):
+        return []
+    if sorted(source_symbols) != sorted(target_symbols):
+        return []
+    if not target_edges:
+        return []
+
+    source_graph = nx.Graph()
+    source_graph.add_nodes_from(
+        (index, {"element": symbol}) for index, symbol in enumerate(source_symbols)
+    )
+    source_graph.add_edges_from(tuple(edge) for edge in source_edges)
+    target_graph = nx.Graph()
+    target_graph.add_nodes_from(
+        (index, {"element": symbol}) for index, symbol in enumerate(target_symbols)
+    )
+    target_graph.add_edges_from(tuple(edge) for edge in target_edges)
+
+    matcher = isomorphism.GraphMatcher(
+        source_graph,
+        target_graph,
+        node_match=lambda source, target: source.get("element") == target.get("element"),
+    )
+    orders: list[list[int]] = []
+    seen: set[tuple[int, ...]] = set()
+    for source_to_target in matcher.subgraph_monomorphisms_iter():
+        order: list[int | None] = [None] * len(target_symbols)
+        for source_index, target_index in source_to_target.items():
+            order[int(target_index)] = int(source_index)
+        if any(index is None for index in order):
+            continue
+        concrete = tuple(int(index) for index in order if index is not None)
+        if concrete in seen:
+            continue
+        seen.add(concrete)
+        orders.append(list(concrete))
+        if len(orders) >= max(1, int(limit)):
+            break
+    return orders
 
 
 def _linear_sum_assignment(cost: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -587,6 +669,7 @@ def _mapping_candidate(
     method: str,
     cell,
     pbc,
+    reactant_edges: set[frozenset[int]] | None = None,
 ) -> _MappingCandidate:
     """Score a C-node order against the relaxed AB reacting-block positions."""
     c_order = [int(n) for n in c_order]
@@ -602,19 +685,30 @@ def _mapping_candidate(
     total_sq = float(np.sum(distances_arr**2))
     rms = float(np.sqrt(total_sq / max(1, len(distances_arr))))
     max_d = float(distances_arr.max()) if len(distances_arr) else 0.0
-    total = float(distances_arr.sum())
+    total_distance = float(distances_arr.sum())
     # Keep the global-distance objective dominant, but add a modest max-jump
     # term so auto mode can prefer smoother paths over one very long crossing.
     score = float(total_sq + 0.5 * max_d * max_d)
+    preserved = None
+    reactant_bond_count = None
+    if reactant_edges is not None:
+        reactant_bond_count = len(reactant_edges)
+        preserved = sum(
+            1
+            for edge in reactant_edges
+            if len(edge) == 2 and G.has_edge(*(c_order[index] for index in edge))
+        )
     return _MappingCandidate(
         method=method,
         c_node_order=c_order,
         distances=[float(x) for x in distances_arr],
-        total_distance=total,
+        total_distance=total_distance,
         total_distance_sq=total_sq,
         rms_distance=rms,
         max_distance=max_d,
         score=score,
+        reactant_bonds_preserved=preserved,
+        reactant_bonds_total=reactant_bond_count,
     )
 
 
@@ -806,11 +900,67 @@ def _align_gas_product_to_target(
     target_positions_centered: np.ndarray,
     *,
     max_iter: int = 3,
+    gas_edges: set[frozenset[int]] | None = None,
+    target_edges: set[frozenset[int]] | None = None,
+    matching_trials: int = BOND_MATCHING_TRIALS,
 ) -> tuple[np.ndarray, list[int], dict]:
     """Return gas positions assigned/oriented to best match target positions."""
     gas_positions = np.asarray(gas_positions, dtype=float)
     gas_centered = gas_positions - gas_positions.mean(axis=0)
     target_centered = np.asarray(target_positions_centered, dtype=float)
+
+    connectivity_orders: list[list[int]] = []
+    if target_edges:
+        connectivity_orders = _connectivity_preserving_orders(
+            gas_symbols,
+            set(gas_edges or ()),
+            target_symbols,
+            target_edges,
+            limit=max(1, int(matching_trials)),
+        )
+        if not connectivity_orders:
+            raise ValueError(
+                "Bond NEB gas-product pairing: no atom mapping preserves "
+                "the existing A+B connectivity in product C."
+            )
+
+    if connectivity_orders:
+        aligned: list[tuple[float, float, list[int], np.ndarray, np.ndarray]] = []
+        for candidate_order in connectivity_orders:
+            P = gas_centered[candidate_order]
+            R = _kabsch_rotation(P, target_centered)
+            rotated = gas_centered @ R
+            ordered_candidate = rotated[candidate_order]
+            distances = np.linalg.norm(ordered_candidate - target_centered, axis=1)
+            total_sq = float(np.sum(distances**2))
+            max_distance = float(distances.max()) if len(distances) else 0.0
+            score = float(total_sq + 0.5 * max_distance * max_distance)
+            aligned.append(
+                (
+                    score,
+                    max_distance,
+                    list(candidate_order),
+                    rotated,
+                    distances,
+                )
+            )
+        _, _, order, rotated_all, d = min(
+            aligned,
+            key=lambda item: (item[0], item[1], tuple(item[2])),
+        )
+        ordered = rotated_all[order]
+        diag = {
+            "selected_method": "gas_product_connectivity_kabsch",
+            "gas_atom_order": list(order),
+            "gas_symbols_ordered": [gas_symbols[i] for i in order],
+            "alignment_rms_ang": (float(np.sqrt(np.mean(d**2))) if len(d) else 0.0),
+            "alignment_max_ang": float(d.max()) if len(d) else 0.0,
+            "reactant_bonds_preserved": len(target_edges),
+            "reactant_bonds_total": len(target_edges),
+            "connectivity_preserved": True,
+            "connectivity_candidates": len(connectivity_orders),
+        }
+        return ordered, order, diag
 
     order = _assign_indices_by_element(
         gas_symbols,
@@ -836,10 +986,14 @@ def _align_gas_product_to_target(
     ordered = rotated_all[order]
     d = np.linalg.norm(ordered - target_centered, axis=1)
     diag = {
+        "selected_method": "gas_product_kabsch",
         "gas_atom_order": list(order),
         "gas_symbols_ordered": [gas_symbols[i] for i in order],
         "alignment_rms_ang": float(np.sqrt(np.mean(d**2))) if len(d) else 0.0,
         "alignment_max_ang": float(d.max()) if len(d) else 0.0,
+        "reactant_bonds_preserved": 0 if target_edges is not None else None,
+        "reactant_bonds_total": 0 if target_edges is not None else None,
+        "connectivity_preserved": True if target_edges is not None else None,
     }
     return ordered, order, diag
 
@@ -852,14 +1006,17 @@ def _select_c_to_ab_mapping(
     *,
     atom_matching: str,
     matching_trials: int,
+    ab_node_order: Sequence[int] | None = None,
 ) -> tuple[list[int], dict]:
     """Select the smoothest C->AB atom correspondence before endpoint C NEB.
 
     ``auto`` gathers a small set of chemically legal same-element mappings:
     reactant-index order (when valid), the legacy greedy result, the global
     Hungarian result, and bounded same-element swap trials around the
-    Hungarian mapping.  The candidate with the lowest pre-NEB displacement
-    score is kept.
+    Hungarian mapping.  When *ab_node_order* is supplied, every bond already
+    present within A or B must connect the same atom indices in C.  The
+    candidate with the lowest pre-NEB displacement score is then kept among
+    those connectivity-preserving mappings.
     """
     method = str(atom_matching or BOND_ATOM_MATCHING).strip().lower()
     if method == "nearest":
@@ -882,6 +1039,21 @@ def _select_c_to_ab_mapping(
     cell = np.asarray(G.graph.get("cell", np.eye(3)), dtype=float)
     pbc = full_pbc_for_cell(cell)
     raw_orders: list[tuple[str, list[int]]] = []
+    reactant_edges: set[frozenset[int]] | None = None
+    if ab_node_order is not None:
+        ab_node_order = [int(node) for node in ab_node_order]
+        if len(ab_node_order) != len(ab_symbols):
+            raise ValueError(
+                "Bond NEB connectivity pairing requires one AB graph node "
+                "for every reacting-block atom."
+            )
+        ab_node_symbols = [str(G.nodes[node]["element"]) for node in ab_node_order]
+        if ab_node_symbols != list(ab_symbols):
+            raise ValueError(
+                "Bond NEB connectivity pairing received an AB node order "
+                "with a different element pattern."
+            )
+        reactant_edges = _endpoint_connectivity_edges(G, ab_node_order)
 
     if method in {"auto", "reactant_index"}:
         try:
@@ -926,6 +1098,24 @@ def _select_c_to_ab_mapping(
                 )
             )
 
+    if reactant_edges:
+        c_symbols = [str(G.nodes[node]["element"]) for node in c_present]
+        c_edges = _endpoint_connectivity_edges(G, c_present)
+        connectivity_orders = _connectivity_preserving_orders(
+            c_symbols,
+            c_edges,
+            ab_symbols,
+            reactant_edges,
+            limit=max(1, int(matching_trials)),
+        )
+        raw_orders.extend(
+            (
+                "connectivity",
+                [c_present[source_index] for source_index in order],
+            )
+            for order in connectivity_orders
+        )
+
     # Deduplicate orders while preserving the method labels that produced them.
     seen: set[tuple[int, ...]] = set()
     candidates: list[_MappingCandidate] = []
@@ -935,31 +1125,45 @@ def _select_c_to_ab_mapping(
             continue
         seen.add(key)
         try:
-            candidates.append(
-                _mapping_candidate(
-                    G,
-                    ab_symbols,
-                    ab_positions,
-                    list(order),
-                    method=name,
-                    cell=cell,
-                    pbc=pbc,
-                )
+            candidate = _mapping_candidate(
+                G,
+                ab_symbols,
+                ab_positions,
+                list(order),
+                method=name,
+                cell=cell,
+                pbc=pbc,
+                reactant_edges=reactant_edges,
             )
+            if (
+                candidate.reactant_bonds_total is not None
+                and candidate.reactant_bonds_preserved != candidate.reactant_bonds_total
+            ):
+                continue
+            candidates.append(candidate)
         except ValueError:
             if method not in {"auto", "symmetry_trials"}:
                 raise
             continue
 
     if not candidates:
+        if reactant_edges:
+            raise ValueError(
+                "Bond NEB pairing: no atom mapping preserves the existing "
+                "A+B connectivity in product C."
+            )
         raise ValueError("Bond NEB pairing: no valid atom-mapping candidates.")
 
-    if method == "hungarian":
-        selected = next(c for c in candidates if c.method == "hungarian")
-    elif method == "greedy":
-        selected = next(c for c in candidates if c.method == "greedy")
-    elif method == "reactant_index":
-        selected = next(c for c in candidates if c.method == "reactant_index")
+    if method in {"hungarian", "greedy", "reactant_index"}:
+        requested_candidates = [candidate for candidate in candidates if candidate.method == method]
+        selected = (
+            requested_candidates[0]
+            if requested_candidates
+            else min(
+                candidates,
+                key=lambda c: (c.score, c.total_distance_sq, c.max_distance),
+            )
+        )
     else:
         selected = min(
             candidates,
@@ -1006,13 +1210,12 @@ def _build_bond_atoms(
     ``[A_atoms_by_reactant_index | B_atoms_by_reactant_index]`` at the
     A and B graph positions.
 
-    For ``endpoint == "c"`` the reacting block uses *c_node_order* (a
-    permutation of C's nodes obtained from :func:`_greedy_pair_c_to_ab`)
-    so atom k matches atom k of the AB endpoint by element + nearest
-    initial position.  The element symbols still come from the AB
-    side (which by construction equals C's element multiset in the
-    matched order) — this guarantees identical chemical_symbols across
-    endpoints, a hard requirement for ASE NEB.
+    For ``endpoint == "c"`` the reacting block uses *c_node_order*, a
+    connectivity-preserving permutation of C's nodes selected by
+    :func:`_select_c_to_ab_mapping`.  The element symbols still come from the
+    AB side (which by construction equals C's element multiset in the matched
+    order) — this guarantees identical chemical symbols across endpoints, a
+    hard requirement for ASE NEB.
 
     Returns
     -------
@@ -1047,7 +1250,7 @@ def _build_bond_atoms(
         if c_node_order is None:
             raise ValueError(
                 "endpoint='c' requires a precomputed c_node_order from "
-                "_greedy_pair_c_to_ab so the C reacting block lines up "
+                "_select_c_to_ab_mapping so the C reacting block lines up "
                 "atom-for-atom with the AB reacting block."
             )
         react_node_ids = list(c_node_order)
@@ -1055,7 +1258,7 @@ def _build_bond_atoms(
         c_syms = [G.nodes[n]["element"] for n in react_node_ids]
         if c_syms != symbols_react:
             raise ValueError(
-                "Bond NEB layout: greedy C pairing produced a different "
+                "Bond NEB layout: C pairing produced a different "
                 "element pattern than the AB block — pairing is broken."
             )
 
@@ -1137,6 +1340,7 @@ def _gas_product_neb_endpoint(
     gas_reactant,
     G: nx.Graph,
     lift_height: float,
+    matching_trials: int = BOND_MATCHING_TRIALS,
 ) -> tuple[Atoms, dict]:
     """Return a same-size NEB endpoint with aligned C(gas) lifted above A+B."""
     if gas_reactant is None or getattr(gas_reactant, "atoms", None) is None:
@@ -1162,11 +1366,32 @@ def _gas_product_neb_endpoint(
     target_centered = target_positions - centroid
 
     gas_pos = np.asarray(gas_atoms.get_positions(), dtype=float)
+    target_edges = _endpoint_connectivity_edges(G, react_nodes_ab)
+    gas_graph = getattr(gas_reactant, "graph", None)
+    if isinstance(gas_graph, nx.Graph):
+        gas_edges = {
+            frozenset((int(left), int(right)))
+            for left, right in gas_graph.edges()
+            if int(left) < len(gas_atoms) and int(right) < len(gas_atoms)
+        }
+    else:
+        gas_edges = {
+            frozenset(int(index) for index in edge)
+            for edge in _bond_set(
+                gas_atoms,
+                nl_mult=1.25,
+                relevant_indices=set(range(len(gas_atoms))),
+            )
+            if len(edge) == 2
+        }
     gas_aligned_centered, gas_order, align_diag = _align_gas_product_to_target(
         gas_symbols,
         gas_pos,
         target_symbols,
         target_centered,
+        gas_edges=gas_edges,
+        target_edges=target_edges,
+        matching_trials=matching_trials,
     )
 
     requested_lift = float(lift_height)
@@ -1208,8 +1433,8 @@ def _gas_product_neb_endpoint(
     atoms_c.set_chemical_symbols(symbols)
 
     diagnostics = {
-        "requested_method": "gas_product_kabsch",
-        "selected_method": "gas_product_kabsch",
+        "requested_method": "gas_product_connectivity_kabsch",
+        "selected_method": align_diag["selected_method"],
         "gas_atom_order": list(gas_order),
         "gas_reactant_indices": list(gas_order),
         "target_symbols": list(target_symbols),
@@ -2157,16 +2382,16 @@ def check_bond_site_stability(
     1. Build the AB endpoint (slab + lateral neighbours + A's atoms +
        B's atoms at their graph positions); relax with the configured optimizer; verify
        both A's and B's intended surface coordination survive.
-    2. Pair C's atoms to the AB reacting block using the configured
-       same-element matching strategy (``auto`` defaults to a Hungarian/MIC
-       assignment plus bounded swap trials), then build the C endpoint with
-       C's atoms overwriting the reacting-block positions inherited from the
-       relaxed AB slab+lat.  Relax; verify C's intended surface coordination
-       survives.  For gas products, first lower the intact, aligned molecule
-       to ``gas_precursor_distance`` and relax only that molecule while the
-       surface/lateral environment is fixed.  This molecular precursor is the
-       NEB endpoint; the separate empty-surface + gas energy remains the KMC
-       thermodynamic reference.
+    2. Pair C's atoms to the AB reacting block while preserving every existing
+       bond within A and B.  Use the configured same-element matching strategy
+       and geometry only to rank connectivity-preserving alternatives, then
+       build the C endpoint with C's atoms overwriting the reacting-block
+       positions inherited from the relaxed AB slab+lat.  Relax; verify C's
+       intended surface coordination survives.  For gas products, first lower
+       the intact, connectivity-aligned molecule to ``gas_precursor_distance``
+       and relax only that molecule while the surface/lateral environment is
+       fixed.  This molecular precursor is the NEB endpoint; the separate
+       empty-surface + gas energy remains the KMC thermodynamic reference.
     3. Converge an ordinary NEB band of ``n_images`` interior images between
        the two relaxed endpoints with the requested *interpolation* and
        *spring_k*. If *climb* is enabled and both raw directional barriers are
@@ -2280,6 +2505,7 @@ def check_bond_site_stability(
         "interpolation": str(interpolation),
         "atom_matching": str(atom_matching),
         "matching_trials": int(matching_trials),
+        "atom_mapping_policy": "preserve_reactant_connectivity_v1",
         "gas_precursor_relax": bool(gas_precursor_relax),
         "gas_precursor_distance": float(gas_precursor_distance),
         "nl_mult": float(nl_mult),
@@ -2642,6 +2868,7 @@ def check_bond_site_stability(
             gas_reactant=gas_reactant,
             G=G,
             lift_height=float(getattr(brs, "gas_lift_height", 6.0)),
+            matching_trials=matching_trials,
         )
         lc.energy_c_precursor = None
         lc.gas_precursor_relaxed = False
@@ -2725,6 +2952,7 @@ def check_bond_site_stability(
             c_present,
             atom_matching=atom_matching,
             matching_trials=matching_trials,
+            ab_node_order=react_nodes_ab,
         )
         lc.atom_matching_method = mapping_diag["selected_method"]
         lc.atom_mapping = list(c_node_order)

@@ -1819,6 +1819,61 @@ def test_gas_product_endpoint_uses_periodic_reacting_centroid():
     assert np.linalg.norm(gas_positions[1] - gas_positions[0]) == pytest.approx(0.4)
 
 
+def test_gas_product_endpoint_preserves_reactant_connectivity():
+    atoms_ab = Atoms(
+        "CuOHO",
+        positions=[
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 2.0],
+            [0.0, 1.0, 2.0],
+            [3.0, 0.0, 2.0],
+        ],
+        cell=np.diag([20.0, 20.0, 20.0]),
+        pbc=[True, True, False],
+    )
+    atoms_empty = atoms_ab[:1].copy()
+
+    gas_graph = nx.Graph()
+    gas_graph.add_nodes_from((0, 1, 2))
+    gas_graph.add_edge(0, 2)
+    gas_graph.add_edge(1, 2)
+    gas_reactant = SimpleNamespace(
+        atoms=Atoms(
+            "OHO",
+            positions=[
+                [0.2, 0.0, 0.0],
+                [3.0, 1.0, 0.0],
+                [3.0, 0.0, 0.0],
+            ],
+        ),
+        graph=gas_graph,
+    )
+
+    graph = nx.Graph()
+    graph.add_node(11, element="O")
+    graph.add_node(12, element="H")
+    graph.add_node(13, element="O")
+    graph.add_edge(11, 12, intra_adsorbate=True)
+
+    endpoint, diagnostics = bond_module._gas_product_neb_endpoint(
+        atoms_empty=atoms_empty,
+        atoms_ab=atoms_ab,
+        n_slab=1,
+        n_lat=0,
+        n_react=3,
+        react_nodes_ab=[11, 12, 13],
+        gas_reactant=gas_reactant,
+        G=graph,
+        lift_height=6.0,
+        matching_trials=8,
+    )
+
+    assert diagnostics["gas_atom_order"] == [2, 1, 0]
+    assert diagnostics["selected_method"] == "gas_product_connectivity_kabsch"
+    assert diagnostics["alignment"]["connectivity_preserved"] is True
+    assert endpoint.get_distance(1, 2, mic=True) == pytest.approx(1.0)
+
+
 def test_gas_precursor_seed_is_lowered_to_requested_surface_distance():
     atoms = Atoms(
         "CuH2",

@@ -635,7 +635,7 @@ bond:
   # auto | greedy | hungarian | reactant_index
   atom_matching: auto
 
-  # Number of alternative mappings tried by automatic atom matching.
+  # Maximum connectivity-preserving mappings compared by atom matching.
   matching_trials: 8
 
   # Save every bond-reaction NEB image as an extended-XYZ path.

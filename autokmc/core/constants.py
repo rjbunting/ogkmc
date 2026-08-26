@@ -373,14 +373,15 @@ BOND_PAIR_N_SHELLS: int = N_SHELLS_DEFAULT
 BOND_NEB_INTERPOLATION: str = "idpp"
 
 #: Atom-correspondence strategy for bond-reaction NEB endpoints.
-#: ``"auto"`` tries a small candidate set and keeps the lowest-displacement
-#: path; ``"hungarian"`` solves the global same-element assignment problem;
-#: ``"greedy"`` preserves the pre-existing nearest-neighbour behaviour; and
-#: ``"reactant_index"`` keeps C's reactant atom order when chemically valid.
+#: Every strategy preserves existing A/B bond connectivity.  ``"auto"`` tries
+#: a small candidate set and keeps the lowest-displacement valid path;
+#: ``"hungarian"`` starts from the global same-element assignment problem;
+#: ``"greedy"`` starts from nearest neighbours; and ``"reactant_index"``
+#: starts from C's reactant atom order when chemically valid.
 BOND_ATOM_MATCHING: str = "auto"
 
-#: Maximum number of same-element assignment candidates considered by
-#: ``BOND_ATOM_MATCHING == "auto"`` before the best pre-NEB path is chosen.
+#: Maximum number of connectivity-preserving assignment candidates considered
+#: before the best pre-NEB path is chosen.
 BOND_MATCHING_TRIALS: int = 8
 
 #: Default lift height (Å) used when the C endpoint of ``A + B ⇌ C`` is a
