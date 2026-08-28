@@ -33,8 +33,10 @@ from autokmc.core.constants import (
     NEB_CLIMB,
     NEB_FMAX,
     NEB_IMAGE_SPACING,
+    NEB_INTERMEDIATE_ENERGY_TOLERANCE,
+    NEB_INTERMEDIATE_MINIMUM_PROMINENCE,
+    NEB_INTERMEDIATE_STAGNATION_STEPS,
     NEB_INTERPOLATION,
-    NEB_LOW_BARRIER_FMAX,
     NEB_MAX_ADJACENT_IMAGE_SPACING_MULTIPLIER,
     NEB_MAX_IMAGES,
     NEB_METHOD,
@@ -145,8 +147,11 @@ class DiffusionChannelOptions:
     neb_geometry_guard_multiplier: float = (
         NEB_MAX_ADJACENT_IMAGE_SPACING_MULTIPLIER
     )
-    neb_low_barrier_fmax: float = NEB_LOW_BARRIER_FMAX
-
+    neb_intermediate_stagnation_steps: int = NEB_INTERMEDIATE_STAGNATION_STEPS
+    neb_intermediate_energy_tolerance: float = NEB_INTERMEDIATE_ENERGY_TOLERANCE
+    neb_intermediate_minimum_prominence: float = (
+        NEB_INTERMEDIATE_MINIMUM_PROMINENCE
+    )
     @classmethod
     def from_mapping(
         cls,
@@ -188,8 +193,11 @@ class BondChannelOptions:
     neb_geometry_guard_multiplier: float = (
         NEB_MAX_ADJACENT_IMAGE_SPACING_MULTIPLIER
     )
-    neb_low_barrier_fmax: float = NEB_LOW_BARRIER_FMAX
-
+    neb_intermediate_stagnation_steps: int = NEB_INTERMEDIATE_STAGNATION_STEPS
+    neb_intermediate_energy_tolerance: float = NEB_INTERMEDIATE_ENERGY_TOLERANCE
+    neb_intermediate_minimum_prominence: float = (
+        NEB_INTERMEDIATE_MINIMUM_PROMINENCE
+    )
     @classmethod
     def from_mapping(
         cls,

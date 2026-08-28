@@ -1056,12 +1056,24 @@ def test_required_extxyz_states_cannot_be_omitted():
         (
             "diffusion",
             {"state_a": -5.0, "state_b": -4.8, "transition": -4.0},
-            {"state_a.extxyz", "state_b.extxyz", "ts.extxyz"},
+            {
+                "state_a.extxyz",
+                "state_b.extxyz",
+                "ts.extxyz",
+                "neb_refinement_initial.extxyz",
+                "neb_refinement_final.extxyz",
+            },
         ),
         (
             "bond",
             {"state_ab": -7.0, "state_c": -8.0, "transition": -6.5},
-            {"state_ab.extxyz", "state_c.extxyz", "ts.extxyz"},
+            {
+                "state_ab.extxyz",
+                "state_c.extxyz",
+                "ts.extxyz",
+                "neb_refinement_initial.extxyz",
+                "neb_refinement_final.extxyz",
+            },
         ),
     ],
 )
@@ -1085,16 +1097,29 @@ def test_neb_reactions_write_required_states_and_optional_path(
         parameters=parameters,
         inputs={"initial": _atoms()},
     )
+    state_records = {
+        name: state_payload(_atoms(index * 0.05), energy_ev=energy)
+        for index, (name, energy) in enumerate(states.items())
+    }
+    state_records.update(
+        {
+            "neb_refinement_initial": state_payload(
+                _atoms(0.02),
+                energy_ev=-5.1,
+            ),
+            "neb_refinement_final": state_payload(
+                _atoms(0.08),
+                energy_ev=-4.9,
+            ),
+        }
+    )
     record = make_calculation_record(
         kind=kind,
         cache_key=key,
         operation=operation,
         parameters=parameters,
         inputs={},
-        states={
-            name: state_payload(_atoms(index * 0.05), energy_ev=energy)
-            for index, (name, energy) in enumerate(states.items())
-        },
+        states=state_records,
         reaction_graph=_graph(),
         neb={
             "energies_ev": [-5.0, -4.0, -4.8],
@@ -1112,6 +1137,23 @@ def test_neb_reactions_write_required_states_and_optional_path(
     hit = load_calculation_record(root, kind, key, reaction_graph=_graph())
     assert hit is not None
     assert len(hit["neb"]["path"]) == 3
+    lateral = SimpleNamespace(stable=None)
+    state_mapping = (
+        {
+            "state_a": ("energy_a", "atoms_a"),
+            "state_b": ("energy_b", "atoms_b"),
+            "transition": ("energy_ts", "atoms_ts"),
+        }
+        if kind == "diffusion"
+        else {
+            "state_ab": ("energy_ab", "atoms_ab"),
+            "state_c": ("energy_c", "atoms_c"),
+            "transition": ("energy_ts", "atoms_ts"),
+        }
+    )
+    assert apply_cached_states(lateral, hit, state_mapping)
+    assert isinstance(lateral.atoms_neb_refinement_initial, Atoms)
+    assert isinstance(lateral.atoms_neb_refinement_final, Atoms)
 
 
 def test_bond_record_round_trips_optional_gas_reference_states(tmp_path):

@@ -49,8 +49,10 @@ from autokmc.core.constants import (
     NEB_FMAX,
     NEB_CLIMB,
     NEB_IMAGE_SPACING,
+    NEB_INTERMEDIATE_ENERGY_TOLERANCE,
+    NEB_INTERMEDIATE_MINIMUM_PROMINENCE,
+    NEB_INTERMEDIATE_STAGNATION_STEPS,
     NEB_INTERPOLATION,
-    NEB_LOW_BARRIER_FMAX,
     NEB_MAX_ADJACENT_IMAGE_SPACING_MULTIPLIER,
     NEB_MAX_IMAGES,
     NEB_METHOD,
@@ -151,9 +153,15 @@ class OptimizationCfg:
     neb_geometry_guard_multiplier: float = (
         NEB_MAX_ADJACENT_IMAGE_SPACING_MULTIPLIER
     )
-    #: Looser force threshold (eV/Å) at which a band below the shared
-    #: ``EA_MIN`` barrier floor may stop without reaching channel ``fmax``.
-    neb_low_barrier_fmax: float = NEB_LOW_BARRIER_FMAX
+    #: Inspect a stalled ordinary band for intermediate minima after this many
+    #: steps without a lower interior-image electronic energy.
+    neb_intermediate_stagnation_steps: int = NEB_INTERMEDIATE_STAGNATION_STEPS
+    #: Electronic-energy decrease (eV) required to reset the stagnation count.
+    neb_intermediate_energy_tolerance: float = NEB_INTERMEDIATE_ENERGY_TOLERANCE
+    #: Required local-minimum prominence (eV) on both neighboring images.
+    neb_intermediate_minimum_prominence: float = (
+        NEB_INTERMEDIATE_MINIMUM_PROMINENCE
+    )
 
 
 @dataclass

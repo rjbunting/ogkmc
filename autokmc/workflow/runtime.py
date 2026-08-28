@@ -377,8 +377,14 @@ def resolve_channel_runtime(cfg, frozen_indices: list[int] | None) -> ChannelRun
             neb_geometry_guard_multiplier=(
                 cfg.optimization.neb_geometry_guard_multiplier
             ),
-            neb_low_barrier_fmax=(
-                cfg.optimization.neb_low_barrier_fmax
+            neb_intermediate_stagnation_steps=(
+                cfg.optimization.neb_intermediate_stagnation_steps
+            ),
+            neb_intermediate_energy_tolerance=(
+                cfg.optimization.neb_intermediate_energy_tolerance
+            ),
+            neb_intermediate_minimum_prominence=(
+                cfg.optimization.neb_intermediate_minimum_prominence
             ),
         )
 
@@ -416,8 +422,14 @@ def resolve_channel_runtime(cfg, frozen_indices: list[int] | None) -> ChannelRun
             neb_geometry_guard_multiplier=(
                 cfg.optimization.neb_geometry_guard_multiplier
             ),
-            neb_low_barrier_fmax=(
-                cfg.optimization.neb_low_barrier_fmax
+            neb_intermediate_stagnation_steps=(
+                cfg.optimization.neb_intermediate_stagnation_steps
+            ),
+            neb_intermediate_energy_tolerance=(
+                cfg.optimization.neb_intermediate_energy_tolerance
+            ),
+            neb_intermediate_minimum_prominence=(
+                cfg.optimization.neb_intermediate_minimum_prominence
             ),
         )
         bond_growth = BondGrowthOptions(

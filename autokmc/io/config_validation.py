@@ -352,10 +352,20 @@ class _Validator:
             "optimization.neb_geometry_guard_multiplier",
             strictly_positive=True,
         )
+        self.integer(
+            cfg.neb_intermediate_stagnation_steps,
+            "optimization.neb_intermediate_stagnation_steps",
+            minimum=1,
+        )
         self.number(
-            cfg.neb_low_barrier_fmax,
-            "optimization.neb_low_barrier_fmax",
-            strictly_positive=True,
+            cfg.neb_intermediate_energy_tolerance,
+            "optimization.neb_intermediate_energy_tolerance",
+            minimum=0.0,
+        )
+        self.number(
+            cfg.neb_intermediate_minimum_prominence,
+            "optimization.neb_intermediate_minimum_prominence",
+            minimum=0.0,
         )
 
     def structure(self, cfg: Any) -> None:

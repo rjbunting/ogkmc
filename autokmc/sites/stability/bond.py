@@ -134,6 +134,9 @@ from autokmc.core.constants import (
     NL_MULT_DEFAULT,
     NEB_BAND_EVAL,
     NEB_IMAGE_SPACING,
+    NEB_INTERMEDIATE_ENERGY_TOLERANCE,
+    NEB_INTERMEDIATE_MINIMUM_PROMINENCE,
+    NEB_INTERMEDIATE_STAGNATION_STEPS,
     NEB_MAX_ADJACENT_IMAGE_SPACING_MULTIPLIER,
     NEB_MAX_IMAGES,
     NEB_MIN_IMAGES,
@@ -143,7 +146,6 @@ from autokmc.core.constants import (
     NEB_CLIMB,
     NEB_SPRING_K,
     NEB_METHOD,
-    NEB_LOW_BARRIER_FMAX,
     BOND_NEB_INTERPOLATION,
     BOND_ATOM_MATCHING,
     BOND_MATCHING_TRIALS,
@@ -2043,7 +2045,6 @@ def _apply_bond_thermochemistry(
     if (
         getattr(free_energy_options, "include_ts_vibrations", True)
         and not getattr(lc, "neb_climb_skipped_low_barrier", False)
-        and not getattr(lc, "neb_converged_low_barrier", False)
     ):
         ts_thermo = _harm(atoms_ts, "ts", energy_ts)
     else:
@@ -2188,6 +2189,28 @@ def _write_bond_calculation_cache(
                 ),
             }
         )
+    refinement_initial = getattr(lc, "atoms_neb_refinement_initial", None)
+    refinement_final = getattr(lc, "atoms_neb_refinement_final", None)
+    refinement = getattr(lc, "neb_intermediate_refinement", None)
+    if (
+        isinstance(refinement_initial, Atoms)
+        and isinstance(refinement_final, Atoms)
+        and isinstance(refinement, dict)
+        and refinement.get("refinement_initial_energy_ev") is not None
+        and refinement.get("refinement_final_energy_ev") is not None
+    ):
+        states.update(
+            {
+                "neb_refinement_initial": state_payload(
+                    refinement_initial,
+                    energy_ev=float(refinement["refinement_initial_energy_ev"]),
+                ),
+                "neb_refinement_final": state_payload(
+                    refinement_final,
+                    energy_ev=float(refinement["refinement_final_energy_ev"]),
+                ),
+            }
+        )
 
     record = make_calculation_record(
         kind="bond",
@@ -2291,34 +2314,9 @@ def _write_bond_calculation_cache(
                 "neb_regular_reverse_barrier",
                 None,
             ),
-            "neb_convergence_mode": getattr(
+            "neb_intermediate_refinement": getattr(
                 lc,
-                "neb_convergence_mode",
-                None,
-            ),
-            "neb_convergence_fmax": getattr(
-                lc,
-                "neb_convergence_fmax",
-                None,
-            ),
-            "neb_converged_low_barrier": getattr(
-                lc,
-                "neb_converged_low_barrier",
-                None,
-            ),
-            "neb_low_barrier_fmax": getattr(
-                lc,
-                "neb_low_barrier_fmax",
-                None,
-            ),
-            "neb_low_barrier_threshold": getattr(
-                lc,
-                "neb_low_barrier_threshold",
-                None,
-            ),
-            "neb_low_barrier_stage": getattr(
-                lc,
-                "neb_low_barrier_stage",
+                "neb_intermediate_refinement",
                 None,
             ),
         },
@@ -2364,7 +2362,11 @@ def check_bond_site_stability(
     neb_method: str = NEB_METHOD,
     neb_band_eval: str = NEB_BAND_EVAL,
     neb_geometry_guard_multiplier: float = (NEB_MAX_ADJACENT_IMAGE_SPACING_MULTIPLIER),
-    neb_low_barrier_fmax: float = NEB_LOW_BARRIER_FMAX,
+    neb_intermediate_stagnation_steps: int = NEB_INTERMEDIATE_STAGNATION_STEPS,
+    neb_intermediate_energy_tolerance: float = NEB_INTERMEDIATE_ENERGY_TOLERANCE,
+    neb_intermediate_minimum_prominence: float = (
+        NEB_INTERMEDIATE_MINIMUM_PROMINENCE
+    ),
     verbose: bool = False,
     calculation_cache_root: str | None = None,
     calculation_cache_lookup_enabled: bool = False,
@@ -2495,7 +2497,15 @@ def check_bond_site_stability(
         ),
         "neb_method": str(neb_method).strip().lower(),
         "neb_geometry_guard_multiplier": float(neb_geometry_guard_multiplier),
-        "neb_low_barrier_fmax": float(neb_low_barrier_fmax),
+        "neb_intermediate_stagnation_steps": int(
+            neb_intermediate_stagnation_steps
+        ),
+        "neb_intermediate_energy_tolerance": float(
+            neb_intermediate_energy_tolerance
+        ),
+        "neb_intermediate_minimum_prominence": float(
+            neb_intermediate_minimum_prominence
+        ),
         "n_images": int(n_images),
         "image_spacing": (None if image_spacing is None else float(image_spacing)),
         "min_images": int(min_images),
@@ -2522,10 +2532,13 @@ def check_bond_site_stability(
             "name": "skip_if_either_regular_barrier_below_ea_min_v1",
             "minimum_barrier_ev": float(EA_MIN),
         },
-        "neb_low_barrier_convergence_policy": {
-            "name": "accept_at_force_cutoff_or_max_steps_if_either_barrier_below_ea_min_v2",
-            "force_cutoff_ev_per_ang": float(neb_low_barrier_fmax),
-            "minimum_barrier_ev": float(EA_MIN),
+        "neb_intermediate_refinement_policy": {
+            "name": "highest_peak_nearest_minima_single_segment_v1",
+            "stagnation_steps": int(neb_intermediate_stagnation_steps),
+            "energy_tolerance_ev": float(neb_intermediate_energy_tolerance),
+            "minimum_prominence_ev": float(
+                neb_intermediate_minimum_prominence
+            ),
         },
         "gas_product": bool(gas_product),
         "gas_lift_height": float(getattr(brs, "gas_lift_height", 6.0)),
@@ -3066,6 +3079,15 @@ def check_bond_site_stability(
         elif seed_images:
             print(f"  [NEB] bare path incompatible; using {interpolation} interpolation")
 
+    def retain_intermediate_refinement(
+        refinement_initial: Atoms,
+        refinement_final: Atoms,
+        metadata: dict[str, Any],
+    ) -> None:
+        lc.atoms_neb_refinement_initial = refinement_initial
+        lc.atoms_neb_refinement_final = refinement_final
+        lc.neb_intermediate_refinement = dict(metadata)
+
     neb_result = run_neb(
         atoms_ab_opt,
         atoms_c_opt,
@@ -3087,7 +3109,14 @@ def check_bond_site_stability(
         image_spacing=image_selection.target_spacing,
         geometry_guard_multiplier=neb_geometry_guard_multiplier,
         barrier_endpoint_energies=(float(E_ab), float(E_c)),
-        low_barrier_fmax=float(neb_low_barrier_fmax),
+        intermediate_stagnation_steps=neb_intermediate_stagnation_steps,
+        intermediate_energy_tolerance=neb_intermediate_energy_tolerance,
+        intermediate_minimum_prominence=neb_intermediate_minimum_prominence,
+        intermediate_optimizer=optimizer,
+        intermediate_optimizer_kwargs=optimizer_kwargs,
+        intermediate_min_images=min_images,
+        intermediate_max_images=max_images,
+        intermediate_refinement_callback=retain_intermediate_refinement,
         verbose=verbose,
         not_converged_error=BondNEBNotConvergedError,
         persist_path=persist_neb_path,
@@ -3117,15 +3146,54 @@ def check_bond_site_stability(
 
     lc.energy_ts = E_ts
     lc.neb_climb_performed = neb_result.climb_performed
+    lc.neb_n_images = neb_result.n_interior
+    lc.neb_n_frames = neb_result.n_interior + 2
+    if neb_result.intermediate_refinement_performed:
+        lc.neb_max_endpoint_displacement = (
+            neb_result.refinement_max_endpoint_displacement
+        )
+        lc.neb_target_image_spacing = neb_result.refinement_target_image_spacing
+        lc.neb_estimated_image_spacing = (
+            neb_result.refinement_estimated_image_spacing
+        )
+        lc.neb_image_count_limited_by = (
+            neb_result.refinement_image_count_limited_by
+        )
     lc.neb_climb_skipped_low_barrier = neb_result.climb_skipped_low_barrier
     lc.neb_regular_forward_barrier = neb_result.regular_forward_barrier
     lc.neb_regular_reverse_barrier = neb_result.regular_reverse_barrier
-    lc.neb_convergence_mode = neb_result.convergence_mode
-    lc.neb_convergence_fmax = neb_result.convergence_fmax
-    lc.neb_converged_low_barrier = neb_result.converged_low_barrier
-    lc.neb_low_barrier_fmax = neb_result.low_barrier_fmax
-    lc.neb_low_barrier_threshold = neb_result.low_barrier_threshold
-    lc.neb_low_barrier_stage = neb_result.low_barrier_stage
+    lc.neb_intermediate_refinement = (
+        {
+            "performed": True,
+            "policy": "highest_peak_nearest_minima_single_segment_v1",
+            "stagnation_steps": neb_result.intermediate_stagnation_steps,
+            "optimizer_steps_at_detection": neb_result.intermediate_stalled_steps,
+            "peak_image_index": neb_result.intermediate_peak_index,
+            "left_state_image_index": neb_result.intermediate_left_index,
+            "right_state_image_index": neb_result.intermediate_right_index,
+            "stalled_profile_energies_ev": neb_result.intermediate_profile_energies,
+            "refinement_initial_energy_ev": neb_result.refinement_initial_energy,
+            "refinement_final_energy_ev": neb_result.refinement_final_energy,
+            "replacement_interior_images": neb_result.n_interior,
+            "replacement_max_endpoint_displacement_ang": (
+                neb_result.refinement_max_endpoint_displacement
+            ),
+            "replacement_target_image_spacing_ang": (
+                neb_result.refinement_target_image_spacing
+            ),
+            "replacement_estimated_image_spacing_ang": (
+                neb_result.refinement_estimated_image_spacing
+            ),
+            "replacement_image_count_limited_by": (
+                neb_result.refinement_image_count_limited_by
+            ),
+            "other_segments_refined": False,
+        }
+        if neb_result.intermediate_refinement_performed
+        else None
+    )
+    lc.atoms_neb_refinement_initial = neb_result.refinement_initial_atoms
+    lc.atoms_neb_refinement_final = neb_result.refinement_final_atoms
     lc.atoms_ts = atoms_ts
     # Keep the final path attached until all validation and thermochemistry
     # steps succeed.  Failed candidates are then self-contained diagnostics.
@@ -3138,23 +3206,46 @@ def check_bond_site_stability(
         lc._warm_start_neb_energies = list(neb_result.path_energies or [])
         lc._warm_start_member_index = int(member_index)
 
+    validation_initial = (
+        neb_result.refinement_initial_atoms
+        if neb_result.refinement_initial_atoms is not None
+        else atoms_ab_opt
+    )
+    validation_final = (
+        neb_result.refinement_final_atoms
+        if neb_result.refinement_final_atoms is not None
+        else atoms_c_opt
+    )
+    validation_initial_energy = (
+        neb_result.refinement_initial_energy
+        if neb_result.refinement_initial_energy is not None
+        else E_ab
+    )
+    validation_final_energy = (
+        neb_result.refinement_final_energy
+        if neb_result.refinement_final_energy is not None
+        else E_c
+    )
+    validation_final_path_energy = (
+        neb_result.refinement_final_energy
+        if neb_result.refinement_final_energy is not None
+        else E_c_path
+    )
     _check_bond_ts_validity(
         atoms_ts,
-        atoms_ab_opt,
-        atoms_c_opt,
+        validation_initial,
+        validation_final,
         n_slab=n_slab,
         n_lat=n_lat,
         n_react=n_react,
         nl_mult=nl_mult,
-        e_ab=E_ab,
-        e_c=E_c,
-        e_c_path=E_c_path,
+        e_ab=validation_initial_energy,
+        e_c=validation_final_energy,
+        e_c_path=validation_final_path_energy,
         e_ts=E_ts,
         ts_index=k_ts,
         n_interior=neb_result.n_interior,
-        allow_barrier_floor=(
-            neb_result.climb_skipped_low_barrier or neb_result.converged_low_barrier
-        ),
+        allow_barrier_floor=neb_result.climb_skipped_low_barrier,
     )
 
     _apply_bond_thermochemistry(

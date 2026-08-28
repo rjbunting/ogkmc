@@ -88,6 +88,9 @@ from autokmc.core.constants import (
     NEB_BAND_EVAL,
     NEB_FMAX,
     NEB_IMAGE_SPACING,
+    NEB_INTERMEDIATE_ENERGY_TOLERANCE,
+    NEB_INTERMEDIATE_MINIMUM_PROMINENCE,
+    NEB_INTERMEDIATE_STAGNATION_STEPS,
     NEB_MAX_ADJACENT_IMAGE_SPACING_MULTIPLIER,
     NEB_MAX_IMAGES,
     NEB_MAX_STEPS,
@@ -96,7 +99,6 @@ from autokmc.core.constants import (
     NEB_CLIMB,
     NEB_SPRING_K,
     NEB_METHOD,
-    NEB_LOW_BARRIER_FMAX,
     BOND_NEB_INTERPOLATION,
     BOND_ATOM_MATCHING,
     BOND_MATCHING_TRIALS,
@@ -457,7 +459,11 @@ def get_applicable_bond_reaction_for_member(
     neb_geometry_guard_multiplier: float = (
         NEB_MAX_ADJACENT_IMAGE_SPACING_MULTIPLIER
     ),
-    neb_low_barrier_fmax: float = NEB_LOW_BARRIER_FMAX,
+    neb_intermediate_stagnation_steps: int = NEB_INTERMEDIATE_STAGNATION_STEPS,
+    neb_intermediate_energy_tolerance: float = NEB_INTERMEDIATE_ENERGY_TOLERANCE,
+    neb_intermediate_minimum_prominence: float = (
+        NEB_INTERMEDIATE_MINIMUM_PROMINENCE
+    ),
     lateral_interactions: bool = True,
     lateral_shells: int = LATERAL_SHELLS_DEFAULT,
     verbose: bool = False,
@@ -502,7 +508,11 @@ def get_applicable_bond_reaction_for_member(
             "neb_method": neb_method,
             "neb_band_eval": neb_band_eval,
             "neb_geometry_guard_multiplier": neb_geometry_guard_multiplier,
-            "neb_low_barrier_fmax": neb_low_barrier_fmax,
+            "neb_intermediate_stagnation_steps": neb_intermediate_stagnation_steps,
+            "neb_intermediate_energy_tolerance": neb_intermediate_energy_tolerance,
+            "neb_intermediate_minimum_prominence": (
+                neb_intermediate_minimum_prominence
+            ),
             "verbose": verbose,
             "calculation_cache_root": calculation_cache_root,
             "calculation_cache_lookup_enabled": (
@@ -767,7 +777,11 @@ def get_applicable_bond_reactions(
     neb_geometry_guard_multiplier: float = (
         NEB_MAX_ADJACENT_IMAGE_SPACING_MULTIPLIER
     ),
-    neb_low_barrier_fmax: float = NEB_LOW_BARRIER_FMAX,
+    neb_intermediate_stagnation_steps: int = NEB_INTERMEDIATE_STAGNATION_STEPS,
+    neb_intermediate_energy_tolerance: float = NEB_INTERMEDIATE_ENERGY_TOLERANCE,
+    neb_intermediate_minimum_prominence: float = (
+        NEB_INTERMEDIATE_MINIMUM_PROMINENCE
+    ),
     lateral_interactions: bool = True,
     lateral_shells: int = LATERAL_SHELLS_DEFAULT,
     verbose: bool = False,
@@ -827,7 +841,11 @@ def get_applicable_bond_reactions(
                 neb_method=neb_method,
                 neb_band_eval=neb_band_eval,
                 neb_geometry_guard_multiplier=neb_geometry_guard_multiplier,
-                neb_low_barrier_fmax=neb_low_barrier_fmax,
+                neb_intermediate_stagnation_steps=neb_intermediate_stagnation_steps,
+                neb_intermediate_energy_tolerance=neb_intermediate_energy_tolerance,
+                neb_intermediate_minimum_prominence=(
+                    neb_intermediate_minimum_prominence
+                ),
                 lateral_interactions=lateral_interactions,
                 lateral_shells=lateral_shells,
                 verbose=verbose,
@@ -889,7 +907,11 @@ def compute_all_bond_reactions(
     neb_geometry_guard_multiplier: float = (
         NEB_MAX_ADJACENT_IMAGE_SPACING_MULTIPLIER
     ),
-    neb_low_barrier_fmax: float = NEB_LOW_BARRIER_FMAX,
+    neb_intermediate_stagnation_steps: int = NEB_INTERMEDIATE_STAGNATION_STEPS,
+    neb_intermediate_energy_tolerance: float = NEB_INTERMEDIATE_ENERGY_TOLERANCE,
+    neb_intermediate_minimum_prominence: float = (
+        NEB_INTERMEDIATE_MINIMUM_PROMINENCE
+    ),
     lateral_interactions: bool = True,
     lateral_shells: int = LATERAL_SHELLS_DEFAULT,
     verbose: bool = False,
@@ -940,7 +962,15 @@ def compute_all_bond_reactions(
                     neb_geometry_guard_multiplier = (
                         neb_geometry_guard_multiplier
                     ),
-                    neb_low_barrier_fmax  = neb_low_barrier_fmax,
+                    neb_intermediate_stagnation_steps = (
+                        neb_intermediate_stagnation_steps
+                    ),
+                    neb_intermediate_energy_tolerance = (
+                        neb_intermediate_energy_tolerance
+                    ),
+                    neb_intermediate_minimum_prominence = (
+                        neb_intermediate_minimum_prominence
+                    ),
                     lateral_interactions     = lateral_interactions,
                     lateral_shells           = lateral_shells,
                     verbose                  = verbose,
@@ -990,7 +1020,9 @@ def compute_all_bond_reactions(
             neb_method                = neb_method,
             neb_band_eval             = neb_band_eval,
             neb_geometry_guard_multiplier = neb_geometry_guard_multiplier,
-            neb_low_barrier_fmax     = neb_low_barrier_fmax,
+            neb_intermediate_stagnation_steps = neb_intermediate_stagnation_steps,
+            neb_intermediate_energy_tolerance = neb_intermediate_energy_tolerance,
+            neb_intermediate_minimum_prominence = neb_intermediate_minimum_prominence,
             lateral_interactions     = lateral_interactions,
             lateral_shells           = lateral_shells,
             verbose                  = verbose,

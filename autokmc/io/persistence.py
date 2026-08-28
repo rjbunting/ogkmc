@@ -533,6 +533,23 @@ def _write_missing_bond_result_assets(
                 [_safe_atoms_copy(image) for image in images],
             )
             wrote = True
+    if _write_neb_refinement_assets(folder, lateral_class):
+        wrote = True
+    return wrote
+
+
+def _write_neb_refinement_assets(folder: Path, lateral_class) -> bool:
+    """Write the optimized endpoints selected for a stalled-band restart."""
+    wrote = False
+    for filename, attribute in (
+        ("neb_refinement_initial.extxyz", "atoms_neb_refinement_initial"),
+        ("neb_refinement_final.extxyz", "atoms_neb_refinement_final"),
+    ):
+        atoms = getattr(lateral_class, attribute, None)
+        path = folder / filename
+        if isinstance(atoms, Atoms) and not path.is_file():
+            _atomic_extxyz(path, _safe_atoms_copy(atoms))
+            wrote = True
     return wrote
 
 
@@ -1031,6 +1048,8 @@ class ReactionWriter:
                     reaction.site,
                     lc,
                 )
+            elif sub == "diffusion":
+                _write_neb_refinement_assets(folder, lc)
             return folder
 
         ensure_directory(folder)
@@ -1094,6 +1113,7 @@ class ReactionWriter:
                     folder / "neb_path_initial.extxyz",
                     [_safe_atoms_copy(im) for im in atoms_neb_path_initial],
                 )
+            _write_neb_refinement_assets(folder, lc)
         elif sub == "bond":
             atoms_ab_initial = getattr(lc, "atoms_ab_initial", None)
             atoms_c_initial = getattr(lc, "atoms_c_initial", None)
@@ -1164,6 +1184,7 @@ class ReactionWriter:
                     folder / "neb_path_initial.extxyz",
                     [_safe_atoms_copy(im) for im in atoms_neb_path_initial],
                 )
+            _write_neb_refinement_assets(folder, lc)
         else:
             # Stamped onto the lateral class by check_site_stability().
             atoms_occ_initial = getattr(lc, "atoms_occupied_initial", None)
@@ -1466,6 +1487,7 @@ class ReactionWriter:
             / f"ads_iso{iso}_lat{lat}"
         )
         if key in self._folder_meta:
+            _write_neb_refinement_assets(folder, lc)
             return self._folder_paths.get(key, folder)
 
         ensure_directory(folder)
@@ -1597,6 +1619,7 @@ class ReactionWriter:
                 folder / "neb_path.extxyz",
                 [_safe_atoms_copy(image) for image in atoms_neb_path],
             )
+        _write_neb_refinement_assets(folder, lc)
 
         metadata_path = folder / "reaction.json"
         existing_discovery_step = (
@@ -1645,6 +1668,11 @@ class ReactionWriter:
             ),
             "template": {"species": smiles},
             "gas_product": False,
+            "neb_intermediate_refinement": getattr(
+                lc,
+                "neb_intermediate_refinement",
+                None,
+            ),
             "rate_energy_bases": [],
             "stats": {"count": 0, "first_step": None, "last_step": None},
             "energies_ev": {
@@ -1671,6 +1699,18 @@ class ReactionWriter:
                 ),
                 "transition": (
                     "ts.extxyz" if atoms_ts is not None else None
+                ),
+                "neb_refinement_initial": (
+                    "neb_refinement_initial.extxyz"
+                    if getattr(lc, "atoms_neb_refinement_initial", None)
+                    is not None
+                    else None
+                ),
+                "neb_refinement_final": (
+                    "neb_refinement_final.extxyz"
+                    if getattr(lc, "atoms_neb_refinement_final", None)
+                    is not None
+                    else None
                 ),
                 "neb_path_initial": (
                     "neb_path_initial.extxyz"
@@ -1746,6 +1786,16 @@ class ReactionWriter:
                 getattr(lc, "atoms_gas_molecule", None),
             ),
             ("transition", "ts.extxyz", getattr(lc, "atoms_ts", None)),
+            (
+                "neb_refinement_initial",
+                "neb_refinement_initial.extxyz",
+                getattr(lc, "atoms_neb_refinement_initial", None),
+            ),
+            (
+                "neb_refinement_final",
+                "neb_refinement_final.extxyz",
+                getattr(lc, "atoms_neb_refinement_final", None),
+            ),
         )
         path_specs = (
             (
@@ -1838,6 +1888,11 @@ class ReactionWriter:
                 "source": getattr(template, "source", None),
             },
             "gas_product": bool(getattr(brs, "gas_product", False)),
+            "neb_intermediate_refinement": getattr(
+                lc,
+                "neb_intermediate_refinement",
+                None,
+            ),
             "rate_energy_bases": [],
             "stats": {"count": 0, "first_step": None, "last_step": None},
             "energies_ev": {

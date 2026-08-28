@@ -95,12 +95,14 @@ ordinary directional barriers are at least 0.1 eV. Finally, AutoKMC derives the
 forward and reverse rates from one effective transition-state level, preserving
 energy consistency when it applies the minimum barrier floor.
 
-An ordinary or climbing band may also stop before its strict force target when
-its maximum NEB force is at most the configured low-barrier cutoff (0.1 eV/Å
-by default) and either raw directional barrier is below 0.1 eV. Reaction JSON
-retains that alternate convergence provenance. A stage that exhausts its full
-step budget receives the same barrier check even if its final force remains
-above the cutoff; acceptance is recorded as `low_barrier_max_steps`.
+If the ordinary band goes 100 optimizer steps without lowering its least
+energetic interior image, AutoKMC inspects the electronic-energy profile for
+intermediate minima. It brackets the band's highest-energy image with the
+nearest minimum on each side, optimizes the selected interior state or states
+(already-optimized original endpoints are reused), and runs one fresh standard
+NEB between them. Other minima and path segments are not refined. The shortened
+band supplies the transition state, but diffusion rates remain referenced to
+the original A and B endpoint energies.
 
 For a lateral environment containing neighboring adsorbates, the reaction
 evaluator first obtains an optimized band for the corresponding no-neighbor
@@ -117,6 +119,11 @@ expand the network when a new surface species first appears. Calculator-based
 stability pruning runs before the one-representative-per-adsorption-triple
 prune, so a geometrically compact but unstable member cannot displace a stable
 candidate prematurely.
+
+Bond NEBs use the same single highest-peak segment refinement. Its final
+transition state is still reported as the barrier for the original reversible
+`A + B <=> C` event, with electronic and free energetics referenced to the
+original A+B and C states rather than the selected intermediate minima.
 
 ## Rates and free energy
 

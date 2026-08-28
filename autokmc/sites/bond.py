@@ -250,12 +250,9 @@ class BondReactionLateral:
     neb_target_image_spacing: float | None = None
     neb_estimated_image_spacing: float | None = None
     neb_image_count_limited_by: str | None = None
-    neb_convergence_mode: str | None = None
-    neb_convergence_fmax: float | None = None
-    neb_converged_low_barrier: bool | None = None
-    neb_low_barrier_fmax: float | None = None
-    neb_low_barrier_threshold: float | None = None
-    neb_low_barrier_stage: str | None = None
+    neb_intermediate_refinement: dict[str, Any] | None = None
+    atoms_neb_refinement_initial: Any = None
+    atoms_neb_refinement_final: Any = None
     stable           : bool | None      = None
     invalid_reason   : str | None       = None
     last_failure_reason: str | None     = None

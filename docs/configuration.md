@@ -98,7 +98,9 @@ optimization:
   neb_method: improvedtangent
   neb_band_eval: images
   neb_geometry_guard_multiplier: 3.0
-  neb_low_barrier_fmax: 0.1
+  neb_intermediate_stagnation_steps: 100
+  neb_intermediate_energy_tolerance: 0.001
+  neb_intermediate_minimum_prominence: 0.01
 ```
 
 `optimizer` controls calculator-backed ordinary relaxations, including
@@ -127,23 +129,7 @@ uses `neb_climb_optimizer`; `null` reuses `neb_optimizer`.
 keywords, while `null` reuses `neb_optimizer_kwargs`. Each stage creates a fresh
 optimizer instance, so FIRE or MDMin velocity state does not pass from ordinary
 NEB into CI-NEB. The calculation-cache identity includes every optimizer
-choice, constructor mapping, and low-barrier climbing decision.
-
-`neb_low_barrier_fmax` provides an alternate stopping condition for a small
-barrier whose spring modes remain above the strict diffusion or bond `fmax`.
-AutoKMC first checks that the maximum NEB force is above the strict target but
-at or below this cutoff. It then compares the highest interior-image energy
-with both endpoint energies. If either raw directional barrier is below
-`EA_MIN = 0.1` eV, AutoKMC accepts the current ordinary or climbing band. The
-default cutoff is 0.1 eV/Å and must be finite and greater than zero. If a stage
-uses its entire step budget without converging or entering that force window,
-AutoKMC applies the same two-direction barrier check to the final band without
-requiring its force to be below the loose cutoff. A low final barrier is
-accepted with convergence mode `low_barrier_max_steps`; a non-low final barrier
-retains the normal non-convergence failure. The reaction JSON stores the mode,
-observed force, force cutoff, energy cutoff, and NEB stage under
-`neb_convergence`. The calculation-cache identity also includes this cutoff
-and versioned policy.
+choice, constructor mapping, and CI-NEB skip decision.
 
 `neb_geometry_guard_multiplier` controls the geometric rollback threshold for
 both diffusion and bond NEBs. The maximum adjacent-image atom displacement is
@@ -152,6 +138,28 @@ The default `3.0` therefore gives a 0.75 Å limit for the default 0.25 Å image
 spacing. Changing this multiplier does not change the dynamically selected
 number of images. It must be finite and greater than zero, and it is included
 in calculation-cache identities.
+
+The three `neb_intermediate_*` controls define a single, deliberately narrow
+stalled-path refinement. During the ordinary stage, AutoKMC tracks the lowest
+interior-image electronic energy. After 100 consecutive optimizer steps
+without a decrease of at least `neb_intermediate_energy_tolerance`, it finds
+the highest-energy interior image and the nearest local minimum on each side.
+An interior image counts as a minimum only when it lies below both neighboring
+images by at least `neb_intermediate_minimum_prominence`; the original
+endpoints also count as bounding minima.
+
+If the two bounding states include at least one interior minimum, AutoKMC
+optimizes the selected interior state or states with the ordinary `optimizer`
+and runs the standard ordinary/CI-NEB workflow once between that pair. It does
+not run NEBs between the other minima or refine the remaining path segments,
+and it will not recursively shorten the replacement band. This is faster but
+can miss a competing barrier. The final transition energy is nevertheless
+combined with the original reaction endpoint energies (A/B for diffusion or
+A+B/C for bond changes) for the stored forward and reverse energetics. The
+selected optimized states are written as
+`neb_refinement_initial.extxyz` and `neb_refinement_final.extxyz`, and the
+indices, stalled electronic-energy profile, and policy are stored in
+`reaction.json` and the calculation cache.
 
 The retained ordinary transition energy remains the raw recorded value. At
 rate construction, both reversible directions use the same effective level,

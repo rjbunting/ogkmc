@@ -147,12 +147,14 @@ optimization:
   # this multiple of diffusion.image_spacing or bond.neb_image_spacing.
   neb_geometry_guard_multiplier: 3.0
 
-  # Once the NEB force is below this value (eV/Å) but still above the strict
-  # channel fmax, accept the band if either raw directional barrier is below
-  # the shared 0.1 eV minimum barrier. If the full step budget is exhausted
-  # first, apply the same barrier check to the final band regardless of force.
-  neb_low_barrier_fmax: 0.1
-
+  # If the lowest interior-image electronic energy does not improve by at
+  # least this tolerance for this many ordinary NEB optimizer steps, inspect
+  # the band for intermediate minima. AutoKMC optimizes only the nearest
+  # minima bracketing the band's highest image, then runs the standard NEB
+  # workflow once between that pair. Other path segments are not refined.
+  neb_intermediate_stagnation_steps: 100
+  neb_intermediate_energy_tolerance: 0.001
+  neb_intermediate_minimum_prominence: 0.01
 
 # ---------------------------------------------------------------------------
 # Output files

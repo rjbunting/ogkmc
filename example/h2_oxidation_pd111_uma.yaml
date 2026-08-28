@@ -100,11 +100,9 @@ optimization:
   neb_method: improvedtangent
   neb_band_eval: batched
   neb_geometry_guard_multiplier: 3.0
-  # First barrier gate: while ordinary NEB is still above its strict 0.05
-  # eV/angstrom target, check at 0.10 eV/angstrom and stop if either raw
-  # directional barrier is below 0.10 eV. If the full step budget is exhausted
-  # before reaching that gate, check the final band using the same barrier rule.
-  neb_low_barrier_fmax: 0.1
+  neb_intermediate_stagnation_steps: 100
+  neb_intermediate_energy_tolerance: 0.001
+  neb_intermediate_minimum_prominence: 0.01
 
 adsorption:
   prune_stable_only: true

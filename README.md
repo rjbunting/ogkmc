@@ -311,15 +311,15 @@ stage. The rate calculation applies the floor through one common effective
 transition-state level, which preserves reversible energy consistency. These
 calculations are often among the most expensive parts of a run.
 
-Effectively barrierless bands can oscillate above the strict channel `fmax`
-because of their spring modes. Once the observed maximum NEB force is at or
-below `optimization.neb_low_barrier_fmax` (default 0.1 eV/Å), AutoKMC checks
-both raw directional barriers. If either is below 0.1 eV, the band is accepted
-without reaching the strict force target. If the optimizer instead exhausts
-its full step budget before reaching that force cutoff, AutoKMC applies the
-same barrier check to the final band regardless of its force. The reaction JSON
-records the low-barrier mode (`low_barrier` or `low_barrier_max_steps`), the
-observed force, and both cutoffs.
+If an ordinary NEB takes 100 optimizer steps without finding a lower
+interior-image electronic energy, AutoKMC inspects that band's energy profile.
+It selects only the two nearest minima bracketing the highest-energy image,
+optimizes any selected interior states, and reruns the standard NEB workflow
+for that one segment. Already-optimized original endpoints are reused. It
+deliberately does not evaluate every adjacent-minimum segment. This is faster
+but more aggressive; the resulting transition state is still referenced to
+the original reaction endpoints when the forward and reverse barriers are
+stored.
 
 When `image_spacing` (or bond `neb_image_spacing`) is set, it also guards the
 optimized geometry. By default, no unfrozen atom may move more than three times
@@ -468,6 +468,8 @@ reactions/
     state_b_initial.extxyz
     state_b.extxyz
     ts.extxyz
+    neb_refinement_initial.extxyz # when stalled-path refinement is used
+    neb_refinement_final.extxyz   # when stalled-path refinement is used
     neb_path_initial.extxyz       # when persist_neb_path is true
     neb_path.extxyz               # when persist_neb_path is true
   bond/<A+B<->C>/bond_isoX_latY/
@@ -479,6 +481,8 @@ reactions/
     state_c_gas_reference.extxyz # empty surface only, gas products
     gas_molecule.extxyz          # optimized gas molecule only, gas products
     ts.extxyz
+    neb_refinement_initial.extxyz # when stalled-path refinement is used
+    neb_refinement_final.extxyz   # when stalled-path refinement is used
     neb_path_initial.extxyz       # when persist_neb_path is true
     neb_path.extxyz               # when persist_neb_path is true
 ```
@@ -492,6 +496,9 @@ empty surface/lateral environment with no molecule in the vacuum, while
 their independent energies reproduces the additive thermodynamic C state.
 For diffusion and bond reactions, `neb_path_initial.extxyz` is the interpolated
 band before NEB optimization and `neb_path.extxyz` is the optimized band.
+When stalled-path refinement is used, `neb_refinement_initial.extxyz` and
+`neb_refinement_final.extxyz` are its two optimized endpoints; the NEB path
+files then describe the replacement highest-peak segment.
 Failed diffusion and bond candidates retain both files automatically, even
 when `persist_neb_path` is false, with the latter containing the last-known
 band at the point of failure.

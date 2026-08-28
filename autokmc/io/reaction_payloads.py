@@ -92,38 +92,6 @@ def _neb_image_payload(lateral_class) -> dict[str, Any]:
     }
 
 
-def _neb_convergence_payload(lateral_class) -> dict[str, Any]:
-    """Return the force or low-barrier NEB stopping provenance."""
-    return {
-        "mode": getattr(lateral_class, "neb_convergence_mode", None),
-        "observed_fmax_ev_per_ang": getattr(
-            lateral_class,
-            "neb_convergence_fmax",
-            None,
-        ),
-        "low_barrier_early_stop": getattr(
-            lateral_class,
-            "neb_converged_low_barrier",
-            None,
-        ),
-        "low_barrier_force_cutoff_ev_per_ang": getattr(
-            lateral_class,
-            "neb_low_barrier_fmax",
-            None,
-        ),
-        "low_barrier_energy_cutoff_ev": getattr(
-            lateral_class,
-            "neb_low_barrier_threshold",
-            None,
-        ),
-        "low_barrier_stage": getattr(
-            lateral_class,
-            "neb_low_barrier_stage",
-            None,
-        ),
-    }
-
-
 def build_diffusion_payload(
     reaction,
     *,
@@ -174,7 +142,11 @@ def build_diffusion_payload(
         "gas_product": False,
         "description": description,
         "neb_images": _neb_image_payload(lc),
-        "neb_convergence": _neb_convergence_payload(lc),
+        "neb_intermediate_refinement": getattr(
+            lc,
+            "neb_intermediate_refinement",
+            None,
+        ),
         "energies_ev": {
             "state_a": None if e_a is None else float(e_a),
             "state_b": None if e_b is None else float(e_b),
@@ -229,6 +201,16 @@ def build_diffusion_payload(
             "state_a": "state_a.extxyz",
             "state_b": "state_b.extxyz",
             "transition": "ts.extxyz",
+            "neb_refinement_initial": (
+                "neb_refinement_initial.extxyz"
+                if getattr(lc, "atoms_neb_refinement_initial", None) is not None
+                else None
+            ),
+            "neb_refinement_final": (
+                "neb_refinement_final.extxyz"
+                if getattr(lc, "atoms_neb_refinement_final", None) is not None
+                else None
+            ),
             "neb_path_initial": (
                 "neb_path_initial.extxyz"
                 if getattr(lc, "atoms_neb_path_initial", None)
@@ -304,7 +286,11 @@ def build_bond_payload(
         "gas_product": bool(getattr(reaction.site, "gas_product", False)),
         "description": description,
         "neb_images": _neb_image_payload(lc),
-        "neb_convergence": _neb_convergence_payload(lc),
+        "neb_intermediate_refinement": getattr(
+            lc,
+            "neb_intermediate_refinement",
+            None,
+        ),
         "energies_ev": {
             "state_ab": None if e_ab is None else float(e_ab),
             "state_c": None if e_c is None else float(e_c),
@@ -385,6 +371,16 @@ def build_bond_payload(
                 else None
             ),
             "transition": "ts.extxyz",
+            "neb_refinement_initial": (
+                "neb_refinement_initial.extxyz"
+                if getattr(lc, "atoms_neb_refinement_initial", None) is not None
+                else None
+            ),
+            "neb_refinement_final": (
+                "neb_refinement_final.extxyz"
+                if getattr(lc, "atoms_neb_refinement_final", None) is not None
+                else None
+            ),
             "neb_path_initial": (
                 "neb_path_initial.extxyz"
                 if getattr(lc, "atoms_neb_path_initial", None)

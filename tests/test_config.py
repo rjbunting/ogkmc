@@ -88,7 +88,13 @@ def test_load_yaml_ok(tmp_path):
     assert cfg.optimization.neb_optimizer == "bfgs"
     assert cfg.optimization.neb_method == "improvedtangent"
     assert cfg.optimization.neb_geometry_guard_multiplier == pytest.approx(3.0)
-    assert cfg.optimization.neb_low_barrier_fmax == pytest.approx(0.1)
+    assert cfg.optimization.neb_intermediate_stagnation_steps == 100
+    assert cfg.optimization.neb_intermediate_energy_tolerance == pytest.approx(
+        0.001
+    )
+    assert cfg.optimization.neb_intermediate_minimum_prominence == pytest.approx(
+        0.01
+    )
 
 
 def test_loads_optimizer_choices(tmp_path):
@@ -116,7 +122,9 @@ optimization:
     downhill_check: false
   neb_method: aseneb
   neb_geometry_guard_multiplier: 4.0
-  neb_low_barrier_fmax: 0.15
+  neb_intermediate_stagnation_steps: 75
+  neb_intermediate_energy_tolerance: 0.002
+  neb_intermediate_minimum_prominence: 0.03
 reactants:
   - smiles: "[O]"
 calculator:
@@ -147,7 +155,13 @@ calculator:
     }
     assert cfg.optimization.neb_method == "aseneb"
     assert cfg.optimization.neb_geometry_guard_multiplier == pytest.approx(4.0)
-    assert cfg.optimization.neb_low_barrier_fmax == pytest.approx(0.15)
+    assert cfg.optimization.neb_intermediate_stagnation_steps == 75
+    assert cfg.optimization.neb_intermediate_energy_tolerance == pytest.approx(
+        0.002
+    )
+    assert cfg.optimization.neb_intermediate_minimum_prominence == pytest.approx(
+        0.03
+    )
 
 
 @pytest.mark.parametrize(
@@ -301,15 +315,26 @@ calculator:
         load_config(path)
 
 
-@pytest.mark.parametrize("value", [0.0, -0.1])
-def test_rejects_nonpositive_neb_low_barrier_fmax(tmp_path, value):
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("neb_intermediate_stagnation_steps", 0),
+        ("neb_intermediate_energy_tolerance", -0.001),
+        ("neb_intermediate_minimum_prominence", -0.001),
+    ],
+)
+def test_rejects_invalid_neb_intermediate_refinement_controls(
+    tmp_path,
+    key,
+    value,
+):
     pytest.importorskip("yaml")
     path = _write(
         tmp_path,
         f"""
 schema_version: "1"
 optimization:
-  neb_low_barrier_fmax: {value}
+  {key}: {value}
 reactants:
   - smiles: "[O]"
 calculator:
@@ -317,10 +342,7 @@ calculator:
 """,
     )
 
-    with pytest.raises(
-        ConfigError,
-        match="optimization.neb_low_barrier_fmax",
-    ):
+    with pytest.raises(ConfigError, match=f"optimization.{key}"):
         load_config(path)
 
 

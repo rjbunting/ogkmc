@@ -206,8 +206,18 @@ def test_reaction_writer_persists_initial_structures_and_neb_paths(
         atoms_a=optimized.copy(),
         atoms_b=optimized.copy(),
         atoms_ts=optimized.copy(),
+        atoms_neb_refinement_initial=optimized.copy(),
+        atoms_neb_refinement_final=optimized.copy(),
         atoms_neb_path_initial=path_initial,
         atoms_neb_path=path_optimized,
+        neb_intermediate_refinement={
+            "performed": True,
+            "policy": "highest_peak_nearest_minima_single_segment_v1",
+            "peak_image_index": 4,
+            "left_state_image_index": 2,
+            "right_state_image_index": 5,
+            "other_segments_refined": False,
+        },
         neb_n_images=6,
         neb_n_frames=8,
         neb_max_endpoint_displacement=1.5,
@@ -218,12 +228,6 @@ def test_reaction_writer_persists_initial_structures_and_neb_paths(
         neb_climb_skipped_low_barrier=False,
         neb_regular_forward_barrier=1.0,
         neb_regular_reverse_barrier=0.8,
-        neb_convergence_mode="force",
-        neb_convergence_fmax=0.009,
-        neb_converged_low_barrier=False,
-        neb_low_barrier_fmax=0.1,
-        neb_low_barrier_threshold=0.1,
-        neb_low_barrier_stage=None,
     )
     diffusion_reaction = SimpleNamespace(
         kind="diffusion",
@@ -254,8 +258,18 @@ def test_reaction_writer_persists_initial_structures_and_neb_paths(
             "H2", positions=[[0.0, 0.0, 0.0], [0.0, 0.0, 0.74]]
         ),
         atoms_ts=optimized.copy(),
+        atoms_neb_refinement_initial=optimized.copy(),
+        atoms_neb_refinement_final=optimized.copy(),
         atoms_neb_path_initial=path_initial,
         atoms_neb_path=path_optimized,
+        neb_intermediate_refinement={
+            "performed": True,
+            "policy": "highest_peak_nearest_minima_single_segment_v1",
+            "peak_image_index": 4,
+            "left_state_image_index": 2,
+            "right_state_image_index": 5,
+            "other_segments_refined": False,
+        },
         neb_n_images=6,
         neb_n_frames=8,
         neb_max_endpoint_displacement=1.5,
@@ -266,12 +280,6 @@ def test_reaction_writer_persists_initial_structures_and_neb_paths(
         neb_climb_skipped_low_barrier=True,
         neb_regular_forward_barrier=1.5,
         neb_regular_reverse_barrier=0.05,
-        neb_convergence_mode="low_barrier_max_steps",
-        neb_convergence_fmax=0.25,
-        neb_converged_low_barrier=True,
-        neb_low_barrier_fmax=0.1,
-        neb_low_barrier_threshold=0.1,
-        neb_low_barrier_stage="NEB pre-climb relaxation",
     )
     bond_reaction = SimpleNamespace(
         kind="bond",
@@ -307,12 +315,16 @@ def test_reaction_writer_persists_initial_structures_and_neb_paths(
     assert (diffusion_folder / "state_b_initial.extxyz").is_file()
     assert (diffusion_folder / "neb_path_initial.extxyz").is_file()
     assert (diffusion_folder / "neb_path.extxyz").is_file()
+    assert (diffusion_folder / "neb_refinement_initial.extxyz").is_file()
+    assert (diffusion_folder / "neb_refinement_final.extxyz").is_file()
     assert (bond_folder / "state_ab_initial.extxyz").is_file()
     assert (bond_folder / "state_c_initial.extxyz").is_file()
     assert (bond_folder / "state_c_gas_reference.extxyz").is_file()
     assert (bond_folder / "gas_molecule.extxyz").is_file()
     assert (bond_folder / "neb_path_initial.extxyz").is_file()
     assert (bond_folder / "neb_path.extxyz").is_file()
+    assert (bond_folder / "neb_refinement_initial.extxyz").is_file()
+    assert (bond_folder / "neb_refinement_final.extxyz").is_file()
     bond_payload = json.loads((bond_folder / "reaction.json").read_text())
     assert bond_payload["energies_ev"]["state_c"] == pytest.approx(-4.7)
     assert bond_payload["energies_ev"]["state_c_precursor"] == pytest.approx(
@@ -326,6 +338,12 @@ def test_reaction_writer_persists_initial_structures_and_neb_paths(
         "state_c_gas_reference.extxyz"
     )
     assert bond_payload["atoms"]["gas_molecule"] == "gas_molecule.extxyz"
+    assert bond_payload["atoms"]["neb_refinement_initial"] == (
+        "neb_refinement_initial.extxyz"
+    )
+    assert bond_payload["neb_intermediate_refinement"][
+        "other_segments_refined"
+    ] is False
     gas_surface = ase_read(bond_folder / "state_c_gas_reference.extxyz")
     gas_molecule = ase_read(bond_folder / "gas_molecule.extxyz")
     assert gas_surface.get_chemical_symbols() == ["Pt", "Pt"]
@@ -340,15 +358,6 @@ def test_reaction_writer_persists_initial_structures_and_neb_paths(
     assert bond_payload["neb_images"][
         "regular_reverse_barrier_ev"
     ] == pytest.approx(0.05)
-    assert bond_payload["neb_convergence"] == {
-        "mode": "low_barrier_max_steps",
-        "observed_fmax_ev_per_ang": pytest.approx(0.25),
-        "low_barrier_early_stop": True,
-        "low_barrier_force_cutoff_ev_per_ang": pytest.approx(0.1),
-        "low_barrier_energy_cutoff_ev": pytest.approx(0.1),
-        "low_barrier_stage": "NEB pre-climb relaxation",
-    }
-
     diffusion_payload = json.loads(
         (diffusion_folder / "reaction.json").read_text()
     )
@@ -357,12 +366,11 @@ def test_reaction_writer_persists_initial_structures_and_neb_paths(
     )
     assert diffusion_payload["neb_images"]["interior_images"] == 6
     assert diffusion_payload["neb_images"]["climb_performed"] is True
-    assert diffusion_payload["neb_convergence"]["mode"] == "force"
-    assert diffusion_payload["neb_convergence"][
-        "low_barrier_early_stop"
-    ] is False
     assert diffusion_payload["atoms"]["neb_path_initial"] == (
         "neb_path_initial.extxyz"
+    )
+    assert diffusion_payload["atoms"]["neb_refinement_final"] == (
+        "neb_refinement_final.extxyz"
     )
 
 
@@ -1211,6 +1219,13 @@ def test_invalid_diffusion_record_tolerates_missing_energies(tmp_path):
         last_failure_reason="NEBNotConvergedError: NEB failed early",
         atoms_a_initial=atoms.copy(),
         atoms_b_initial=atoms.copy(),
+        atoms_neb_refinement_initial=atoms.copy(),
+        atoms_neb_refinement_final=atoms.copy(),
+        neb_intermediate_refinement={
+            "performed": True,
+            "policy": "highest_peak_nearest_minima_single_segment_v1",
+            "other_segments_refined": False,
+        },
         atoms_neb_path_initial=[atoms.copy(), atoms.copy()],
         atoms_neb_path=[atoms.copy(), atoms.copy()],
     )
@@ -1244,10 +1259,18 @@ def test_invalid_diffusion_record_tolerates_missing_energies(tmp_path):
     assert (folder / "state_b_initial.extxyz").is_file()
     assert (folder / "neb_path_initial.extxyz").is_file()
     assert (folder / "neb_path.extxyz").is_file()
+    assert (folder / "neb_refinement_initial.extxyz").is_file()
+    assert (folder / "neb_refinement_final.extxyz").is_file()
     assert payload["atoms"]["state_a_initial"] == "state_a_initial.extxyz"
     assert payload["atoms"]["state_b_initial"] == "state_b_initial.extxyz"
     assert payload["atoms"]["neb_path_initial"] == "neb_path_initial.extxyz"
     assert payload["atoms"]["neb_path"] == "neb_path.extxyz"
+    assert payload["atoms"]["neb_refinement_initial"] == (
+        "neb_refinement_initial.extxyz"
+    )
+    assert payload["neb_intermediate_refinement"][
+        "other_segments_refined"
+    ] is False
     definitions = load_reaction_index(tmp_path / "reactions" / "index.jsonl")
     definition = definitions[payload["reaction_id"]]
     assert definition["valid"] is False

@@ -150,7 +150,13 @@ _STATE_FILENAMES: dict[str, dict[str, str]] = {
 }
 
 _OPTIONAL_STATE_FILENAMES: dict[str, dict[str, str]] = {
+    "diffusion": {
+        "neb_refinement_initial": "neb_refinement_initial.extxyz",
+        "neb_refinement_final": "neb_refinement_final.extxyz",
+    },
     "bond": {
+        "neb_refinement_initial": "neb_refinement_initial.extxyz",
+        "neb_refinement_final": "neb_refinement_final.extxyz",
         "state_c_gas_reference": "state_c_gas_reference.extxyz",
         "gas_molecule": "gas_molecule.extxyz",
     },
@@ -2389,6 +2395,13 @@ def apply_cached_states(
     if neb:
         lateral_class.atoms_neb_path = [image.copy() for image in neb.get("path", [])]
         lateral_class.neb_path_energies = list(neb.get("energies_ev", []))
+    for state_name, atoms_attr in (
+        ("neb_refinement_initial", "atoms_neb_refinement_initial"),
+        ("neb_refinement_final", "atoms_neb_refinement_final"),
+    ):
+        state = states.get(state_name)
+        if state and isinstance(state.get("atoms"), Atoms):
+            setattr(lateral_class, atoms_attr, state["atoms"].copy())
     for name, value in record.get("lateral_attributes", {}).items():
         if (
             value is not None
