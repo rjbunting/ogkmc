@@ -4,6 +4,7 @@ from collections import Counter
 from pathlib import Path
 
 from ase import Atoms
+from ase.build import fcc100, fcc111, make_supercell
 from ase.calculators.emt import EMT
 import numpy as np
 import pytest
@@ -99,6 +100,48 @@ def test_surface_examples_build_4x4_four_layer_slabs(filename):
         normal = np.cross(atoms.cell[0], atoms.cell[1])
         normal /= np.linalg.norm(normal)
         np.testing.assert_allclose(normal, [0.0, 0.0, 1.0], atol=1.0e-12)
+    elif cfg.structure.miller_index == (1, 0, 0):
+        np.testing.assert_allclose(atoms.cell.angles(), [90.0, 90.0, 90.0])
+
+
+@pytest.mark.parametrize("facet", ["100", "111"])
+@pytest.mark.parametrize("shear", [-2, -1, 1])
+def test_surface_tiling_uses_shortest_in_plane_basis(monkeypatch, facet, shear):
+    import autokmc.structure.slab as slab_module
+
+    builder = fcc100 if facet == "100" else fcc111
+    reference = builder("Pd", size=(1, 1, 4), a=3.89, vacuum=12.0, periodic=True)
+    sheared = make_supercell(reference, [[1, 0, 0], [shear, 1, 0], [0, 0, 1]])
+    # Primitive-cell generation may return any equivalent integer-sheared
+    # basis. Reproduce that independently of the installed pymatgen version.
+    pmg_slab = slab_module.AseAtomsAdaptor.get_structure(sheared)
+
+    class ShearedSlabGenerator:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def get_slabs(self):
+            return [pmg_slab]
+
+    monkeypatch.setattr(slab_module, "SlabGenerator", ShearedSlabGenerator)
+    _, atoms = _build_pd_example_surface(facet)
+
+    heights, layer_counts = np.unique(
+        np.round(atoms.positions[:, 2], decimals=8), return_counts=True
+    )
+    assert len(atoms) == 64
+    assert len(heights) == 4
+    np.testing.assert_array_equal(layer_counts, [16, 16, 16, 16])
+    assert len(atoms.info["frozen_indices"]) == 32
+    np.testing.assert_allclose(atoms.cell.lengths()[:2], 4 * reference.cell.lengths()[:2])
+    np.testing.assert_allclose(atoms.cell[2], reference.cell[2])
+    np.testing.assert_allclose(np.diff(heights), np.diff(np.unique(reference.positions[:, 2])))
+    np.testing.assert_allclose(atoms.get_volume(), 16 * reference.get_volume())
+    # Square surfaces stay square; hexagonal surfaces retain their skew.
+    expected_cosine = 0.0 if facet == "100" else 0.5
+    np.testing.assert_allclose(
+        abs(np.cos(np.deg2rad(atoms.cell.angles()[2]))), expected_cosine, atol=1.0e-12
+    )
 
 
 def test_skew_pd111_o_sites_are_local_and_connectivity_consistent():

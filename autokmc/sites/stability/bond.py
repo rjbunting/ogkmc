@@ -2533,7 +2533,7 @@ def check_bond_site_stability(
             "minimum_barrier_ev": float(EA_MIN),
         },
         "neb_intermediate_refinement_policy": {
-            "name": "highest_peak_nearest_minima_single_segment_v1",
+            "name": "highest_peak_nearest_minima_single_segment_v2",
             "stagnation_steps": int(neb_intermediate_stagnation_steps),
             "energy_tolerance_ev": float(neb_intermediate_energy_tolerance),
             "minimum_prominence_ev": float(
@@ -3165,7 +3165,13 @@ def check_bond_site_stability(
     lc.neb_intermediate_refinement = (
         {
             "performed": True,
-            "policy": "highest_peak_nearest_minima_single_segment_v1",
+            "policy": "highest_peak_nearest_minima_single_segment_v2",
+            "trigger": neb_result.intermediate_trigger,
+            "source_stage": neb_result.intermediate_source_stage,
+            "checkpoint_fmax_ev_per_ang": neb_result.intermediate_checkpoint_fmax,
+            "checkpoint_optimizer_steps": (
+                neb_result.intermediate_checkpoint_optimizer_steps
+            ),
             "stagnation_steps": neb_result.intermediate_stagnation_steps,
             "optimizer_steps_at_detection": neb_result.intermediate_stalled_steps,
             "peak_image_index": neb_result.intermediate_peak_index,

@@ -212,7 +212,10 @@ def test_reaction_writer_persists_initial_structures_and_neb_paths(
         atoms_neb_path=path_optimized,
         neb_intermediate_refinement={
             "performed": True,
-            "policy": "highest_peak_nearest_minima_single_segment_v1",
+            "policy": "highest_peak_nearest_minima_single_segment_v2",
+            "trigger": "geometry_rollback",
+            "source_stage": "NEB pre-climb relaxation",
+            "checkpoint_fmax_ev_per_ang": 0.2,
             "peak_image_index": 4,
             "left_state_image_index": 2,
             "right_state_image_index": 5,
@@ -264,7 +267,10 @@ def test_reaction_writer_persists_initial_structures_and_neb_paths(
         atoms_neb_path=path_optimized,
         neb_intermediate_refinement={
             "performed": True,
-            "policy": "highest_peak_nearest_minima_single_segment_v1",
+            "policy": "highest_peak_nearest_minima_single_segment_v2",
+            "trigger": "geometry_rollback",
+            "source_stage": "CI-NEB",
+            "checkpoint_fmax_ev_per_ang": 0.15,
             "peak_image_index": 4,
             "left_state_image_index": 2,
             "right_state_image_index": 5,
@@ -344,6 +350,11 @@ def test_reaction_writer_persists_initial_structures_and_neb_paths(
     assert bond_payload["neb_intermediate_refinement"][
         "other_segments_refined"
     ] is False
+    assert bond_payload["neb_intermediate_refinement"]["trigger"] == "geometry_rollback"
+    assert bond_payload["neb_intermediate_refinement"]["source_stage"] == "CI-NEB"
+    assert bond_payload["neb_intermediate_refinement"][
+        "checkpoint_fmax_ev_per_ang"
+    ] == pytest.approx(0.15)
     gas_surface = ase_read(bond_folder / "state_c_gas_reference.extxyz")
     gas_molecule = ase_read(bond_folder / "gas_molecule.extxyz")
     assert gas_surface.get_chemical_symbols() == ["Pt", "Pt"]
@@ -1223,7 +1234,8 @@ def test_invalid_diffusion_record_tolerates_missing_energies(tmp_path):
         atoms_neb_refinement_final=atoms.copy(),
         neb_intermediate_refinement={
             "performed": True,
-            "policy": "highest_peak_nearest_minima_single_segment_v1",
+            "policy": "highest_peak_nearest_minima_single_segment_v2",
+            "trigger": "geometry_rollback",
             "other_segments_refined": False,
         },
         atoms_neb_path_initial=[atoms.copy(), atoms.copy()],
@@ -1271,6 +1283,7 @@ def test_invalid_diffusion_record_tolerates_missing_energies(tmp_path):
     assert payload["neb_intermediate_refinement"][
         "other_segments_refined"
     ] is False
+    assert payload["neb_intermediate_refinement"]["trigger"] == "geometry_rollback"
     definitions = load_reaction_index(tmp_path / "reactions" / "index.jsonl")
     definition = definitions[payload["reaction_id"]]
     assert definition["valid"] is False

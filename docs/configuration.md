@@ -148,6 +148,17 @@ An interior image counts as a minimum only when it lies below both neighboring
 images by at least `neb_intermediate_minimum_prominence`; the original
 endpoints also count as bounding minima.
 
+A distance-guard rollback is a second, immediate trigger for the same check:
+AutoKMC first restores the whole valid band with the lowest maximum NEB force
+in the current optimizer stage, then evaluates that restored band's electronic
+energy profile. It does not inspect the rejected stretched geometry or merely
+the most recent valid frame. This check runs during either ordinary or CI-NEB
+and does not wait for the 100-step stagnation threshold, even if rollback
+consumes the last allowed stage step. A usable minimum bracket starts a fresh
+ordinary/CI-NEB calculation with the normal per-stage budget. Otherwise, the
+existing reduced-step rollback resumes within the remaining budget, or reports
+non-convergence when that budget is exhausted.
+
 If the two bounding states include at least one interior minimum, AutoKMC
 optimizes the selected interior state or states with the ordinary `optimizer`
 and runs the standard ordinary/CI-NEB workflow once between that pair. It does
@@ -159,7 +170,11 @@ A+B/C for bond changes) for the stored forward and reverse energetics. The
 selected optimized states are written as
 `neb_refinement_initial.extxyz` and `neb_refinement_final.extxyz`, and the
 indices, stalled electronic-energy profile, and policy are stored in
-`reaction.json` and the calculation cache.
+`reaction.json` and the calculation cache. The metadata also distinguishes
+`energy_stagnation` from `geometry_rollback` and records the source stage and,
+for rollback, the checkpoint's maximum NEB force and optimizer step. The
+replacement band still has the distance guard but cannot trigger another
+minima refinement.
 
 The retained ordinary transition energy remains the raw recorded value. At
 rate construction, both reversible directions use the same effective level,
@@ -327,6 +342,12 @@ structures in one call."
 
 Positive sizes and force thresholds are required for built structures.
 `n_freeze_layers` may be zero. Unconverged structure optimization is an error.
+
+Surface slabs use the shortest equivalent in-plane lattice vectors before
+tiling to `goal_x` and `goal_y`, so an integer-sheared primitive cell from
+pymatgen does not change the repeat counts. This basis reduction preserves
+the layers and vacuum; `extra_kwargs.orthogonalise: false` still retains
+naturally skewed surfaces such as FCC(111).
 
 File-backed structures use any single-frame or multi-frame format supported by
 the installed ASE version:

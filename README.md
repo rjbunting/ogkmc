@@ -324,9 +324,12 @@ stored.
 When `image_spacing` (or bond `neb_image_spacing`) is set, it also guards the
 optimized geometry. By default, no unfrozen atom may move more than three times
 that distance between adjacent images. If a step violates this limit, AutoKMC
-restores the lowest-force valid band and starts a fresh optimizer inside the
-existing step budget. FIRE restarts with halved `dt` and `dtmax`, preventing a
-stretched band from being retained. Set
+restores the lowest-force valid band and immediately checks its electronic
+energy profile for minima, without waiting for 100 stagnant steps. If a usable
+bracket exists, it runs the one permitted highest-peak segment refinement;
+this also applies to rollback during CI-NEB. Otherwise, it starts a fresh
+optimizer inside the existing step budget. FIRE restarts with halved `dt` and
+`dtmax`, preventing a stretched band from being retained. Set
 `optimization.neb_geometry_guard_multiplier` to change the limit without
 changing the image density.
 

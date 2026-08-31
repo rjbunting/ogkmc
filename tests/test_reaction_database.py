@@ -1125,6 +1125,16 @@ def test_neb_reactions_write_required_states_and_optional_path(
             "energies_ev": [-5.0, -4.0, -4.8],
             "path_atoms": [_atoms(0.0), _atoms(0.05), _atoms(0.1)],
         },
+        lateral_attributes={
+            "neb_intermediate_refinement": {
+                "performed": True,
+                "policy": "highest_peak_nearest_minima_single_segment_v2",
+                "trigger": "geometry_rollback",
+                "source_stage": "CI-NEB",
+                "checkpoint_fmax_ev_per_ang": 0.2,
+                "checkpoint_optimizer_steps": 12,
+            },
+        },
     )
     record_path = write_calculation_record(root, kind, key, record)
     isaac = json.loads(record_path.read_text())
@@ -1154,6 +1164,10 @@ def test_neb_reactions_write_required_states_and_optional_path(
     assert apply_cached_states(lateral, hit, state_mapping)
     assert isinstance(lateral.atoms_neb_refinement_initial, Atoms)
     assert isinstance(lateral.atoms_neb_refinement_final, Atoms)
+    assert lateral.neb_intermediate_refinement["trigger"] == "geometry_rollback"
+    assert lateral.neb_intermediate_refinement["source_stage"] == "CI-NEB"
+    assert lateral.neb_intermediate_refinement["checkpoint_fmax_ev_per_ang"] == pytest.approx(0.2)
+    assert lateral.neb_intermediate_refinement["checkpoint_optimizer_steps"] == 12
 
 
 def test_bond_record_round_trips_optional_gas_reference_states(tmp_path):

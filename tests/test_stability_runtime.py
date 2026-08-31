@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import threading
 from types import SimpleNamespace
 
 from ase import Atoms
+from ase.calculators.calculator import Calculator, all_changes
 from ase.calculators.singlepoint import SinglePointCalculator
 import networkx as nx
 import numpy as np
@@ -364,6 +365,9 @@ def test_stalled_neb_refines_only_highest_peak_segment(monkeypatch):
         True,
     ]
     assert result.intermediate_refinement_performed is True
+    assert result.intermediate_trigger == "energy_stagnation"
+    assert result.intermediate_source_stage == "NEB pre-climb relaxation"
+    assert result.intermediate_checkpoint_fmax is None
     assert result.intermediate_peak_index == 4
     assert result.intermediate_left_index == 2
     assert result.intermediate_right_index == 5
@@ -376,6 +380,184 @@ def test_stalled_neb_refines_only_highest_peak_segment(monkeypatch):
     assert result.regular_reverse_barrier == pytest.approx(0.75)
     assert result.climb_performed is True
     assert result.optimizer_steps == 9
+
+
+@pytest.mark.parametrize(
+    ("rollback_stage", "max_steps", "replacement_rollback"),
+    [
+        (stage, steps, False)
+        for stage in ("ordinary", "ci", "ci_restart")
+        for steps in (3, 20)
+    ] + [("ordinary", 20, True)],
+)
+def test_rollback_refines_minima_from_lowest_force_valid_band(
+    monkeypatch,
+    rollback_stage,
+    max_steps,
+    replacement_rollback,
+):
+    # The best force belongs to y=0.1, not the latest/lower-energy valid y=0.2.
+    # The rejected y=2 frame has an even smaller force but violates spacing.
+    profiles = {
+        0.0: [0.0, 0.6, 0.9, 1.1, 0.8, 0.6, 0.5],
+        0.1: [0.0, 0.8, 0.2, 0.9, 1.4, 0.3, 0.5],
+        0.2: [0.0, 1.6, 0.05, 0.8, 0.4, 0.6, 0.5],
+        2.0: [0.0, 2.0, 0.1, 0.5, 0.2, 0.7, 0.5],
+    }
+
+    class ProfileCalculator(Calculator):
+        implemented_properties = ["energy"]
+
+        def __init__(self, index):
+            super().__init__()
+            self.index = index
+
+        def calculate(self, atoms=None, properties=("energy",), system_changes=all_changes):
+            super().calculate(atoms, properties, system_changes)
+            frame = round(float(atoms.positions[0, 1]), 1)
+            self.results = {"energy": profiles[frame][self.index]}
+
+    bands = []
+
+    def band_factory(initial, final, *, n_images, **_kwargs):
+        if not bands:
+            images = [Atoms("H", positions=[[0.1 * i, 0.0, 0.0]]) for i in range(7)]
+            for index, image in enumerate(images):
+                image.calc = ProfileCalculator(index)
+        else:
+            assert n_images == 2
+            images = []
+            for fraction, energy in zip(np.linspace(0.0, 1.0, 4), [0.15, 0.1, 1.25, 0.25]):
+                image = initial.copy()
+                image.positions = (1.0 - fraction) * initial.positions + fraction * final.positions
+                image.calc = SinglePointCalculator(image, energy=energy)
+                images.append(image)
+        neb = SimpleNamespace(climb=False, images=images, band_index=len(bands), force=0.4)
+        neb.get_forces = lambda: np.asarray([[neb.force, 0.0, 0.0]])
+        bands.append(neb)
+        return neb, images
+
+    stage_calls = []
+
+    class RollbackOptimizer:
+        def __init__(self, neb, *, logfile, maxstep=0.2):
+            del logfile
+            self.neb = neb
+            self.nsteps = 0
+            self.maxstep = maxstep
+            self.observers = []
+            stage_calls.append((neb.band_index, bool(neb.climb)))
+
+        def attach(self, function, interval=1):
+            assert interval == 1
+            self.observers.append(function)
+
+        def run(self, *, fmax, steps):
+            assert fmax == 0.05
+            replacement_attempt = stage_calls.count((1, False))
+            retrying_replacement = (
+                replacement_rollback and self.neb.band_index == 1
+                and not self.neb.climb and replacement_attempt == 2
+            )
+            assert steps == (max_steps - 3 if retrying_replacement else max_steps)
+            if retrying_replacement:
+                assert self.maxstep == pytest.approx(0.1)
+            should_rollback = self.neb.band_index == 0 and (
+                (rollback_stage == "ordinary" and not self.neb.climb)
+                or (rollback_stage != "ordinary" and self.neb.climb)
+            )
+            should_rollback = should_rollback or (
+                replacement_rollback and self.neb.band_index == 1
+                and not self.neb.climb and replacement_attempt == 1
+            )
+            frames = [(0.0, 0.4), (0.1, 0.2), (0.2, 0.3), (2.0, 0.01)]
+            if should_rollback:
+                for step, (height, force) in enumerate(frames):
+                    self.nsteps = step
+                    self.neb.force = force
+                    for image in self.neb.images[1:-1]:
+                        image.positions[0, 1] = height
+                    for observer in self.observers:
+                        observer()
+                pytest.fail("the distance guard should interrupt the stretched band")
+            else:
+                if self.neb.band_index == 1:
+                    for image, energy in zip(self.neb.images, [0.15, 0.1, 1.25, 0.25]):
+                        image.calc = SinglePointCalculator(image, energy=energy)
+                self.neb.force = 0.01
+                for observer in self.observers:
+                    observer()
+                self.nsteps = 1
+
+        def converged(self):
+            return True
+
+    relaxed = []
+
+    def relaxer(candidate, label):
+        del label
+        relaxed.append(candidate.positions.copy())
+        return candidate.copy(), 0.15 if len(relaxed) == 1 else 0.25
+
+    captured = []
+    monkeypatch.setattr(neb_module, "acquire_calculator", _calculator_context)
+    monkeypatch.setattr(neb_module, "BFGS", RollbackOptimizer)
+    result = neb_module.run_neb(
+        Atoms("H", positions=[[0.0, 0.0, 0.0]]),
+        Atoms("H", positions=[[0.6, 0.0, 0.0]]),
+        calculator=object(),
+        purpose="rollback minimum inspection",
+        n_images=5,
+        interpolation="linear",
+        spring_k=1.0,
+        climb=True,
+        start_climbing=rollback_stage == "ci_restart",
+        frozen_indices=None,
+        fmax=0.05,
+        max_steps=max_steps,
+        image_spacing=0.25,
+        intermediate_stagnation_steps=100,
+        intermediate_min_images=2,
+        intermediate_max_images=5,
+        intermediate_relaxer=relaxer,
+        intermediate_refinement_callback=lambda *args: captured.append(args),
+        barrier_endpoint_energies=(0.0, 0.5),
+        verbose=False,
+        not_converged_error=RuntimeError,
+        band_factory=band_factory,
+    )
+
+    assert len(bands) == 2
+    assert len(relaxed) == 2
+    np.testing.assert_allclose(relaxed, [[[0.2, 0.1, 0.0]], [[0.5, 0.1, 0.0]]])
+    expected_stages = {
+        "ordinary": [(0, False), (1, False), (1, True)],
+        "ci": [(0, False), (0, True), (1, False), (1, True)],
+        "ci_restart": [(0, True), (1, False), (1, True)],
+    }
+    expected = expected_stages[rollback_stage]
+    if replacement_rollback:
+        expected.insert(-1, (1, False))
+    assert stage_calls == expected
+    assert result.intermediate_trigger == "geometry_rollback"
+    assert result.intermediate_source_stage == (
+        "NEB pre-climb relaxation" if rollback_stage == "ordinary" else "CI-NEB"
+    )
+    assert result.intermediate_checkpoint_fmax == pytest.approx(0.2)
+    assert result.intermediate_checkpoint_optimizer_steps == (2 if rollback_stage == "ci" else 1)
+    assert result.intermediate_profile_energies == pytest.approx(profiles[0.1])
+    assert (
+        result.intermediate_peak_index,
+        result.intermediate_left_index,
+        result.intermediate_right_index,
+    ) == (4, 2, 5)
+    expected_steps = 6 if rollback_stage == "ci" else 5
+    assert result.optimizer_steps == expected_steps + (3 if replacement_rollback else 0)
+    assert result.regular_forward_barrier == pytest.approx(1.25)
+    assert result.regular_reverse_barrier == pytest.approx(0.75)
+    assert result.climb_performed is True
+    assert captured[0][2]["trigger"] == "geometry_rollback"
+    assert captured[0][2]["checkpoint_fmax_ev_per_ang"] == pytest.approx(0.2)
 
 
 def test_dynamic_neb_image_count_uses_maximum_mic_atom_displacement():
@@ -460,14 +642,37 @@ def test_neb_band_gap_is_mic_aware_and_ignores_frozen_atoms():
     ("guard_multiplier", "expected_optimizer_steps"),
     [(2.0, 4), (3.0, 5)],
 )
+@pytest.mark.parametrize("exhausted", [False, True])
 def test_shared_neb_restores_best_valid_band_and_halves_fire_timestep(
     monkeypatch,
     caplog,
     guard_multiplier,
     expected_optimizer_steps,
+    exhausted,
 ):
     energies = [0.0, 1.0, 0.0]
     images = [Atoms("H", positions=[[position, 0.0, 0.0]]) for position in (0.0, 0.10, 0.20)]
+
+    class ConstantEnergyCalculator(Calculator):
+        implemented_properties = ["energy"]
+
+        def __init__(self, energy):
+            super().__init__()
+            self.energy = energy
+
+        def calculate(self, atoms=None, properties=("energy",), system_changes=all_changes):
+            super().calculate(atoms, properties, system_changes)
+            self.results = {"energy": self.energy}
+
+    for image, energy in zip(images, energies):
+        image.calc = ConstantEnergyCalculator(energy)
+    inspected_positions = []
+    original_bracket = neb_module._highest_peak_minimum_bracket
+
+    def inspect_restored_band(profile, **kwargs):
+        inspected_positions.append(float(images[1].positions[0, 0]))
+        assert profile == energies
+        return original_bracket(profile, **kwargs)
 
     class ControlledNEB:
         def __init__(self):
@@ -549,38 +754,52 @@ def test_shared_neb_restores_best_valid_band_and_halves_fire_timestep(
 
     monkeypatch.setattr(neb_module, "acquire_calculator", _calculator_context)
     monkeypatch.setattr(neb_module, "FIRE", DivergingFire)
+    monkeypatch.setattr(neb_module, "_highest_peak_minimum_bracket", inspect_restored_band)
 
-    result = neb_module.run_neb(
-        images[0],
-        images[-1],
-        calculator=object(),
-        purpose="geometry recovery NEB",
-        n_images=1,
-        interpolation="linear",
-        spring_k=1.0,
-        climb=False,
-        frozen_indices=None,
-        fmax=0.05,
-        max_steps=20,
-        optimizer="fire",
-        optimizer_kwargs={
-            "dt": 0.04,
-            "dtmax": 0.20,
-            "maxstep": 0.10,
-            "downhill_check": False,
-        },
-        image_spacing=0.25,
-        geometry_guard_multiplier=guard_multiplier,
-        verbose=False,
-        not_converged_error=RuntimeError,
-        band_factory=lambda *_args, **_kwargs: (neb, images),
+    expectation = (
+        pytest.raises(RuntimeError, match="exhausted .*lowest-force valid band was restored")
+        if exhausted else nullcontext()
     )
+    with expectation:
+        result = neb_module.run_neb(
+            images[0],
+            images[-1],
+            calculator=object(),
+            purpose="geometry recovery NEB",
+            n_images=1,
+            interpolation="linear",
+            spring_k=1.0,
+            climb=False,
+            frozen_indices=None,
+            fmax=0.05,
+            max_steps=expected_optimizer_steps - 1 if exhausted else 20,
+            optimizer="fire",
+            optimizer_kwargs={
+                "dt": 0.04,
+                "dtmax": 0.20,
+                "maxstep": 0.10,
+                "downhill_check": False,
+            },
+            image_spacing=0.25,
+            geometry_guard_multiplier=guard_multiplier,
+            intermediate_stagnation_steps=100,
+            verbose=False,
+            not_converged_error=RuntimeError,
+            band_factory=lambda *_args, **_kwargs: (neb, images),
+        )
+
+    assert inspected_positions == pytest.approx([0.15])
+    if exhausted:
+        assert len(attempts) == 1
+        assert images[1].positions[0, 0] == pytest.approx(0.15)
+        return
 
     assert attempts == [
         {"dt": 0.04, "dtmax": 0.20, "start": 0.10},
         {"dt": 0.02, "dtmax": 0.10, "start": 0.15},
     ]
     assert result.optimizer_steps == expected_optimizer_steps
+    assert result.intermediate_refinement_performed is False
     assert "Restored the lowest-force valid band" in caplog.text
     assert "dt=0.02, dtmax=0.1" in caplog.text
 

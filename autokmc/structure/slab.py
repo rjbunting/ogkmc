@@ -11,6 +11,7 @@ import numpy as np
 from ase import Atoms
 from ase.build import make_supercell
 from ase.constraints import FixAtoms
+from ase.geometry import minkowski_reduce
 
 from autokmc.core.constants import (
     RANDOM_SEED,
@@ -115,6 +116,14 @@ def build_surface(
     slab_ase = AseAtomsAdaptor.get_atoms(slabs[0])
     assert isinstance(slab_ase, Atoms)
     set_full_pbc_if_cell(slab_ase)
+
+    # A primitive slab can have an unnecessarily sheared in-plane basis.
+    # Reduce a and b before selecting repeats so equivalent pymatgen cells
+    # produce the same lateral size. Exclude c to preserve layers and vacuum;
+    # this basis change does not force a naturally skewed surface to be square.
+    reduced_cell, _ = minkowski_reduce(slab_ase.cell, pbc=[True, True, False])
+    slab_ase.set_cell(reduced_cell, scale_atoms=False)
+    slab_ase.wrap()
 
     if orthogonalise:
         slab_ase, ortho_info = _orthogonalise_slab(slab_ase)

@@ -152,6 +152,10 @@ class NEBRunResult:
     regular_reverse_barrier: float | None = None
     intermediate_refinement_performed: bool = False
     intermediate_stagnation_steps: int | None = None
+    intermediate_trigger: str | None = None
+    intermediate_source_stage: str | None = None
+    intermediate_checkpoint_fmax: float | None = None
+    intermediate_checkpoint_optimizer_steps: int | None = None
     intermediate_peak_index: int | None = None
     intermediate_left_index: int | None = None
     intermediate_right_index: int | None = None
@@ -203,7 +207,7 @@ class _NEBBandSpacingViolation(RuntimeError):
 
 
 class _NEBIntermediateRefinement(RuntimeError):
-    """Internal signal carrying a stalled band and selected peak bracket."""
+    """Internal signal carrying a valid band and selected peak bracket."""
 
     def __init__(
         self,
@@ -213,6 +217,10 @@ class _NEBIntermediateRefinement(RuntimeError):
         peak_index: int,
         left_index: int,
         right_index: int,
+        trigger: str,
+        source_stage: str,
+        checkpoint_fmax: float | None = None,
+        checkpoint_optimizer_steps: int | None = None,
     ) -> None:
         self.images = []
         for image in images:
@@ -223,9 +231,13 @@ class _NEBIntermediateRefinement(RuntimeError):
         self.peak_index = int(peak_index)
         self.left_index = int(left_index)
         self.right_index = int(right_index)
+        self.trigger = trigger
+        self.source_stage = source_stage
+        self.checkpoint_fmax = checkpoint_fmax
+        self.checkpoint_optimizer_steps = checkpoint_optimizer_steps
         self.optimizer_steps = 0
         super().__init__(
-            "ordinary NEB stagnated with an intermediate minimum; "
+            f"{source_stage} found an intermediate minimum after {trigger}; "
             f"highest image {self.peak_index} is bracketed by states "
             f"{self.left_index} and {self.right_index}"
         )
@@ -848,9 +860,14 @@ def run_neb(
     (using the minimum-image convention). The default multiplier is three.
     The lowest-force geometrically valid band in the current stage is
     checkpointed. If a later step crosses the limit, that checkpoint is
-    restored and a fresh optimizer is created. FIRE restarts with both ``dt``
-    and ``dtmax`` halved; other supported optimizers reduce their available
-    displacement control. Restarts share the original stage step budget.
+    restored. With intermediate refinement enabled, its electronic-energy
+    profile is inspected immediately, before checking the remaining step
+    budget. Bracketing minima trigger the same single-segment refinement as
+    energy stagnation, including on rollback during CI-NEB. Without a usable
+    bracket (or after refinement has already been used), a fresh optimizer
+    resumes the restored band. FIRE halves ``dt`` and ``dtmax``; other
+    supported optimizers reduce their available displacement control. These
+    same-band restarts share the original stage step budget.
 
     When climbing was requested after an ordinary stage, the highest ordinary
     image is also checked against both endpoint energies. If either raw barrier
@@ -867,7 +884,10 @@ def run_neb(
     relaxed and a fresh standard NEB is run between them. This intentionally
     faster approximation does not refine the other portions of the original
     path. The returned transition energy remains on the original calculator
-    energy reference.
+    energy reference. At most one refinement is allowed per call; a replacement
+    band always begins with ordinary NEB, even if a CI-only restart triggered
+    it. ``intermediate_refinement_callback`` captures the optimized minima and
+    trigger/checkpoint provenance before constructing the replacement band.
 
     """
     build_band = band_factory or make_neb_band
@@ -969,6 +989,10 @@ def run_neb(
             original_barrier_endpoints = resolved_barrier_endpoints
             active_barrier_endpoints = original_barrier_endpoints
             intermediate_refinement_performed = False
+            intermediate_trigger = None
+            intermediate_source_stage = None
+            intermediate_checkpoint_fmax = None
+            intermediate_checkpoint_optimizer_steps = None
             intermediate_peak_index = None
             intermediate_left_index = None
             intermediate_right_index = None
@@ -1033,6 +1057,7 @@ def run_neb(
 
                 best_fmax = float("inf")
                 best_positions: list[np.ndarray] | None = None
+                best_optimizer_steps: int | None = None
                 best_interior_energy = float("inf")
                 steps_without_lower_interior_energy = 0
                 remaining_steps = int(max_steps)
@@ -1105,15 +1130,16 @@ def run_neb(
                         if hasattr(stage_optimizer, name)
                     }
 
-                    monitor_intermediate = bool(
+                    can_refine_intermediate = bool(
                         resolved_stagnation_steps is not None
-                        and not climbing_stage
                         and not intermediate_refinement_performed
                     )
+                    monitor_intermediate = can_refine_intermediate and not climbing_stage
                     if spacing_limit is not None or monitor_intermediate:
 
                         def monitor_band() -> None:
                             nonlocal best_fmax, best_positions
+                            nonlocal best_optimizer_steps
                             nonlocal best_interior_energy
                             nonlocal steps_without_lower_interior_energy
                             if spacing_limit is not None:
@@ -1132,6 +1158,9 @@ def run_neb(
                                     and current_fmax < best_fmax
                                 ):
                                     best_fmax = current_fmax
+                                    best_optimizer_steps = (
+                                        optimizer_steps + int(stage_optimizer.nsteps)
+                                    )
                                     best_positions = [
                                         np.asarray(image.positions, dtype=float).copy()
                                         for image in images
@@ -1174,6 +1203,8 @@ def run_neb(
                                 peak_index=peak_index,
                                 left_index=left_index,
                                 right_index=right_index,
+                                trigger="energy_stagnation",
+                                source_stage=stage,
                             )
                         stage_optimizer.attach(
                             monitor_band,
@@ -1204,6 +1235,46 @@ def run_neb(
                                 positions,
                                 apply_constraint=False,
                             )
+                        if can_refine_intermediate:
+                            # Inspect only the restored, lowest-force valid
+                            # band, never the rejected over-stretched frame.
+                            # This trigger is independent of the stagnation
+                            # clock and is checked even on the last stage step.
+                            energies = [
+                                float(image.get_potential_energy())
+                                for image in images
+                            ]
+                            bracket = _highest_peak_minimum_bracket(
+                                energies,
+                                minimum_prominence=resolved_minimum_prominence,
+                            )
+                            if bracket is not None:
+                                peak_index, left_index, right_index = bracket
+                                _log.warning(
+                                    "%s exceeded the adjacent-image limit: %s. "
+                                    "Restored the lowest-force valid band "
+                                    "(fmax=%.6f eV/Å); its energy profile contains "
+                                    "minima bracketing the highest peak.",
+                                    stage,
+                                    exc,
+                                    best_fmax,
+                                )
+                                refinement = _NEBIntermediateRefinement(
+                                    images=images,
+                                    energies=energies,
+                                    peak_index=peak_index,
+                                    left_index=left_index,
+                                    right_index=right_index,
+                                    trigger="geometry_rollback",
+                                    source_stage=stage,
+                                    checkpoint_fmax=best_fmax,
+                                    checkpoint_optimizer_steps=best_optimizer_steps,
+                                )
+                                # The failed attempt was counted above; a
+                                # signal raised in this except block bypasses
+                                # the sibling refinement-exception handler.
+                                refinement.optimizer_steps = optimizer_steps
+                                raise refinement from exc
                         if remaining_steps <= 0:
                             raise not_converged_error(
                                 f"{stage} exceeded its adjacent-image spacing "
@@ -1245,20 +1316,83 @@ def run_neb(
                         )
                     return
 
-            climb_performed = False
-            climb_skipped_low_barrier = False
-            regular_forward_barrier = None
-            regular_reverse_barrier = None
-
-            if not (climb and start_climbing):
-                ordinary_stage = "NEB pre-climb relaxation" if climb else "NEB"
+            ordinary_stage = "NEB pre-climb relaxation" if climb else "NEB"
+            run_climbing_restart = bool(climb and start_climbing)
+            while True:
+                climb_performed = False
+                climb_skipped_low_barrier = False
+                regular_forward_barrier = None
+                regular_reverse_barrier = None
                 try:
-                    _optimise_stage(
-                        stage=ordinary_stage,
-                        selected_optimizer=optimizer,
-                        selected_optimizer_kwargs=optimizer_kwargs,
-                        target_fmax=float(fmax),
-                    )
+                    if not run_climbing_restart:
+                        _optimise_stage(
+                            stage=ordinary_stage,
+                            selected_optimizer=optimizer,
+                            selected_optimizer_kwargs=optimizer_kwargs,
+                            target_fmax=float(fmax),
+                        )
+                        regular_energies = [
+                            float(image.get_potential_energy()) for image in images
+                        ]
+                        regular_interior = regular_energies[1:-1]
+                        if not regular_interior:
+                            raise not_converged_error(
+                                "NEB band has no interior images (n_images=0); "
+                                "cannot identify a TS."
+                            )
+                        regular_ts_energy = float(max(regular_interior))
+                        segment_barrier_endpoints = (
+                            active_barrier_endpoints
+                            if active_barrier_endpoints is not None
+                            else (regular_energies[0], regular_energies[-1])
+                        )
+                        original_energy_references = (
+                            original_barrier_endpoints
+                            if original_barrier_endpoints is not None
+                            else (regular_energies[0], regular_energies[-1])
+                        )
+                        segment_forward_barrier, segment_reverse_barrier = (
+                            _raw_directional_barriers(
+                                regular_ts_energy,
+                                segment_barrier_endpoints,
+                            )
+                        )
+                        regular_forward_barrier, regular_reverse_barrier = (
+                            _raw_directional_barriers(
+                                regular_ts_energy,
+                                original_energy_references,
+                            )
+                        )
+                        if (
+                            climb
+                            and min(segment_forward_barrier, segment_reverse_barrier)
+                            < float(EA_MIN) - 1.0e-12
+                        ):
+                            climb_skipped_low_barrier = True
+                            _log.warning(
+                                "Skipping CI-NEB because the converged ordinary band "
+                                "has a raw barrier below EA_MIN=%.3f eV "
+                                "(forward=%.6f eV, reverse=%.6f eV). The ordinary "
+                                "band is retained and the reversible KMC rate applies "
+                                "the common effective-TS barrier floor.",
+                                EA_MIN,
+                                segment_forward_barrier,
+                                segment_reverse_barrier,
+                            )
+                    if climb and not climb_skipped_low_barrier:
+                        neb.climb = True
+                        _optimise_stage(
+                            stage="CI-NEB",
+                            selected_optimizer=climb_optimizer or optimizer,
+                            selected_optimizer_kwargs=(
+                                optimizer_kwargs
+                                if climb_optimizer_kwargs is None
+                                else climb_optimizer_kwargs
+                            ),
+                            target_fmax=float(fmax),
+                        )
+                        climb_performed = True
+                    break
                 except _NEBIntermediateRefinement as refinement:
                     if original_barrier_endpoints is None:
                         original_barrier_endpoints = (
@@ -1266,22 +1400,28 @@ def run_neb(
                             float(refinement.energies[-1]),
                         )
                     intermediate_refinement_performed = True
+                    intermediate_trigger = refinement.trigger
+                    intermediate_source_stage = refinement.source_stage
+                    intermediate_checkpoint_fmax = refinement.checkpoint_fmax
+                    intermediate_checkpoint_optimizer_steps = (
+                        refinement.checkpoint_optimizer_steps
+                    )
                     intermediate_peak_index = refinement.peak_index
                     intermediate_left_index = refinement.left_index
                     intermediate_right_index = refinement.right_index
                     intermediate_stalled_steps = refinement.optimizer_steps
                     intermediate_profile_energies = list(refinement.energies)
-                    stalled_images = refinement.images
-                    stalled_energies = refinement.energies
+                    source_images = refinement.images
+                    source_energies = refinement.energies
 
                     def relax_refinement_state(
                         index: int,
                         label: str,
                     ) -> tuple[Atoms, float]:
-                        candidate = stalled_images[index].copy()
+                        candidate = source_images[index].copy()
                         candidate.calc = None
-                        if index in {0, len(stalled_images) - 1}:
-                            return candidate, float(stalled_energies[index])
+                        if index in {0, len(source_images) - 1}:
+                            return candidate, float(source_energies[index])
                         if intermediate_relaxer is not None:
                             optimized, energy = intermediate_relaxer(candidate, label)
                         else:
@@ -1344,7 +1484,11 @@ def run_neb(
                     refinement_image_count_limited_by = segment_selection.limited_by
                     refinement_metadata = {
                         "performed": True,
-                        "policy": "highest_peak_nearest_minima_single_segment_v1",
+                        "policy": "highest_peak_nearest_minima_single_segment_v2",
+                        "trigger": refinement.trigger,
+                        "source_stage": refinement.source_stage,
+                        "checkpoint_fmax_ev_per_ang": refinement.checkpoint_fmax,
+                        "checkpoint_optimizer_steps": refinement.checkpoint_optimizer_steps,
                         "stagnation_steps": resolved_stagnation_steps,
                         "optimizer_steps_at_detection": refinement.optimizer_steps,
                         "peak_image_index": refinement.peak_index,
@@ -1378,13 +1522,18 @@ def run_neb(
                         refinement_initial_energy,
                         refinement_final_energy,
                     )
+                    trigger_description = (
+                        f"{refinement.source_stage} restored its lowest-force valid band "
+                        "after a geometry rollback."
+                        if refinement.trigger == "geometry_rollback"
+                        else f"{refinement.source_stage} found no lower interior-image "
+                        f"energy for {resolved_stagnation_steps} steps."
+                    )
                     _log.warning(
-                        "%s found no lower interior-image energy for %d steps. "
-                        "Refining only the highest-energy segment %d-%d around "
-                        "image %d; other portions of the stalled path are not "
+                        "%s Refining only the highest-energy segment %d-%d around "
+                        "image %d; other portions of the original path are not "
                         "reoptimized.",
-                        ordinary_stage,
-                        resolved_stagnation_steps,
+                        trigger_description,
                         refinement.left_index,
                         refinement.right_index,
                         refinement.peak_index,
@@ -1416,69 +1565,9 @@ def run_neb(
                             snapshot.calc = None
                             segment_initial_path.append(snapshot)
                         initial_path_callback(segment_initial_path)
-                    _optimise_stage(
-                        stage=ordinary_stage,
-                        selected_optimizer=optimizer,
-                        selected_optimizer_kwargs=optimizer_kwargs,
-                        target_fmax=float(fmax),
-                    )
-                regular_energies = [float(image.get_potential_energy()) for image in images]
-                regular_interior = regular_energies[1:-1]
-                if not regular_interior:
-                    raise not_converged_error(
-                        "NEB band has no interior images (n_images=0); cannot identify a TS."
-                    )
-                regular_ts_energy = float(max(regular_interior))
-                segment_barrier_endpoints = (
-                    active_barrier_endpoints
-                    if active_barrier_endpoints is not None
-                    else (regular_energies[0], regular_energies[-1])
-                )
-                original_energy_references = (
-                    original_barrier_endpoints
-                    if original_barrier_endpoints is not None
-                    else (regular_energies[0], regular_energies[-1])
-                )
-                segment_forward_barrier, segment_reverse_barrier = _raw_directional_barriers(
-                    regular_ts_energy,
-                    segment_barrier_endpoints,
-                )
-                regular_forward_barrier, regular_reverse_barrier = _raw_directional_barriers(
-                    regular_ts_energy,
-                    original_energy_references,
-                )
-                if (
-                    climb
-                    and min(
-                        segment_forward_barrier,
-                        segment_reverse_barrier,
-                    )
-                    < float(EA_MIN) - 1.0e-12
-                ):
-                    climb_skipped_low_barrier = True
-                    _log.warning(
-                        "Skipping CI-NEB because the converged ordinary band "
-                        "has a raw barrier below EA_MIN=%.3f eV "
-                        "(forward=%.6f eV, reverse=%.6f eV). The ordinary "
-                        "band is retained and the reversible KMC rate applies "
-                        "the common effective-TS barrier floor.",
-                        EA_MIN,
-                        segment_forward_barrier,
-                        segment_reverse_barrier,
-                    )
-            if climb and not climb_skipped_low_barrier:
-                neb.climb = True
-                _optimise_stage(
-                    stage="CI-NEB",
-                    selected_optimizer=climb_optimizer or optimizer,
-                    selected_optimizer_kwargs=(
-                        optimizer_kwargs
-                        if climb_optimizer_kwargs is None
-                        else climb_optimizer_kwargs
-                    ),
-                    target_fmax=float(fmax),
-                )
-                climb_performed = True
+                    # A replacement band always uses the standard ordinary
+                    # then optional CI workflow, even after a CI-only restart.
+                    run_climbing_restart = False
 
             energies = [float(image.get_potential_energy()) for image in images]
             interior = energies[1:-1]
@@ -1515,6 +1604,12 @@ def run_neb(
                     intermediate_refinement_performed
                 ),
                 intermediate_stagnation_steps=resolved_stagnation_steps,
+                intermediate_trigger=intermediate_trigger,
+                intermediate_source_stage=intermediate_source_stage,
+                intermediate_checkpoint_fmax=intermediate_checkpoint_fmax,
+                intermediate_checkpoint_optimizer_steps=(
+                    intermediate_checkpoint_optimizer_steps
+                ),
                 intermediate_peak_index=intermediate_peak_index,
                 intermediate_left_index=intermediate_left_index,
                 intermediate_right_index=intermediate_right_index,

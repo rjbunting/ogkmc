@@ -104,6 +104,12 @@ NEB between them. Other minima and path segments are not refined. The shortened
 band supplies the transition state, but diffusion rates remain referenced to
 the original A and B endpoint energies.
 
+The distance guard also triggers this check immediately after restoring the
+lowest-force geometrically valid band, including during CI-NEB. The restored
+profile, not the rejected geometry, supplies the minima. If none bracket the
+highest peak, normal reduced-step rollback continues; after one refinement,
+subsequent rollbacks only restore and restart the replacement band.
+
 For a lateral environment containing neighboring adsorbates, the reaction
 evaluator first obtains an optimized band for the corresponding no-neighbor
 class. It calculates that bare class on demand when necessary. Next, it projects
