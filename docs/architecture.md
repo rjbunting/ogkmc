@@ -99,16 +99,19 @@ If the ordinary band goes 100 optimizer steps without lowering its least
 energetic interior image, AutoKMC inspects the electronic-energy profile for
 intermediate minima. It brackets the band's highest-energy image with the
 nearest minimum on each side, optimizes the selected interior state or states
-(already-optimized original endpoints are reused), and runs one fresh standard
-NEB between them. Other minima and path segments are not refined. The shortened
-band supplies the transition state, but diffusion rates remain referenced to
-the original A and B endpoint energies.
+(already-optimized original endpoints are reused), and runs a fresh standard
+NEB between them. The replacement band is eligible for the same check, up to
+`optimization.neb_intermediate_max_refinements` times (default 10). Other
+minima and path segments are not refined. The final shortened band supplies
+the transition state, but diffusion rates remain referenced to the original A
+and B endpoint energies.
 
 The distance guard also triggers this check immediately after restoring the
 lowest-force geometrically valid band, including during CI-NEB. The restored
 profile, not the rejected geometry, supplies the minima. If none bracket the
-highest peak, normal reduced-step rollback continues; after one refinement,
-subsequent rollbacks only restore and restart the replacement band.
+highest peak, normal reduced-step rollback continues. Once the configured
+refinement limit is reached, subsequent rollbacks only restore and restart the
+current replacement band.
 
 For a lateral environment containing neighboring adsorbates, the reaction
 evaluator first obtains an optimized band for the corresponding no-neighbor

@@ -500,8 +500,9 @@ their independent energies reproduces the additive thermodynamic C state.
 For diffusion and bond reactions, `neb_path_initial.extxyz` is the interpolated
 band before NEB optimization and `neb_path.extxyz` is the optimized band.
 When stalled-path refinement is used, `neb_refinement_initial.extxyz` and
-`neb_refinement_final.extxyz` are its two optimized endpoints; the NEB path
-files then describe the replacement highest-peak segment.
+`neb_refinement_final.extxyz` are the most recently selected optimized
+endpoints; the NEB path files then describe the final replacement highest-peak
+segment.
 Failed diffusion and bond candidates retain both files automatically, even
 when `persist_neb_path` is false, with the latter containing the last-known
 band at the point of failure.

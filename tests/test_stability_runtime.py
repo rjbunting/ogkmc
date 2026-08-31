@@ -365,6 +365,8 @@ def test_stalled_neb_refines_only_highest_peak_segment(monkeypatch):
         True,
     ]
     assert result.intermediate_refinement_performed is True
+    assert result.intermediate_refinement_count == 1
+    assert result.intermediate_max_refinements == 10
     assert result.intermediate_trigger == "energy_stagnation"
     assert result.intermediate_source_stage == "NEB pre-climb relaxation"
     assert result.intermediate_checkpoint_fmax is None
@@ -380,6 +382,93 @@ def test_stalled_neb_refines_only_highest_peak_segment(monkeypatch):
     assert result.regular_reverse_barrier == pytest.approx(0.75)
     assert result.climb_performed is True
     assert result.optimizer_steps == 9
+
+
+def test_stalled_neb_honors_multiple_refinement_limit(monkeypatch):
+    energies = [0.0, 0.8, 0.2, 0.9, 1.4, 0.3, 0.5]
+    bands = []
+
+    def band_factory(initial, final, **_kwargs):
+        fractions = np.linspace(0.0, 1.0, len(energies))
+        images = []
+        for fraction, energy in zip(fractions, energies):
+            image = initial.copy()
+            image.positions = (
+                (1.0 - fraction) * initial.positions
+                + fraction * final.positions
+            )
+            image.calc = SinglePointCalculator(image, energy=energy)
+            images.append(image)
+        neb = SimpleNamespace(climb=False, band_index=len(bands))
+        bands.append((neb, images))
+        return neb, images
+
+    optimizer_calls = []
+
+    class IterativeStagnationOptimizer:
+        def __init__(self, stage_neb, *, logfile):
+            del logfile
+            self.stage_neb = stage_neb
+            self.nsteps = 0
+            self.observers = []
+            optimizer_calls.append((stage_neb.band_index, bool(stage_neb.climb)))
+
+        def attach(self, function, interval=1):
+            assert interval == 1
+            self.observers.append(function)
+
+        def run(self, *, fmax, steps):
+            assert fmax == pytest.approx(0.05)
+            assert steps == 20
+            if self.stage_neb.band_index < 2 and not self.stage_neb.climb:
+                for step in range(1, 4):
+                    self.nsteps = step
+                    for observer in self.observers:
+                        observer()
+            else:
+                self.nsteps = 1
+
+        def converged(self):
+            return True
+
+    def relaxer(candidate, label):
+        energy = 0.15 if "initial" in label else 0.25
+        return candidate.copy(), energy
+
+    refinements = []
+    monkeypatch.setattr(neb_module, "acquire_calculator", _calculator_context)
+    monkeypatch.setattr(neb_module, "BFGS", IterativeStagnationOptimizer)
+
+    result = neb_module.run_neb(
+        Atoms("H", positions=[[0.0, 0.0, 0.0]]),
+        Atoms("H", positions=[[6.0, 0.0, 0.0]]),
+        calculator=object(),
+        purpose="iterative stalled highest-peak segment NEB",
+        n_images=5,
+        interpolation="linear",
+        spring_k=1.0,
+        climb=True,
+        frozen_indices=None,
+        fmax=0.05,
+        max_steps=20,
+        barrier_endpoint_energies=(0.0, 0.5),
+        intermediate_stagnation_steps=2,
+        intermediate_max_refinements=2,
+        intermediate_relaxer=relaxer,
+        intermediate_refinement_callback=lambda *args: refinements.append(args),
+        verbose=False,
+        not_converged_error=RuntimeError,
+        band_factory=band_factory,
+    )
+
+    assert len(bands) == 3
+    assert optimizer_calls == [(0, False), (1, False), (2, False), (2, True)]
+    assert len(refinements) == 2
+    assert [item[2]["refinement_index"] for item in refinements] == [1, 2]
+    assert all(item[2]["max_refinements"] == 2 for item in refinements)
+    assert result.intermediate_refinement_performed is True
+    assert result.intermediate_refinement_count == 2
+    assert result.intermediate_max_refinements == 2
 
 
 @pytest.mark.parametrize(
@@ -517,6 +606,7 @@ def test_rollback_refines_minima_from_lowest_force_valid_band(
         max_steps=max_steps,
         image_spacing=0.25,
         intermediate_stagnation_steps=100,
+        intermediate_max_refinements=1,
         intermediate_min_images=2,
         intermediate_max_images=5,
         intermediate_relaxer=relaxer,

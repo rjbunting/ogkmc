@@ -24,8 +24,8 @@ structure:
   # vectors are about 2.75 Å, so 10.0 Å targets tile the slab 4x4.
   min_slab_size: 8.0
   min_vacuum_size: 12.0
-  goal_x: 10.0
-  goal_y: 10.0
+  goal_x: 12.0
+  goal_y: 12.0
   extra_kwargs:
     orthogonalise: false
   # Freeze the bottom two of the four metal layers.
@@ -40,7 +40,7 @@ reactants:
     relax_in_gas: true
     fmax: 0.05
     max_steps: 500
-    partial_pressure_bar: 10.0
+    partial_pressure_bar: 1.0
     geometry: linear
 
   # O2 feed; bond dissociation templates produce O* + O* <=> O2.
@@ -49,7 +49,7 @@ reactants:
     relax_in_gas: true
     fmax: 0.05
     max_steps: 500
-    partial_pressure_bar: 10.0
+    partial_pressure_bar: 1.0
     geometry: linear
     spin: 1.0
 
@@ -84,12 +84,12 @@ optimization:
     dt: 0.05
     dtmax: 0.5
     maxstep: 0.1
-    downhill_check: true
+    downhill_check: false
   neb_optimizer: fire
   neb_optimizer_kwargs:
-    dt: 0.05
-    dtmax: 0.5
-    maxstep: 0.05
+    dt: 0.025
+    dtmax: 0.25
+    maxstep: 0.025
     downhill_check: true
   # Use a fresh MDMin instance after the ordinary band has converged and the
   # climbing image is enabled.
@@ -99,9 +99,10 @@ optimization:
     maxstep: 0.01
   neb_method: improvedtangent
   neb_band_eval: batched
-  neb_geometry_guard_multiplier: 3.0
+  neb_geometry_guard_multiplier: 10.0
   neb_intermediate_stagnation_steps: 100
-  neb_intermediate_energy_tolerance: 0.001
+  neb_intermediate_max_refinements: 10
+  neb_intermediate_energy_tolerance: 0.01
   neb_intermediate_minimum_prominence: 0.01
 
 adsorption:
@@ -137,14 +138,14 @@ diffusion:
   # Dynamically space images by maximum corresponding-atom displacement.
   # During optimization, a gap above 0.75 Å restores the lowest-force valid
   # band and halves FIRE dt/dtmax. n_images is the fixed fallback when null.
-  n_images: 8
-  image_spacing: 0.25
+  n_images: 20
+  image_spacing: 0.1
   min_images: 4
-  max_images: 12
+  max_images: 40
   # CI is skipped if either ordinary directional barrier is below 0.1 eV.
   climb: true
-  spring_k: 1.0
-  interpolation: linear
+  spring_k: 5.0
+  interpolation: idpp
   persist_neb_path: true
 
 bond:
@@ -177,14 +178,14 @@ bond:
   # Dynamically choose the band length from the relaxed endpoint distance.
   # During optimization, a gap above 0.75 Å restores the lowest-force valid
   # band and halves FIRE dt/dtmax. neb_n_images is the fallback when null.
-  neb_n_images: 8
-  neb_image_spacing: 0.25
+  neb_n_images: 20
+  neb_image_spacing: 0.1
   neb_min_images: 4
-  neb_max_images: 12
+  neb_max_images: 40
   # CI is skipped if either ordinary directional barrier is below 0.1 eV.
   neb_climb: true
-  neb_spring_k: 1.0
-  neb_interpolation: linear
+  neb_spring_k: 5.0
+  neb_interpolation: idpp
   atom_matching: auto
   matching_trials: 8
   persist_neb_path: true

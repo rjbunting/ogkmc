@@ -380,6 +380,9 @@ def resolve_channel_runtime(cfg, frozen_indices: list[int] | None) -> ChannelRun
             neb_intermediate_stagnation_steps=(
                 cfg.optimization.neb_intermediate_stagnation_steps
             ),
+            neb_intermediate_max_refinements=(
+                cfg.optimization.neb_intermediate_max_refinements
+            ),
             neb_intermediate_energy_tolerance=(
                 cfg.optimization.neb_intermediate_energy_tolerance
             ),
@@ -424,6 +427,9 @@ def resolve_channel_runtime(cfg, frozen_indices: list[int] | None) -> ChannelRun
             ),
             neb_intermediate_stagnation_steps=(
                 cfg.optimization.neb_intermediate_stagnation_steps
+            ),
+            neb_intermediate_max_refinements=(
+                cfg.optimization.neb_intermediate_max_refinements
             ),
             neb_intermediate_energy_tolerance=(
                 cfg.optimization.neb_intermediate_energy_tolerance

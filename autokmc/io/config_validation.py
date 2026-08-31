@@ -357,6 +357,11 @@ class _Validator:
             "optimization.neb_intermediate_stagnation_steps",
             minimum=1,
         )
+        self.integer(
+            cfg.neb_intermediate_max_refinements,
+            "optimization.neb_intermediate_max_refinements",
+            minimum=1,
+        )
         self.number(
             cfg.neb_intermediate_energy_tolerance,
             "optimization.neb_intermediate_energy_tolerance",

@@ -76,6 +76,7 @@ from autokmc.core.constants import (
     NEB_FMAX,
     NEB_IMAGE_SPACING,
     NEB_INTERMEDIATE_ENERGY_TOLERANCE,
+    NEB_INTERMEDIATE_MAX_REFINEMENTS,
     NEB_INTERMEDIATE_MINIMUM_PROMINENCE,
     NEB_INTERMEDIATE_STAGNATION_STEPS,
     NEB_MAX_ADJACENT_IMAGE_SPACING_MULTIPLIER,
@@ -413,6 +414,7 @@ def get_applicable_diffusion_for_member(
         NEB_MAX_ADJACENT_IMAGE_SPACING_MULTIPLIER
     ),
     neb_intermediate_stagnation_steps: int = NEB_INTERMEDIATE_STAGNATION_STEPS,
+    neb_intermediate_max_refinements: int = NEB_INTERMEDIATE_MAX_REFINEMENTS,
     neb_intermediate_energy_tolerance: float = NEB_INTERMEDIATE_ENERGY_TOLERANCE,
     neb_intermediate_minimum_prominence: float = (
         NEB_INTERMEDIATE_MINIMUM_PROMINENCE
@@ -458,6 +460,7 @@ def get_applicable_diffusion_for_member(
             "neb_band_eval": neb_band_eval,
             "neb_geometry_guard_multiplier": neb_geometry_guard_multiplier,
             "neb_intermediate_stagnation_steps": neb_intermediate_stagnation_steps,
+            "neb_intermediate_max_refinements": neb_intermediate_max_refinements,
             "neb_intermediate_energy_tolerance": neb_intermediate_energy_tolerance,
             "neb_intermediate_minimum_prominence": (
                 neb_intermediate_minimum_prominence
@@ -727,6 +730,7 @@ def get_applicable_diffusions(
         NEB_MAX_ADJACENT_IMAGE_SPACING_MULTIPLIER
     ),
     neb_intermediate_stagnation_steps: int = NEB_INTERMEDIATE_STAGNATION_STEPS,
+    neb_intermediate_max_refinements: int = NEB_INTERMEDIATE_MAX_REFINEMENTS,
     neb_intermediate_energy_tolerance: float = NEB_INTERMEDIATE_ENERGY_TOLERANCE,
     neb_intermediate_minimum_prominence: float = (
         NEB_INTERMEDIATE_MINIMUM_PROMINENCE
@@ -788,6 +792,7 @@ def get_applicable_diffusions(
                 neb_band_eval=neb_band_eval,
                 neb_geometry_guard_multiplier=neb_geometry_guard_multiplier,
                 neb_intermediate_stagnation_steps=neb_intermediate_stagnation_steps,
+                neb_intermediate_max_refinements=neb_intermediate_max_refinements,
                 neb_intermediate_energy_tolerance=neb_intermediate_energy_tolerance,
                 neb_intermediate_minimum_prominence=(
                     neb_intermediate_minimum_prominence
@@ -850,6 +855,7 @@ def compute_all_diffusions(
         NEB_MAX_ADJACENT_IMAGE_SPACING_MULTIPLIER
     ),
     neb_intermediate_stagnation_steps: int = NEB_INTERMEDIATE_STAGNATION_STEPS,
+    neb_intermediate_max_refinements: int = NEB_INTERMEDIATE_MAX_REFINEMENTS,
     neb_intermediate_energy_tolerance: float = NEB_INTERMEDIATE_ENERGY_TOLERANCE,
     neb_intermediate_minimum_prominence: float = (
         NEB_INTERMEDIATE_MINIMUM_PROMINENCE
@@ -901,6 +907,9 @@ def compute_all_diffusions(
                     ),
                     neb_intermediate_stagnation_steps = (
                         neb_intermediate_stagnation_steps
+                    ),
+                    neb_intermediate_max_refinements = (
+                        neb_intermediate_max_refinements
                     ),
                     neb_intermediate_energy_tolerance = (
                         neb_intermediate_energy_tolerance
@@ -954,6 +963,7 @@ def compute_all_diffusions(
             neb_band_eval             = neb_band_eval,
             neb_geometry_guard_multiplier = neb_geometry_guard_multiplier,
             neb_intermediate_stagnation_steps = neb_intermediate_stagnation_steps,
+            neb_intermediate_max_refinements = neb_intermediate_max_refinements,
             neb_intermediate_energy_tolerance = neb_intermediate_energy_tolerance,
             neb_intermediate_minimum_prominence = neb_intermediate_minimum_prominence,
             verbose                  = verbose,

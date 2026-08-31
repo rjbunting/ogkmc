@@ -101,6 +101,7 @@ optimization:
   neb_band_eval: batched
   neb_geometry_guard_multiplier: 3.0
   neb_intermediate_stagnation_steps: 100
+  neb_intermediate_max_refinements: 10
   neb_intermediate_energy_tolerance: 0.001
   neb_intermediate_minimum_prominence: 0.01
 

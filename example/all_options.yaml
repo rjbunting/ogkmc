@@ -151,11 +151,12 @@ optimization:
   # least this tolerance for this many ordinary NEB optimizer steps, inspect
   # the band for intermediate minima. AutoKMC optimizes only the nearest
   # minima bracketing the band's highest image, then runs the standard NEB
-  # workflow once between that pair. Other path segments are not refined.
+  # workflow between that pair. Other path segments are not refined.
   # A distance rollback immediately checks the lowest-force valid checkpoint
-  # the same way, including in CI-NEB, without waiting for stagnation. Only
-  # one minima refinement is allowed; later rollbacks use reduced steps.
+  # the same way, including in CI-NEB, without waiting for stagnation. Each
+  # replacement band may be shortened again up to the configured limit.
   neb_intermediate_stagnation_steps: 100
+  neb_intermediate_max_refinements: 10
   neb_intermediate_energy_tolerance: 0.001
   neb_intermediate_minimum_prominence: 0.01
 

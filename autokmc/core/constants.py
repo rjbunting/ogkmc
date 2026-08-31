@@ -279,6 +279,10 @@ NEB_FMAX: float = 0.01
 #: electronic energy before the band is inspected for an intermediate minimum.
 NEB_INTERMEDIATE_STAGNATION_STEPS: int = 100
 
+#: Maximum number of successive highest-peak/minimum-bracket refinements in
+#: one NEB calculation.
+NEB_INTERMEDIATE_MAX_REFINEMENTS: int = 10
+
 #: Minimum decrease (eV) required to reset the interior-energy stagnation
 #: counter. This prevents calculator noise from postponing inspection forever.
 NEB_INTERMEDIATE_ENERGY_TOLERANCE: float = 1.0e-3

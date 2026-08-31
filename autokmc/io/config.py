@@ -50,6 +50,7 @@ from autokmc.core.constants import (
     NEB_CLIMB,
     NEB_IMAGE_SPACING,
     NEB_INTERMEDIATE_ENERGY_TOLERANCE,
+    NEB_INTERMEDIATE_MAX_REFINEMENTS,
     NEB_INTERMEDIATE_MINIMUM_PROMINENCE,
     NEB_INTERMEDIATE_STAGNATION_STEPS,
     NEB_INTERPOLATION,
@@ -156,6 +157,8 @@ class OptimizationCfg:
     #: Inspect a stalled ordinary band for intermediate minima after this many
     #: steps without a lower interior-image electronic energy.
     neb_intermediate_stagnation_steps: int = NEB_INTERMEDIATE_STAGNATION_STEPS
+    #: Maximum number of successive minima-based replacement NEBs.
+    neb_intermediate_max_refinements: int = NEB_INTERMEDIATE_MAX_REFINEMENTS
     #: Electronic-energy decrease (eV) required to reset the stagnation count.
     neb_intermediate_energy_tolerance: float = NEB_INTERMEDIATE_ENERGY_TOLERANCE
     #: Required local-minimum prominence (eV) on both neighboring images.

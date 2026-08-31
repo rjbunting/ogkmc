@@ -30,6 +30,7 @@ from autokmc.core.constants import (
     NEB_BAND_EVAL as DEFAULT_NEB_BAND_EVAL,
     NEB_BAND_EVALS,
     NEB_INTERMEDIATE_ENERGY_TOLERANCE,
+    NEB_INTERMEDIATE_MAX_REFINEMENTS,
     NEB_INTERMEDIATE_MINIMUM_PROMINENCE,
     NEB_MAX_ADJACENT_IMAGE_SPACING_MULTIPLIER,
     NEB_METHOD as DEFAULT_NEB_METHOD,
@@ -151,6 +152,8 @@ class NEBRunResult:
     regular_forward_barrier: float | None = None
     regular_reverse_barrier: float | None = None
     intermediate_refinement_performed: bool = False
+    intermediate_refinement_count: int = 0
+    intermediate_max_refinements: int = NEB_INTERMEDIATE_MAX_REFINEMENTS
     intermediate_stagnation_steps: int | None = None
     intermediate_trigger: str | None = None
     intermediate_source_stage: str | None = None
@@ -821,6 +824,7 @@ def run_neb(
     geometry_guard_multiplier: float = (NEB_MAX_ADJACENT_IMAGE_SPACING_MULTIPLIER),
     barrier_endpoint_energies: tuple[float, float] | None = None,
     intermediate_stagnation_steps: int | None = None,
+    intermediate_max_refinements: int = NEB_INTERMEDIATE_MAX_REFINEMENTS,
     intermediate_energy_tolerance: float = NEB_INTERMEDIATE_ENERGY_TOLERANCE,
     intermediate_minimum_prominence: float = NEB_INTERMEDIATE_MINIMUM_PROMINENCE,
     intermediate_optimizer: str = DEFAULT_OPTIMIZER,
@@ -864,7 +868,7 @@ def run_neb(
     profile is inspected immediately, before checking the remaining step
     budget. Bracketing minima trigger the same single-segment refinement as
     energy stagnation, including on rollback during CI-NEB. Without a usable
-    bracket (or after refinement has already been used), a fresh optimizer
+    bracket (or after the refinement limit is reached), a fresh optimizer
     resumes the restored band. FIRE halves ``dt`` and ``dtmax``; other
     supported optimizers reduce their available displacement control. These
     same-band restarts share the original stage step budget.
@@ -884,10 +888,12 @@ def run_neb(
     relaxed and a fresh standard NEB is run between them. This intentionally
     faster approximation does not refine the other portions of the original
     path. The returned transition energy remains on the original calculator
-    energy reference. At most one refinement is allowed per call; a replacement
-    band always begins with ordinary NEB, even if a CI-only restart triggered
-    it. ``intermediate_refinement_callback`` captures the optimized minima and
-    trigger/checkpoint provenance before constructing the replacement band.
+    energy reference. Up to ``intermediate_max_refinements`` replacements are
+    allowed per call, and each replacement band is eligible for the same
+    stagnation and rollback inspection until that limit is reached. A
+    replacement band always begins with ordinary NEB, even if a CI-only restart
+    triggered it. ``intermediate_refinement_callback`` captures each optimized
+    pair and its trigger/checkpoint provenance before constructing the next band.
 
     """
     build_band = band_factory or make_neb_band
@@ -917,6 +923,11 @@ def run_neb(
         if intermediate_stagnation_steps < 1:
             raise ValueError("intermediate_stagnation_steps must be >= 1")
         resolved_stagnation_steps = int(intermediate_stagnation_steps)
+    if type(intermediate_max_refinements) is not int:
+        raise ValueError("intermediate_max_refinements must be an integer")
+    if intermediate_max_refinements < 1:
+        raise ValueError("intermediate_max_refinements must be >= 1")
+    resolved_max_refinements = int(intermediate_max_refinements)
     resolved_energy_tolerance = float(intermediate_energy_tolerance)
     if not np.isfinite(resolved_energy_tolerance) or resolved_energy_tolerance < 0.0:
         raise ValueError("intermediate_energy_tolerance must be finite and non-negative")
@@ -989,6 +1000,7 @@ def run_neb(
             original_barrier_endpoints = resolved_barrier_endpoints
             active_barrier_endpoints = original_barrier_endpoints
             intermediate_refinement_performed = False
+            intermediate_refinement_count = 0
             intermediate_trigger = None
             intermediate_source_stage = None
             intermediate_checkpoint_fmax = None
@@ -1132,7 +1144,7 @@ def run_neb(
 
                     can_refine_intermediate = bool(
                         resolved_stagnation_steps is not None
-                        and not intermediate_refinement_performed
+                        and intermediate_refinement_count < resolved_max_refinements
                     )
                     monitor_intermediate = can_refine_intermediate and not climbing_stage
                     if spacing_limit is not None or monitor_intermediate:
@@ -1400,6 +1412,7 @@ def run_neb(
                             float(refinement.energies[-1]),
                         )
                     intermediate_refinement_performed = True
+                    intermediate_refinement_count += 1
                     intermediate_trigger = refinement.trigger
                     intermediate_source_stage = refinement.source_stage
                     intermediate_checkpoint_fmax = refinement.checkpoint_fmax
@@ -1484,7 +1497,9 @@ def run_neb(
                     refinement_image_count_limited_by = segment_selection.limited_by
                     refinement_metadata = {
                         "performed": True,
-                        "policy": "highest_peak_nearest_minima_single_segment_v2",
+                        "policy": "highest_peak_nearest_minima_iterative_v3",
+                        "refinement_index": intermediate_refinement_count,
+                        "max_refinements": resolved_max_refinements,
                         "trigger": refinement.trigger,
                         "source_stage": refinement.source_stage,
                         "checkpoint_fmax_ev_per_ang": refinement.checkpoint_fmax,
@@ -1603,6 +1618,8 @@ def run_neb(
                 intermediate_refinement_performed=(
                     intermediate_refinement_performed
                 ),
+                intermediate_refinement_count=intermediate_refinement_count,
+                intermediate_max_refinements=resolved_max_refinements,
                 intermediate_stagnation_steps=resolved_stagnation_steps,
                 intermediate_trigger=intermediate_trigger,
                 intermediate_source_stage=intermediate_source_stage,

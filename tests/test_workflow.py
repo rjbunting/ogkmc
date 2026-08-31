@@ -132,6 +132,7 @@ def test_channel_runtime_propagates_optimizer_choices():
             neb_band_eval="batched",
             neb_geometry_guard_multiplier=4.0,
             neb_intermediate_stagnation_steps=75,
+            neb_intermediate_max_refinements=4,
             neb_intermediate_energy_tolerance=0.002,
             neb_intermediate_minimum_prominence=0.03,
         ),
@@ -163,6 +164,7 @@ def test_channel_runtime_propagates_optimizer_choices():
     assert runtime.diffusion.neb_method == "aseneb"
     assert runtime.diffusion.neb_geometry_guard_multiplier == pytest.approx(4.0)
     assert runtime.diffusion.neb_intermediate_stagnation_steps == 75
+    assert runtime.diffusion.neb_intermediate_max_refinements == 4
     assert runtime.diffusion.neb_intermediate_energy_tolerance == pytest.approx(
         0.002
     )
@@ -196,6 +198,7 @@ def test_channel_runtime_propagates_optimizer_choices():
     assert runtime.bond.neb_method == "aseneb"
     assert runtime.bond.neb_geometry_guard_multiplier == pytest.approx(4.0)
     assert runtime.bond.neb_intermediate_stagnation_steps == 75
+    assert runtime.bond.neb_intermediate_max_refinements == 4
     assert runtime.bond.neb_intermediate_energy_tolerance == pytest.approx(
         0.002
     )

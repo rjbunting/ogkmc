@@ -126,6 +126,7 @@ from autokmc.core.constants import (
     NEB_BAND_EVAL,
     NEB_IMAGE_SPACING,
     NEB_INTERMEDIATE_ENERGY_TOLERANCE,
+    NEB_INTERMEDIATE_MAX_REFINEMENTS,
     NEB_INTERMEDIATE_MINIMUM_PROMINENCE,
     NEB_INTERMEDIATE_STAGNATION_STEPS,
     NEB_MAX_ADJACENT_IMAGE_SPACING_MULTIPLIER,
@@ -1205,6 +1206,7 @@ def check_diffusion_stability(
     neb_band_eval: str = NEB_BAND_EVAL,
     neb_geometry_guard_multiplier: float = (NEB_MAX_ADJACENT_IMAGE_SPACING_MULTIPLIER),
     neb_intermediate_stagnation_steps: int = NEB_INTERMEDIATE_STAGNATION_STEPS,
+    neb_intermediate_max_refinements: int = NEB_INTERMEDIATE_MAX_REFINEMENTS,
     neb_intermediate_energy_tolerance: float = NEB_INTERMEDIATE_ENERGY_TOLERANCE,
     neb_intermediate_minimum_prominence: float = (
         NEB_INTERMEDIATE_MINIMUM_PROMINENCE
@@ -1365,6 +1367,9 @@ def check_diffusion_stability(
         "neb_intermediate_stagnation_steps": int(
             neb_intermediate_stagnation_steps
         ),
+        "neb_intermediate_max_refinements": int(
+            neb_intermediate_max_refinements
+        ),
         "neb_intermediate_energy_tolerance": float(
             neb_intermediate_energy_tolerance
         ),
@@ -1393,8 +1398,9 @@ def check_diffusion_stability(
             "minimum_barrier_ev": float(EA_MIN),
         },
         "neb_intermediate_refinement_policy": {
-            "name": "highest_peak_nearest_minima_single_segment_v2",
+            "name": "highest_peak_nearest_minima_iterative_v3",
             "stagnation_steps": int(neb_intermediate_stagnation_steps),
+            "max_refinements": int(neb_intermediate_max_refinements),
             "energy_tolerance_ev": float(neb_intermediate_energy_tolerance),
             "minimum_prominence_ev": float(
                 neb_intermediate_minimum_prominence
@@ -1765,6 +1771,7 @@ def check_diffusion_stability(
         geometry_guard_multiplier=neb_geometry_guard_multiplier,
         barrier_endpoint_energies=(float(E_a), float(E_b)),
         intermediate_stagnation_steps=neb_intermediate_stagnation_steps,
+        intermediate_max_refinements=neb_intermediate_max_refinements,
         intermediate_energy_tolerance=neb_intermediate_energy_tolerance,
         intermediate_minimum_prominence=neb_intermediate_minimum_prominence,
         intermediate_optimizer=optimizer,
@@ -1825,7 +1832,9 @@ def check_diffusion_stability(
     lateral_class.neb_intermediate_refinement = (
         {
             "performed": True,
-            "policy": "highest_peak_nearest_minima_single_segment_v2",
+            "policy": "highest_peak_nearest_minima_iterative_v3",
+            "refinement_count": neb_result.intermediate_refinement_count,
+            "max_refinements": neb_result.intermediate_max_refinements,
             "trigger": neb_result.intermediate_trigger,
             "source_stage": neb_result.intermediate_source_stage,
             "checkpoint_fmax_ev_per_ang": neb_result.intermediate_checkpoint_fmax,

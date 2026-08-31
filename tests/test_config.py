@@ -89,6 +89,7 @@ def test_load_yaml_ok(tmp_path):
     assert cfg.optimization.neb_method == "improvedtangent"
     assert cfg.optimization.neb_geometry_guard_multiplier == pytest.approx(3.0)
     assert cfg.optimization.neb_intermediate_stagnation_steps == 100
+    assert cfg.optimization.neb_intermediate_max_refinements == 10
     assert cfg.optimization.neb_intermediate_energy_tolerance == pytest.approx(
         0.001
     )
@@ -123,6 +124,7 @@ optimization:
   neb_method: aseneb
   neb_geometry_guard_multiplier: 4.0
   neb_intermediate_stagnation_steps: 75
+  neb_intermediate_max_refinements: 4
   neb_intermediate_energy_tolerance: 0.002
   neb_intermediate_minimum_prominence: 0.03
 reactants:
@@ -156,6 +158,7 @@ calculator:
     assert cfg.optimization.neb_method == "aseneb"
     assert cfg.optimization.neb_geometry_guard_multiplier == pytest.approx(4.0)
     assert cfg.optimization.neb_intermediate_stagnation_steps == 75
+    assert cfg.optimization.neb_intermediate_max_refinements == 4
     assert cfg.optimization.neb_intermediate_energy_tolerance == pytest.approx(
         0.002
     )
@@ -319,6 +322,7 @@ calculator:
     ("key", "value"),
     [
         ("neb_intermediate_stagnation_steps", 0),
+        ("neb_intermediate_max_refinements", 0),
         ("neb_intermediate_energy_tolerance", -0.001),
         ("neb_intermediate_minimum_prominence", -0.001),
     ],

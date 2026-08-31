@@ -1128,7 +1128,9 @@ def test_neb_reactions_write_required_states_and_optional_path(
         lateral_attributes={
             "neb_intermediate_refinement": {
                 "performed": True,
-                "policy": "highest_peak_nearest_minima_single_segment_v2",
+                "policy": "highest_peak_nearest_minima_iterative_v3",
+                "refinement_count": 2,
+                "max_refinements": 10,
                 "trigger": "geometry_rollback",
                 "source_stage": "CI-NEB",
                 "checkpoint_fmax_ev_per_ang": 0.2,
@@ -1165,6 +1167,8 @@ def test_neb_reactions_write_required_states_and_optional_path(
     assert isinstance(lateral.atoms_neb_refinement_initial, Atoms)
     assert isinstance(lateral.atoms_neb_refinement_final, Atoms)
     assert lateral.neb_intermediate_refinement["trigger"] == "geometry_rollback"
+    assert lateral.neb_intermediate_refinement["refinement_count"] == 2
+    assert lateral.neb_intermediate_refinement["max_refinements"] == 10
     assert lateral.neb_intermediate_refinement["source_stage"] == "CI-NEB"
     assert lateral.neb_intermediate_refinement["checkpoint_fmax_ev_per_ang"] == pytest.approx(0.2)
     assert lateral.neb_intermediate_refinement["checkpoint_optimizer_steps"] == 12

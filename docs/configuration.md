@@ -99,6 +99,7 @@ optimization:
   neb_band_eval: images
   neb_geometry_guard_multiplier: 3.0
   neb_intermediate_stagnation_steps: 100
+  neb_intermediate_max_refinements: 10
   neb_intermediate_energy_tolerance: 0.001
   neb_intermediate_minimum_prominence: 0.01
 ```
@@ -139,8 +140,8 @@ spacing. Changing this multiplier does not change the dynamically selected
 number of images. It must be finite and greater than zero, and it is included
 in calculation-cache identities.
 
-The three `neb_intermediate_*` controls define a single, deliberately narrow
-stalled-path refinement. During the ordinary stage, AutoKMC tracks the lowest
+The `neb_intermediate_*` controls define a deliberately narrow stalled-path
+refinement. During the ordinary stage, AutoKMC tracks the lowest
 interior-image electronic energy. After 100 consecutive optimizer steps
 without a decrease of at least `neb_intermediate_energy_tolerance`, it finds
 the highest-energy interior image and the nearest local minimum on each side.
@@ -161,20 +162,21 @@ non-convergence when that budget is exhausted.
 
 If the two bounding states include at least one interior minimum, AutoKMC
 optimizes the selected interior state or states with the ordinary `optimizer`
-and runs the standard ordinary/CI-NEB workflow once between that pair. It does
-not run NEBs between the other minima or refine the remaining path segments,
-and it will not recursively shorten the replacement band. This is faster but
-can miss a competing barrier. The final transition energy is nevertheless
+and runs the standard ordinary/CI-NEB workflow between that pair. A replacement
+band is checked by the same stagnation and rollback rules and may be shortened
+again, up to `neb_intermediate_max_refinements` times in one calculation
+(default 10). It does not run NEBs between the other minima or refine the
+remaining path segments. This is faster but can miss a competing barrier. The
+final transition energy is nevertheless
 combined with the original reaction endpoint energies (A/B for diffusion or
 A+B/C for bond changes) for the stored forward and reverse energetics. The
-selected optimized states are written as
+most recently selected optimized states are written as
 `neb_refinement_initial.extxyz` and `neb_refinement_final.extxyz`, and the
 indices, stalled electronic-energy profile, and policy are stored in
 `reaction.json` and the calculation cache. The metadata also distinguishes
 `energy_stagnation` from `geometry_rollback` and records the source stage and,
-for rollback, the checkpoint's maximum NEB force and optimizer step. The
-replacement band still has the distance guard but cannot trigger another
-minima refinement.
+for rollback, the checkpoint's maximum NEB force and optimizer step. It also
+records the total refinement count and configured limit.
 
 The retained ordinary transition energy remains the raw recorded value. At
 rate construction, both reversible directions use the same effective level,

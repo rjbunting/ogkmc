@@ -212,7 +212,9 @@ def test_reaction_writer_persists_initial_structures_and_neb_paths(
         atoms_neb_path=path_optimized,
         neb_intermediate_refinement={
             "performed": True,
-            "policy": "highest_peak_nearest_minima_single_segment_v2",
+            "policy": "highest_peak_nearest_minima_iterative_v3",
+            "refinement_count": 3,
+            "max_refinements": 10,
             "trigger": "geometry_rollback",
             "source_stage": "NEB pre-climb relaxation",
             "checkpoint_fmax_ev_per_ang": 0.2,
@@ -267,7 +269,9 @@ def test_reaction_writer_persists_initial_structures_and_neb_paths(
         atoms_neb_path=path_optimized,
         neb_intermediate_refinement={
             "performed": True,
-            "policy": "highest_peak_nearest_minima_single_segment_v2",
+            "policy": "highest_peak_nearest_minima_iterative_v3",
+            "refinement_count": 2,
+            "max_refinements": 10,
             "trigger": "geometry_rollback",
             "source_stage": "CI-NEB",
             "checkpoint_fmax_ev_per_ang": 0.15,
@@ -351,6 +355,8 @@ def test_reaction_writer_persists_initial_structures_and_neb_paths(
         "other_segments_refined"
     ] is False
     assert bond_payload["neb_intermediate_refinement"]["trigger"] == "geometry_rollback"
+    assert bond_payload["neb_intermediate_refinement"]["refinement_count"] == 2
+    assert bond_payload["neb_intermediate_refinement"]["max_refinements"] == 10
     assert bond_payload["neb_intermediate_refinement"]["source_stage"] == "CI-NEB"
     assert bond_payload["neb_intermediate_refinement"][
         "checkpoint_fmax_ev_per_ang"
@@ -383,6 +389,7 @@ def test_reaction_writer_persists_initial_structures_and_neb_paths(
     assert diffusion_payload["atoms"]["neb_refinement_final"] == (
         "neb_refinement_final.extxyz"
     )
+    assert diffusion_payload["neb_intermediate_refinement"]["refinement_count"] == 3
 
 
 def test_resumed_successful_bond_backfills_late_structure_assets(tmp_path):
@@ -1234,7 +1241,7 @@ def test_invalid_diffusion_record_tolerates_missing_energies(tmp_path):
         atoms_neb_refinement_final=atoms.copy(),
         neb_intermediate_refinement={
             "performed": True,
-            "policy": "highest_peak_nearest_minima_single_segment_v2",
+            "policy": "highest_peak_nearest_minima_iterative_v3",
             "trigger": "geometry_rollback",
             "other_segments_refined": False,
         },
