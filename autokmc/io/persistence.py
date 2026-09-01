@@ -85,6 +85,7 @@ from autokmc.io.event_log import (  # noqa: F401
     reconcile_event_log,
 )
 from autokmc.io.event_transitions import reaction_transition
+from autokmc.io.atoms import copy_atoms_with_results
 from autokmc.io.reaction_layout import (
     diffusion_folder_name as _diffusion_folder_name,
     kind_folder_name as _kind_folder_name,
@@ -134,33 +135,8 @@ def _atomic_extxyz(path: Path, images: Atoms | list[Atoms]) -> None:
 # ---------------------------------------------------------------------------
 
 def _safe_atoms_copy(atoms: Atoms) -> Atoms:
-    """Return a copy of *atoms* with a sanitised calculator.
-
-    If the attached calculator has result arrays (forces, energies, …) whose
-    first dimension does not match ``len(atoms)`` — which can happen when a
-    NequIP / MACE calculator caches results from a previous, smaller system —
-    the calculator is stripped so that ASE's extxyz writer does not raise a
-    broadcast error.  Energy is preserved as ``atoms.info["energy"]`` when
-    available.
-    """
-    snap = atoms.copy()
-    calc = snap.calc
-    if calc is None:
-        return snap
-    try:
-        results = getattr(calc, "results", {}) or {}
-        for key, val in results.items():
-            if hasattr(val, "__len__") and len(val) != len(snap):
-                # Stale results — strip the calculator entirely.
-                # Try to salvage the scalar energy first.
-                e = results.get("energy")
-                if e is not None:
-                    snap.info.setdefault("energy", float(e))
-                snap.calc = None
-                return snap
-    except Exception:
-        snap.calc = None
-    return snap
+    """Return an extxyz-ready copy without retaining a live calculator."""
+    return copy_atoms_with_results(atoms)
 
 
 def write_invalid_adsorption_diagnostic(
@@ -446,9 +422,7 @@ def _prepare_bond_gas_reference_assets(site, lateral_class) -> None:
         getattr(lateral_class, "atoms_gas_molecule", None) is None
         and isinstance(gas_atoms, Atoms)
     ):
-        snapshot = gas_atoms.copy()
-        snapshot.calc = None
-        lateral_class.atoms_gas_molecule = snapshot
+        lateral_class.atoms_gas_molecule = copy_atoms_with_results(gas_atoms)
 
     if getattr(lateral_class, "atoms_c_gas_reference", None) is None:
         atoms_c = getattr(lateral_class, "atoms_c", None)
@@ -728,7 +702,9 @@ class ReactionWriter:
     firing of either direction.  Event rows are appended immediately, while
     ``reaction.json`` statistics are batched and atomically flushed at a
     checkpoint boundary or when the writer closes.  The .extxyz files are
-    written once.
+    written once. Optimized structures retain cached single-point ``energy``
+    and ``forces`` fields; initial or otherwise unevaluated structures remain
+    geometry-only.
     """
 
     def __init__(

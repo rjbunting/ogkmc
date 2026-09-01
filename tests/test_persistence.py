@@ -7,8 +7,10 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 from ase import Atoms
+from ase.calculators.singlepoint import SinglePointCalculator
 from ase.constraints import FixAtoms
 from ase.io import read as ase_read, write as ase_write
 
@@ -28,7 +30,7 @@ from autokmc.io.schemas import (
     REACTION_INDEX_SCHEMA_VERSION,
 )
 from autokmc.io.event_log import EventHistory
-from autokmc.io.atoms import atoms_from_graph
+from autokmc.io.atoms import atoms_from_graph, copy_atoms_with_results
 from autokmc.io import persistence as persistence_module
 from autokmc.utils.telemetry import RuntimeTelemetry, telemetry_context
 
@@ -70,6 +72,20 @@ def test_atoms_from_graph_excludes_unoccupied(synth_graph):
     assert atoms.get_chemical_symbols() == ["Cu", "Cu"]
 
 
+def test_result_snapshot_rejects_stale_single_point_data():
+    atoms = Atoms("H", positions=[[0.0, 0.0, 0.0]])
+    atoms.calc = SinglePointCalculator(
+        atoms,
+        energy=-0.5,
+        forces=[[0.1, 0.0, 0.0]],
+    )
+    atoms.positions[0, 0] = 0.25
+
+    snapshot = copy_atoms_with_results(atoms)
+
+    assert snapshot.calc is None
+
+
 def test_atoms_from_graph_uses_legacy_iso_class_as_metadata_fallback(synth_graph):
     synth_graph.nodes[100]["iso_class"] = 7
     atoms = atoms_from_graph(synth_graph)
@@ -84,6 +100,19 @@ def test_reaction_writer_creates_per_lateral_class_folder(
     # check_site_stability does in production).
     a_occ   = tiny_atoms.copy()
     a_unocc = tiny_atoms.copy()[:2]   # slab only
+    occupied_forces = np.full((len(a_occ), 3), 0.125)
+    unoccupied_forces = np.full((len(a_unocc), 3), -0.25)
+    a_occ.calc = SinglePointCalculator(
+        a_occ,
+        energy=-10.0,
+        forces=occupied_forces,
+    )
+    a_unocc.calc = SinglePointCalculator(
+        a_unocc,
+        energy=-8.5,
+        forces=unoccupied_forces,
+    )
+    stub_reaction.lateral_class.atoms_occupied_initial = tiny_atoms.copy()
     stub_reaction.lateral_class.atoms_occupied   = a_occ
     stub_reaction.lateral_class.atoms_unoccupied = a_unocc
 
@@ -146,6 +175,12 @@ def test_reaction_writer_creates_per_lateral_class_folder(
 
     a_occ_rt = ase_read(folder / "occupied.extxyz")
     assert a_occ_rt.get_chemical_symbols() == a_occ.get_chemical_symbols()
+    assert a_occ_rt.get_potential_energy() == pytest.approx(-10.0)
+    np.testing.assert_allclose(a_occ_rt.get_forces(), occupied_forces)
+    a_unocc_rt = ase_read(folder / "unoccupied.extxyz")
+    assert a_unocc_rt.get_potential_energy() == pytest.approx(-8.5)
+    np.testing.assert_allclose(a_unocc_rt.get_forces(), unoccupied_forces)
+    assert ase_read(folder / "occupied_initial.extxyz").calc is None
 
 
 def test_reaction_writer_atomically_publishes_structure_files(
@@ -230,9 +265,6 @@ def test_reaction_writer_persists_initial_structures_and_neb_paths(
         neb_estimated_image_spacing=1.5 / 7.0,
         neb_image_count_limited_by="distance",
         neb_climb_performed=True,
-        neb_climb_skipped_low_barrier=False,
-        neb_regular_forward_barrier=1.0,
-        neb_regular_reverse_barrier=0.8,
     )
     diffusion_reaction = SimpleNamespace(
         kind="diffusion",
@@ -287,9 +319,6 @@ def test_reaction_writer_persists_initial_structures_and_neb_paths(
         neb_estimated_image_spacing=1.5 / 7.0,
         neb_image_count_limited_by="distance",
         neb_climb_performed=False,
-        neb_climb_skipped_low_barrier=True,
-        neb_regular_forward_barrier=1.5,
-        neb_regular_reverse_barrier=0.05,
     )
     bond_reaction = SimpleNamespace(
         kind="bond",
@@ -371,10 +400,6 @@ def test_reaction_writer_persists_initial_structures_and_neb_paths(
         0.25
     )
     assert bond_payload["neb_images"]["climb_performed"] is False
-    assert bond_payload["neb_images"]["climb_skipped_low_barrier"] is True
-    assert bond_payload["neb_images"][
-        "regular_reverse_barrier_ev"
-    ] == pytest.approx(0.05)
     diffusion_payload = json.loads(
         (diffusion_folder / "reaction.json").read_text()
     )
@@ -1302,6 +1327,11 @@ def test_invalid_diffusion_record_tolerates_missing_energies(tmp_path):
 def test_invalid_adsorption_record_writes_last_known_endpoint(tmp_path):
     initial = Atoms("H", positions=[[0.0, 0.0, 0.0]])
     failed = Atoms("H", positions=[[1.5, 0.0, 0.0]])
+    failed.calc = SinglePointCalculator(
+        failed,
+        energy=-0.75,
+        forces=[[0.2, 0.0, 0.0]],
+    )
     site = SimpleNamespace(iso_class=2, reactant="[H]")
     lateral = SimpleNamespace(
         lateral_class=3,
@@ -1329,6 +1359,9 @@ def test_invalid_adsorption_record_writes_last_known_endpoint(tmp_path):
     assert (folder / "occupied.extxyz").is_file()
     restored = ase_read(folder / "occupied.extxyz")
     assert restored.positions[0, 0] == pytest.approx(1.5)
+    assert restored.get_potential_energy() == pytest.approx(-0.75)
+    np.testing.assert_allclose(restored.get_forces(), [[0.2, 0.0, 0.0]])
+    assert ase_read(folder / "occupied_initial.extxyz").calc is None
     payload = json.loads((folder / "diagnostic.json").read_text())
     assert payload["discovery_step"] == 6
     assert payload["structures"]["occupied"] == "occupied.extxyz"

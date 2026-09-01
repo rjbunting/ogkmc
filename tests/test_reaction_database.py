@@ -12,6 +12,7 @@ import networkx as nx
 import numpy as np
 import pytest
 from ase import Atoms
+from ase.calculators.singlepoint import SinglePointCalculator
 
 import autokmc.io.calculation_cache as calculation_cache
 from autokmc.io.calculation_cache import (
@@ -66,6 +67,8 @@ def _adsorption_record(
     parameters=None,
     occupied_initial=None,
     unoccupied_initial=None,
+    occupied_state=None,
+    unoccupied_state=None,
     input_metadata=None,
 ):
     graph = graph or _graph()
@@ -82,6 +85,8 @@ def _adsorption_record(
     }
     occupied_initial = _atoms() if occupied_initial is None else occupied_initial
     unoccupied_initial = _atoms(0.1) if unoccupied_initial is None else unoccupied_initial
+    occupied_state = _atoms() if occupied_state is None else occupied_state
+    unoccupied_state = _atoms(0.1) if unoccupied_state is None else unoccupied_state
     inputs = {
         "occupied_initial": occupied_initial,
         "unoccupied_initial": unoccupied_initial,
@@ -101,11 +106,11 @@ def _adsorption_record(
         inputs={**inputs, "reactant_smiles": "[C-]#[O+]"},
         states={
             "occupied": state_payload(
-                _atoms(),
+                occupied_state,
                 energy_ev=-10.5,
                 properties={"g_occupied": -10.2, "frequencies_occupied_ev": [0.1]},
             ),
-            "unoccupied": state_payload(_atoms(0.1), energy_ev=-8.0),
+            "unoccupied": state_payload(unoccupied_state, energy_ev=-8.0),
         },
         reaction_graph=graph,
     )
@@ -145,6 +150,50 @@ def test_writes_isaac_record_extxyz_assets_and_sqlite_index(tmp_path):
             """
         ).fetchone()
         assert all(indexed)
+
+
+def test_optimized_results_survive_reaction_database_round_trip(tmp_path):
+    root = tmp_path / "reaction_db"
+    occupied = _atoms()
+    unoccupied = _atoms(0.1)
+    occupied_forces = np.full((len(occupied), 3), 0.15)
+    unoccupied_forces = np.full((len(unoccupied), 3), -0.05)
+    occupied.calc = SinglePointCalculator(
+        occupied,
+        energy=-10.5,
+        forces=occupied_forces,
+    )
+    unoccupied.calc = SinglePointCalculator(
+        unoccupied,
+        energy=-8.0,
+        forces=unoccupied_forces,
+    )
+    key, _, _, _ = _adsorption_record(
+        root,
+        occupied_state=occupied,
+        unoccupied_state=unoccupied,
+    )
+
+    hit = load_calculation_record(root, "adsorption", key, reaction_graph=_graph())
+    assert hit is not None
+    loaded_occupied = hit["states"]["occupied"]["atoms"]
+    assert loaded_occupied.get_potential_energy() == pytest.approx(-10.5)
+    np.testing.assert_allclose(loaded_occupied.get_forces(), occupied_forces)
+
+    lateral = SimpleNamespace(stable=None)
+    assert apply_cached_states(
+        lateral,
+        hit,
+        {
+            "occupied": ("energy_occupied", "atoms_occupied"),
+            "unoccupied": ("energy_unoccupied", "atoms_unoccupied"),
+        },
+    )
+    assert lateral.atoms_occupied.get_potential_energy() == pytest.approx(-10.5)
+    np.testing.assert_allclose(
+        lateral.atoms_unoccupied.get_forces(),
+        unoccupied_forces,
+    )
 
 
 def test_graph_search_ignores_node_ids_and_run_local_iso_classes(tmp_path):

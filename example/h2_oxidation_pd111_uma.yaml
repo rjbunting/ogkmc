@@ -21,7 +21,7 @@ structure:
   miller_index: [1, 1, 1]
   lattice_constant: 3.89
   # For Pd(111), 8.0 Å builds four metal layers. The primitive in-plane
-  # vectors are about 2.75 Å, so 10.0 Å targets tile the slab 4x4.
+  # vectors are about 2.75 Å, so 12.0 Å targets tile the slab 5x5.
   min_slab_size: 8.0
   min_vacuum_size: 12.0
   goal_x: 12.0
@@ -89,7 +89,7 @@ optimization:
   neb_optimizer_kwargs:
     dt: 0.025
     dtmax: 0.25
-    maxstep: 0.025
+    maxstep: 0.05
     downhill_check: true
   # Use a fresh MDMin instance after the ordinary band has converged and the
   # climbing image is enabled.

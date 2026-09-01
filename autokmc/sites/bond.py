@@ -1956,6 +1956,7 @@ def prune_unstable_bond_sites(
     if calculator is None or not bond_sites:
         return list(bond_sites)
 
+    from autokmc.io.atoms import copy_atoms_with_results
     from autokmc.structure import optimise_structure
     from autokmc.core.graph import build_graph
 
@@ -2055,7 +2056,12 @@ def prune_unstable_bond_sites(
                     max_force = float(np.linalg.norm(forces[free_mask], axis=1).max())
                 else:
                     max_force = float(np.linalg.norm(forces, axis=1).max())
-                atoms_opt.calc = None
+                energy = float(atoms_opt.get_potential_energy())
+                atoms_opt = copy_atoms_with_results(
+                    atoms_opt,
+                    energy=energy,
+                    forces=forces,
+                )
         except Exception as exc:
             if isinstance(exc, CalculatorConfigError):
                 raise

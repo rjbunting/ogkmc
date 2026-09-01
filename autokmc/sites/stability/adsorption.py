@@ -90,6 +90,7 @@ from ase.constraints import FixAtoms
 from ase.neighborlist import NeighborList, natural_cutoffs
 
 from autokmc.io.calculators import acquire_calculator
+from autokmc.io.atoms import copy_atoms_with_results
 from autokmc.io.calculation_cache import (
     CalculationFingerprintMemo,
     apply_cached_states,
@@ -1379,14 +1380,15 @@ def check_site_stability(
             failed_attribute = (
                 "atoms_occupied" if include_self else "atoms_unoccupied"
             )
-            last_snapshot = atoms_opt.copy()
-            last_snapshot.calc = None
-            setattr(lateral_class, failed_attribute, last_snapshot)
-
             # Convergence guard — optimise_structure issues a RuntimeWarning but
             # we want to raise an actionable error for the stability workflow.
             # Check forces directly on the returned structure.
             forces = atoms_opt.get_forces()
+            setattr(
+                lateral_class,
+                failed_attribute,
+                copy_atoms_with_results(atoms_opt, forces=forces),
+            )
             if frozen_indices:
                 free_mask = np.ones(len(atoms_opt), dtype=bool)
                 free_mask[list(frozen_indices)] = False
@@ -1432,7 +1434,11 @@ def check_site_stability(
                     f"bonds_after={len(bonds_after)}  "
                     f"max|F|={max_force:.4f} eV/Å  stable"
                 )
-            atoms_opt.calc = None
+            atoms_opt = copy_atoms_with_results(
+                atoms_opt,
+                energy=energy,
+                forces=forces,
+            )
 
         # Return n_slab, n_lat and n_self alongside the energy and relaxed atoms
         # so the free-energy section can compute vib_idx_occ from the SAME

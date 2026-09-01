@@ -26,6 +26,7 @@ from autokmc.structure.builders import (
 )
 from autokmc.core.pbc import set_full_pbc_if_cell
 from autokmc.io.calculators import CalculatorConfigError, acquire_calculator
+from autokmc.io.atoms import copy_atoms_with_results
 from autokmc.structure.types import LatticeParams
 from autokmc.utils.optimizers import (
     DEFAULT_OPTIMIZER,
@@ -39,9 +40,10 @@ from autokmc.utils.telemetry import instrument
 class StructureOptimisationError(RuntimeError):
     """Structure relaxation failed while retaining its last geometry.
 
-    ``atoms`` is a calculator-detached snapshot taken after the last completed
-    optimizer update.  Callers can therefore persist the failed geometry
-    without relying on the optimizer returning normally.
+    ``atoms`` is detached from the live model after the last completed
+    optimizer update. Cached energy and forces, when valid, are retained in a
+    safe ASE single-point calculator so callers can persist the failed geometry
+    without rerunning the model.
     """
 
     def __init__(
@@ -53,9 +55,7 @@ class StructureOptimisationError(RuntimeError):
         steps: int,
     ) -> None:
         super().__init__(message)
-        snapshot = atoms.copy()
-        snapshot.calc = None
-        self.atoms = snapshot
+        self.atoms = copy_atoms_with_results(atoms)
         self.converged = converged
         self.steps = int(steps)
 

@@ -32,7 +32,11 @@ from autokmc.utils.telemetry import RuntimeTelemetry, telemetry_context
 
 def _image(energy: float) -> Atoms:
     atoms = Atoms("H", positions=[[0.0, 0.0, 0.0]])
-    atoms.calc = SinglePointCalculator(atoms, energy=float(energy))
+    atoms.calc = SinglePointCalculator(
+        atoms,
+        energy=float(energy),
+        forces=np.zeros((len(atoms), 3)),
+    )
     return atoms
 
 
@@ -101,9 +105,14 @@ def test_shared_neb_selects_transition_and_detaches_images(monkeypatch):
     assert result.optimizer_steps == 8
     assert optimizer_climb_states == [False, True]
     assert result.path_energies == pytest.approx([0.0, 0.5, 1.5, 0.2])
-    assert result.atoms_ts.calc is None
+    assert isinstance(result.atoms_ts.calc, SinglePointCalculator)
+    assert result.atoms_ts.get_potential_energy() == pytest.approx(1.5)
+    np.testing.assert_allclose(result.atoms_ts.get_forces(), 0.0)
     assert all(image.calc is None for image in images)
-    assert all(image.calc is None for image in result.path_images or [])
+    assert all(
+        isinstance(image.calc, SinglePointCalculator)
+        for image in result.path_images or []
+    )
     assert len(initial_paths) == 1
     assert len(initial_paths[0]) == len(images)
     assert all(image.calc is None for image in initial_paths[0])
@@ -111,22 +120,8 @@ def test_shared_neb_selects_transition_and_detaches_images(monkeypatch):
     assert telemetry.timings_s["neb.seconds"] >= 0.0
 
 
-@pytest.mark.parametrize(
-    ("transition_energy", "expected_stages", "expected_skip"),
-    [
-        (0.45, [False], True),
-        (0.50, [False, True], False),
-    ],
-)
-def test_shared_neb_skips_ci_when_either_regular_barrier_is_below_floor(
-    monkeypatch,
-    caplog,
-    transition_energy,
-    expected_stages,
-    expected_skip,
-):
-    # Forward barrier is 0.45/0.50 eV; reverse is 0.05/0.10 eV.
-    images = [_image(0.0), _image(transition_energy), _image(0.40)]
+def test_shared_neb_runs_ci_after_every_converged_ordinary_stage(monkeypatch):
+    images = [_image(0.0), _image(0.45), _image(0.40)]
     neb = SimpleNamespace(climb=False)
     observed_stages = []
 
@@ -142,7 +137,7 @@ def test_shared_neb_skips_ci_when_either_regular_barrier_is_below_floor(
         images[0],
         images[-1],
         calculator=object(),
-        purpose="CI-NEB barrier guard",
+        purpose="CI-NEB stage sequence",
         n_images=1,
         interpolation="linear",
         spring_k=1.0,
@@ -150,86 +145,13 @@ def test_shared_neb_skips_ci_when_either_regular_barrier_is_below_floor(
         frozen_indices=None,
         fmax=0.05,
         max_steps=20,
-        barrier_endpoint_energies=(0.0, 0.40),
         verbose=False,
         not_converged_error=RuntimeError,
         band_factory=lambda *_args, **_kwargs: (neb, images),
     )
 
-    assert observed_stages == expected_stages
-    assert result.climb_skipped_low_barrier is expected_skip
-    assert result.climb_performed is (not expected_skip)
-    assert result.regular_forward_barrier == pytest.approx(transition_energy)
-    assert result.regular_reverse_barrier == pytest.approx(transition_energy - 0.40)
-    if expected_skip:
-        assert "Skipping CI-NEB" in caplog.text
-
-
-def test_shared_neb_rechecks_barrier_after_strict_force_convergence(
-    monkeypatch,
-    caplog,
-):
-    # The optimized ordinary band has a 0.05 eV reverse barrier, so CI-NEB
-    # must not start after strict force convergence.
-    images = [_image(0.0), _image(0.55), _image(0.40)]
-
-    class ControlledNEB:
-        climb = False
-
-    neb = ControlledNEB()
-    observed_stages = []
-
-    class TwoGateOptimizer:
-        def __init__(self, stage_neb, *, logfile):
-            del logfile
-            observed_stages.append(stage_neb.climb)
-            self.nsteps = 0
-            self.observers = []
-
-        def attach(self, function, interval=1):
-            assert interval == 1
-            self.observers.append(function)
-
-        def run(self, *, fmax, steps):
-            assert fmax == pytest.approx(0.05)
-            assert steps == 20
-
-            # Ordinary NEB reaches its strict force target and the optimized
-            # band now has a 0.05 eV reverse barrier.
-            images[1].calc = SinglePointCalculator(images[1], energy=0.45)
-            self.nsteps = 9
-
-        def converged(self) -> bool:
-            return True
-
-    monkeypatch.setattr(neb_module, "acquire_calculator", _calculator_context)
-    monkeypatch.setattr(neb_module, "BFGS", TwoGateOptimizer)
-
-    result = neb_module.run_neb(
-        images[0],
-        images[-1],
-        calculator=object(),
-        purpose="post-convergence CI-NEB guard",
-        n_images=1,
-        interpolation="linear",
-        spring_k=1.0,
-        climb=True,
-        frozen_indices=None,
-        fmax=0.05,
-        max_steps=20,
-        barrier_endpoint_energies=(0.0, 0.40),
-        verbose=False,
-        not_converged_error=RuntimeError,
-        band_factory=lambda *_args, **_kwargs: (neb, images),
-    )
-
-    assert observed_stages == [False]
-    assert result.optimizer_steps == 9
-    assert result.climb_skipped_low_barrier is True
-    assert result.climb_performed is False
-    assert result.regular_forward_barrier == pytest.approx(0.45)
-    assert result.regular_reverse_barrier == pytest.approx(0.05)
-    assert "Skipping CI-NEB" in caplog.text
+    assert observed_stages == [False, True]
+    assert result.climb_performed is True
 
 
 def test_highest_peak_uses_only_nearest_bracketing_minima():
@@ -336,7 +258,6 @@ def test_stalled_neb_refines_only_highest_peak_segment(monkeypatch):
         frozen_indices=None,
         fmax=0.05,
         max_steps=20,
-        barrier_endpoint_energies=(0.0, 0.5),
         intermediate_stagnation_steps=2,
         intermediate_energy_tolerance=0.001,
         intermediate_minimum_prominence=0.01,
@@ -378,8 +299,6 @@ def test_stalled_neb_refines_only_highest_peak_segment(monkeypatch):
     assert result.refinement_initial_energy == pytest.approx(0.15)
     assert result.refinement_final_energy == pytest.approx(0.25)
     assert result.energy_ts == pytest.approx(1.25)
-    assert result.regular_forward_barrier == pytest.approx(1.25)
-    assert result.regular_reverse_barrier == pytest.approx(0.75)
     assert result.climb_performed is True
     assert result.optimizer_steps == 9
 
@@ -451,7 +370,6 @@ def test_stalled_neb_honors_multiple_refinement_limit(monkeypatch):
         frozen_indices=None,
         fmax=0.05,
         max_steps=20,
-        barrier_endpoint_energies=(0.0, 0.5),
         intermediate_stagnation_steps=2,
         intermediate_max_refinements=2,
         intermediate_relaxer=relaxer,
@@ -611,7 +529,6 @@ def test_rollback_refines_minima_from_lowest_force_valid_band(
         intermediate_max_images=5,
         intermediate_relaxer=relaxer,
         intermediate_refinement_callback=lambda *args: captured.append(args),
-        barrier_endpoint_energies=(0.0, 0.5),
         verbose=False,
         not_converged_error=RuntimeError,
         band_factory=band_factory,
@@ -643,8 +560,6 @@ def test_rollback_refines_minima_from_lowest_force_valid_band(
     ) == (4, 2, 5)
     expected_steps = 6 if rollback_stage == "ci" else 5
     assert result.optimizer_steps == expected_steps + (3 if replacement_rollback else 0)
-    assert result.regular_forward_barrier == pytest.approx(1.25)
-    assert result.regular_reverse_barrier == pytest.approx(0.75)
     assert result.climb_performed is True
     assert captured[0][2]["trigger"] == "geometry_rollback"
     assert captured[0][2]["checkpoint_fmax_ev_per_ang"] == pytest.approx(0.2)
@@ -1214,7 +1129,10 @@ def test_shared_neb_stops_when_preclimb_stage_does_not_converge(monkeypatch):
     assert len(initial_paths) == 1
     assert all(image.calc is None for image in initial_paths[0])
     assert len(failed_paths) == 1
-    assert all(image.calc is None for image in failed_paths[0])
+    assert all(
+        image.calc is None or isinstance(image.calc, SinglePointCalculator)
+        for image in failed_paths[0]
+    )
     assert failed_paths[0][1].positions[0, 0] == pytest.approx(0.75)
     assert neb.climb is False
     assert all(image.calc is None for image in images)
@@ -1424,7 +1342,10 @@ def test_run_neb_can_capture_path_without_public_persistence(monkeypatch):
     assert result.path_energies == pytest.approx([0.0, 0.7, 0.1])
     assert result.path_images is not None
     assert len(result.path_images) == 3
-    assert all(image.calc is None for image in result.path_images)
+    assert all(
+        isinstance(image.calc, SinglePointCalculator)
+        for image in result.path_images
+    )
 
 
 def test_diffusion_endpoint_failure_retains_last_geometry(monkeypatch):
@@ -1832,41 +1753,6 @@ def test_transition_validators_reject_nonfinite_energy(
         )
 
 
-def test_transition_validators_allow_intentional_low_barrier_floor():
-    atoms = Atoms("H", positions=[[0.0, 0.0, 0.0]])
-
-    _check_ts_validity(
-        atoms,
-        atoms.copy(),
-        atoms.copy(),
-        n_slab=0,
-        n_lat=0,
-        n_mig=1,
-        nl_mult=1.2,
-        e_a=0.0,
-        e_b=0.4,
-        e_ts=0.4,
-        ts_index=1,
-        n_interior=1,
-        allow_barrier_floor=True,
-    )
-    _check_bond_ts_validity(
-        atoms,
-        atoms.copy(),
-        atoms.copy(),
-        n_slab=0,
-        n_lat=0,
-        n_react=1,
-        nl_mult=1.2,
-        e_ab=0.0,
-        e_c=0.4,
-        e_ts=0.4,
-        ts_index=1,
-        n_interior=1,
-        allow_barrier_floor=True,
-    )
-
-
 def _gas_reactant(**overrides):
     values = {
         "smiles": "CO",
@@ -2067,7 +1953,8 @@ def test_gas_precursor_relaxation_fixes_environment_and_keeps_molecule(
     )
 
     assert energy == pytest.approx(-3.0)
-    assert relaxed.calc is None
+    assert isinstance(relaxed.calc, SinglePointCalculator)
+    np.testing.assert_allclose(relaxed.get_forces(), 0.0)
     assert diagnostics["precursor_relaxed"] is True
     assert diagnostics["precursor_environment_fixed"] is True
     assert diagnostics["precursor_bond_lengths"][0]["relaxed_ang"] == pytest.approx(0.74)

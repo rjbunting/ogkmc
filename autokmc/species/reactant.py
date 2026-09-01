@@ -56,6 +56,7 @@ from ase.optimize import BFGS, FIRE, LBFGS, MDMin
 from autokmc.core.graph import build_graph
 from autokmc.core.constants import NL_MULT_DEFAULT, RANDOM_SEED
 from autokmc.io.calculators import acquire_calculator
+from autokmc.io.atoms import copy_atoms_with_results
 from autokmc.species.smiles import smiles_to_dirname
 from autokmc.utils.logging import get_logger
 from autokmc.utils.optimizers import (
@@ -560,6 +561,7 @@ def build_reactant(
     # 2. Optional ASE relaxation + energy
     energy = float("nan")
     if calculator is not None:
+        optimized_forces = None
         with acquire_calculator(calculator, purpose="gas-phase reactant relaxation") as calc:
             original_pbc = atoms.get_pbc().copy()
             if _requires_full_periodic_boundaries(calc):
@@ -576,6 +578,12 @@ def build_reactant(
                     )
                 atoms.calc = calc
                 try:
+                    if relax:
+                        optimized_snapshot = copy_atoms_with_results(atoms)
+                        if optimized_snapshot.calc is not None:
+                            optimized_forces = optimized_snapshot.calc.results.get(
+                                "forces"
+                            )
                     energy = float(atoms.get_potential_energy())
                 except Exception as exc:
                     raise RuntimeError(
@@ -588,6 +596,12 @@ def build_reactant(
                 raise ValueError(
                     f"build_reactant({smiles!r}) returned non-finite gas energy {energy!r}"
                 )
+        if relax:
+            atoms = copy_atoms_with_results(
+                atoms,
+                energy=energy,
+                forces=optimized_forces,
+            )
 
     # 3. Tag every atom as adsorbate (molecules have no bulk interior and are
     #    not part of the surface — they will adsorb onto it).

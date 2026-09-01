@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import networkx as nx
+import numpy as np
+import pytest
 from types import SimpleNamespace
 from ase import Atoms
 from ase.calculators.emt import EMT
+from ase.calculators.singlepoint import SinglePointCalculator
 
 from autokmc.io.checkpoint import (
     CHECKPOINT_SCHEMA_VERSION,
@@ -169,6 +172,32 @@ def test_checkpoint_preserves_shared_site_and_registry_identity(tmp_path):
     assert loaded.graph.graph["bond_registry"]["species"]["[O]"] is loaded.reactants[0]
     assert restored_site.calc is None
     assert loaded.reactants[0].atoms.calc is None
+
+
+def test_checkpoint_preserves_optimized_single_point_results(tmp_path):
+    optimized = Atoms("H", positions=[[0.0, 0.0, 0.0]])
+    optimized.calc = SinglePointCalculator(
+        optimized,
+        energy=-0.5,
+        forces=[[0.1, 0.0, 0.0]],
+    )
+    lateral = SimpleNamespace(atoms_occupied=optimized)
+
+    state = make_checkpoint_state(
+        step=2,
+        time_s=0.2,
+        graph=nx.Graph(),
+        adsorbate_sites=[SimpleNamespace(lateral_classes=[lateral])],
+        diffusion_sites=[],
+        bond_sites=[],
+        reactants=[],
+    )
+    loaded = load_checkpoint(save_checkpoint(tmp_path / "results.pkl", state))
+
+    restored = loaded.adsorbate_sites[0].lateral_classes[0].atoms_occupied
+    assert isinstance(restored.calc, SinglePointCalculator)
+    assert restored.get_potential_energy() == pytest.approx(-0.5)
+    np.testing.assert_allclose(restored.get_forces(), [[0.1, 0.0, 0.0]])
 
 
 def test_checkpoint_preserves_numerical_failure_retry_latches(tmp_path):

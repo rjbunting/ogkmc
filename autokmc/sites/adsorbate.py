@@ -1736,6 +1736,7 @@ def prune_unstable_adsorbate_sites(
         optimise_structure,
     )
     from autokmc.core.graph import build_graph
+    from autokmc.io.atoms import copy_atoms_with_results
     from autokmc.io.persistence import write_invalid_adsorption_diagnostic
 
     react_sym = list(reactant.atoms.get_chemical_symbols())
@@ -1820,7 +1821,11 @@ def prune_unstable_adsorbate_sites(
                 else:
                     max_force = float(np.linalg.norm(forces, axis=1).max())
                 E = float(atoms_opt.get_potential_energy())
-                atoms_opt.calc = None
+                atoms_opt = copy_atoms_with_results(
+                    atoms_opt,
+                    energy=E,
+                    forces=forces,
+                )
         except Exception as exc:
             if isinstance(exc, CalculatorConfigError):
                 raise

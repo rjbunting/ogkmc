@@ -91,6 +91,7 @@ from ase import Atoms
 from ase.constraints import FixAtoms
 
 from autokmc.io.calculators import acquire_calculator
+from autokmc.io.atoms import copy_atoms_with_results
 from autokmc.io.calculation_cache import (
     CalculationFingerprintMemo,
     apply_cached_states,
@@ -129,7 +130,6 @@ from autokmc.sites.stability.neb import (
 from autokmc.sites.bond import BondReactionSite, BondReactionLateral
 from autokmc.sites.diffusion import _member_clique_union
 from autokmc.core.constants import (
-    EA_MIN,
     LATERAL_SHELLS_DEFAULT,
     NL_MULT_DEFAULT,
     NEB_BAND_EVAL,
@@ -1618,9 +1618,19 @@ def _relax_gas_precursor(
                 optimizer_kwargs=optimizer_kwargs,
                 verbose=verbose,
             )
+            result_snapshot = copy_atoms_with_results(atoms_opt)
+            result_forces = (
+                result_snapshot.calc.results.get("forces")
+                if result_snapshot.calc is not None
+                else None
+            )
             energy = float(atoms_opt.get_potential_energy())
             atoms_opt.set_pbc(atoms_seed.get_pbc())
-            atoms_opt.calc = None
+            atoms_opt = copy_atoms_with_results(
+                atoms_opt,
+                energy=energy,
+                forces=result_forces,
+            )
     except StructureOptimisationError as exc:
         wrapped = BondEndpointStabilityError(
             f"Endpoint 'endpoint_c_precursor' molecular relaxation failed: {exc}"
@@ -1785,7 +1795,11 @@ def _relax_bond_endpoint(
 
             if verbose:
                 print(f"  [{state_label}] E={energy:.4f} eV  max|F|={max_force:.4f} eV/Å  stable")
-            atoms_opt.calc = None
+            atoms_opt = copy_atoms_with_results(
+                atoms_opt,
+                energy=energy,
+                forces=forces,
+            )
         return atoms_opt, energy
 
     except StructureOptimisationError as exc:
@@ -1796,8 +1810,7 @@ def _relax_bond_endpoint(
     except (SurfaceConnectivityError, AdsorbateDissociationError, OptimisationFailedError) as exc:
         wrapped = BondEndpointStabilityError(f"Endpoint '{state_label}' relaxation failed: {exc}")
         if atoms_opt is not None:
-            wrapped.atoms = atoms_opt.copy()
-            wrapped.atoms.calc = None
+            wrapped.atoms = copy_atoms_with_results(atoms_opt)
         wrapped.state_label = state_label
         raise wrapped from exc
 
@@ -1823,7 +1836,6 @@ def _check_bond_ts_validity(
     n_interior: int,
     e_c_path: float | None = None,
     energy_tol: float = 1e-3,
-    allow_barrier_floor: bool = False,
 ) -> None:
     """Validate that the highest-energy NEB image is a real saddle.
 
@@ -1856,7 +1868,7 @@ def _check_bond_ts_validity(
             energy_tol,
         )
 
-    if n_interior >= 1 and not allow_barrier_floor:
+    if n_interior >= 1:
         # Check energy proximity regardless of image index — a TS image at
         # position k=2 can still collapse to an endpoint energy if the NEB
         # is nearly flat near that end.  Restricting to ts_index == 1 or
@@ -1963,7 +1975,10 @@ def _cached_gas_reference_atoms(
     molecule = states.get("gas_molecule", {}).get("atoms")
     if not isinstance(surface, Atoms) or not isinstance(molecule, Atoms):
         return None
-    return surface.copy(), molecule.copy()
+    return (
+        copy_atoms_with_results(surface),
+        copy_atoms_with_results(molecule),
+    )
 
 
 def _apply_bond_thermochemistry(
@@ -2043,10 +2058,7 @@ def _apply_bond_thermochemistry(
     else:
         c_thermo = _harm(atoms_c, "state_c", energy_c)
 
-    if (
-        getattr(free_energy_options, "include_ts_vibrations", True)
-        and not getattr(lc, "neb_climb_skipped_low_barrier", False)
-    ):
+    if getattr(free_energy_options, "include_ts_vibrations", True):
         ts_thermo = _harm(atoms_ts, "ts", energy_ts)
     else:
         average = 0.5 * (ab_thermo["g_corr_ev"] + c_thermo["g_corr_ev"])
@@ -2300,21 +2312,6 @@ def _write_bond_calculation_cache(
                 "neb_climb_performed",
                 None,
             ),
-            "neb_climb_skipped_low_barrier": getattr(
-                lc,
-                "neb_climb_skipped_low_barrier",
-                None,
-            ),
-            "neb_regular_forward_barrier": getattr(
-                lc,
-                "neb_regular_forward_barrier",
-                None,
-            ),
-            "neb_regular_reverse_barrier": getattr(
-                lc,
-                "neb_regular_reverse_barrier",
-                None,
-            ),
             "neb_intermediate_refinement": getattr(
                 lc,
                 "neb_intermediate_refinement",
@@ -2398,10 +2395,10 @@ def check_bond_site_stability(
        empty-surface + gas energy remains the KMC thermodynamic reference.
     3. Converge an ordinary NEB band of ``n_images`` interior images between
        the two relaxed endpoints with the requested *interpolation* and
-       *spring_k*. If *climb* is enabled and both raw directional barriers are
-       at least ``EA_MIN``, retain the same band and spring constant, enable
-       its climbing image, and converge it again. All images share one acquired
-       calculator via ASE's SingleCalculatorNEB-style path.
+       *spring_k*. If *climb* is enabled, retain the same band and spring
+       constant, enable its climbing image, and converge it again regardless of
+       raw barrier height. All images share one acquired calculator via ASE's
+       SingleCalculatorNEB-style path.
     4. Identify the TS as the highest-energy interior image; validate
        (no fragmentation into a third species, no collapse onto an
        endpoint); store all energies / atoms / (optional) full band on
@@ -2533,10 +2530,6 @@ def check_bond_site_stability(
             if image_spacing is None
             else "max_gap_configurable_restore_lowest_fmax_halve_controls_v3"
         ),
-        "neb_climb_policy": {
-            "name": "skip_if_either_regular_barrier_below_ea_min_v1",
-            "minimum_barrier_ev": float(EA_MIN),
-        },
         "neb_intermediate_refinement_policy": {
             "name": "highest_peak_nearest_minima_iterative_v3",
             "stagnation_steps": int(neb_intermediate_stagnation_steps),
@@ -2833,8 +2826,7 @@ def check_bond_site_stability(
             raise ValueError(
                 f"Gas product {brs.template.smiles_c!r} has no optimized gas-phase structure."
             )
-        lc.atoms_gas_molecule = gas_atoms.copy()
-        lc.atoms_gas_molecule.calc = None
+        lc.atoms_gas_molecule = copy_atoms_with_results(gas_atoms)
         gas_energy = getattr(gas_reactant, "energy", float("nan"))
         if not np.isfinite(float(gas_energy)):
             raise ValueError(
@@ -2862,9 +2854,19 @@ def check_bond_site_stability(
                     optimizer_kwargs=optimizer_kwargs,
                     verbose=verbose,
                 )
+                result_snapshot = copy_atoms_with_results(atoms_empty_opt)
+                result_forces = (
+                    result_snapshot.calc.results.get("forces")
+                    if result_snapshot.calc is not None
+                    else None
+                )
                 E_empty = float(atoms_empty_opt.get_potential_energy())
                 atoms_empty_opt.set_pbc(atoms_empty_init.get_pbc())
-                atoms_empty_opt.calc = None
+                atoms_empty_opt = copy_atoms_with_results(
+                    atoms_empty_opt,
+                    energy=E_empty,
+                    forces=result_forces,
+                )
         except StructureOptimisationError as exc:
             lc.atoms_c = exc.atoms
             wrapped = BondEndpointStabilityError(
@@ -2875,8 +2877,7 @@ def check_bond_site_stability(
             raise wrapped from exc
         E_c = E_empty + float(gas_energy)
         lc.energy_c_gas_reference = E_empty
-        lc.atoms_c_gas_reference = atoms_empty_opt.copy()
-        lc.atoms_c_gas_reference.calc = None
+        lc.atoms_c_gas_reference = copy_atoms_with_results(atoms_empty_opt)
         atoms_c_opt, gas_mapping_diag = _gas_product_neb_endpoint(
             atoms_empty=atoms_empty_opt,
             atoms_ab=atoms_ab_opt,
@@ -3114,7 +3115,6 @@ def check_bond_site_stability(
         band_eval=neb_band_eval,
         image_spacing=image_selection.target_spacing,
         geometry_guard_multiplier=neb_geometry_guard_multiplier,
-        barrier_endpoint_energies=(float(E_ab), float(E_c)),
         intermediate_stagnation_steps=neb_intermediate_stagnation_steps,
         intermediate_max_refinements=neb_intermediate_max_refinements,
         intermediate_energy_tolerance=neb_intermediate_energy_tolerance,
@@ -3166,9 +3166,6 @@ def check_bond_site_stability(
         lc.neb_image_count_limited_by = (
             neb_result.refinement_image_count_limited_by
         )
-    lc.neb_climb_skipped_low_barrier = neb_result.climb_skipped_low_barrier
-    lc.neb_regular_forward_barrier = neb_result.regular_forward_barrier
-    lc.neb_regular_reverse_barrier = neb_result.regular_reverse_barrier
     lc.neb_intermediate_refinement = (
         {
             "performed": True,
@@ -3215,9 +3212,9 @@ def check_bond_site_stability(
     lc.neb_path_energies = neb_result.path_energies
     lc.atoms_neb_path = neb_result.path_images
     if capture_neb_path and neb_result.path_images:
-        lc._warm_start_neb_path = [image.copy() for image in neb_result.path_images]
-        for image in lc._warm_start_neb_path:
-            image.calc = None
+        lc._warm_start_neb_path = [
+            copy_atoms_with_results(image) for image in neb_result.path_images
+        ]
         lc._warm_start_neb_energies = list(neb_result.path_energies or [])
         lc._warm_start_member_index = int(member_index)
 
@@ -3260,7 +3257,6 @@ def check_bond_site_stability(
         e_ts=E_ts,
         ts_index=k_ts,
         n_interior=neb_result.n_interior,
-        allow_barrier_floor=neb_result.climb_skipped_low_barrier,
     )
 
     _apply_bond_thermochemistry(

@@ -12,6 +12,7 @@ from typing import Any
 from ase import Atoms
 
 from autokmc.io._files import atomic_output_path
+from autokmc.io.atoms import copy_atoms_with_results
 from autokmc.utils.telemetry import instrument
 
 
@@ -32,8 +33,9 @@ _TRANSIENT_GRAPH_CACHE_KEYS = frozenset({
 class CheckpointState:
 	"""Serializable restart bundle.
 
-	The calculators are intentionally stripped before writing; they are rebuilt
-	from the run config on resume.
+	Live calculators are stripped before writing and rebuilt from the run config
+	on resume. Safe single-point energy/force snapshots may remain attached to
+	optimized structures.
 	"""
 	schema_version: str
 	step: int
@@ -73,15 +75,14 @@ def _hashable_fallback(value):
 
 
 def _strip_calculators(obj, *, _memo: dict[int, Any] | None = None):
-	"""Return a deep-copied object with ASE calculator handles removed."""
+	"""Deep-copy state, replacing live calculators with cached results."""
 	if _memo is None:
 		_memo = {}
 	oid = id(obj)
 	if oid in _memo:
 		return _memo[oid]
 	if isinstance(obj, Atoms):
-		out = obj.copy()
-		out.calc = None
+		out = copy_atoms_with_results(obj)
 		_memo[oid] = out
 		return out
 	if isinstance(obj, dict):
@@ -125,7 +126,7 @@ def _strip_calculators(obj, *, _memo: dict[int, Any] | None = None):
 
 
 def _clear_calculators_inplace(obj, *, _seen: set[int] | None = None) -> None:
-	"""Remove calculator attributes without copying an already-copied graph."""
+	"""Remove live calculators without copying an already-copied graph."""
 	if _seen is None:
 		_seen = set()
 	identity = id(obj)
@@ -133,7 +134,7 @@ def _clear_calculators_inplace(obj, *, _seen: set[int] | None = None) -> None:
 		return
 	_seen.add(identity)
 	if isinstance(obj, Atoms):
-		obj.calc = None
+		obj.calc = copy_atoms_with_results(obj).calc
 		return
 	if isinstance(obj, dict):
 		for value in obj.values():

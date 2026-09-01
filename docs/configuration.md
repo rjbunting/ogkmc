@@ -121,16 +121,15 @@ because ASE does not recommend it for NEB. Defaults preserve the previous
 behavior: `lbfgs` for ordinary relaxations and `bfgs` for NEB.
 
 `neb_optimizer_kwargs` provides the same constructor-keyword interface for the
-ordinary NEB optimizer. AutoKMC first optimizes the ordinary band and compares
-its highest interior-image energy with both endpoint energies. If either raw
-directional barrier is below the shared `EA_MIN = 0.1` eV floor, it retains the
-ordinary band and skips CI-NEB. Otherwise, it enables the climbing image and
-uses `neb_climb_optimizer`; `null` reuses `neb_optimizer`.
+ordinary NEB optimizer. AutoKMC first optimizes the ordinary band and, whenever
+the channel's climbing-image option is enabled, refines it with CI-NEB regardless
+of the raw barrier height. CI-NEB uses `neb_climb_optimizer`; `null` reuses
+`neb_optimizer`.
 `neb_climb_optimizer_kwargs` supplies the climbing optimizer's constructor
 keywords, while `null` reuses `neb_optimizer_kwargs`. Each stage creates a fresh
 optimizer instance, so FIRE or MDMin velocity state does not pass from ordinary
 NEB into CI-NEB. The calculation-cache identity includes every optimizer
-choice, constructor mapping, and CI-NEB skip decision.
+choice and constructor mapping.
 
 `neb_geometry_guard_multiplier` controls the geometric rollback threshold for
 both diffusion and bond NEBs. The maximum adjacent-image atom displacement is

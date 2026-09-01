@@ -437,16 +437,17 @@ def test_all_options_template_lists_every_shared_constant():
 
 
 @pytest.mark.parametrize(
-    ("facet", "miller_index", "min_slab_size"),
+    ("facet", "miller_index", "min_slab_size", "goal_size"),
     [
-        ("111", (1, 1, 1), 8.0),
-        ("100", (1, 0, 0), 6.0),
+        ("111", (1, 1, 1), 8.0, 12.0),
+        ("100", (1, 0, 0), 6.0, 10.0),
     ],
 )
-def test_h2_oxidation_pd_uma_examples_are_4x4_four_layer_and_batched(
+def test_h2_oxidation_pd_uma_examples_have_expected_size_and_are_batched(
     facet,
     miller_index,
     min_slab_size,
+    goal_size,
 ):
     pytest.importorskip("yaml")
     path = (
@@ -460,8 +461,8 @@ def test_h2_oxidation_pd_uma_examples_are_4x4_four_layer_and_batched(
     assert cfg.structure.composition == "Pd"
     assert cfg.structure.miller_index == miller_index
     assert cfg.structure.min_slab_size == pytest.approx(min_slab_size)
-    assert cfg.structure.goal_x == pytest.approx(10.0)
-    assert cfg.structure.goal_y == pytest.approx(10.0)
+    assert cfg.structure.goal_x == pytest.approx(goal_size)
+    assert cfg.structure.goal_y == pytest.approx(goal_size)
     assert cfg.structure.extra_kwargs["orthogonalise"] is False
     assert cfg.structure.n_freeze_layers == 2
     assert [reactant.smiles for reactant in cfg.reactants] == ["[H][H]", "O=O"]

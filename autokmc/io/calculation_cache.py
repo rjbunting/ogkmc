@@ -36,6 +36,7 @@ from ase.io import read as ase_read
 from ase.io import write as ase_write
 
 from autokmc.io._files import atomic_output_path, write_json_atomic
+from autokmc.io.atoms import copy_atoms_with_results
 from autokmc.io.calculators import (
     cached_calculator_scientific_identity,
     configured_calculator_identity,
@@ -1027,7 +1028,7 @@ def state_payload(
     if not isinstance(atoms, Atoms):
         raise TypeError("state atoms must be an ase.Atoms instance")
     return {
-        "atoms": atoms.copy(),
+        "atoms": copy_atoms_with_results(atoms),
         "energy_ev": float(energy_ev),
         "properties": _jsonable(dict(properties or {})),
     }
@@ -1393,11 +1394,10 @@ def _atomic_json(path: Path, value: Any) -> None:
 
 
 def _safe_atoms_copy(atoms: Atoms, energy_ev: float | None = None) -> Atoms:
-    snapshot = atoms.copy()
-    snapshot.calc = None
+    snapshot = copy_atoms_with_results(atoms)
     snapshot.info = {
         str(key): _jsonable(value)
-        for key, value in getattr(atoms, "info", {}).items()
+        for key, value in getattr(snapshot, "info", {}).items()
     }
     if energy_ev is not None:
         snapshot.info["autokmc_energy_ev"] = float(energy_ev)
@@ -2368,7 +2368,7 @@ def apply_cached_states(
                 energy_attr,
                 atoms_attr,
                 float(state["energy_ev"]),
-                state["atoms"].copy(),
+                copy_atoms_with_results(state["atoms"]),
                 state.get("properties", {}),
             )
         )
@@ -2393,7 +2393,9 @@ def apply_cached_states(
 
     neb = record.get("neb")
     if neb:
-        lateral_class.atoms_neb_path = [image.copy() for image in neb.get("path", [])]
+        lateral_class.atoms_neb_path = [
+            copy_atoms_with_results(image) for image in neb.get("path", [])
+        ]
         lateral_class.neb_path_energies = list(neb.get("energies_ev", []))
     for state_name, atoms_attr in (
         ("neb_refinement_initial", "atoms_neb_refinement_initial"),
@@ -2401,7 +2403,11 @@ def apply_cached_states(
     ):
         state = states.get(state_name)
         if state and isinstance(state.get("atoms"), Atoms):
-            setattr(lateral_class, atoms_attr, state["atoms"].copy())
+            setattr(
+                lateral_class,
+                atoms_attr,
+                copy_atoms_with_results(state["atoms"]),
+            )
     for name, value in record.get("lateral_attributes", {}).items():
         if (
             value is not None

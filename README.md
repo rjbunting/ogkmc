@@ -304,12 +304,12 @@ diffusion:
 ```
 
 For each new diffusion lateral class, AutoKMC first relaxes both endpoints. It
-then optimizes an ordinary NEB band and, when needed, refines the same band with
-a climbing image. If either raw ordinary directional barrier is below the
-0.1 eV KMC floor, AutoKMC retains the ordinary band and skips the climbing
-stage. The rate calculation applies the floor through one common effective
-transition-state level, which preserves reversible energy consistency. These
-calculations are often among the most expensive parts of a run.
+then optimizes an ordinary NEB band and, when `climb` is enabled, always refines
+the same band with a climbing image. Raw barrier height does not bypass this
+optimization. The rate calculation separately applies its 0.1 eV floor through
+one common effective transition-state level, which preserves reversible energy
+consistency. These calculations are often among the most expensive parts of a
+run.
 
 If an ordinary NEB takes 100 optimizer steps without finding a lower
 interior-image electronic energy, AutoKMC inspects that band's energy profile.

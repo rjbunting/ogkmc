@@ -83,6 +83,7 @@ from ase import Atoms
 from ase.constraints import FixAtoms
 
 from autokmc.io.calculators import acquire_calculator
+from autokmc.io.atoms import copy_atoms_with_results
 from autokmc.io.calculation_cache import (
     CalculationFingerprintMemo,
     apply_cached_states,
@@ -120,7 +121,6 @@ from autokmc.sites.stability.neb import (
     run_neb,
 )
 from autokmc.core.constants import (
-    EA_MIN,
     LATERAL_SHELLS_DEFAULT,
     NL_MULT_DEFAULT,
     NEB_BAND_EVAL,
@@ -747,7 +747,11 @@ def _relax_endpoint(
 
             if verbose:
                 print(f"  [{state_label}] E={energy:.4f} eV  max|F|={max_force:.4f} eV/Å  stable")
-            atoms_opt.calc = None
+            atoms_opt = copy_atoms_with_results(
+                atoms_opt,
+                energy=energy,
+                forces=forces,
+            )
         return atoms_opt, energy
 
     except StructureOptimisationError as exc:
@@ -758,8 +762,7 @@ def _relax_endpoint(
     except (SurfaceConnectivityError, AdsorbateDissociationError, OptimisationFailedError) as exc:
         wrapped = EndpointStabilityError(f"Endpoint '{state_label}' relaxation failed: {exc}")
         if atoms_opt is not None:
-            wrapped.atoms = atoms_opt.copy()
-            wrapped.atoms.calc = None
+            wrapped.atoms = copy_atoms_with_results(atoms_opt)
         wrapped.state_label = state_label
         raise wrapped from exc
 
@@ -784,7 +787,6 @@ def _check_ts_validity(
     ts_index: int,
     n_interior: int,
     energy_tol: float = 1e-3,
-    allow_barrier_floor: bool = False,
 ) -> None:
     """Validate that the highest-energy NEB image is a real saddle.
 
@@ -830,7 +832,7 @@ def _check_ts_validity(
 
     # 2. Endpoint collapse — TS sits at the band edge and matches its
     # adjacent endpoint within energy_tol.
-    if n_interior >= 1 and not allow_barrier_floor:
+    if n_interior >= 1:
         if ts_index == 1 and abs(float(e_ts) - float(e_a)) < float(energy_tol):
             raise TransitionStateInvalidError(
                 f"TS image (k={ts_index}) collapsed onto endpoint A: "
@@ -937,14 +939,7 @@ def _apply_diffusion_thermochemistry(
 
     a_thermo = _harm(atoms_a, "state_a", energy_a, True)
     b_thermo = _harm(atoms_b, "state_b", energy_b, True)
-    if (
-        getattr(free_energy_options, "include_ts_vibrations", True)
-        and not getattr(
-            lateral_class,
-            "neb_climb_skipped_low_barrier",
-            False,
-        )
-    ):
+    if getattr(free_energy_options, "include_ts_vibrations", True):
         ts_thermo = _harm(atoms_ts, "ts", energy_ts, True)
     else:
         ts_thermo = None
@@ -1146,21 +1141,6 @@ def _write_diffusion_calculation_cache(
                 "neb_climb_performed",
                 None,
             ),
-            "neb_climb_skipped_low_barrier": getattr(
-                lateral_class,
-                "neb_climb_skipped_low_barrier",
-                None,
-            ),
-            "neb_regular_forward_barrier": getattr(
-                lateral_class,
-                "neb_regular_forward_barrier",
-                None,
-            ),
-            "neb_regular_reverse_barrier": getattr(
-                lateral_class,
-                "neb_regular_reverse_barrier",
-                None,
-            ),
             "neb_intermediate_refinement": getattr(
                 lateral_class,
                 "neb_intermediate_refinement",
@@ -1235,10 +1215,10 @@ def check_diffusion_stability(
        (IDPP or linear interpolation, configurable spring constant).  All
        images share one acquired calculator via ASE's
        SingleCalculatorNEB-style path.
-    4. Run the selected NEB optimizer on the ordinary NEB to ``fmax``.  If
-       *climb* is enabled and both raw directional barriers are at least
-       ``EA_MIN``, retain the same band and spring constant, enable its
-       climbing image, and converge a second optimization.
+    4. Run the selected NEB optimizer on the ordinary NEB to ``fmax``. If
+       *climb* is enabled, retain the same band and spring constant, enable its
+       climbing image, and converge a second optimization regardless of raw
+       barrier height.
     5. Identify the TS as the highest-energy interior image; validate
        (no fragmentation, no collapse onto an endpoint); store all
        energies, atoms, and (optionally) the full band on *lateral_class*.
@@ -1393,10 +1373,6 @@ def check_diffusion_stability(
             if image_spacing is None
             else "max_gap_configurable_restore_lowest_fmax_halve_controls_v3"
         ),
-        "neb_climb_policy": {
-            "name": "skip_if_either_regular_barrier_below_ea_min_v1",
-            "minimum_barrier_ev": float(EA_MIN),
-        },
         "neb_intermediate_refinement_policy": {
             "name": "highest_peak_nearest_minima_iterative_v3",
             "stagnation_steps": int(neb_intermediate_stagnation_steps),
@@ -1769,7 +1745,6 @@ def check_diffusion_stability(
         band_eval=neb_band_eval,
         image_spacing=image_selection.target_spacing,
         geometry_guard_multiplier=neb_geometry_guard_multiplier,
-        barrier_endpoint_energies=(float(E_a), float(E_b)),
         intermediate_stagnation_steps=neb_intermediate_stagnation_steps,
         intermediate_max_refinements=neb_intermediate_max_refinements,
         intermediate_energy_tolerance=neb_intermediate_energy_tolerance,
@@ -1826,9 +1801,6 @@ def check_diffusion_stability(
         lateral_class.neb_image_count_limited_by = (
             neb_result.refinement_image_count_limited_by
         )
-    lateral_class.neb_climb_skipped_low_barrier = neb_result.climb_skipped_low_barrier
-    lateral_class.neb_regular_forward_barrier = neb_result.regular_forward_barrier
-    lateral_class.neb_regular_reverse_barrier = neb_result.regular_reverse_barrier
     lateral_class.neb_intermediate_refinement = (
         {
             "performed": True,
@@ -1877,9 +1849,9 @@ def check_diffusion_stability(
     lateral_class.neb_path_energies = neb_result.path_energies
     lateral_class.atoms_neb_path = neb_result.path_images
     if capture_neb_path and neb_result.path_images:
-        lateral_class._warm_start_neb_path = [image.copy() for image in neb_result.path_images]
-        for image in lateral_class._warm_start_neb_path:
-            image.calc = None
+        lateral_class._warm_start_neb_path = [
+            copy_atoms_with_results(image) for image in neb_result.path_images
+        ]
         lateral_class._warm_start_neb_energies = list(neb_result.path_energies or [])
         lateral_class._warm_start_member_index = int(member_index)
 
@@ -1916,7 +1888,6 @@ def check_diffusion_stability(
         e_ts=E_ts,
         ts_index=k_ts,
         n_interior=neb_result.n_interior,
-        allow_barrier_floor=neb_result.climb_skipped_low_barrier,
     )
 
     _apply_diffusion_thermochemistry(

@@ -26,7 +26,6 @@ from ase.geometry import find_mic
 from ase.optimize import BFGS, FIRE, MDMin
 
 from autokmc.core.constants import (
-    EA_MIN,
     NEB_BAND_EVAL as DEFAULT_NEB_BAND_EVAL,
     NEB_BAND_EVALS,
     NEB_INTERMEDIATE_ENERGY_TOLERANCE,
@@ -42,6 +41,7 @@ from autokmc.io.calculators import (
     acquire_calculator,
     primary_calculator,
 )
+from autokmc.io.atoms import copy_atoms_with_results
 from autokmc.sites.stability.band_eval import (
     BandEvaluator,
     BandImageCalculator,
@@ -138,7 +138,7 @@ def normalize_neb_method(value: str) -> str:
 
 @dataclass(frozen=True)
 class NEBRunResult:
-    """Calculator-detached result of a converged NEB optimisation."""
+    """Live-calculator-free result of a converged NEB optimization."""
 
     atoms_ts: Atoms
     energy_ts: float
@@ -148,9 +148,6 @@ class NEBRunResult:
     path_energies: list[float] | None = None
     path_images: list[Atoms] | None = None
     climb_performed: bool = False
-    climb_skipped_low_barrier: bool = False
-    regular_forward_barrier: float | None = None
-    regular_reverse_barrier: float | None = None
     intermediate_refinement_performed: bool = False
     intermediate_refinement_count: int = 0
     intermediate_max_refinements: int = NEB_INTERMEDIATE_MAX_REFINEMENTS
@@ -225,12 +222,11 @@ class _NEBIntermediateRefinement(RuntimeError):
         checkpoint_fmax: float | None = None,
         checkpoint_optimizer_steps: int | None = None,
     ) -> None:
-        self.images = []
-        for image in images:
-            snapshot = image.copy()
-            snapshot.calc = None
-            self.images.append(snapshot)
         self.energies = [float(value) for value in energies]
+        self.images = [
+            copy_atoms_with_results(image, energy=self.energies[index])
+            for index, image in enumerate(images)
+        ]
         self.peak_index = int(peak_index)
         self.left_index = int(left_index)
         self.right_index = int(right_index)
@@ -274,17 +270,6 @@ def _highest_peak_minimum_bracket(
     if left_index == 0 and right_index == len(values) - 1:
         return None
     return peak_index, left_index, right_index
-
-
-def _raw_directional_barriers(
-    transition_energy: float,
-    endpoint_energies: tuple[float, float],
-) -> tuple[float, float]:
-    """Return forward and reverse barriers from one shared energy reference."""
-    return (
-        float(transition_energy) - endpoint_energies[0],
-        float(transition_energy) - endpoint_energies[1],
-    )
 
 
 def _maximum_adjacent_image_displacement(
@@ -822,7 +807,6 @@ def run_neb(
     band_eval: str = DEFAULT_NEB_BAND_EVAL,
     image_spacing: float | None = None,
     geometry_guard_multiplier: float = (NEB_MAX_ADJACENT_IMAGE_SPACING_MULTIPLIER),
-    barrier_endpoint_energies: tuple[float, float] | None = None,
     intermediate_stagnation_steps: int | None = None,
     intermediate_max_refinements: int = NEB_INTERMEDIATE_MAX_REFINEMENTS,
     intermediate_energy_tolerance: float = NEB_INTERMEDIATE_ENERGY_TOLERANCE,
@@ -836,7 +820,7 @@ def run_neb(
         Callable[[Atoms, Atoms, dict[str, Any]], None] | None
     ) = None,
 ) -> NEBRunResult:
-    """Optimise one NEB band and return a calculator-detached result.
+    """Optimize one NEB band and return a live-calculator-free result.
 
     The caller supplies its channel-specific non-convergence exception class;
     scientific transition-state validation remains in the caller after this
@@ -853,11 +837,12 @@ def run_neb(
     another optimizer stage. CI-FIRE disables downhill checking immediately.
 
     If an optimizer, calculator, or convergence check raises after band
-    construction, *failure_path_callback* receives a calculator-detached
-    snapshot of the last-known full band before the exception is re-raised. A
-    pool supplies exactly one concrete calculator, and that lease is held for
-    the complete NEB lifecycle. Other pool calculators remain available for
-    independent NEBs, never for other images in this band.
+    construction, *failure_path_callback* receives a snapshot of the last-known
+    full band before the exception is re-raised. Live calculators are removed,
+    while valid cached energy and force results are retained as safe
+    single-point data. A pool supplies exactly one concrete calculator, and
+    that lease is held for the complete NEB lifecycle. Other pool calculators
+    remain available for independent NEBs, never for other images in this band.
 
     When ``image_spacing`` is configured, no unfrozen atom may move more than
     ``geometry_guard_multiplier`` times that distance between adjacent images
@@ -872,13 +857,6 @@ def run_neb(
     resumes the restored band. FIRE halves ``dt`` and ``dtmax``; other
     supported optimizers reduce their available displacement control. These
     same-band restarts share the original stage step budget.
-
-    When climbing was requested after an ordinary stage, the highest ordinary
-    image is also checked against both endpoint energies. If either raw barrier
-    is below :data:`EA_MIN`, CI-NEB is skipped. The ordinary band is retained
-    as the raw result; the reversible rate layer raises its common effective
-    TS level so that the affected KMC barrier is exactly the configured floor
-    without violating detailed energy consistency.
 
     During an ordinary stage, ``intermediate_stagnation_steps`` monitors the
     lowest interior-image electronic energy. If it does not decrease by
@@ -898,6 +876,10 @@ def run_neb(
     """
     build_band = band_factory or make_neb_band
     select_logfile = logfile_factory or neb_optimizer_logfile
+    active_endpoint_results = (
+        copy_atoms_with_results(atoms_initial),
+        copy_atoms_with_results(atoms_final),
+    )
     band_eval_mode = normalize_band_eval(band_eval)
     method_name = normalize_neb_method(neb_method)
     spacing_limit = None
@@ -909,13 +891,6 @@ def run_neb(
         if not np.isfinite(resolved_guard_multiplier) or resolved_guard_multiplier <= 0.0:
             raise ValueError("geometry_guard_multiplier must be finite and positive")
         spacing_limit = resolved_guard_multiplier * resolved_spacing
-    resolved_barrier_endpoints = None
-    if barrier_endpoint_energies is not None:
-        if len(barrier_endpoint_energies) != 2:
-            raise ValueError("barrier_endpoint_energies must contain two values")
-        resolved_barrier_endpoints = tuple(float(value) for value in barrier_endpoint_energies)
-        if not all(np.isfinite(value) for value in resolved_barrier_endpoints):
-            raise ValueError("barrier_endpoint_energies must be finite")
     resolved_stagnation_steps = None
     if intermediate_stagnation_steps is not None:
         if type(intermediate_stagnation_steps) is not int:
@@ -997,8 +972,6 @@ def run_neb(
                 initial_path_callback(initial_snapshot_path)
 
             optimizer_steps = 0
-            original_barrier_endpoints = resolved_barrier_endpoints
-            active_barrier_endpoints = original_barrier_endpoints
             intermediate_refinement_performed = False
             intermediate_refinement_count = 0
             intermediate_trigger = None
@@ -1332,9 +1305,6 @@ def run_neb(
             run_climbing_restart = bool(climb and start_climbing)
             while True:
                 climb_performed = False
-                climb_skipped_low_barrier = False
-                regular_forward_barrier = None
-                regular_reverse_barrier = None
                 try:
                     if not run_climbing_restart:
                         _optimise_stage(
@@ -1343,55 +1313,7 @@ def run_neb(
                             selected_optimizer_kwargs=optimizer_kwargs,
                             target_fmax=float(fmax),
                         )
-                        regular_energies = [
-                            float(image.get_potential_energy()) for image in images
-                        ]
-                        regular_interior = regular_energies[1:-1]
-                        if not regular_interior:
-                            raise not_converged_error(
-                                "NEB band has no interior images (n_images=0); "
-                                "cannot identify a TS."
-                            )
-                        regular_ts_energy = float(max(regular_interior))
-                        segment_barrier_endpoints = (
-                            active_barrier_endpoints
-                            if active_barrier_endpoints is not None
-                            else (regular_energies[0], regular_energies[-1])
-                        )
-                        original_energy_references = (
-                            original_barrier_endpoints
-                            if original_barrier_endpoints is not None
-                            else (regular_energies[0], regular_energies[-1])
-                        )
-                        segment_forward_barrier, segment_reverse_barrier = (
-                            _raw_directional_barriers(
-                                regular_ts_energy,
-                                segment_barrier_endpoints,
-                            )
-                        )
-                        regular_forward_barrier, regular_reverse_barrier = (
-                            _raw_directional_barriers(
-                                regular_ts_energy,
-                                original_energy_references,
-                            )
-                        )
-                        if (
-                            climb
-                            and min(segment_forward_barrier, segment_reverse_barrier)
-                            < float(EA_MIN) - 1.0e-12
-                        ):
-                            climb_skipped_low_barrier = True
-                            _log.warning(
-                                "Skipping CI-NEB because the converged ordinary band "
-                                "has a raw barrier below EA_MIN=%.3f eV "
-                                "(forward=%.6f eV, reverse=%.6f eV). The ordinary "
-                                "band is retained and the reversible KMC rate applies "
-                                "the common effective-TS barrier floor.",
-                                EA_MIN,
-                                segment_forward_barrier,
-                                segment_reverse_barrier,
-                            )
-                    if climb and not climb_skipped_low_barrier:
+                    if climb:
                         neb.climb = True
                         _optimise_stage(
                             stage="CI-NEB",
@@ -1406,11 +1328,6 @@ def run_neb(
                         climb_performed = True
                     break
                 except _NEBIntermediateRefinement as refinement:
-                    if original_barrier_endpoints is None:
-                        original_barrier_endpoints = (
-                            float(refinement.energies[0]),
-                            float(refinement.energies[-1]),
-                        )
                     intermediate_refinement_performed = True
                     intermediate_refinement_count += 1
                     intermediate_trigger = refinement.trigger
@@ -1434,7 +1351,13 @@ def run_neb(
                         candidate = source_images[index].copy()
                         candidate.calc = None
                         if index in {0, len(source_images) - 1}:
-                            return candidate, float(source_energies[index])
+                            return (
+                                copy_atoms_with_results(
+                                    source_images[index],
+                                    energy=float(source_energies[index]),
+                                ),
+                                float(source_energies[index]),
+                            )
                         if intermediate_relaxer is not None:
                             optimized, energy = intermediate_relaxer(candidate, label)
                         else:
@@ -1459,8 +1382,10 @@ def run_neb(
                             raise ValueError(
                                 "intermediate relaxation returned a non-finite energy"
                             )
-                        detached = optimized.copy()
-                        detached.calc = None
+                        detached = copy_atoms_with_results(
+                            optimized,
+                            energy=resolved_energy,
+                        )
                         return detached, resolved_energy
 
                     refinement_initial_atoms, refinement_initial_energy = (
@@ -1533,10 +1458,6 @@ def run_neb(
                             refinement_final_atoms.copy(),
                             refinement_metadata,
                         )
-                    active_barrier_endpoints = (
-                        refinement_initial_energy,
-                        refinement_final_energy,
-                    )
                     trigger_description = (
                         f"{refinement.source_stage} restored its lowest-force valid band "
                         "after a geometry rollback."
@@ -1559,6 +1480,10 @@ def run_neb(
                     segment_band_kwargs.pop("initial_path", None)
                     segment_band_kwargs["n_images"] = segment_selection.n_images
                     try:
+                        active_endpoint_results = (
+                            copy_atoms_with_results(refinement_initial_atoms),
+                            copy_atoms_with_results(refinement_final_atoms),
+                        )
                         neb, images = build_band(
                             refinement_initial_atoms,
                             refinement_final_atoms,
@@ -1584,6 +1509,23 @@ def run_neb(
                     # then optional CI workflow, even after a CI-only restart.
                     run_climbing_restart = False
 
+            final_result_snapshots = [
+                copy_atoms_with_results(image) for image in images
+            ]
+            final_forces = [
+                (
+                    snapshot.calc.results.get("forces")
+                    if snapshot.calc is not None
+                    else None
+                )
+                for snapshot in final_result_snapshots
+            ]
+            for index, endpoint in (
+                (0, active_endpoint_results[0]),
+                (len(images) - 1, active_endpoint_results[1]),
+            ):
+                if final_forces[index] is None and endpoint.calc is not None:
+                    final_forces[index] = endpoint.calc.results.get("forces")
             energies = [float(image.get_potential_energy()) for image in images]
             interior = energies[1:-1]
             if not interior:
@@ -1592,18 +1534,24 @@ def run_neb(
                 )
 
             transition_index = 1 + int(np.argmax(interior))
-            atoms_ts = images[transition_index].copy()
-            atoms_ts.calc = None
+            atoms_ts = copy_atoms_with_results(
+                images[transition_index],
+                energy=energies[transition_index],
+                forces=final_forces[transition_index],
+            )
 
             retain_path = bool(persist_path or capture_path)
             path_energies = list(energies) if retain_path else None
             path_images = None
             if retain_path:
-                path_images = []
-                for image in images:
-                    snapshot = image.copy()
-                    snapshot.calc = None
-                    path_images.append(snapshot)
+                path_images = [
+                    copy_atoms_with_results(
+                        image,
+                        energy=energies[index],
+                        forces=final_forces[index],
+                    )
+                    for index, image in enumerate(images)
+                ]
 
             result = NEBRunResult(
                 atoms_ts=atoms_ts,
@@ -1612,9 +1560,6 @@ def run_neb(
                 n_interior=len(interior),
                 optimizer_steps=optimizer_steps,
                 climb_performed=climb_performed,
-                climb_skipped_low_barrier=climb_skipped_low_barrier,
-                regular_forward_barrier=regular_forward_barrier,
-                regular_reverse_barrier=regular_reverse_barrier,
                 intermediate_refinement_performed=(
                     intermediate_refinement_performed
                 ),
@@ -1651,11 +1596,9 @@ def run_neb(
             )
         except Exception as exc:
             if failure_path_callback is not None:
-                failed_path = []
-                for image in images:
-                    snapshot = image.copy()
-                    snapshot.calc = None
-                    failed_path.append(snapshot)
+                failed_path = [
+                    copy_atoms_with_results(image) for image in images
+                ]
                 try:
                     failure_path_callback(failed_path)
                 except Exception as callback_exc:

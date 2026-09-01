@@ -77,24 +77,25 @@ def test_surface_builder_requires_an_explicit_calculator(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "filename",
+    ("filename", "repeat"),
     [
-        "h2_oxidation_pd111_uma.yaml",
-        "h2_oxidation_pd100_uma.yaml",
-        "h2_oxidation_pd111_dft.yaml",
-        "co_adsorption_diffusion_cu111_uma.yaml",
-        "all_options.yaml",
+        ("h2_oxidation_pd111_uma.yaml", 5),
+        ("h2_oxidation_pd100_uma.yaml", 4),
+        ("h2_oxidation_pd111_dft.yaml", 4),
+        ("co_adsorption_diffusion_cu111_uma.yaml", 4),
+        ("all_options.yaml", 4),
     ],
 )
-def test_surface_examples_build_4x4_four_layer_slabs(filename):
+def test_surface_examples_build_expected_four_layer_slabs(filename, repeat):
     cfg, atoms = _build_example_surface(filename)
 
     fractional_layers = np.unique(
         np.round(atoms.get_scaled_positions(wrap=False)[:, 2], decimals=8)
     )
-    assert len(atoms) == 4 * 4 * 4
+    atoms_per_layer = repeat**2
+    assert len(atoms) == atoms_per_layer * 4
     assert len(fractional_layers) == 4
-    assert len(atoms.info["frozen_indices"]) == 4 * 4 * 2
+    assert len(atoms.info["frozen_indices"]) == atoms_per_layer * 2
     if cfg.structure.miller_index == (1, 1, 1):
         np.testing.assert_allclose(atoms.cell.angles(), [90.0, 90.0, 60.0])
         normal = np.cross(atoms.cell[0], atoms.cell[1])
@@ -125,18 +126,23 @@ def test_surface_tiling_uses_shortest_in_plane_basis(monkeypatch, facet, shear):
 
     monkeypatch.setattr(slab_module, "SlabGenerator", ShearedSlabGenerator)
     _, atoms = _build_pd_example_surface(facet)
+    repeat = 5 if facet == "111" else 4
+    atoms_per_layer = repeat**2
 
     heights, layer_counts = np.unique(
         np.round(atoms.positions[:, 2], decimals=8), return_counts=True
     )
-    assert len(atoms) == 64
+    assert len(atoms) == atoms_per_layer * 4
     assert len(heights) == 4
-    np.testing.assert_array_equal(layer_counts, [16, 16, 16, 16])
-    assert len(atoms.info["frozen_indices"]) == 32
-    np.testing.assert_allclose(atoms.cell.lengths()[:2], 4 * reference.cell.lengths()[:2])
+    np.testing.assert_array_equal(layer_counts, [atoms_per_layer] * 4)
+    assert len(atoms.info["frozen_indices"]) == atoms_per_layer * 2
+    np.testing.assert_allclose(
+        atoms.cell.lengths()[:2],
+        repeat * reference.cell.lengths()[:2],
+    )
     np.testing.assert_allclose(atoms.cell[2], reference.cell[2])
     np.testing.assert_allclose(np.diff(heights), np.diff(np.unique(reference.positions[:, 2])))
-    np.testing.assert_allclose(atoms.get_volume(), 16 * reference.get_volume())
+    np.testing.assert_allclose(atoms.get_volume(), atoms_per_layer * reference.get_volume())
     # Square surfaces stay square; hexagonal surfaces retain their skew.
     expected_cosine = 0.0 if facet == "100" else 0.5
     np.testing.assert_allclose(
@@ -173,7 +179,7 @@ def test_skew_pd111_o_sites_are_local_and_connectivity_consistent():
     )
 
     assert sorted(len(site.atom_cliques[0]) for site in sites) == [1, 2, 3, 3]
-    assert len(graph.graph["raw_cliques"]["O"][3]) == 32
+    assert len(graph.graph["raw_cliques"]["O"][3]) == 2 * 5**2
     assert all(
         _geometry_connectivity_mismatch(
             graph,
