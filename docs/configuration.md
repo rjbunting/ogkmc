@@ -476,9 +476,9 @@ cache or resume contract being able to detect it.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `prune_stable_only` | `true` | Relax one representative per candidate class and retain stable classes. |
-| `prune_fmax` | `0.05` eV/Å | Site-pruning relaxation threshold. |
-| `prune_max_steps` | `500` | Site-pruning step limit. |
+| `prune_stable_only` | `true` | Optimize one representative per candidate class with the potential and retain stable classes. Each representative first undergoes a fixed-slab rigid-molecule optimization, then the ordinary relaxed optimization. |
+| `prune_fmax` | `0.05` eV/Å | Convergence threshold for each stable-site optimization stage. The rigid stage tests net translation and length-scaled torque; the relaxed stage tests free-atom forces. |
+| `prune_max_steps` | `500` | Per-stage stable-site optimization limit; each candidate may use this many rigid steps followed by this many relaxed steps. |
 | `endpoint_fmax` | `0.05` eV/Å | Occupied/unoccupied endpoint threshold used to construct adsorption/desorption rates. |
 | `endpoint_max_steps` | `200` | Occupied/unoccupied endpoint step limit. |
 | `anchor_k_max` | `4` | Maximum anchor clique size. Four covers atop, bridge, three-fold, and four-fold sites while bounding dense-graph enumeration; set to `null` for legacy unbounded enumeration. |

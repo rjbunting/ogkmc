@@ -139,12 +139,12 @@ BOND_TOLERANCE: float = 0.4
 # Stability pruning
 # ---------------------------------------------------------------------------
 
-#: Force convergence threshold (eV/Å) for the ML-potential relaxation used by
+#: Force convergence threshold (eV/Å) for both ML-potential stages used by
 #: :func:`autokmc.sites.adsorbate.prune_unstable_adsorbate_sites` to
 #: decide whether a representative placement is stable.
 PRUNE_FMAX: float = 0.05
 
-#: Maximum LBFGS steps for the ML-potential relaxation used by
+#: Maximum optimizer steps per rigid or relaxed ML-potential stage used by
 #: :func:`autokmc.sites.adsorbate.prune_unstable_adsorbate_sites`.
 PRUNE_MAX_STEPS: int = 500
 

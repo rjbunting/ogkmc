@@ -4,16 +4,48 @@ import networkx as nx
 import numpy as np
 import pytest
 from ase import Atoms
+from ase.calculators.calculator import Calculator, all_changes
+from ase.constraints import FixAtoms
 
 from autokmc.core.graph import build_graph
 from autokmc.sites.adsorbate import (
     AdsorbateSite,
+    _RigidAdsorbateOptimizable,
     _adsorbate_edges_from_graph,
     _build_pruning_atoms,
     _geometry_connectivity_mismatch,
     _intended_adsorbate_edges,
+    _optimise_rigid_adsorbate_with_potential,
     optimise_adsorbate_site_positions,
 )
+from autokmc.structure import optimise_structure
+
+
+class _CartesianHarmonic(Calculator):
+    """Independent Cartesian wells used to exercise rigid/full relaxation."""
+
+    implemented_properties = ["energy", "forces"]
+
+    def __init__(self, target):
+        super().__init__()
+        self.target = np.asarray(target, dtype=float)
+
+    def calculate(
+        self,
+        atoms=None,
+        properties=("energy",),
+        system_changes=all_changes,
+    ):
+        super().calculate(atoms, properties, system_changes)
+        displacement = np.asarray(atoms.positions, dtype=float) - self.target
+        self.results = {
+            "energy": 0.5 * float(np.einsum(
+                "ij,ij->",
+                displacement,
+                displacement,
+            )),
+            "forces": -displacement,
+        }
 
 
 def _surface_graph() -> nx.Graph:
@@ -90,6 +122,112 @@ def _ase_connectivity_mismatch(graph, site, reactant, positions, nl_mult=1.2):
     missing = intended - actual
     extra = actual - intended
     return (missing, extra) if missing or extra else None
+
+
+def test_potential_rigid_generalized_forces_match_finite_difference():
+    atoms = Atoms(
+        "PdCO",
+        positions=np.array(
+            [[0.0, 0.0, 0.0], [1.1, -0.2, 1.3], [1.2, 0.9, 1.5]],
+        ),
+        cell=[10.0, 10.0, 10.0],
+        pbc=[True, True, False],
+    )
+    target = atoms.positions.copy()
+    target[1:] += np.array([[0.4, 0.2, -0.1], [-0.3, 0.5, 0.2]])
+    atoms.calc = _CartesianHarmonic(target)
+    rigid = _RigidAdsorbateOptimizable(atoms, n_slab=1)
+    coordinates = np.array(
+        [[0.13, -0.07, 0.11], [0.31, -0.25, 0.19]],
+    )
+    rigid.set_positions(coordinates)
+    analytical = rigid.get_forces().reshape(-1)
+
+    step = 1.0e-6
+    numerical = np.empty(coordinates.size)
+    for index in range(coordinates.size):
+        plus = coordinates.reshape(-1).copy()
+        minus = coordinates.reshape(-1).copy()
+        plus[index] += step
+        minus[index] -= step
+        rigid.set_positions(plus.reshape(coordinates.shape))
+        energy_plus = rigid.get_potential_energy()
+        rigid.set_positions(minus.reshape(coordinates.shape))
+        energy_minus = rigid.get_potential_energy()
+        numerical[index] = -(energy_plus - energy_minus) / (2.0 * step)
+
+    assert analytical == pytest.approx(numerical, rel=1.0e-6, abs=1.0e-8)
+
+
+def test_potential_rigid_then_relaxed_optimization_preserves_then_releases_bond():
+    atoms = Atoms(
+        "PdCO",
+        positions=np.array(
+            [[0.0, 0.0, 0.0], [0.0, 0.0, 1.8], [1.15, 0.0, 1.8]],
+        ),
+        cell=[12.0, 12.0, 12.0],
+        pbc=[True, True, False],
+    )
+    atoms.set_constraint(FixAtoms(indices=[0]))
+    initial_slab = atoms.positions[0].copy()
+    initial_bond = atoms.get_distance(1, 2)
+
+    target = np.array(
+        [[0.5, 0.5, 0.5], [2.0, 1.0, 2.0], [2.0, 2.55, 2.0]],
+    )
+    calculator = _CartesianHarmonic(target)
+    rigid, rigid_force, _rigid_steps = _optimise_rigid_adsorbate_with_potential(
+        atoms,
+        n_slab=1,
+        calculator=calculator,
+        fmax=1.0e-5,
+        max_steps=300,
+        optimizer="lbfgs",
+        optimizer_kwargs={},
+    )
+
+    assert rigid_force < 1.0e-5
+    assert rigid.positions[0] == pytest.approx(initial_slab, abs=1.0e-12)
+    assert rigid.get_distance(1, 2) == pytest.approx(initial_bond, abs=1.0e-12)
+
+    relaxed = optimise_structure(
+        rigid,
+        calculator=calculator,
+        fmax=1.0e-5,
+        steps=300,
+        optimizer="lbfgs",
+        optimizer_kwargs={},
+        verbose=False,
+    )
+
+    assert relaxed.positions[0] == pytest.approx(initial_slab, abs=1.0e-12)
+    assert relaxed.get_distance(1, 2) == pytest.approx(1.55, abs=1.0e-4)
+
+
+@pytest.mark.parametrize("optimizer", ["lbfgs", "bfgs", "fire", "mdmin"])
+def test_potential_rigid_optimization_translates_single_atom_without_slab_motion(
+    optimizer,
+):
+    atoms = Atoms(
+        "PdO",
+        positions=[[0.0, 0.0, 0.0], [0.0, 0.0, 1.8]],
+        cell=[10.0, 10.0, 10.0],
+        pbc=[True, True, False],
+    )
+    target = np.array([[1.0, 0.0, 0.0], [0.4, -0.2, 2.1]])
+    rigid, rigid_force, _rigid_steps = _optimise_rigid_adsorbate_with_potential(
+        atoms,
+        n_slab=1,
+        calculator=_CartesianHarmonic(target),
+        fmax=1.0e-6,
+        max_steps=300,
+        optimizer=optimizer,
+        optimizer_kwargs={},
+    )
+
+    assert rigid_force < 1.0e-6
+    assert rigid.positions[0] == pytest.approx(atoms.positions[0], abs=1.0e-12)
+    assert rigid.positions[1] == pytest.approx(target[1], abs=1.0e-5)
 
 
 @pytest.mark.parametrize(

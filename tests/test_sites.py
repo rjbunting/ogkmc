@@ -1575,7 +1575,17 @@ def test_adsorbate_pruning_reads_energy_before_detaching_calculator(monkeypatch)
     )
     reactant.graph.add_node(0, element="O")
 
+    stages = []
+
+    def fake_rigid_optimisation(atoms, *_args, **_kwargs):
+        stages.append("rigid")
+        rigid = atoms.copy()
+        rigid.positions[-1, 2] += 0.01
+        return rigid, 0.0, 3
+
     def fake_optimise_structure(atoms, **_kwargs):
+        stages.append("relaxed")
+        assert atoms.positions[-1, 2] == pytest.approx(1.81)
         opt = atoms.copy()
         opt.calc = SinglePointCalculator(
             opt,
@@ -1588,6 +1598,10 @@ def test_adsorbate_pruning_reads_energy_before_detaching_calculator(monkeypatch)
         "autokmc.structure.optimise_structure",
         fake_optimise_structure,
     )
+    monkeypatch.setattr(
+        "autokmc.sites.adsorbate._optimise_rigid_adsorbate_with_potential",
+        fake_rigid_optimisation,
+    )
 
     stable = prune_unstable_adsorbate_sites(
         G,
@@ -1599,6 +1613,7 @@ def test_adsorbate_pruning_reads_energy_before_detaching_calculator(monkeypatch)
     )
 
     assert stable == [site]
+    assert stages == ["rigid", "relaxed"]
 
 
 def test_adsorbate_pruning_persists_mlip_rejected_structures(
@@ -1643,6 +1658,10 @@ def test_adsorbate_pruning_persists_mlip_rejected_structures(
     monkeypatch.setattr(
         "autokmc.structure.optimise_structure",
         fake_optimise_structure,
+    )
+    monkeypatch.setattr(
+        "autokmc.sites.adsorbate._optimise_rigid_adsorbate_with_potential",
+        lambda atoms, *_args, **_kwargs: (atoms.copy(), 0.0, 0),
     )
 
     stable = prune_unstable_adsorbate_sites(
@@ -1720,6 +1739,10 @@ def test_adsorbate_pruning_persists_last_geometry_when_optimizer_raises(
         "autokmc.structure.optimise_structure",
         fail_optimise_structure,
     )
+    monkeypatch.setattr(
+        "autokmc.sites.adsorbate._optimise_rigid_adsorbate_with_potential",
+        lambda atoms, *_args, **_kwargs: (atoms.copy(), 0.0, 0),
+    )
 
     stable = prune_unstable_adsorbate_sites(
         graph,
@@ -1742,6 +1765,83 @@ def test_adsorbate_pruning_persists_last_geometry_when_optimizer_raises(
     payload = json.loads((folder / "diagnostic.json").read_text())
     assert payload["invalid_reason"] == "relaxation_failed"
     assert payload["details"]["optimizer_steps"] == 7
+
+
+def test_adsorbate_pruning_reports_rigid_stage_nonconvergence(
+    tmp_path,
+    monkeypatch,
+):
+    from autokmc.structure import StructureOptimisationError
+
+    graph = nx.Graph()
+    graph.graph["cell"] = np.eye(3) * 10.0
+    graph.graph["pbc"] = np.array([True, True, True])
+    graph.add_node(
+        0,
+        type="surface",
+        element="Pt",
+        position=np.array([0.0, 0.0, 0.0]),
+        index=0,
+    )
+    site = AdsorbateSite(
+        reactant="[O]",
+        n_atoms=1,
+        atom_cliques=[frozenset({0})],
+        positions=np.array([[0.0, 0.0, 1.8]]),
+        iso_class=0,
+        members=[[frozenset({0})]],
+        member_node_ids=[],
+    )
+    reactant = SimpleNamespace(
+        smiles="[O]",
+        atoms=Atoms("O", positions=[[0.0, 0.0, 0.0]]),
+        graph=nx.Graph(),
+    )
+    reactant.graph.add_node(0, element="O")
+
+    def fail_rigid(atoms, *_args, **_kwargs):
+        failed = atoms.copy()
+        failed.positions[-1, 2] = 2.25
+        raise StructureOptimisationError(
+            "forced rigid nonconvergence",
+            failed,
+            converged=False,
+            steps=9,
+        )
+
+    monkeypatch.setattr(
+        "autokmc.sites.adsorbate._optimise_rigid_adsorbate_with_potential",
+        fail_rigid,
+    )
+    monkeypatch.setattr(
+        "autokmc.structure.optimise_structure",
+        lambda *_args, **_kwargs: pytest.fail(
+            "full relaxation must not run after rigid nonconvergence"
+        ),
+    )
+
+    stable = prune_unstable_adsorbate_sites(
+        graph,
+        [site],
+        reactant,
+        calculator=object(),
+        diagnostics_dir=tmp_path / "diagnostics",
+    )
+
+    assert stable == []
+    folder = (
+        tmp_path
+        / "diagnostics"
+        / "invalid_adsorption"
+        / "(O)"
+        / "ads_iso0"
+    )
+    optimized = ase_read(folder / "optimized.extxyz")
+    assert optimized.positions[-1, 2] == pytest.approx(2.25)
+    payload = json.loads((folder / "diagnostic.json").read_text())
+    assert payload["invalid_reason"] == "rigid_not_converged"
+    assert payload["details"]["optimization_stage"] == "rigid"
+    assert payload["details"]["optimizer_steps"] == 9
 
 
 def test_adsorbate_pruning_projects_relaxed_adsorbate_back_to_graph_frame(monkeypatch):
@@ -1806,6 +1906,10 @@ def test_adsorbate_pruning_projects_relaxed_adsorbate_back_to_graph_frame(monkey
     monkeypatch.setattr(
         "autokmc.structure.optimise_structure",
         fake_optimise_structure,
+    )
+    monkeypatch.setattr(
+        "autokmc.sites.adsorbate._optimise_rigid_adsorbate_with_potential",
+        lambda atoms, *_args, **_kwargs: (atoms.copy(), 0.0, 0),
     )
 
     stable = prune_unstable_adsorbate_sites(

@@ -13,8 +13,9 @@ atom rather than a single node.
 Single-atom reactants (``N == 1``) take a degenerate fast path: the lone
 anchor atom is placed at every raw anchor-node position of its element and
 iso-classes are deduplicated by ego-graph isomorphism around the bonded
-clique.  The rigid-body refinement step is skipped (no rotational DOF) and
-ML stability pruning runs as for any other reactant.
+clique.  The calculator-free rotational refinement is skipped, while the
+potential-driven rigid translation and relaxed stability stages run as for
+any other reactant.
 
 Strategy
 --------
@@ -54,9 +55,14 @@ Strategy
 7. **Materialise** one adsorbate-site node per reactant atom per member on *G*
    (``type="adsorbate"``, ``occupied=False``).
 
-8. **Optional rigid-body refinement.**
+8. **Optional calculator-free rigid-body refinement.**
    :func:`optimise_adsorbate_site_positions` does a calculator-free L-BFGS-B
    refinement of each iso-class representative's 6 rigid-body DOF.
+
+9. **Potential stability pruning.**  With ``prune_stable_only=True``, each
+   representative is first optimized against the configured potential as an
+   exact rigid body on a fixed slab.  Only after that stage converges is the
+   ordinary atom-level relaxation run and its adsorption topology checked.
 
 Storage
 -------
@@ -67,12 +73,13 @@ Public API
 ----------
 * :class:`AdsorbateSite`                    — one iso-class of molecule placements.
 * :func:`find_adsorbate_sites`              — universal N-atom enumerator.
-* :func:`optimise_adsorbate_site_positions` — rigid-body refinement.
+* :func:`optimise_adsorbate_site_positions` — calculator-free rigid refinement.
 * :func:`push_member_positions_to_graph`    — write refined positions back to G.
 """
 
 from __future__ import annotations
 
+import os
 import warnings
 from dataclasses import dataclass, field
 from itertools import combinations
@@ -100,7 +107,11 @@ from autokmc.sites.anchors import (
     _reserve_node_ids,
 )
 from autokmc.utils.logging import get_logger
-from autokmc.utils.optimizers import DEFAULT_OPTIMIZER
+from autokmc.utils.optimizers import (
+    DEFAULT_OPTIMIZER,
+    REGULAR_OPTIMIZERS,
+    normalize_optimizer_kwargs,
+)
 
 _log = get_logger(__name__)
 
@@ -1403,6 +1414,180 @@ def _build_pruning_atoms(
     return atoms, len(slab_nodes), n_ads, node_to_ase
 
 
+class _RigidAdsorbateOptimizable:
+    """Expose one adsorbate's rigid modes to an ASE optimizer.
+
+    The first pseudo-position contains translation in Angstrom.  Molecular
+    adsorbates have a second pseudo-position containing an axis-angle rotation
+    multiplied by a characteristic molecular length.  The corresponding
+    pseudo-forces are the net adsorbate force and torque divided by that same
+    length, so ASE's ordinary ``fmax`` test has eV/Angstrom units for both
+    rigid modes.  Slab coordinates are never exposed to the optimizer.
+    """
+
+    def __init__(self, atoms, n_slab: int) -> None:
+        self.atoms = atoms
+        self.n_slab = int(n_slab)
+        self.n_ads = len(atoms) - self.n_slab
+        if self.n_ads < 1:
+            raise ValueError(
+                "rigid adsorbate optimization requires at least one atom"
+            )
+
+        adsorbate_positions = np.asarray(
+            atoms.get_positions()[self.n_slab :],
+            dtype=float,
+        )
+        adsorbate_positions = unwrap_positions_about_reference(
+            adsorbate_positions,
+            np.asarray(atoms.cell, dtype=float),
+            np.asarray(atoms.pbc, dtype=bool),
+        )
+        self.center = adsorbate_positions.mean(axis=0)
+        self.reference_offsets = adsorbate_positions - self.center
+        squared_radii = np.einsum(
+            "ij,ij->i",
+            self.reference_offsets,
+            self.reference_offsets,
+        )
+        rms_radius = float(np.sqrt(np.mean(squared_radii)))
+        # A 1-Angstrom floor prevents tiny or nearly coincident structures
+        # from turning a harmless torque into a numerically enormous force.
+        self.rotation_scale = max(1.0, rms_radius)
+        self.has_rotation = self.n_ads > 1 and rms_radius > 1.0e-12
+        self.coordinates = np.zeros((2 if self.has_rotation else 1, 3))
+
+        positions = atoms.get_positions()
+        positions[self.n_slab :] = adsorbate_positions
+        atoms.set_positions(positions)
+
+    def __len__(self) -> int:
+        return len(self.coordinates)
+
+    def __ase_optimizable__(self):
+        return self
+
+    def get_positions(self) -> np.ndarray:
+        return self.coordinates.copy()
+
+    def set_positions(self, coordinates) -> None:
+        candidate = np.asarray(coordinates, dtype=float)
+        if candidate.shape != self.coordinates.shape:
+            raise ValueError(
+                "rigid optimizer coordinates must have shape "
+                f"{self.coordinates.shape}, got {candidate.shape}"
+            )
+        self.coordinates = candidate.copy()
+        if self.has_rotation:
+            rotvec = self.coordinates[1] / self.rotation_scale
+            rotation = _rotation_from_axis_angle(rotvec)
+            adsorbate_positions = self.reference_offsets @ rotation.T
+        else:
+            adsorbate_positions = self.reference_offsets.copy()
+        adsorbate_positions += self.center + self.coordinates[0]
+
+        positions = self.atoms.get_positions()
+        positions[self.n_slab :] = adsorbate_positions
+        self.atoms.set_positions(positions)
+
+    def get_forces(self) -> np.ndarray:
+        atomic_forces = np.asarray(self.atoms.get_forces(), dtype=float)
+        adsorbate_forces = atomic_forces[self.n_slab :]
+        if not np.all(np.isfinite(adsorbate_forces)):
+            raise ValueError("calculator returned non-finite adsorbate forces")
+
+        generalized_forces = np.empty_like(self.coordinates)
+        generalized_forces[0] = adsorbate_forces.sum(axis=0)
+        if self.has_rotation:
+            rotvec = self.coordinates[1] / self.rotation_scale
+            rotation = _rotation_from_axis_angle(rotvec)
+            right_jacobian = _rotation_right_jacobian(rotvec)
+            body_forces = adsorbate_forces @ rotation
+            body_torque = np.cross(
+                self.reference_offsets,
+                body_forces,
+            ).sum(axis=0)
+            generalized_forces[1] = (
+                right_jacobian.T @ body_torque
+            ) / self.rotation_scale
+        return generalized_forces
+
+    def get_potential_energy(self) -> float:
+        return float(self.atoms.get_potential_energy())
+
+    def iterimages(self):
+        return self.atoms.iterimages()
+
+    def converged(self, forces, fmax: float) -> bool:
+        force_norms = np.linalg.norm(np.asarray(forces, dtype=float), axis=1)
+        return bool(force_norms.max() < float(fmax))
+
+    def is_neb(self) -> bool:
+        return False
+
+
+def _optimise_rigid_adsorbate_with_potential(
+    atoms,
+    n_slab: int,
+    calculator,
+    *,
+    fmax: float,
+    max_steps: int,
+    optimizer: str,
+    optimizer_kwargs: dict[str, Any] | None,
+):
+    """Optimize only rigid adsorbate translation/rotation with a potential."""
+    from autokmc.structure.optimization import (
+        StructureOptimisationError,
+        _optimizer_class,
+    )
+
+    result = atoms.copy()
+    result.calc = calculator
+    rigid = _RigidAdsorbateOptimizable(result, n_slab)
+    optimizer_cls = _optimizer_class(optimizer)
+    constructor_kwargs = normalize_optimizer_kwargs(
+        optimizer,
+        optimizer_kwargs,
+        allowed=REGULAR_OPTIMIZERS,
+        setting="optimizer_kwargs",
+    )
+    # One global optimizer restart/trajectory cannot safely be shared by the
+    # two-coordinate rigid body and the subsequent full atomic relaxation.
+    constructor_kwargs.pop("restart", None)
+    constructor_kwargs.pop("trajectory", None)
+    opt = optimizer_cls(rigid, logfile=os.devnull, **constructor_kwargs)
+    try:
+        opt.run(fmax=fmax, steps=max_steps)
+        generalized_forces = rigid.get_forces()
+    except CalculatorConfigError:
+        raise
+    except Exception as exc:
+        completed_steps = int(opt.get_number_of_steps())
+        raise StructureOptimisationError(
+            "rigid adsorbate optimization failed after "
+            f"{completed_steps} steps: {type(exc).__name__}: {exc}",
+            result,
+            converged=None,
+            steps=completed_steps,
+        ) from exc
+
+    completed_steps = int(opt.get_number_of_steps())
+    max_generalized_force = float(
+        np.linalg.norm(generalized_forces, axis=1).max()
+    )
+    if not rigid.converged(generalized_forces, fmax):
+        raise StructureOptimisationError(
+            "rigid adsorbate optimization did not converge within "
+            f"{max_steps} steps (fmax={fmax} eV/Angstrom; "
+            f"max rigid force={max_generalized_force:.6g} eV/Angstrom)",
+            result,
+            converged=False,
+            steps=completed_steps,
+        )
+    return result, max_generalized_force, completed_steps
+
+
 def _relaxed_adsorbate_positions_in_graph_frame(
     G: nx.Graph,
     ms: AdsorbateSite,
@@ -2077,9 +2262,14 @@ def prune_unstable_adsorbate_sites(
        :func:`_build_pruning_atoms`.  The adsorbate atoms are tagged
        ``surface == 2`` so :func:`autokmc.core.graph.build_graph` can be called
        on it directly.
-    2. Run a full ML relaxation via
-       :func:`~autokmc.structure.optimise_structure`.
-    3. Build the graph of the relaxed structure (same NL cutoff as the rest
+    2. Run a potential-driven rigid-body optimization with the slab fixed and
+       the adsorbate's internal coordinates held exactly constant.  The only
+       degrees of freedom are molecular translation and rotation.
+    3. Starting from that constrained minimum, run the existing full ML
+       relaxation via :func:`~autokmc.structure.optimise_structure`.  The
+       configured slab constraints are restored for this stage and the
+       adsorbate's internal coordinates may relax.
+    4. Build the graph of the relaxed structure (same NL cutoff as the rest
        of the package) and compare its **adsorbate-touching edge set** to
        the *intended* edge set:
 
@@ -2093,9 +2283,10 @@ def prune_unstable_adsorbate_sites(
        Slab–slab edges are *ignored* because un-frozen metal atoms relax by
        O(0.01–0.1 Å) under a real ML potential and can flip pairs across
        the natural-cutoff threshold without affecting the adsorbate.
-    4. Convergence is also checked (max|F| ≤ *fmax* on the un-frozen atoms);
-       non-converged iso-classes are pruned.
-    5. For surviving iso-classes the relaxed adsorbate positions are
+    5. Both stages must converge.  The rigid stage applies *fmax* to the net
+       translational force and length-scaled torque; the relaxed stage applies
+       it to the un-frozen atomic forces.  Non-converged classes are pruned.
+    6. For surviving iso-classes the relaxed adsorbate positions are
        written back to ``ms.positions`` and propagated to every member through
        a validated adsorption-coordination graph mapping.
 
@@ -2121,10 +2312,10 @@ def prune_unstable_adsorbate_sites(
         relaxation.  Pass ``atoms.info["frozen_indices"]`` from the slab
         directly.
     fmax : float
-        Force convergence threshold (eV/Å).  Default
-        :data:`~autokmc.core.constants.PRUNE_FMAX`.
+        Force convergence threshold (eV/Å) used for both the rigid and fully
+        relaxed stages.  Default :data:`~autokmc.core.constants.PRUNE_FMAX`.
     max_steps : int
-        Maximum optimizer steps.  Default
+        Maximum optimizer steps for each of the two stages.  Default
         :data:`~autokmc.core.constants.PRUNE_MAX_STEPS`.
     nl_mult : float
         Neighbour-list cutoff multiplier handed to
@@ -2192,7 +2383,8 @@ def prune_unstable_adsorbate_sites(
     if verbose:
         print(
             f"\nprune_unstable_adsorbate_sites: {len(adsorbate_sites)} iso-class(es)  "
-            f"fmax={fmax} eV/Å  max_steps={max_steps}"
+            f"rigid + relaxed potential stages  fmax={fmax} eV/Å  "
+            f"max_steps/stage={max_steps}"
         )
 
     for ms in adsorbate_sites:
@@ -2215,13 +2407,31 @@ def prune_unstable_adsorbate_sites(
             ms, reactant, n_slab, node_to_ase
         )
 
-        # Next, relax the structure with the configured calculator.
+        # First optimize only the molecule's rigid translation and rotation
+        # against the potential while leaving every slab atom stationary.
+        # Then restore the ordinary atom-level degrees of freedom and slab
+        # constraints for the existing relaxed stability check.
+        optimization_stage = "rigid"
+        rigid_max_force: float | None = None
+        rigid_steps: int | None = None
         try:
             with acquire_calculator(
                 calculator, purpose="adsorbate-site pruning"
             ) as calc:
+                atoms_rigid, rigid_max_force, rigid_steps = (
+                    _optimise_rigid_adsorbate_with_potential(
+                        atoms_init,
+                        n_slab,
+                        calc,
+                        fmax=fmax,
+                        max_steps=max_steps,
+                        optimizer=optimizer,
+                        optimizer_kwargs=optimizer_kwargs,
+                    )
+                )
+                optimization_stage = "relaxed"
                 atoms_opt = optimise_structure(
-                    atoms_init,
+                    atoms_rigid,
                     calculator = calc,
                     fmax       = fmax,
                     steps      = max_steps,
@@ -2250,24 +2460,42 @@ def prune_unstable_adsorbate_sites(
                 if isinstance(exc, StructureOptimisationError)
                 else None
             )
-            invalid_reason = (
-                "not_converged"
-                if isinstance(exc, StructureOptimisationError)
+            did_not_converge = (
+                isinstance(exc, StructureOptimisationError)
                 and exc.converged is False
-                else "relaxation_failed"
             )
+            if optimization_stage == "rigid":
+                invalid_reason = (
+                    "rigid_not_converged"
+                    if did_not_converge
+                    else "rigid_relaxation_failed"
+                )
+            else:
+                # Preserve the established diagnostics contract for the
+                # pre-existing fully relaxed stage.
+                invalid_reason = (
+                    "not_converged"
+                    if did_not_converge
+                    else "relaxation_failed"
+                )
             _log.debug(
                 "prune_unstable_adsorbate_sites: iso_class=%d relaxation raised %s",
                 ms.iso_class, exc,
             )
             if verbose:
-                print(f"  PRUNED iso={ms.iso_class}: relaxation failed ({exc})")
+                print(
+                    f"  PRUNED iso={ms.iso_class}: {optimization_stage} "
+                    f"optimization failed ({exc})"
+                )
             _persist_invalid(
                 ms,
                 atoms_init,
                 failed_atoms,
                 invalid_reason,
                 error=f"{type(exc).__name__}: {exc}",
+                optimization_stage=optimization_stage,
+                rigid_max_force_ev_per_ang=rigid_max_force,
+                rigid_optimizer_steps=rigid_steps,
                 optimizer_steps=(
                     exc.steps
                     if isinstance(exc, StructureOptimisationError)
@@ -2277,6 +2505,9 @@ def prune_unstable_adsorbate_sites(
             n_pruned += 1
             _remove_iso_class_nodes(G, ms)
             continue
+
+        assert rigid_max_force is not None
+        assert rigid_steps is not None
 
         # After relaxation, reject structures that did not reach the requested
         # force threshold.
@@ -2294,6 +2525,8 @@ def prune_unstable_adsorbate_sites(
                 max_force_ev_per_ang=float(max_force),
                 fmax_ev_per_ang=float(fmax),
                 energy_ev=float(E),
+                rigid_max_force_ev_per_ang=float(rigid_max_force),
+                rigid_optimizer_steps=int(rigid_steps),
             )
             n_pruned += 1
             _remove_iso_class_nodes(G, ms)
@@ -2327,6 +2560,8 @@ def prune_unstable_adsorbate_sites(
                 error=f"{type(exc).__name__}: {exc}",
                 max_force_ev_per_ang=float(max_force),
                 energy_ev=float(E),
+                rigid_max_force_ev_per_ang=float(rigid_max_force),
+                rigid_optimizer_steps=int(rigid_steps),
             )
             n_pruned += 1
             _remove_iso_class_nodes(G, ms)
@@ -2359,6 +2594,8 @@ def prune_unstable_adsorbate_sites(
                 extra_edge_count=len(extra),
                 max_force_ev_per_ang=float(max_force),
                 energy_ev=float(E),
+                rigid_max_force_ev_per_ang=float(rigid_max_force),
+                rigid_optimizer_steps=int(rigid_steps),
             )
             n_pruned += 1
             _remove_iso_class_nodes(G, ms)
@@ -2446,7 +2683,9 @@ def prune_unstable_adsorbate_sites(
             )
             print(
                 f"  STABLE iso={ms.iso_class}: "
-                f"E={E:.4f} eV  max|F|={max_force:.4f} eV/Å  {suffix}"
+                f"rigid max|F|={rigid_max_force:.4f} eV/Å "
+                f"({rigid_steps} steps); relaxed E={E:.4f} eV  "
+                f"max|F|={max_force:.4f} eV/Å  {suffix}"
             )
 
         stable.append(ms)
@@ -2654,11 +2893,12 @@ def find_adsorbate_sites(
         post-relaxation connectivity checks.  Default
         :data:`~autokmc.core.constants.NL_MULT_DEFAULT`.
     prune_stable_only : bool
-        If ``True`` (default), run an ML-potential relaxation on the
-        representative geometry of every iso-class after enumeration and
-        discard any iso-class whose bond topology changes or whose relaxation
-        does not converge.  Requires *calculator* to be set; if *calculator*
-        is ``None`` a :class:`RuntimeWarning` is issued and pruning is skipped.
+        If ``True`` (default), optimize every iso-class representative against
+        the ML potential first as an exact rigid molecule on a fixed slab and
+        then with the ordinary atomic degrees of freedom.  Discard any class
+        whose bond topology changes or whose optimization does not converge.
+        Requires *calculator* to be set; if *calculator* is ``None`` a
+        :class:`RuntimeWarning` is issued and pruning is skipped.
     calculator
         ASE-compatible ML/empirical potential or CalculatorPool used for
         stability pruning.  Calculators are acquired rather than deep-copied.
@@ -2668,11 +2908,12 @@ def find_adsorbate_sites(
         ASE atom ``index``) to freeze during the pruning relaxation.  Pass
         ``atoms.info["frozen_indices"]`` directly for slab structures.
     prune_fmax : float
-        Force convergence threshold (eV/Å) for pruning relaxations.
+        Force convergence threshold (eV/Å) for each of the rigid and relaxed
+        pruning stages.
         Default :data:`~autokmc.core.constants.PRUNE_FMAX` (0.05).
     prune_max_steps : int
-        Maximum optimizer steps for pruning relaxations.
-        Default :data:`~autokmc.core.constants.PRUNE_MAX_STEPS` (200).
+        Maximum optimizer steps for each pruning stage.
+        Default :data:`~autokmc.core.constants.PRUNE_MAX_STEPS` (500).
     diagnostics_dir : str | None
         Run diagnostics directory. Adsorption candidates rejected by MLIP
         pruning are written below ``invalid_adsorption`` when supplied.
@@ -3060,13 +3301,14 @@ def find_adsorbate_sites(
                     "\n  Stage B-1 skipped (single-atom reactant — no rigid-body DOF)"
                 )
 
-            # Then use the configured calculator to test stability. This prunes
-            # unstable iso-classes and propagates each relaxed representative
-            # to its remaining members.
+            # Then use the configured calculator for a rigid molecular
+            # optimization followed by the ordinary atom-level relaxation.
+            # This prunes unstable iso-classes and propagates each relaxed
+            # representative to its remaining members.
             if verbose:
                 print(
                     "\n  ──────────────────────────────────────────────────────\n"
-                    "  Stage B-2 : ML stability check, pruning & position update\n"
+                    "  Stage B-2/3 : rigid + relaxed ML stability check\n"
                     "  ──────────────────────────────────────────────────────"
                 )
             adsorbate_sites = prune_unstable_adsorbate_sites(
