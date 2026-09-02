@@ -24,8 +24,13 @@ from autokmc.sites.adsorbate import (
     AdsorbateSite,
     AdsorbateSiteLateral,
     _adsorbate_pose_is_outward,
+    _build_adsorbate_coordination_graph,
     _full_adsorbate_positions,
+    _mapped_adsorbate_positions,
+    _molecular_mapping_preserves_handedness,
+    _propagate_adsorbate_member_positions,
     _relaxed_adsorbate_positions_in_graph_frame,
+    _try_merge_or_new,
     find_adsorbate_sites,
     _geometry_connectivity_mismatch,
     optimise_adsorbate_site_positions,
@@ -38,16 +43,23 @@ from autokmc.sites.bond import (
     BondReactionTemplate,
     find_bond_sites,
     _prune_one_per_adsorption_triple,
+    _triple_node_match,
     rebuild_bond_reverse_indexes,
 )
 from autokmc.sites.diffusion import (
     find_diffusion_sites,
+    _pair_node_match,
     rebuild_diffusion_reverse_indexes,
 )
 from autokmc.sites.stability.adsorption import check_adsorbate_site_lateral
 from autokmc.sites.stability.adsorption import check_site_stability
 from autokmc.sites.stability.bond import _select_c_to_ab_mapping
-from autokmc.sites.stability.diffusion import check_diffusion_site_lateral
+from autokmc.sites.stability.bond import _bond_lateral_node_match
+from autokmc.sites.stability.diffusion import (
+    check_diffusion_site_lateral,
+    _diffusion_lateral_node_match,
+)
+from autokmc.species.reactant import build_reactant
 
 
 def test_sites_package_exports_public_api():
@@ -172,6 +184,193 @@ def test_adsorbate_enumeration_applies_anchor_cap_to_dense_surface(monkeypatch):
     assert len(raw[1]) == 5
     assert len(raw[2]) == 10
     assert graph.graph["_anchor_k_max_by_element"]["O"] == 2
+
+
+def test_adsorbate_iso_reduction_preserves_per_atom_coordination_graph():
+    substrate_ego = nx.complete_graph(3)
+    nx.set_node_attributes(substrate_ego, "Pd", "element")
+    nx.set_node_attributes(substrate_ego, "surface", "type")
+
+    reactant_graph = nx.Graph()
+    reactant_graph.add_node(0, element="O", type="adsorbate")
+    reactant_graph.add_node(1, element="O", type="adsorbate")
+    reactant_graph.add_edge(0, 1)
+
+    top_top = [frozenset({0}), frozenset({1})]
+    bridge_bridge = [frozenset({0, 1}), frozenset({0, 2})]
+    hollow_bridge = [frozenset({0, 1, 2}), frozenset({0, 1})]
+    equivalent_top_top = [frozenset({1}), frozenset({2})]
+    equivalent_hollow_bridge = [
+        frozenset({0, 1}),
+        frozenset({0, 1, 2}),
+    ]
+
+    sites = []
+    seen_signatures = set()
+    node_match = nx.algorithms.isomorphism.categorical_node_match(
+        ["coordination_role", "element"],
+        ["substrate", "X"],
+    )
+    edge_match = nx.algorithms.isomorphism.categorical_edge_match(
+        "coordination_kind",
+        "substrate",
+    )
+    for atom_cliques in (
+        top_top,
+        bridge_bridge,
+        hollow_bridge,
+        equivalent_top_top,
+        equivalent_hollow_bridge,
+    ):
+        coordination_graph = _build_adsorbate_coordination_graph(
+            substrate_ego,
+            atom_cliques,
+            reactant_graph,
+        )
+        _try_merge_or_new(
+            sites,
+            reactant_smiles="O=O",
+            atom_cliques=atom_cliques,
+            positions=np.zeros((2, 3)),
+            ego_graph=coordination_graph,
+            node_match=node_match,
+            edge_match=edge_match,
+            seen_signatures=seen_signatures,
+        )
+
+    assert len(sites) == 3
+    assert {
+        tuple(sorted(len(clique) for clique in site.atom_cliques))
+        for site in sites
+    } == {(1, 1), (2, 2), (2, 3)}
+    assert sorted(len(site.members) for site in sites) == [1, 2, 2]
+
+
+def test_decorated_mapping_applies_the_molecular_atom_permutation():
+    representative = np.array(
+        [
+            [1.0, 2.0, 3.0],
+            [4.0, 5.0, 6.0],
+            [7.0, 8.0, 9.0],
+        ]
+    )
+    mapping = {
+        ("adsorbate", 0): ("adsorbate", 2),
+        ("adsorbate", 1): ("adsorbate", 0),
+        ("adsorbate", 2): ("adsorbate", 1),
+    }
+    rotation = np.diag([-1.0, -1.0, 1.0])
+    translation = np.array([10.0, 20.0, 30.0])
+
+    mapped = _mapped_adsorbate_positions(
+        representative,
+        mapping,
+        rotation,
+        translation,
+    )
+    transformed = representative @ rotation.T + translation
+
+    np.testing.assert_allclose(mapped[2], transformed[0])
+    np.testing.assert_allclose(mapped[0], transformed[1])
+    np.testing.assert_allclose(mapped[1], transformed[2])
+
+
+def test_decorated_mapping_preserves_heteronuclear_atom_identity():
+    substrate_ego = nx.Graph()
+    substrate_ego.add_node(0, element="Pd", type="surface")
+    substrate_ego.add_node(1, element="Pd", type="surface")
+    substrate_ego.add_edge(0, 1)
+    reactant_graph = nx.Graph()
+    reactant_graph.add_node(0, element="C", type="adsorbate")
+    reactant_graph.add_node(1, element="O", type="adsorbate")
+    reactant_graph.add_edge(0, 1)
+
+    representative = _build_adsorbate_coordination_graph(
+        substrate_ego,
+        [frozenset({0}), frozenset({1})],
+        reactant_graph,
+    )
+    member = _build_adsorbate_coordination_graph(
+        substrate_ego,
+        [frozenset({1}), frozenset({0})],
+        reactant_graph,
+    )
+    node_match = nx.algorithms.isomorphism.categorical_node_match(
+        ["coordination_role", "element"],
+        ["substrate", "X"],
+    )
+    edge_match = nx.algorithms.isomorphism.categorical_edge_match(
+        "coordination_kind",
+        "substrate",
+    )
+    mappings = list(
+        nx.algorithms.isomorphism.GraphMatcher(
+            representative,
+            member,
+            node_match=node_match,
+            edge_match=edge_match,
+        ).isomorphisms_iter()
+    )
+
+    assert mappings
+    assert all(
+        mapping[("adsorbate", 0)] == ("adsorbate", 0)
+        and mapping[("adsorbate", 1)] == ("adsorbate", 1)
+        for mapping in mappings
+    )
+
+
+def test_reflected_mapping_accepts_achiral_geometry_but_rejects_chiral_inversion():
+    linear = np.array([[-0.6, 0.0, 0.0], [0.6, 0.0, 0.0]])
+    reflected_linear = linear * np.array([-1.0, 1.0, 1.0])
+    assert _molecular_mapping_preserves_handedness(linear, reflected_linear)
+
+    tetrahedron = np.array(
+        [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.2, 0.0],
+            [0.0, 0.0, 1.4],
+        ]
+    )
+    reflected_tetrahedron = tetrahedron * np.array([-1.0, 1.0, 1.0])
+    assert not _molecular_mapping_preserves_handedness(
+        tetrahedron,
+        reflected_tetrahedron,
+    )
+
+
+def test_decorated_propagation_fails_closed_for_nonisomorphic_members():
+    graph = nx.Graph()
+    graph.graph["cell"] = np.eye(3) * 20.0
+    graph.graph["pbc"] = np.array([False, False, False])
+    graph.add_node(
+        0,
+        type="surface",
+        element="Pd",
+        position=np.array([0.0, 0.0, 0.0]),
+        index=0,
+        covalent_radius=1.39,
+    )
+    graph.add_node(
+        1,
+        type="surface",
+        element="Au",
+        position=np.array([4.0, 0.0, 0.0]),
+        index=1,
+        covalent_radius=1.36,
+    )
+    reactant = build_reactant("[O]", add_hydrogens=False, relax=False)
+
+    with pytest.raises(RuntimeError, match="tested=0"):
+        _propagate_adsorbate_member_positions(
+            graph,
+            [frozenset({0})],
+            [frozenset({1})],
+            np.array([[0.0, 0.0, 1.8]]),
+            reactant,
+            n_shells=0,
+        )
 
 
 def test_adsorbate_runtime_geometry_parameters_reach_each_algorithm_stage(
@@ -824,6 +1023,93 @@ def test_diffusion_enumeration_uses_local_surface_shell_without_apsp():
     assert "surface_apsp" not in graph.graph
 
 
+def test_diffusion_keeps_distinct_placements_with_the_same_clique_union():
+    graph = nx.complete_graph([1, 2, 3])
+    for surface_id in (1, 2, 3):
+        graph.nodes[surface_id].update(
+            type="surface",
+            element="Pd",
+            position=np.array([float(surface_id), 0.0, 0.0]),
+        )
+
+    placements = (
+        (0, (frozenset({1, 2}), frozenset({1, 3})), (10, 11)),
+        (1, (frozenset({1, 2, 3}), frozenset({1, 2})), (20, 21)),
+    )
+    sites = []
+    for iso_class, cliques, node_ids in placements:
+        site = AdsorbateSite(
+            reactant="O=O",
+            n_atoms=2,
+            atom_cliques=list(cliques),
+            positions=np.zeros((2, 3)),
+            iso_class=iso_class,
+            members=[list(cliques)],
+            member_node_ids=[list(node_ids)],
+        )
+        site._member_cliques = [tuple(cliques)]
+        for atom_index, (node_id, clique) in enumerate(zip(node_ids, cliques)):
+            graph.add_node(
+                node_id,
+                type="adsorbate",
+                element="O",
+                reactant="O=O",
+                iso_class=iso_class,
+                reactant_index=atom_index,
+                reactant_orbit=0,
+                clique=clique,
+                occupied=False,
+                siblings=(node_ids[1 - atom_index],),
+                position=np.array([float(atom_index), 0.0, 1.5]),
+            )
+            for surface_id in clique:
+                graph.add_edge(node_id, surface_id, anchor_bond=True)
+        graph.add_edge(*node_ids, intra_adsorbate=True)
+        sites.append(site)
+
+    found = find_diffusion_sites(
+        graph,
+        sites,
+        max_hops=0,
+        prune_by_adsorption_pair=False,
+    )["O=O"]
+
+    assert len(found) == 1
+    assert len(found[0].members) == 1
+    site_a, _, site_b, _ = found[0].members[0]
+    assert {site_a.iso_class, site_b.iso_class} == {0, 1}
+
+
+def test_reaction_graph_matchers_use_molecular_orbits_not_atom_indices():
+    atom_zero = {
+        "type": "adsorbate",
+        "element": "O",
+        "iso_class": 4,
+        "reactant": "O=O",
+        "reactant_index": 0,
+        "reactant_orbit": 0,
+        "endpoint_role": "endpoint",
+    }
+    equivalent_atom_one = {
+        **atom_zero,
+        "reactant_index": 1,
+    }
+    inequivalent_atom = {
+        **equivalent_atom_one,
+        "reactant_orbit": 1,
+    }
+
+    matchers = (
+        _pair_node_match,
+        _triple_node_match,
+        _diffusion_lateral_node_match,
+        _bond_lateral_node_match,
+    )
+    for matcher in matchers:
+        assert matcher(atom_zero, equivalent_atom_one)
+        assert not matcher(atom_zero, inequivalent_atom)
+
+
 def test_base_adsorption_ego_graph_ignores_live_adsorbate_occupancy():
     graph = nx.Graph()
     graph.add_node(1, type="surface", element="Pt")
@@ -1461,7 +1747,7 @@ def test_adsorbate_pruning_persists_last_geometry_when_optimizer_raises(
 def test_adsorbate_pruning_projects_relaxed_adsorbate_back_to_graph_frame(monkeypatch):
     G = nx.Graph()
     G.graph["cell"] = np.eye(3) * 20.0
-    G.graph["pbc"] = np.array([False, False, False])
+    G.graph["pbc"] = np.array([True, True, False])
     for nid, x in ((0, 0.0), (1, 3.0)):
         G.add_node(
             nid,

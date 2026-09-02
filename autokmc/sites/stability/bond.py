@@ -128,7 +128,7 @@ from autokmc.sites.stability.neb import (
     run_neb,
 )
 from autokmc.sites.bond import BondReactionSite, BondReactionLateral
-from autokmc.sites.diffusion import _member_clique_union
+from autokmc.sites.diffusion import _member_clique_union, _reactant_orbit_label
 from autokmc.core.constants import (
     LATERAL_SHELLS_DEFAULT,
     NL_MULT_DEFAULT,
@@ -225,7 +225,7 @@ def _bond_lateral_node_match(d1: dict, d2: dict) -> bool:
             return False
         if d1.get("reactant") != d2.get("reactant"):
             return False
-        if d1.get("reactant_index") != d2.get("reactant_index"):
+        if _reactant_orbit_label(d1) != _reactant_orbit_label(d2):
             return False
         if d1.get("endpoint_role") != d2.get("endpoint_role"):
             return False
@@ -241,7 +241,7 @@ def _bond_lateral_fingerprint(g: nx.Graph) -> tuple:
                 d.get("element", "X"),
                 int(d.get("iso_class", -1)) if d.get("type") == "adsorbate" else -1,
                 str(d.get("reactant", "")) if d.get("type") == "adsorbate" else "",
-                int(d.get("reactant_index", -1)) if d.get("type") == "adsorbate" else -1,
+                _reactant_orbit_label(d) if d.get("type") == "adsorbate" else -1,
                 str(d.get("endpoint_role", "")) if d.get("type") == "adsorbate" else "",
                 g.degree(n),
             )
@@ -313,6 +313,7 @@ def _build_bond_lateral_ego_graph(
                     iso_class=int(d.get("iso_class", -1)),
                     reactant=str(d.get("reactant", "")),
                     reactant_index=int(d.get("reactant_index", -1)),
+                    reactant_orbit=_reactant_orbit_label(d),
                     occupied=True,
                     endpoint_role=role,
                 )

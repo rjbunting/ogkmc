@@ -102,6 +102,7 @@ from autokmc.sites.diffusion import (
     DiffusionSite,
     DiffusionLateral,
     _member_clique_union,
+    _reactant_orbit_label,
 )
 from autokmc.sites.stability.adsorption import (
     _surface_bfs_shells,
@@ -170,10 +171,11 @@ def _diffusion_lateral_node_match(d1: dict, d2: dict) -> bool:
     """Lateral-iso predicate for the diffusion ego-graph.
 
     Same as :func:`autokmc.sites.stability.adsorption._lateral_node_match` but
-    additionally requires ``endpoint_role`` and ``reactant_index`` to agree on
+    additionally requires ``endpoint_role`` and molecular ``reactant_orbit``
+    to agree on
     adsorbate nodes so endpoints never map onto third-party neighbours of the
-    same SMILES, and so symmetry-inequivalent atoms of the same element within a
-    multi-atom adsorbate are not interchanged.
+    same SMILES, symmetry-equivalent atoms may be interchanged, and
+    symmetry-inequivalent atoms of the same element remain distinct.
     """
     if d1.get("type") != d2.get("type"):
         return False
@@ -184,7 +186,7 @@ def _diffusion_lateral_node_match(d1: dict, d2: dict) -> bool:
             return False
         if d1.get("reactant") != d2.get("reactant"):
             return False
-        if d1.get("reactant_index") != d2.get("reactant_index"):
+        if _reactant_orbit_label(d1) != _reactant_orbit_label(d2):
             return False
         # Treat missing ``endpoint_role`` as None on both sides.
         if d1.get("endpoint_role") != d2.get("endpoint_role"):
@@ -201,7 +203,7 @@ def _diffusion_lateral_fingerprint(g: nx.Graph) -> tuple:
                 d.get("element", "X"),
                 int(d.get("iso_class", -1)) if d.get("type") == "adsorbate" else -1,
                 str(d.get("reactant", "")) if d.get("type") == "adsorbate" else "",
-                int(d.get("reactant_index", -1)) if d.get("type") == "adsorbate" else -1,
+                _reactant_orbit_label(d) if d.get("type") == "adsorbate" else -1,
                 str(d.get("endpoint_role", "")) if d.get("type") == "adsorbate" else "",
                 g.degree(n),
             )
@@ -324,6 +326,7 @@ def _build_diffusion_lateral_ego_graph(
                 iso_class=int(d.get("iso_class", -1)),
                 reactant=str(d.get("reactant", "")),
                 reactant_index=int(d.get("reactant_index", -1)),
+                reactant_orbit=_reactant_orbit_label(d),
                 occupied=True,
                 endpoint_role="endpoint",
             )

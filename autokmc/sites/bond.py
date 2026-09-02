@@ -91,7 +91,7 @@ from autokmc.sites.adsorbate import (
     AdsorbateSite,
 )
 from autokmc.sites.identity import SiteId, member_identifier, site_identifier
-from autokmc.sites.diffusion import _member_clique_union
+from autokmc.sites.diffusion import _member_clique_union, _reactant_orbit_label
 from autokmc.sites.stability.adsorption import _surface_bfs_shells
 from autokmc.species.smiles import canonical_atom_inventory_smiles
 from autokmc.core.constants import (
@@ -888,6 +888,7 @@ def _build_triple_ego_graph(
                     iso_class      = int(d.get("iso_class", -1)),
                     reactant       = str(d.get("reactant",  "")),
                     reactant_index = int(d.get("reactant_index", -1)),
+                    reactant_orbit = _reactant_orbit_label(d),
                     occupied       = True,
                     endpoint_role  = role,
                 )
@@ -944,7 +945,7 @@ def _triple_match_label(
         element_label,
         int(data.get("iso_class", -1)),
         str(data.get("reactant", "")),
-        int(data.get("reactant_index", -1)),
+        _reactant_orbit_label(data),
         str(role or ""),
     )
 
@@ -1032,7 +1033,7 @@ def _materialise_triple_blueprint(blueprint: _TripleEgoBlueprint) -> nx.Graph:
             element,
             iso_class,
             reactant,
-            reactant_index,
+            reactant_orbit,
             endpoint_role,
         ) = label
         attributes: dict[str, Any] = {
@@ -1043,7 +1044,7 @@ def _materialise_triple_blueprint(blueprint: _TripleEgoBlueprint) -> nx.Graph:
             attributes.update(
                 iso_class=iso_class,
                 reactant=reactant,
-                reactant_index=reactant_index,
+                reactant_orbit=reactant_orbit,
                 endpoint_role=endpoint_role,
             )
         graph.add_node(node_id, **attributes)
@@ -1175,10 +1176,9 @@ def _triple_node_match(d1: dict, d2: dict) -> bool:
 
     * ``type == "surface"``   — must share ``element``.
     * ``type == "adsorbate"`` — must share ``element``, ``iso_class``,
-      ``reactant``, ``reactant_index`` *and* ``endpoint_role`` so that the
-      A/B/C roles are preserved across the mapping, and symmetry-inequivalent
-      atoms of the same element within a multi-atom adsorbate are never
-      interchanged.
+      ``reactant``, molecular ``reactant_orbit`` *and* ``endpoint_role`` so
+      that the A/B/C roles are preserved, symmetry-equivalent atoms may be
+      interchanged, and symmetry-inequivalent atoms remain distinct.
     """
     if d1.get("type") != d2.get("type"):
         return False
@@ -1189,7 +1189,7 @@ def _triple_node_match(d1: dict, d2: dict) -> bool:
             return False
         if d1.get("reactant") != d2.get("reactant"):
             return False
-        if d1.get("reactant_index") != d2.get("reactant_index"):
+        if _reactant_orbit_label(d1) != _reactant_orbit_label(d2):
             return False
         if (d1.get("endpoint_role") or "") != (d2.get("endpoint_role") or ""):
             return False
@@ -1208,7 +1208,7 @@ def _triple_fingerprint(g: nx.Graph) -> tuple:
             d.get("element", "X"),
             int(d.get("iso_class",      -1)) if d.get("type") == "adsorbate" else -1,
             str(d.get("reactant",       "")) if d.get("type") == "adsorbate" else "",
-            int(d.get("reactant_index", -1)) if d.get("type") == "adsorbate" else -1,
+            _reactant_orbit_label(d) if d.get("type") == "adsorbate" else -1,
             (d.get("endpoint_role") or "") if d.get("type") == "adsorbate" else "",
             g.degree(n),
         )

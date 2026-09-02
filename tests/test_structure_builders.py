@@ -14,7 +14,9 @@ from autokmc.io.calculators import CalculatorConfigError
 from autokmc.io.config import load_config
 from autokmc.sites.adsorbate import (
     _geometry_connectivity_mismatch,
+    _geometry_connectivity_mismatch_for_cliques,
     find_adsorbate_sites,
+    optimise_adsorbate_site_positions,
 )
 from autokmc.species.reactant import build_reactant
 from autokmc.structure import find_surface_atoms
@@ -191,6 +193,73 @@ def test_skew_pd111_o_sites_are_local_and_connectivity_consistent():
         is None
         for site in sites
     )
+
+    # Multi-atom iso-reduction must retain the two distinct hollow--bridge
+    # O2 coordination graphs before any potential-based pruning is run.
+    o2_reactant = build_reactant("O=O", add_hydrogens=False, relax=False)
+    o2_sites = find_adsorbate_sites(
+        graph,
+        o2_reactant,
+        calculator=None,
+        verbose=False,
+        **site_kwargs,
+    )
+    full_coordination_sizes = Counter(
+        tuple(sorted(len(clique) for clique in site.atom_cliques))
+        for site in o2_sites
+        if all(clique is not None for clique in site.atom_cliques)
+    )
+    assert full_coordination_sizes[(2, 3)] == 2
+    assert {
+        graph.nodes[node_id]["reactant_orbit"]
+        for site in o2_sites
+        for member_node_ids in site.member_node_ids
+        for node_id in member_node_ids
+    } == {0}
+
+    optimise_adsorbate_site_positions(
+        graph,
+        "O=O",
+        o2_reactant,
+        repulsion_weight=site_kwargs["repulsion_weight"],
+        repulsion_cutoff=site_kwargs["repulsion_cutoff"],
+        contact_factor=site_kwargs["contact_factor"],
+        standoff_factor=site_kwargs["standoff_factor"],
+        n_restarts=site_kwargs["n_restarts"],
+        n_shells_pair=site_kwargs["n_shells_pair"],
+        nl_mult=site_kwargs["nl_mult"],
+        kabsch_max_mappings=site_kwargs["kabsch_max_mappings"],
+        verbose=False,
+    )
+    valid_members_by_coordination = Counter()
+    for site in o2_sites:
+        coordination = tuple(
+            sorted(
+                len(clique)
+                for clique in site.atom_cliques
+                if clique is not None
+            )
+        )
+        for member_index, member_cliques in enumerate(site.members):
+            node_ids = site.member_node_ids[member_index]
+            positions = np.asarray(
+                [graph.nodes[node_id]["position"] for node_id in node_ids],
+                dtype=float,
+            )
+            assert all(graph.nodes[node_id]["optimised"] for node_id in node_ids)
+            assert _geometry_connectivity_mismatch_for_cliques(
+                graph,
+                member_cliques,
+                o2_reactant,
+                positions,
+                nl_mult=constants.neighbor_list_multiplier,
+            ) is None
+            valid_members_by_coordination[coordination] += 1
+
+    assert sum(valid_members_by_coordination.values()) == 1050
+    assert valid_members_by_coordination[(1, 2)] == 300
+    assert valid_members_by_coordination[(2, 2)] == 300
+    assert valid_members_by_coordination[(2, 3)] == 300
 
 
 def test_nanoparticle_helpers_require_an_explicit_calculator(monkeypatch):

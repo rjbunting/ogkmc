@@ -262,6 +262,16 @@ def _member_clique_union(site: AdsorbateSite, m_idx: int) -> frozenset[int]:
     return frozenset(out)
 
 
+def _reactant_orbit_label(data: dict) -> int:
+    """Return an adsorbate atom's molecular automorphism-orbit label.
+
+    Newly materialised nodes carry ``reactant_orbit``.  Falling back to the
+    raw atom index preserves compatibility with lightweight hand-built test
+    graphs and site objects that predate the orbit attribute.
+    """
+    return int(data.get("reactant_orbit", data.get("reactant_index", -1)))
+
+
 def _surface_node_index_for_placements(
     flat: list[tuple[AdsorbateSite, int, frozenset[int]]],
 ) -> dict[int, list[int]]:
@@ -373,6 +383,7 @@ def _build_pair_ego_graph(
                 iso_class      = int(d.get("iso_class", -1)),
                 reactant       = str(d.get("reactant",  "")),
                 reactant_index = int(d.get("reactant_index", -1)),
+                reactant_orbit = _reactant_orbit_label(d),
                 occupied       = True,
                 endpoint_role  = "endpoint",
             )
@@ -399,10 +410,10 @@ def _pair_node_match(d1: dict, d2: dict) -> bool:
 
     * ``type == "surface"``   — must share ``element``.
     * ``type == "adsorbate"`` — must share ``element``, ``iso_class``,
-      ``reactant``, ``reactant_index`` *and* ``endpoint_role`` (so an
+      ``reactant``, molecular ``reactant_orbit`` *and* ``endpoint_role`` (so an
       endpoint never maps onto a third-party occupied adsorbate that happens
-      to share the SMILES, and symmetry-inequivalent atoms of the same element
-      within a multi-atom adsorbate are not interchanged).
+      to share the SMILES, symmetry-equivalent atoms may be interchanged, and
+      symmetry-inequivalent atoms of the same element are kept distinct).
     """
     if d1.get("type") != d2.get("type"):
         return False
@@ -413,7 +424,7 @@ def _pair_node_match(d1: dict, d2: dict) -> bool:
             return False
         if d1.get("reactant") != d2.get("reactant"):
             return False
-        if d1.get("reactant_index") != d2.get("reactant_index"):
+        if _reactant_orbit_label(d1) != _reactant_orbit_label(d2):
             return False
         if d1.get("endpoint_role") != d2.get("endpoint_role"):
             return False
@@ -433,7 +444,7 @@ def _pair_fingerprint(g: nx.Graph) -> tuple:
             d.get("element", "X"),
             int(d.get("iso_class",      -1)) if d.get("type") == "adsorbate" else -1,
             str(d.get("reactant",       "")) if d.get("type") == "adsorbate" else "",
-            int(d.get("reactant_index", -1)) if d.get("type") == "adsorbate" else -1,
+            _reactant_orbit_label(d) if d.get("type") == "adsorbate" else -1,
             (d.get("endpoint_role", "") or "") if d.get("type") == "adsorbate" else "",
             g.degree(n),
         )
@@ -593,10 +604,6 @@ def find_diffusion_sites(
                     continue
                 site_b, m_b, clq_b = flat[j]
                 n_pairs_considered += 1
-
-                # The bounded shell lookup already enforces the hop limit.
-                if clq_a == clq_b:
-                    continue
 
                 a_nids = list(site_a.member_node_ids[m_a])
                 b_nids = list(site_b.member_node_ids[m_b])
