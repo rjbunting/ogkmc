@@ -88,6 +88,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import networkx as nx
 from networkx.algorithms import isomorphism
+from ase.utils.abc import Optimizable
 
 from autokmc.core.pbc import (
     full_pbc_for_cell,
@@ -1414,7 +1415,7 @@ def _build_pruning_atoms(
     return atoms, len(slab_nodes), n_ads, node_to_ase
 
 
-class _RigidAdsorbateOptimizable:
+class _RigidAdsorbateOptimizable(Optimizable):
     """Expose one adsorbate's rigid modes to an ASE optimizer.
 
     The first pseudo-position contains translation in Angstrom.  Molecular
@@ -1461,23 +1462,23 @@ class _RigidAdsorbateOptimizable:
         positions[self.n_slab :] = adsorbate_positions
         atoms.set_positions(positions)
 
-    def __len__(self) -> int:
-        return len(self.coordinates)
+    def ndofs(self) -> int:
+        """Return the number of generalized rigid-body degrees of freedom."""
+        return int(self.coordinates.size)
 
-    def __ase_optimizable__(self):
-        return self
+    def get_x(self) -> np.ndarray:
+        """Return translation and scaled axis-angle coordinates."""
+        return self.coordinates.ravel().copy()
 
-    def get_positions(self) -> np.ndarray:
-        return self.coordinates.copy()
-
-    def set_positions(self, coordinates) -> None:
+    def set_x(self, coordinates) -> None:
+        """Set flat translation and scaled axis-angle coordinates."""
         candidate = np.asarray(coordinates, dtype=float)
-        if candidate.shape != self.coordinates.shape:
+        if candidate.ndim != 1 or candidate.size != self.coordinates.size:
             raise ValueError(
-                "rigid optimizer coordinates must have shape "
-                f"{self.coordinates.shape}, got {candidate.shape}"
+                "rigid optimizer coordinates must be a flat array containing "
+                f"{self.coordinates.size} values, got shape {candidate.shape}"
             )
-        self.coordinates = candidate.copy()
+        self.coordinates = candidate.reshape(self.coordinates.shape).copy()
         if self.has_rotation:
             rotvec = self.coordinates[1] / self.rotation_scale
             rotation = _rotation_from_axis_angle(rotvec)
@@ -1490,7 +1491,8 @@ class _RigidAdsorbateOptimizable:
         positions[self.n_slab :] = adsorbate_positions
         self.atoms.set_positions(positions)
 
-    def get_forces(self) -> np.ndarray:
+    def _generalized_forces(self) -> np.ndarray:
+        """Return net translation and length-scaled rotational forces."""
         atomic_forces = np.asarray(self.atoms.get_forces(), dtype=float)
         adsorbate_forces = atomic_forces[self.n_slab :]
         if not np.all(np.isfinite(adsorbate_forces)):
@@ -1512,18 +1514,27 @@ class _RigidAdsorbateOptimizable:
             ) / self.rotation_scale
         return generalized_forces
 
-    def get_potential_energy(self) -> float:
+    def get_gradient(self) -> np.ndarray:
+        """Return the flat energy gradient for ASE's Optimizable protocol."""
+        return -self._generalized_forces().ravel()
+
+    def get_value(self) -> float:
+        """Return the potential energy of the full slab and adsorbate."""
         return float(self.atoms.get_potential_energy())
 
     def iterimages(self):
         return self.atoms.iterimages()
 
-    def converged(self, forces, fmax: float) -> bool:
-        force_norms = np.linalg.norm(np.asarray(forces, dtype=float), axis=1)
-        return bool(force_norms.max() < float(fmax))
-
-    def is_neb(self) -> bool:
-        return False
+    def gradient_norm(self, gradient) -> float:
+        """Return the largest norm across translation and rotation modes."""
+        values = np.asarray(gradient, dtype=float)
+        if values.size != self.coordinates.size:
+            raise ValueError(
+                "rigid optimizer gradient must contain "
+                f"{self.coordinates.size} values, got {values.size}"
+            )
+        modes = values.reshape(self.coordinates.shape)
+        return float(np.linalg.norm(modes, axis=1).max())
 
 
 def _optimise_rigid_adsorbate_with_potential(
@@ -1559,7 +1570,7 @@ def _optimise_rigid_adsorbate_with_potential(
     opt = optimizer_cls(rigid, logfile=os.devnull, **constructor_kwargs)
     try:
         opt.run(fmax=fmax, steps=max_steps)
-        generalized_forces = rigid.get_forces()
+        gradient = rigid.get_gradient()
     except CalculatorConfigError:
         raise
     except Exception as exc:
@@ -1573,10 +1584,8 @@ def _optimise_rigid_adsorbate_with_potential(
         ) from exc
 
     completed_steps = int(opt.get_number_of_steps())
-    max_generalized_force = float(
-        np.linalg.norm(generalized_forces, axis=1).max()
-    )
-    if not rigid.converged(generalized_forces, fmax):
+    max_generalized_force = rigid.gradient_norm(gradient)
+    if not rigid.converged(gradient, fmax):
         raise StructureOptimisationError(
             "rigid adsorbate optimization did not converge within "
             f"{max_steps} steps (fmax={fmax} eV/Angstrom; "

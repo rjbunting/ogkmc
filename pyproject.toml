@@ -13,7 +13,7 @@ authors = [{ name = "Rhysay Bee" }]
 keywords = ["kmc", "kinetic-monte-carlo", "surface", "catalysis", "ase"]
 
 dependencies = [
-    "ase>=3.22",
+    "ase>=3.29",
     "numpy>=1.24",
     "scipy>=1.10",
     "networkx>=3.0",

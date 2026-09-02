@@ -138,25 +138,53 @@ def test_potential_rigid_generalized_forces_match_finite_difference():
     atoms.calc = _CartesianHarmonic(target)
     rigid = _RigidAdsorbateOptimizable(atoms, n_slab=1)
     coordinates = np.array(
-        [[0.13, -0.07, 0.11], [0.31, -0.25, 0.19]],
+        [0.13, -0.07, 0.11, 0.31, -0.25, 0.19],
     )
-    rigid.set_positions(coordinates)
-    analytical = rigid.get_forces().reshape(-1)
+    rigid.set_x(coordinates)
+    analytical = -rigid.get_gradient()
 
     step = 1.0e-6
     numerical = np.empty(coordinates.size)
     for index in range(coordinates.size):
-        plus = coordinates.reshape(-1).copy()
-        minus = coordinates.reshape(-1).copy()
+        plus = coordinates.copy()
+        minus = coordinates.copy()
         plus[index] += step
         minus[index] -= step
-        rigid.set_positions(plus.reshape(coordinates.shape))
-        energy_plus = rigid.get_potential_energy()
-        rigid.set_positions(minus.reshape(coordinates.shape))
-        energy_minus = rigid.get_potential_energy()
+        rigid.set_x(plus)
+        energy_plus = rigid.get_value()
+        rigid.set_x(minus)
+        energy_minus = rigid.get_value()
         numerical[index] = -(energy_plus - energy_minus) / (2.0 * step)
 
     assert analytical == pytest.approx(numerical, rel=1.0e-6, abs=1.0e-8)
+
+
+def test_potential_rigid_adapter_supports_flat_ase_optimizer_protocol():
+    atoms = Atoms(
+        "PdCO",
+        positions=[[0.0, 0.0, 0.0], [0.0, 0.0, 1.8], [1.15, 0.0, 1.8]],
+        cell=[10.0, 10.0, 10.0],
+        pbc=[True, True, False],
+    )
+    target = atoms.positions.copy()
+    target[1:] += np.array([[0.2, -0.1, 0.3], [-0.1, 0.2, 0.1]])
+    atoms.calc = _CartesianHarmonic(target)
+    rigid = _RigidAdsorbateOptimizable(atoms, n_slab=1)
+
+    assert rigid.ndofs() == 6
+    coordinates = np.array([0.1, -0.2, 0.05, 0.2, 0.1, -0.15])
+    rigid.set_x(coordinates)
+    assert rigid.get_x() == pytest.approx(coordinates)
+    gradient = rigid.get_gradient()
+    assert gradient.shape == (6,)
+    assert gradient == pytest.approx(-rigid._generalized_forces().ravel())
+    assert rigid.get_value() == pytest.approx(atoms.get_potential_energy())
+    assert rigid.gradient_norm(gradient) == pytest.approx(
+        np.linalg.norm(gradient.reshape(-1, 3), axis=1).max()
+    )
+    assert rigid.converged(np.zeros(6), fmax=0.05)
+    assert not hasattr(rigid, "get_positions")
+    assert not hasattr(rigid, "get_forces")
 
 
 def test_potential_rigid_then_relaxed_optimization_preserves_then_releases_bond():
