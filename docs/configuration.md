@@ -148,6 +148,13 @@ An interior image counts as a minimum only when it lies below both neighboring
 images by at least `neb_intermediate_minimum_prominence`; the original
 endpoints also count as bounding minima.
 
+Every successfully converged ordinary or CI-NEB stage also receives a final
+energy-profile inspection, without waiting for the stagnation threshold. If a
+usable minimum bracket remains, AutoKMC shortens and reruns that segment before
+advancing from ordinary NEB to CI-NEB or returning a final result. This catches
+bands that converge in fewer than 100 steps as well as profiles reshaped by the
+climbing-image stage.
+
 A distance-guard rollback is a second, immediate trigger for the same check:
 AutoKMC first restores the whole valid band with the lowest maximum NEB force
 in the current optimizer stage, then evaluates that restored band's electronic
@@ -171,11 +178,12 @@ combined with the original reaction endpoint energies (A/B for diffusion or
 A+B/C for bond changes) for the stored forward and reverse energetics. The
 most recently selected optimized states are written as
 `neb_refinement_initial.extxyz` and `neb_refinement_final.extxyz`, and the
-indices, stalled electronic-energy profile, and policy are stored in
+indices, detected electronic-energy profile, and policy are stored in
 `reaction.json` and the calculation cache. The metadata also distinguishes
-`energy_stagnation` from `geometry_rollback` and records the source stage and,
-for rollback, the checkpoint's maximum NEB force and optimizer step. It also
-records the total refinement count and configured limit.
+`energy_stagnation`, `geometry_rollback`, and `converged_profile`, and records
+the source stage and, for rollback, the checkpoint's maximum NEB force and
+optimizer step. It also records the total refinement count and configured
+limit.
 
 The retained ordinary transition energy remains the raw recorded value. At
 rate construction, both reversible directions use the same effective level,

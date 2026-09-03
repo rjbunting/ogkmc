@@ -291,6 +291,12 @@ NEB_INTERMEDIATE_ENERGY_TOLERANCE: float = 1.0e-3
 #: is treated as a candidate minimum for highest-peak segment refinement.
 NEB_INTERMEDIATE_MINIMUM_PROMINENCE: float = 1.0e-2
 
+#: Versioned intermediate-refinement policy included in calculation-cache
+#: identities and persisted reaction metadata.
+NEB_INTERMEDIATE_REFINEMENT_POLICY: str = (
+    "highest_peak_nearest_minima_iterative_v4"
+)
+
 #: Maximum optimiser steps for the NEB band relaxation.
 NEB_MAX_STEPS: int = 200
 

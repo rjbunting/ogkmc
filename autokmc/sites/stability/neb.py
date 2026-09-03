@@ -31,6 +31,7 @@ from autokmc.core.constants import (
     NEB_INTERMEDIATE_ENERGY_TOLERANCE,
     NEB_INTERMEDIATE_MAX_REFINEMENTS,
     NEB_INTERMEDIATE_MINIMUM_PROMINENCE,
+    NEB_INTERMEDIATE_REFINEMENT_POLICY,
     NEB_MAX_ADJACENT_IMAGE_SPACING_MULTIPLIER,
     NEB_METHOD as DEFAULT_NEB_METHOD,
     NEB_METHODS,
@@ -872,6 +873,9 @@ def run_neb(
     replacement band always begins with ordinary NEB, even if a CI-only restart
     triggered it. ``intermediate_refinement_callback`` captures each optimized
     pair and its trigger/checkpoint provenance before constructing the next band.
+    Independently of the stagnation clock, every successfully converged ordinary
+    or CI stage receives one final profile inspection. A usable bracket restarts
+    the shortened segment before the workflow advances or returns its result.
 
     """
     build_band = band_factory or make_neb_band
@@ -1299,6 +1303,32 @@ def run_neb(
                             f"{stage} did not converge: fmax={target_fmax} "
                             f"eV/Å not reached in {max_steps} steps."
                         )
+                    if can_refine_intermediate:
+                        # A band can converge before the stagnation clock fires,
+                        # and CI can reshape a profile that passed the ordinary
+                        # stage. Inspect every converged stage once before either
+                        # advancing to CI or returning the final result.
+                        energies = [
+                            float(image.get_potential_energy())
+                            for image in images
+                        ]
+                        bracket = _highest_peak_minimum_bracket(
+                            energies,
+                            minimum_prominence=resolved_minimum_prominence,
+                        )
+                        if bracket is not None:
+                            peak_index, left_index, right_index = bracket
+                            refinement = _NEBIntermediateRefinement(
+                                images=images,
+                                energies=energies,
+                                peak_index=peak_index,
+                                left_index=left_index,
+                                right_index=right_index,
+                                trigger="converged_profile",
+                                source_stage=stage,
+                            )
+                            refinement.optimizer_steps = optimizer_steps
+                            raise refinement
                     return
 
             ordinary_stage = "NEB pre-climb relaxation" if climb else "NEB"
@@ -1422,7 +1452,7 @@ def run_neb(
                     refinement_image_count_limited_by = segment_selection.limited_by
                     refinement_metadata = {
                         "performed": True,
-                        "policy": "highest_peak_nearest_minima_iterative_v3",
+                        "policy": NEB_INTERMEDIATE_REFINEMENT_POLICY,
                         "refinement_index": intermediate_refinement_count,
                         "max_refinements": resolved_max_refinements,
                         "trigger": refinement.trigger,
@@ -1458,13 +1488,21 @@ def run_neb(
                             refinement_final_atoms.copy(),
                             refinement_metadata,
                         )
-                    trigger_description = (
-                        f"{refinement.source_stage} restored its lowest-force valid band "
-                        "after a geometry rollback."
-                        if refinement.trigger == "geometry_rollback"
-                        else f"{refinement.source_stage} found no lower interior-image "
-                        f"energy for {resolved_stagnation_steps} steps."
-                    )
+                    if refinement.trigger == "geometry_rollback":
+                        trigger_description = (
+                            f"{refinement.source_stage} restored its lowest-force "
+                            "valid band after a geometry rollback."
+                        )
+                    elif refinement.trigger == "converged_profile":
+                        trigger_description = (
+                            f"{refinement.source_stage} converged, but its final "
+                            "energy profile still contains an intermediate minimum."
+                        )
+                    else:
+                        trigger_description = (
+                            f"{refinement.source_stage} found no lower interior-image "
+                            f"energy for {resolved_stagnation_steps} steps."
+                        )
                     _log.warning(
                         "%s Refining only the highest-energy segment %d-%d around "
                         "image %d; other portions of the original path are not "

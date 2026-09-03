@@ -129,6 +129,7 @@ from autokmc.core.constants import (
     NEB_INTERMEDIATE_ENERGY_TOLERANCE,
     NEB_INTERMEDIATE_MAX_REFINEMENTS,
     NEB_INTERMEDIATE_MINIMUM_PROMINENCE,
+    NEB_INTERMEDIATE_REFINEMENT_POLICY,
     NEB_INTERMEDIATE_STAGNATION_STEPS,
     NEB_MAX_ADJACENT_IMAGE_SPACING_MULTIPLIER,
     NEB_MAX_IMAGES,
@@ -1377,7 +1378,7 @@ def check_diffusion_stability(
             else "max_gap_configurable_restore_lowest_fmax_halve_controls_v3"
         ),
         "neb_intermediate_refinement_policy": {
-            "name": "highest_peak_nearest_minima_iterative_v3",
+            "name": NEB_INTERMEDIATE_REFINEMENT_POLICY,
             "stagnation_steps": int(neb_intermediate_stagnation_steps),
             "max_refinements": int(neb_intermediate_max_refinements),
             "energy_tolerance_ev": float(neb_intermediate_energy_tolerance),
@@ -1807,7 +1808,7 @@ def check_diffusion_stability(
     lateral_class.neb_intermediate_refinement = (
         {
             "performed": True,
-            "policy": "highest_peak_nearest_minima_iterative_v3",
+            "policy": NEB_INTERMEDIATE_REFINEMENT_POLICY,
             "refinement_count": neb_result.intermediate_refinement_count,
             "max_refinements": neb_result.intermediate_max_refinements,
             "trigger": neb_result.intermediate_trigger,

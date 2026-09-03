@@ -168,6 +168,191 @@ def test_highest_peak_uses_only_nearest_bracketing_minima():
     )
 
 
+def test_converged_profile_refines_before_advancing_to_ci(monkeypatch):
+    profiles = [
+        [0.0, 0.8, 0.2, 0.9, 1.4, 0.3, 0.5],
+        [0.2, 0.8, 1.2, 0.3],
+    ]
+    bands = []
+
+    def band_factory(initial, final, **_kwargs):
+        band_index = len(bands)
+        profile = profiles[min(band_index, len(profiles) - 1)]
+        images = []
+        for fraction, energy in zip(
+            np.linspace(0.0, 1.0, len(profile)),
+            profile,
+        ):
+            image = initial.copy()
+            image.positions = (
+                (1.0 - fraction) * initial.positions
+                + fraction * final.positions
+            )
+            image.calc = SinglePointCalculator(image, energy=energy)
+            images.append(image)
+        neb = SimpleNamespace(climb=False, band_index=band_index)
+        bands.append((neb, images))
+        return neb, images
+
+    optimizer_calls = []
+
+    class ImmediatelyConvergedOptimizer:
+        def __init__(self, stage_neb, *, logfile):
+            del logfile
+            self.stage_neb = stage_neb
+            self.nsteps = 1
+            optimizer_calls.append(
+                (stage_neb.band_index, bool(stage_neb.climb))
+            )
+
+        def attach(self, _function, interval=1):
+            assert interval == 1
+
+        def run(self, *, fmax, steps):
+            assert fmax == pytest.approx(0.05)
+            assert steps == 20
+
+        def converged(self):
+            return True
+
+    def relaxer(candidate, label):
+        energy = 0.15 if "initial" in label else 0.25
+        return candidate.copy(), energy
+
+    refinements = []
+    monkeypatch.setattr(neb_module, "acquire_calculator", _calculator_context)
+    monkeypatch.setattr(neb_module, "BFGS", ImmediatelyConvergedOptimizer)
+
+    result = neb_module.run_neb(
+        Atoms("H", positions=[[0.0, 0.0, 0.0]]),
+        Atoms("H", positions=[[6.0, 0.0, 0.0]]),
+        calculator=object(),
+        purpose="final converged-profile intermediate check",
+        n_images=5,
+        interpolation="linear",
+        spring_k=1.0,
+        climb=True,
+        frozen_indices=None,
+        fmax=0.05,
+        max_steps=20,
+        intermediate_stagnation_steps=100,
+        intermediate_relaxer=relaxer,
+        intermediate_refinement_callback=lambda *args: refinements.append(args),
+        verbose=False,
+        not_converged_error=RuntimeError,
+        band_factory=band_factory,
+    )
+
+    assert len(bands) == 2
+    assert optimizer_calls == [(0, False), (1, False), (1, True)]
+    assert len(refinements) == 1
+    assert refinements[0][2]["trigger"] == "converged_profile"
+    assert (
+        refinements[0][2]["policy"]
+        == "highest_peak_nearest_minima_iterative_v4"
+    )
+    assert result.intermediate_refinement_count == 1
+    assert result.intermediate_trigger == "converged_profile"
+    assert result.intermediate_source_stage == "NEB pre-climb relaxation"
+    assert result.intermediate_profile_energies == pytest.approx(profiles[0])
+    assert result.climb_performed is True
+    assert result.optimizer_steps == 3
+
+
+def test_converged_ci_profile_is_refined_and_rerun(monkeypatch):
+    ordinary_profile = [0.0, 0.4, 0.8, 1.2, 1.4, 1.0, 0.5]
+    ci_profile = [0.0, 0.8, 0.2, 0.9, 1.4, 0.3, 0.5]
+    replacement_profile = [0.15, 0.8, 1.2, 0.25]
+    bands = []
+
+    def make_images(initial, final, profile):
+        images = []
+        for fraction, energy in zip(
+            np.linspace(0.0, 1.0, len(profile)),
+            profile,
+        ):
+            image = initial.copy()
+            image.positions = (
+                (1.0 - fraction) * initial.positions
+                + fraction * final.positions
+            )
+            image.calc = SinglePointCalculator(image, energy=energy)
+            images.append(image)
+        return images
+
+    def band_factory(initial, final, **_kwargs):
+        band_index = len(bands)
+        profile = ordinary_profile if band_index == 0 else replacement_profile
+        neb = SimpleNamespace(climb=False, band_index=band_index)
+        images = make_images(initial, final, profile)
+        bands.append((neb, images))
+        return neb, images
+
+    optimizer_calls = []
+
+    class CIProfileOptimizer:
+        def __init__(self, stage_neb, *, logfile):
+            del logfile
+            self.stage_neb = stage_neb
+            self.nsteps = 1
+            optimizer_calls.append(
+                (stage_neb.band_index, bool(stage_neb.climb))
+            )
+
+        def attach(self, _function, interval=1):
+            assert interval == 1
+
+        def run(self, *, fmax, steps):
+            assert fmax == pytest.approx(0.05)
+            assert steps == 20
+            if self.stage_neb.band_index == 0 and self.stage_neb.climb:
+                for image, energy in zip(bands[0][1], ci_profile):
+                    image.calc = SinglePointCalculator(image, energy=energy)
+
+        def converged(self):
+            return True
+
+    def relaxer(candidate, label):
+        energy = 0.15 if "initial" in label else 0.25
+        return candidate.copy(), energy
+
+    monkeypatch.setattr(neb_module, "acquire_calculator", _calculator_context)
+    monkeypatch.setattr(neb_module, "BFGS", CIProfileOptimizer)
+
+    result = neb_module.run_neb(
+        Atoms("H", positions=[[0.0, 0.0, 0.0]]),
+        Atoms("H", positions=[[6.0, 0.0, 0.0]]),
+        calculator=object(),
+        purpose="final converged CI-profile intermediate check",
+        n_images=5,
+        interpolation="linear",
+        spring_k=1.0,
+        climb=True,
+        frozen_indices=None,
+        fmax=0.05,
+        max_steps=20,
+        intermediate_stagnation_steps=100,
+        intermediate_relaxer=relaxer,
+        verbose=False,
+        not_converged_error=RuntimeError,
+        band_factory=band_factory,
+    )
+
+    assert len(bands) == 2
+    assert optimizer_calls == [
+        (0, False),
+        (0, True),
+        (1, False),
+        (1, True),
+    ]
+    assert result.intermediate_refinement_count == 1
+    assert result.intermediate_trigger == "converged_profile"
+    assert result.intermediate_source_stage == "CI-NEB"
+    assert result.intermediate_profile_energies == pytest.approx(ci_profile)
+    assert result.climb_performed is True
+    assert result.optimizer_steps == 4
+
+
 def test_stalled_neb_refines_only_highest_peak_segment(monkeypatch):
     def energy_image(position: float, energy: float) -> Atoms:
         image = Atoms("H", positions=[[position, 0.0, 0.0]])
@@ -793,7 +978,8 @@ def test_shared_neb_restores_best_valid_band_and_halves_fire_timestep(
             band_factory=lambda *_args, **_kwargs: (neb, images),
         )
 
-    assert inspected_positions == pytest.approx([0.15])
+    expected_inspections = [0.15] if exhausted else [0.15, 0.15]
+    assert inspected_positions == pytest.approx(expected_inspections)
     if exhausted:
         assert len(attempts) == 1
         assert images[1].positions[0, 0] == pytest.approx(0.15)
