@@ -66,6 +66,13 @@ from autokmc.sites.stability.diffusion import (
     get_diffusion_bare_lateral,
     NEBNotConvergedError,
 )
+from autokmc.sites.stability.intermediate_pruning import (
+    CompositeDirectEventDetected,
+    classify_diffusion_intermediate,
+    direct_event_is_admissible,
+    intermediate_pruning_network_signature,
+    mark_composite_direct_event,
+)
 from autokmc.reactions.rates import (
     EA_MIN,
     DEFAULT_TRANSMISSION_COEFFICIENT,
@@ -136,6 +143,68 @@ class DiffusionReaction:
     delta_e       : float
     barrier       : float
     rate          : float
+
+
+def _reclassify_persisted_diffusion_intermediate(
+    G: nx.Graph,
+    site: DiffusionSite,
+    member_index: int,
+    lateral_class: DiffusionLateral,
+    *,
+    nl_mult: float,
+) -> None:
+    """Recheck a saved refinement after restart or network expansion."""
+    if (
+        not direct_event_is_admissible(lateral_class)
+        or lateral_class.stable is False
+        or bool(getattr(lateral_class, "last_failure_reason", None))
+    ):
+        return
+    metadata = getattr(lateral_class, "neb_intermediate_refinement", None)
+    initial = getattr(lateral_class, "atoms_neb_refinement_initial", None)
+    final = getattr(lateral_class, "atoms_neb_refinement_final", None)
+    if (
+        not isinstance(metadata, dict)
+        or not isinstance(initial, Atoms)
+        or not isinstance(final, Atoms)
+    ):
+        return
+    current_network_signature = intermediate_pruning_network_signature(
+        G,
+        "diffusion",
+        site,
+    )
+    if (
+        getattr(lateral_class, "direct_event_network_signature", None)
+        == current_network_signature
+    ):
+        return
+    try:
+        n_reacting = len(site.member_node_ids[int(member_index)][0])
+    except (IndexError, TypeError):
+        return
+    n_slab = sum(
+        data.get("type") in ("bulk", "surface")
+        for _, data in G.nodes(data=True)
+    )
+    n_lateral = len(initial) - int(n_slab) - int(n_reacting)
+    if n_lateral < 0:
+        return
+    certificate = classify_diffusion_intermediate(
+        G,
+        site,
+        int(member_index),
+        initial,
+        final,
+        metadata,
+        n_slab=int(n_slab),
+        n_lateral=int(n_lateral),
+        n_reacting=int(n_reacting),
+        nl_mult=float(nl_mult),
+    )
+    if certificate is not None:
+        mark_composite_direct_event(lateral_class, certificate)
+    lateral_class.direct_event_network_signature = current_network_signature
 
 
 # ---------------------------------------------------------------------------
@@ -502,7 +571,18 @@ def get_applicable_diffusion_for_member(
                     f"lateral check skipped ({exc})"
                 )
         else:
-            if bare_lc is not None and lc.stable is None:
+            _reclassify_persisted_diffusion_intermediate(
+                G,
+                ds,
+                index,
+                lc,
+                nl_mult=nl_mult,
+            )
+            if (
+                bare_lc is not None
+                and lc.stable is None
+                and direct_event_is_admissible(lc)
+            ):
                 bare_seed_path, bare_seed_member_index = (
                     _diffusion_seed_path(
                         bare_lc,
@@ -525,6 +605,7 @@ def get_applicable_diffusion_for_member(
                     bare_seed_member_index = None
                 if (
                     capture_lc.stable is None
+                    and direct_event_is_admissible(capture_lc)
                     and not getattr(
                         capture_lc, "last_failure_reason", None,
                     )
@@ -538,6 +619,17 @@ def get_applicable_diffusion_for_member(
                             calculator,
                             capture_neb_path=True,
                             **stability_kwargs,
+                        )
+                    except CompositeDirectEventDetected as exc:
+                        bare_seed_path = None
+                        bare_seed_member_index = None
+                        _log.info(
+                            "diff_iso=%d m=%d bare warm-start classified "
+                            "as composite (%s); evaluating the current "
+                            "lateral environment independently",
+                            ds.iso_class,
+                            index,
+                            exc,
                         )
                     except NEBNotConvergedError as exc:
                         # This bare calculation is only an optional warm start
@@ -603,6 +695,7 @@ def get_applicable_diffusion_for_member(
 
             if (
                 lc.stable is None
+                and direct_event_is_admissible(lc)
                 and not getattr(lc, "last_failure_reason", None)
             ):
                 try:
@@ -620,6 +713,21 @@ def get_applicable_diffusion_for_member(
                         neb_seed_member_index=bare_seed_member_index,
                         **stability_kwargs,
                     )
+                except CompositeDirectEventDetected as exc:
+                    _log.info(
+                        "diff_iso=%d m=%d lat=%d: %s; direct reaction "
+                        "removed from KMC",
+                        ds.iso_class,
+                        index,
+                        lc.lateral_class,
+                        exc,
+                    )
+                    if verbose:
+                        print(
+                            f"  [NEB] diff_iso={ds.iso_class} m={index} "
+                            f"lat={lc.lateral_class}: registered "
+                            "intermediate found; direct event suppressed"
+                        )
                 except NEBNotConvergedError as exc:
                     # Preserve stable=None: a numerical search failure is
                     # not evidence that the event is impossible.  The stored
@@ -670,6 +778,7 @@ def get_applicable_diffusion_for_member(
 
             if (
                 lc.stable
+                and direct_event_is_admissible(lc)
                 and lc.energy_a is not None
                 and lc.energy_b is not None
                 and lc.energy_ts is not None
@@ -1009,7 +1118,11 @@ def fast_diffusion_for_member(
 
     member_lc: dict | None = getattr(ds, "_member_lc", None)
     lc = member_lc.get(member_index) if member_lc is not None else None
-    if lc is None or not lc.stable:
+    if (
+        lc is None
+        or not lc.stable
+        or not direct_event_is_admissible(lc)
+    ):
         return None
     if lc.energy_a is None or lc.energy_b is None or lc.energy_ts is None:
         return None
