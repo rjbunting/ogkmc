@@ -127,6 +127,13 @@ from autokmc.sites.stability.neb import (
     resolve_neb_image_count,
     run_neb,
 )
+from autokmc.sites.stability.intermediate_pruning import (
+    CompositeDirectEventDetected,
+    DIRECT_EVENT_ELEMENTARY,
+    classify_bond_intermediate,
+    intermediate_pruning_network_signature,
+    retain_refinement_and_maybe_suppress,
+)
 from autokmc.sites.bond import BondReactionSite, BondReactionLateral
 from autokmc.sites.diffusion import _member_clique_union, _reactant_orbit_label
 from autokmc.core.constants import (
@@ -2319,6 +2326,31 @@ def _write_bond_calculation_cache(
                 "neb_intermediate_refinement",
                 None,
             ),
+            "neb_intermediate_refinement_history": getattr(
+                lc,
+                "neb_intermediate_refinement_history",
+                [],
+            ),
+            "direct_event_status": getattr(
+                lc,
+                "direct_event_status",
+                None,
+            ),
+            "direct_event_reason": getattr(
+                lc,
+                "direct_event_reason",
+                None,
+            ),
+            "direct_event_certificate": getattr(
+                lc,
+                "direct_event_certificate",
+                None,
+            ),
+            "direct_event_network_signature": getattr(
+                lc,
+                "direct_event_network_signature",
+                None,
+            ),
         },
     )
     write_calculation_record(
@@ -2660,6 +2692,60 @@ def check_bond_site_stability(
                 },
                 include_properties=cached.get("_cache_match") != "electronic",
             ):
+                cached_refinement = getattr(
+                    lc,
+                    "neb_intermediate_refinement",
+                    None,
+                )
+                cached_initial = getattr(
+                    lc,
+                    "atoms_neb_refinement_initial",
+                    None,
+                )
+                cached_final = getattr(
+                    lc,
+                    "atoms_neb_refinement_final",
+                    None,
+                )
+                current_network_signature = intermediate_pruning_network_signature(
+                    G,
+                    "bond",
+                    brs,
+                )
+                previous_network_signature = getattr(
+                    lc,
+                    "direct_event_network_signature",
+                    None,
+                )
+                lc.direct_event_network_signature = current_network_signature
+                if (
+                    previous_network_signature != current_network_signature
+                    and isinstance(cached_refinement, dict)
+                    and isinstance(cached_initial, Atoms)
+                    and isinstance(cached_final, Atoms)
+                ):
+                    cached_certificate = classify_bond_intermediate(
+                        G,
+                        brs,
+                        member_index,
+                        cached_initial,
+                        cached_final,
+                        cached_refinement,
+                        n_slab=n_slab,
+                        n_lateral=n_lat,
+                        n_reacting=n_react,
+                        nl_mult=nl_mult,
+                    )
+                    if cached_certificate is not None:
+                        retain_refinement_and_maybe_suppress(
+                            lc,
+                            cached_initial,
+                            cached_final,
+                            cached_refinement,
+                            cached_certificate,
+                        )
+                if getattr(lc, "direct_event_status", None) is None:
+                    lc.direct_event_status = DIRECT_EVENT_ELEMENTARY
                 if cached_gas_atoms is not None:
                     (
                         lc.atoms_c_gas_reference,
@@ -2721,6 +2807,8 @@ def check_bond_site_stability(
                     lc.atoms_c,
                     lc.atoms_ts,
                 )
+        except CompositeDirectEventDetected:
+            raise
         except Exception as exc:
             _log.debug(
                 "check_bond_site_stability: calculation cache lookup failed "
@@ -2757,6 +2845,9 @@ def check_bond_site_stability(
             temperature_k=free_energy_temperature_k,
             vib_cache_root=vib_cache_root,
         )
+        lc.direct_event_status = DIRECT_EVENT_ELEMENTARY
+        lc.direct_event_reason = None
+        lc.direct_event_certificate = None
         lc.stable = True
         assert calculation_cache_root is not None
         assert cache_key is not None
@@ -3093,9 +3184,30 @@ def check_bond_site_stability(
         refinement_final: Atoms,
         metadata: dict[str, Any],
     ) -> None:
-        lc.atoms_neb_refinement_initial = refinement_initial
-        lc.atoms_neb_refinement_final = refinement_final
-        lc.neb_intermediate_refinement = dict(metadata)
+        lc.direct_event_network_signature = intermediate_pruning_network_signature(
+            G,
+            "bond",
+            brs,
+        )
+        certificate = classify_bond_intermediate(
+            G,
+            brs,
+            member_index,
+            refinement_initial,
+            refinement_final,
+            metadata,
+            n_slab=n_slab,
+            n_lateral=n_lat,
+            n_reacting=n_react,
+            nl_mult=nl_mult,
+        )
+        retain_refinement_and_maybe_suppress(
+            lc,
+            refinement_initial,
+            refinement_final,
+            metadata,
+            certificate,
+        )
 
     neb_result = run_neb(
         atoms_ab_opt,
@@ -3284,6 +3396,9 @@ def check_bond_site_stability(
         lc.atoms_neb_path_initial = None
         lc.atoms_neb_path = None
         lc.neb_path_energies = None
+    lc.direct_event_status = DIRECT_EVENT_ELEMENTARY
+    lc.direct_event_reason = None
+    lc.direct_event_certificate = None
     lc.stable = True
     if verbose:
         print(

@@ -58,8 +58,8 @@ Public API
 * :class:`DiffusionStabilityError`     — base error.
 * :class:`EndpointStabilityError`      — endpoint relaxation failed.
 * :class:`NEBNotConvergedError`        — NEB band did not converge.
-* :class:`TransitionStateInvalidError` — TS lost connectivity / collapsed
-  onto an endpoint.
+* :class:`TransitionStateInvalidError` — TS energies are non-finite or the
+  migrating molecule lost its internal connectivity.
 * (Re-exported) :class:`SurfaceConnectivityError`,
   :class:`AdsorbateDissociationError`,
   :class:`OptimisationFailedError`     — from
@@ -120,6 +120,13 @@ from autokmc.sites.stability.neb import (
     project_neb_path,
     resolve_neb_image_count,
     run_neb,
+)
+from autokmc.sites.stability.intermediate_pruning import (
+    CompositeDirectEventDetected,
+    DIRECT_EVENT_ELEMENTARY,
+    classify_diffusion_intermediate,
+    intermediate_pruning_network_signature,
+    retain_refinement_and_maybe_suppress,
 )
 from autokmc.core.constants import (
     LATERAL_SHELLS_DEFAULT,
@@ -237,11 +244,11 @@ class NEBNotConvergedError(DiffusionStabilityError):
 
 
 class TransitionStateInvalidError(DiffusionStabilityError):
-    """TS image is not a valid saddle.
+    """The selected diffusion-path image is chemically invalid.
 
-    Either the migrating molecule fragmented, the surface bond topology
-    changed at the TS, or the TS image collapsed onto one of the endpoints
-    (its bonded surface clique exactly matches A's or B's).
+    Either its energy is non-finite or the migrating molecule fragmented.
+    An endpoint-like maximum is allowed because a valid low-barrier or
+    barrierless diffusion path can fall back into either endpoint basin.
     """
 
 
@@ -788,22 +795,18 @@ def _check_ts_validity(
     e_a: float,
     e_b: float,
     e_ts: float,
-    ts_index: int,
-    n_interior: int,
     energy_tol: float = 1e-3,
 ) -> None:
-    """Validate that the highest-energy NEB image is a real saddle.
+    """Validate the chemistry of the selected diffusion-path image.
 
-    Detects three failure modes that otherwise propagate silently into the
-    KMC rate:
+    Detects failure modes that otherwise propagate silently into the KMC
+    rate:
 
     1. **Energy ordering** — ``E_ts < max(E_a, E_b) − energy_tol`` (eV) means
-       the band is monotonic / reversed and there is no saddle.
-    2. **Endpoint collapse** — the saddle is one of the boundary interior
-       images (1 or n_interior) *and* its energy is within ``energy_tol``
-       of the adjacent endpoint, i.e. the band trivially recovers an
-       endpoint energy with no genuine barrier.
-    3. **Migrating-molecule fragmentation** — the bond topology *within*
+       the band is monotonic / reversed and there is no interior saddle. This
+       is accepted with a warning because it is valid for low-barrier or
+       barrierless diffusion and the KMC applies the ``EA_MIN`` floor.
+    2. **Migrating-molecule fragmentation** — the bond topology *within*
        the migrating block changed at the TS relative to **both** endpoints.
        (We tolerate matching the topology of either A or B — at the saddle
        the molecule may have already passed through bond rearrangement on
@@ -834,23 +837,7 @@ def _check_ts_validity(
             energy_tol,
         )
 
-    # 2. Endpoint collapse — TS sits at the band edge and matches its
-    # adjacent endpoint within energy_tol.
-    if n_interior >= 1:
-        if ts_index == 1 and abs(float(e_ts) - float(e_a)) < float(energy_tol):
-            raise TransitionStateInvalidError(
-                f"TS image (k={ts_index}) collapsed onto endpoint A: "
-                f"E_ts={e_ts:.4f} eV ≈ E_a={e_a:.4f} eV "
-                f"(tol={energy_tol})."
-            )
-        if ts_index == n_interior and abs(float(e_ts) - float(e_b)) < float(energy_tol):
-            raise TransitionStateInvalidError(
-                f"TS image (k={ts_index}) collapsed onto endpoint B: "
-                f"E_ts={e_ts:.4f} eV ≈ E_b={e_b:.4f} eV "
-                f"(tol={energy_tol})."
-            )
-
-    # 3. Migrating-molecule connectivity.  Compute intra-mig bonds for
+    # 2. Migrating-molecule connectivity.  Compute intra-mig bonds for
     # A, B and TS using the relevant_indices filter so only bonds involving
     # the migrating atoms are compared.  TS must match A *or* B.
     if n_mig >= 2:
@@ -1150,6 +1137,31 @@ def _write_diffusion_calculation_cache(
                 "neb_intermediate_refinement",
                 None,
             ),
+            "neb_intermediate_refinement_history": getattr(
+                lateral_class,
+                "neb_intermediate_refinement_history",
+                [],
+            ),
+            "direct_event_status": getattr(
+                lateral_class,
+                "direct_event_status",
+                None,
+            ),
+            "direct_event_reason": getattr(
+                lateral_class,
+                "direct_event_reason",
+                None,
+            ),
+            "direct_event_certificate": getattr(
+                lateral_class,
+                "direct_event_certificate",
+                None,
+            ),
+            "direct_event_network_signature": getattr(
+                lateral_class,
+                "direct_event_network_signature",
+                None,
+            ),
         },
     )
     write_calculation_record(
@@ -1223,8 +1235,8 @@ def check_diffusion_stability(
        *climb* is enabled, retain the same band and spring constant, enable its
        climbing image, and converge a second optimization regardless of raw
        barrier height.
-    5. Identify the TS as the highest-energy interior image; validate
-       (no fragmentation, no collapse onto an endpoint); store all
+    5. Identify the TS as the highest-energy interior image; validate its
+       finite energy and migrating-molecule connectivity; store all
        energies, atoms, and (optionally) the full band on *lateral_class*.
 
     On success ``lateral_class.stable`` is set to ``True`` and the energies
@@ -1282,7 +1294,7 @@ def check_diffusion_stability(
     NEBNotConvergedError
         NEB band did not reach *fmax* in *max_steps*.
     TransitionStateInvalidError
-        TS image fragmented or collapsed onto an endpoint.
+        TS energy is non-finite or the migrating molecule fragmented.
     """
     if member_index < 0 or member_index >= len(diffusion_site.member_node_ids):
         raise IndexError(
@@ -1482,6 +1494,62 @@ def check_diffusion_stability(
                 },
                 include_properties=cached.get("_cache_match") != "electronic",
             ):
+                cached_refinement = getattr(
+                    lateral_class,
+                    "neb_intermediate_refinement",
+                    None,
+                )
+                cached_initial = getattr(
+                    lateral_class,
+                    "atoms_neb_refinement_initial",
+                    None,
+                )
+                cached_final = getattr(
+                    lateral_class,
+                    "atoms_neb_refinement_final",
+                    None,
+                )
+                current_network_signature = intermediate_pruning_network_signature(
+                    G,
+                    "diffusion",
+                    diffusion_site,
+                )
+                previous_network_signature = getattr(
+                    lateral_class,
+                    "direct_event_network_signature",
+                    None,
+                )
+                lateral_class.direct_event_network_signature = (
+                    current_network_signature
+                )
+                if (
+                    previous_network_signature != current_network_signature
+                    and isinstance(cached_refinement, dict)
+                    and isinstance(cached_initial, Atoms)
+                    and isinstance(cached_final, Atoms)
+                ):
+                    cached_certificate = classify_diffusion_intermediate(
+                        G,
+                        diffusion_site,
+                        member_index,
+                        cached_initial,
+                        cached_final,
+                        cached_refinement,
+                        n_slab=n_slab,
+                        n_lateral=n_lat,
+                        n_reacting=n_mig,
+                        nl_mult=nl_mult,
+                    )
+                    if cached_certificate is not None:
+                        retain_refinement_and_maybe_suppress(
+                            lateral_class,
+                            cached_initial,
+                            cached_final,
+                            cached_refinement,
+                            cached_certificate,
+                        )
+                if getattr(lateral_class, "direct_event_status", None) is None:
+                    lateral_class.direct_event_status = DIRECT_EVENT_ELEMENTARY
                 if capture_neb_path:
                     cached_path = list(getattr(lateral_class, "atoms_neb_path", None) or [])
                     cached_interior = len(cached_path) - 2
@@ -1536,6 +1604,8 @@ def check_diffusion_stability(
                     lateral_class.atoms_b,
                     lateral_class.atoms_ts,
                 )
+        except CompositeDirectEventDetected:
+            raise
         except Exception as exc:
             _log.debug(
                 "check_diffusion_stability: calculation cache lookup failed "
@@ -1571,6 +1641,9 @@ def check_diffusion_stability(
             temperature_k=free_energy_temperature_k,
             vib_cache_root=vib_cache_root,
         )
+        lateral_class.direct_event_status = DIRECT_EVENT_ELEMENTARY
+        lateral_class.direct_event_reason = None
+        lateral_class.direct_event_certificate = None
         lateral_class.stable = True
         assert calculation_cache_root is not None
         assert cache_key is not None
@@ -1725,9 +1798,32 @@ def check_diffusion_stability(
         refinement_final: Atoms,
         metadata: dict[str, Any],
     ) -> None:
-        lateral_class.atoms_neb_refinement_initial = refinement_initial
-        lateral_class.atoms_neb_refinement_final = refinement_final
-        lateral_class.neb_intermediate_refinement = dict(metadata)
+        lateral_class.direct_event_network_signature = (
+            intermediate_pruning_network_signature(
+                G,
+                "diffusion",
+                diffusion_site,
+            )
+        )
+        certificate = classify_diffusion_intermediate(
+            G,
+            diffusion_site,
+            member_index,
+            refinement_initial,
+            refinement_final,
+            metadata,
+            n_slab=n_slab,
+            n_lateral=n_lat,
+            n_reacting=n_mig,
+            nl_mult=nl_mult,
+        )
+        retain_refinement_and_maybe_suppress(
+            lateral_class,
+            refinement_initial,
+            refinement_final,
+            metadata,
+            certificate,
+        )
 
     neb_result = run_neb(
         atoms_a_opt,
@@ -1890,8 +1986,6 @@ def check_diffusion_stability(
         e_a=validation_initial_energy,
         e_b=validation_final_energy,
         e_ts=E_ts,
-        ts_index=k_ts,
-        n_interior=neb_result.n_interior,
     )
 
     _apply_diffusion_thermochemistry(
@@ -1917,6 +2011,9 @@ def check_diffusion_stability(
         lateral_class.neb_path_energies = None
     # Finally, mark the class stable after the requested thermochemistry has
     # succeeded.
+    lateral_class.direct_event_status = DIRECT_EVENT_ELEMENTARY
+    lateral_class.direct_event_reason = None
+    lateral_class.direct_event_certificate = None
     lateral_class.stable = True
     if verbose:
         print(

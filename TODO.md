@@ -57,5 +57,4 @@ Must look into parallelisation and the calculators too.
 Need to develop algorithm to prevent sampling of fast steps.
 
 ## TS pruning
-Sometimes intermediate found during new minima catching in NEB is another adsorbate site.
-Diffusion to this site should be done first and then TS occurs.
+Check the pruning to make sure it is functioning as intended

@@ -1913,7 +1913,7 @@ def test_independent_nebs_can_lease_distinct_calculators(monkeypatch):
             _check_bond_ts_validity,
             BondTransitionStateInvalidError,
             {"e_ab": 0.0, "e_c": 0.2, "e_ts": float("nan")},
-            {"n_react": 1},
+            {"n_react": 1, "ts_index": 1, "n_interior": 1},
         ),
     ],
 )
@@ -1932,11 +1932,37 @@ def test_transition_validators_reject_nonfinite_energy(
             n_slab=0,
             n_lat=0,
             nl_mult=1.2,
-            ts_index=1,
-            n_interior=1,
             **energy_names,
             **extra,
         )
+
+
+@pytest.mark.parametrize(
+    ("e_a", "e_b", "e_ts"),
+    [
+        (0.0, -0.2, 0.0),
+        (-0.2, 0.0, 0.0),
+    ],
+)
+def test_diffusion_ts_validation_accepts_endpoint_like_low_barrier_path(
+    e_a,
+    e_b,
+    e_ts,
+):
+    atoms = Atoms("H", positions=[[0.0, 0.0, 0.0]])
+
+    _check_ts_validity(
+        atoms,
+        atoms.copy(),
+        atoms.copy(),
+        n_slab=0,
+        n_lat=0,
+        n_mig=1,
+        nl_mult=1.2,
+        e_a=e_a,
+        e_b=e_b,
+        e_ts=e_ts,
+    )
 
 
 def _gas_reactant(**overrides):

@@ -66,8 +66,14 @@ class KMCOutputManager:
                 failed_numerically = bool(
                     getattr(lateral_class, "last_failure_reason", None)
                 )
+                composite = (
+                    getattr(lateral_class, "direct_event_status", None)
+                    == "composite"
+                )
                 if (
-                    lateral_class.stable is False or failed_numerically
+                    lateral_class.stable is False
+                    or failed_numerically
+                    or composite
                 ) and not seed_only:
                     if writer is not None:
                         writer.write_invalid_diffusion(
@@ -120,8 +126,14 @@ class KMCOutputManager:
                 failed_numerically = bool(
                     getattr(lateral_class, "last_failure_reason", None)
                 )
+                composite = (
+                    getattr(lateral_class, "direct_event_status", None)
+                    == "composite"
+                )
                 if (
-                    lateral_class.stable is False or failed_numerically
+                    lateral_class.stable is False
+                    or failed_numerically
+                    or composite
                 ) and not seed_only:
                     write_invalid = getattr(writer, "write_invalid_bond", None)
                     if callable(write_invalid):
