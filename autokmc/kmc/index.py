@@ -17,8 +17,22 @@ from autokmc.sites.identity import (
     member_identifier,
     site_identifier,
 )
+from autokmc.sites.stability.intermediate_pruning import (
+    direct_event_is_admissible,
+)
 
 IndexedReaction: TypeAlias = AdsorptionReaction | DiffusionReaction | BondReaction
+
+
+def _admissible_reaction(reaction: IndexedReaction | None) -> IndexedReaction | None:
+    """Defense in depth: composite direct events always install as zero rate."""
+    if reaction is None:
+        return None
+    if getattr(reaction, "kind", None) not in {"diffusion", "bond"}:
+        return reaction
+    if not direct_event_is_admissible(getattr(reaction, "lateral_class", None)):
+        return None
+    return reaction
 
 
 class _ReactionIndex:
@@ -160,12 +174,29 @@ class _ReactionIndex:
         m_idx: int,
     ) -> None:
         """Replace one member leaf without touching sibling members."""
+        rxn = _admissible_reaction(rxn)
         i = self.leaf_id(site, m_idx)
         self.reactions[i] = rxn
-        self.tree.update(
-            i,
-            rxn.rate if (rxn is not None and rxn.rate > 0.0) else 0.0,
-        )
+        updates = {
+            i: rxn.rate if (rxn is not None and rxn.rate > 0.0) else 0.0
+        }
+        if any(
+            not direct_event_is_admissible(lateral_class)
+            for lateral_class in (getattr(site, "lateral_classes", None) or [])
+        ):
+            # A lateral class can be shared by symmetry-equivalent members.
+            # Once it becomes composite, remove every already-installed
+            # sibling reaction backed by that same suppressed class.
+            for leaf in self._site_leaves[site_identifier(site)]:
+                existing = self.reactions[leaf]
+                if _admissible_reaction(existing) is None:
+                    self.reactions[leaf] = None
+                    updates[leaf] = 0.0
+        if len(updates) == 1:
+            leaf, rate = next(iter(updates.items()))
+            self.tree.update(leaf, rate)
+        else:
+            self.tree.update_many(updates.items())
 
     def install_site(self, site, reactions: list) -> None:
         """Refresh every leaf for *site* from a freshly computed reaction list."""
@@ -175,6 +206,9 @@ class _ReactionIndex:
             self.reactions[leaf] = None
             updates[leaf] = 0.0
         for reaction in reactions:
+            reaction = _admissible_reaction(reaction)
+            if reaction is None:
+                continue
             leaf = self.leaf_id(reaction.site, reaction.member_index)
             self.reactions[leaf] = reaction
             updates[leaf] = reaction.rate if reaction.rate > 0.0 else 0.0
@@ -194,6 +228,9 @@ class _ReactionIndex:
             for reaction in (
                 getattr(site, "applicable_reactions", None) or []
             ):
+                reaction = _admissible_reaction(reaction)
+                if reaction is None:
+                    continue
                 leaf = self.leaf_id(
                     reaction.site,
                     reaction.member_index,

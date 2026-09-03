@@ -84,6 +84,13 @@ from autokmc.sites.stability.bond import (
     BondStabilityError,
     get_bond_bare_lateral,
 )
+from autokmc.sites.stability.intermediate_pruning import (
+    CompositeDirectEventDetected,
+    classify_bond_intermediate,
+    direct_event_is_admissible,
+    intermediate_pruning_network_signature,
+    mark_composite_direct_event,
+)
 from autokmc.core.constants import (
     NEB_BAND_EVAL,
     NEB_FMAX,
@@ -152,6 +159,71 @@ class BondReaction:
     delta_e       : float
     barrier       : float
     rate          : float
+
+
+def _reclassify_persisted_bond_intermediate(
+    G: nx.Graph,
+    site: BondReactionSite,
+    member_index: int,
+    lateral_class: BondReactionLateral,
+    *,
+    nl_mult: float,
+) -> None:
+    """Recheck a saved refinement after restart or network expansion."""
+    if (
+        not direct_event_is_admissible(lateral_class)
+        or lateral_class.stable is False
+        or bool(getattr(lateral_class, "last_failure_reason", None))
+    ):
+        return
+    metadata = getattr(lateral_class, "neb_intermediate_refinement", None)
+    initial = getattr(lateral_class, "atoms_neb_refinement_initial", None)
+    final = getattr(lateral_class, "atoms_neb_refinement_final", None)
+    if (
+        not isinstance(metadata, dict)
+        or not isinstance(initial, Atoms)
+        or not isinstance(final, Atoms)
+    ):
+        return
+    current_network_signature = intermediate_pruning_network_signature(
+        G,
+        "bond",
+        site,
+    )
+    if (
+        getattr(lateral_class, "direct_event_network_signature", None)
+        == current_network_signature
+    ):
+        return
+    try:
+        member = site.members[int(member_index)]
+        n_reacting = len(member[0].member_node_ids[int(member[1])]) + len(
+            member[2].member_node_ids[int(member[3])]
+        )
+    except (IndexError, TypeError):
+        return
+    n_slab = sum(
+        data.get("type") in ("bulk", "surface")
+        for _, data in G.nodes(data=True)
+    )
+    n_lateral = len(initial) - int(n_slab) - int(n_reacting)
+    if n_lateral < 0:
+        return
+    certificate = classify_bond_intermediate(
+        G,
+        site,
+        int(member_index),
+        initial,
+        final,
+        metadata,
+        n_slab=int(n_slab),
+        n_lateral=int(n_lateral),
+        n_reacting=int(n_reacting),
+        nl_mult=float(nl_mult),
+    )
+    if certificate is not None:
+        mark_composite_direct_event(lateral_class, certificate)
+    lateral_class.direct_event_network_signature = current_network_signature
 
 
 # ---------------------------------------------------------------------------
@@ -553,7 +625,18 @@ def get_applicable_bond_reaction_for_member(
                     f"lateral check skipped ({exc})"
                 )
         else:
-            if bare_lc is not None and lc.stable is None:
+            _reclassify_persisted_bond_intermediate(
+                G,
+                brs,
+                index,
+                lc,
+                nl_mult=nl_mult,
+            )
+            if (
+                bare_lc is not None
+                and lc.stable is None
+                and direct_event_is_admissible(lc)
+            ):
                 bare_seed_path, bare_seed_member_index = _bond_seed_path(
                     bare_lc,
                     n_images=(None if image_spacing is not None else n_images),
@@ -571,6 +654,7 @@ def get_applicable_bond_reaction_for_member(
                     bare_seed_member_index = None
                 if (
                     capture_lc.stable is None
+                    and direct_event_is_admissible(capture_lc)
                     and not getattr(
                         capture_lc, "last_failure_reason", None,
                     )
@@ -584,6 +668,17 @@ def get_applicable_bond_reaction_for_member(
                             calculator,
                             capture_neb_path=True,
                             **stability_kwargs,
+                        )
+                    except CompositeDirectEventDetected as exc:
+                        bare_seed_path = None
+                        bare_seed_member_index = None
+                        _log.info(
+                            "bond_iso=%d m=%d bare warm-start classified "
+                            "as composite (%s); evaluating the current "
+                            "lateral environment independently",
+                            brs.iso_class,
+                            index,
+                            exc,
                         )
                     except BondNEBNotConvergedError as exc:
                         # This bare calculation is only an optional warm start
@@ -649,6 +744,7 @@ def get_applicable_bond_reaction_for_member(
 
             if (
                 lc.stable is None
+                and direct_event_is_admissible(lc)
                 and calculator is not None
                 and not getattr(lc, "last_failure_reason", None)
             ):
@@ -667,6 +763,21 @@ def get_applicable_bond_reaction_for_member(
                         neb_seed_member_index=bare_seed_member_index,
                         **stability_kwargs,
                     )
+                except CompositeDirectEventDetected as exc:
+                    _log.info(
+                        "bond_iso=%d m=%d lat=%d: %s; direct reaction "
+                        "removed from KMC",
+                        brs.iso_class,
+                        index,
+                        lc.lateral_class,
+                        exc,
+                    )
+                    if verbose:
+                        print(
+                            f"  [NEB] bond_iso={brs.iso_class} m={index} "
+                            f"lat={lc.lateral_class}: registered "
+                            "intermediate found; direct event suppressed"
+                        )
                 except BondNEBNotConvergedError as exc:
                     # Preserve stable=None: a numerical search failure is
                     # not evidence that the event is impossible.  The stored
@@ -717,6 +828,7 @@ def get_applicable_bond_reaction_for_member(
 
             if (
                 lc.stable
+                and direct_event_is_admissible(lc)
                 and lc.energy_ab is not None
                 and lc.energy_c is not None
                 and lc.energy_ts is not None
@@ -1063,7 +1175,11 @@ def fast_bond_reaction_for_member(
 
     member_lc: dict | None = getattr(brs, "_member_lc", None)
     lc = member_lc.get(member_index) if member_lc is not None else None
-    if lc is None or lc.stable is False:
+    if (
+        lc is None
+        or lc.stable is not True
+        or not direct_event_is_admissible(lc)
+    ):
         return None
     if lc.energy_ab is None or lc.energy_c is None or lc.energy_ts is None:
         return None

@@ -287,6 +287,15 @@ class BondReactionLateral:
     atom_matching_method : str | None = None
     atom_mapping         : list = field(default_factory=list)
     matching_diagnostics : dict = field(default_factory=dict)
+    # Appended after every pre-existing init field for positional-checkpoint
+    # compatibility.
+    neb_intermediate_refinement_history: list[dict[str, Any]] = field(
+        default_factory=list
+    )
+    direct_event_status: str | None = None
+    direct_event_reason: str | None = None
+    direct_event_certificate: dict[str, Any] | None = None
+    direct_event_network_signature: str | None = None
     if TYPE_CHECKING:
         _fingerprint : tuple = field(init=False, repr=False, compare=False)
         _rate_cache : dict = field(init=False, repr=False, compare=False)

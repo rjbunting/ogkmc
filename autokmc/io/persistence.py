@@ -1609,7 +1609,12 @@ class ReactionWriter:
             else existing_discovery_step
         )
         failure_reason = getattr(lc, "last_failure_reason", None)
-        invalid_reason = getattr(lc, "invalid_reason", None) or failure_reason
+        composite = getattr(lc, "direct_event_status", None) == "composite"
+        invalid_reason = (
+            getattr(lc, "invalid_reason", None)
+            or failure_reason
+            or getattr(lc, "direct_event_reason", None)
+        )
         stable = getattr(lc, "stable", None)
         numerical_failure = bool(
             stable is None and failure_reason
@@ -1626,13 +1631,17 @@ class ReactionWriter:
             "stable":          stable,
             "invalid_reason":  invalid_reason,
             "diagnostic_status": (
-                "numerical_failure" if numerical_failure else "invalid"
+                "composite_direct_event"
+                if composite
+                else ("numerical_failure" if numerical_failure else "invalid")
             ),
             "retryable": False,
             "automatic_retry": False,
             "kind_directions": ["a_to_b", "b_to_a"],
             "description": (
-                "Invalid diffusion candidate"
+                "Composite diffusion candidate removed from KMC"
+                if composite
+                else "Invalid diffusion candidate"
                 if invalid_reason is None
                 else (
                     "Diffusion candidate evaluation stopped after a "
@@ -1647,6 +1656,31 @@ class ReactionWriter:
             "neb_intermediate_refinement": getattr(
                 lc,
                 "neb_intermediate_refinement",
+                None,
+            ),
+            "neb_intermediate_refinement_history": getattr(
+                lc,
+                "neb_intermediate_refinement_history",
+                [],
+            ),
+            "direct_event_status": getattr(
+                lc,
+                "direct_event_status",
+                None,
+            ),
+            "direct_event_reason": getattr(
+                lc,
+                "direct_event_reason",
+                None,
+            ),
+            "direct_event_certificate": getattr(
+                lc,
+                "direct_event_certificate",
+                None,
+            ),
+            "direct_event_network_signature": getattr(
+                lc,
+                "direct_event_network_signature",
                 None,
             ),
             "rate_energy_bases": [],
@@ -1823,7 +1857,12 @@ class ReactionWriter:
             else existing_discovery_step
         )
         failure_reason = getattr(lc, "last_failure_reason", None)
-        invalid_reason = getattr(lc, "invalid_reason", None) or failure_reason
+        composite = getattr(lc, "direct_event_status", None) == "composite"
+        invalid_reason = (
+            getattr(lc, "invalid_reason", None)
+            or failure_reason
+            or getattr(lc, "direct_event_reason", None)
+        )
         stable = getattr(lc, "stable", None)
         numerical_failure = bool(
             stable is None and failure_reason
@@ -1840,13 +1879,17 @@ class ReactionWriter:
             "stable": stable,
             "invalid_reason": invalid_reason,
             "diagnostic_status": (
-                "numerical_failure" if numerical_failure else "invalid"
+                "composite_direct_event"
+                if composite
+                else ("numerical_failure" if numerical_failure else "invalid")
             ),
             "retryable": False,
             "automatic_retry": False,
             "kind_directions": ["couple", "dissoc"],
             "description": (
-                "Invalid bond candidate"
+                "Composite bond candidate removed from KMC"
+                if composite
+                else "Invalid bond candidate"
                 if invalid_reason is None
                 else (
                     "Bond candidate evaluation stopped after a numerical "
@@ -1867,6 +1910,31 @@ class ReactionWriter:
             "neb_intermediate_refinement": getattr(
                 lc,
                 "neb_intermediate_refinement",
+                None,
+            ),
+            "neb_intermediate_refinement_history": getattr(
+                lc,
+                "neb_intermediate_refinement_history",
+                [],
+            ),
+            "direct_event_status": getattr(
+                lc,
+                "direct_event_status",
+                None,
+            ),
+            "direct_event_reason": getattr(
+                lc,
+                "direct_event_reason",
+                None,
+            ),
+            "direct_event_certificate": getattr(
+                lc,
+                "direct_event_certificate",
+                None,
+            ),
+            "direct_event_network_signature": getattr(
+                lc,
+                "direct_event_network_signature",
                 None,
             ),
             "rate_energy_bases": [],

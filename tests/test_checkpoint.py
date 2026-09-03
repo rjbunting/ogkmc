@@ -232,6 +232,43 @@ def test_checkpoint_preserves_numerical_failure_retry_latches(tmp_path):
     )
 
 
+def test_checkpoint_preserves_composite_direct_event_certificate(tmp_path):
+    lateral = SimpleNamespace(
+        stable=None,
+        last_failure_reason=None,
+        direct_event_status="composite",
+        direct_event_reason="registered_intermediate_diffusion_placement",
+        direct_event_certificate={"component_member_ids": [["a", "b"]]},
+        direct_event_network_signature="abc123",
+        neb_intermediate_refinement_history=[
+            {"trigger": "converged_final_check"}
+        ],
+    )
+    state = make_checkpoint_state(
+        step=2,
+        time_s=0.5,
+        graph=nx.Graph(),
+        adsorbate_sites=[],
+        diffusion_sites=[SimpleNamespace(lateral_classes=[lateral])],
+        bond_sites=[],
+    )
+
+    loaded = load_checkpoint(save_checkpoint(tmp_path / "composite.pkl", state))
+    restored = loaded.diffusion_sites[0].lateral_classes[0]
+
+    assert restored.direct_event_status == "composite"
+    assert restored.direct_event_reason == (
+        "registered_intermediate_diffusion_placement"
+    )
+    assert restored.direct_event_certificate == {
+        "component_member_ids": [["a", "b"]]
+    }
+    assert restored.direct_event_network_signature == "abc123"
+    assert restored.neb_intermediate_refinement_history == [
+        {"trigger": "converged_final_check"}
+    ]
+
+
 def test_checkpoint_root_collections_never_alias_from_temporary_id_reuse(tmp_path):
     adsorbate = SimpleNamespace(kind="adsorbate")
     diffusion = SimpleNamespace(kind="diffusion")

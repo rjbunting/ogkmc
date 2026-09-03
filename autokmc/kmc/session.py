@@ -189,16 +189,22 @@ class KMCSession:
                 if not callable(write_invalid):
                     continue
                 for site in sites:
-                    for lateral_class in site.lateral_classes:
+                    for transition_lateral in site.lateral_classes:
                         seed_only = bool(
-                            getattr(lateral_class, "_seed_only", False)
-                            and not getattr(lateral_class, "members", None)
+                            getattr(transition_lateral, "_seed_only", False)
+                            and not getattr(transition_lateral, "members", None)
                         )
                         failed = (
-                            lateral_class.stable is False
+                            transition_lateral.stable is False
+                            or getattr(
+                                transition_lateral,
+                                "direct_event_status",
+                                None,
+                            )
+                            == "composite"
                             or bool(
                                 getattr(
-                                    lateral_class,
+                                    transition_lateral,
                                     "last_failure_reason",
                                     None,
                                 )
@@ -207,7 +213,7 @@ class KMCSession:
                         if failed and not seed_only:
                             write_invalid(
                                 site,
-                                lateral_class,
+                                transition_lateral,
                                 step=int(step),
                             )
                             n_invalid += 1
