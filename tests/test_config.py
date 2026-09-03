@@ -350,6 +350,48 @@ calculator:
         load_config(path)
 
 
+def test_standoff_default_reaches_configuration_and_public_entry_points(tmp_path):
+    pytest.importorskip("yaml")
+    from inspect import signature
+
+    from autokmc.core.constants import STANDOFF_FACTOR
+    from autokmc.kmc.expansion import expand_bond_sites_for_new_species
+    from autokmc.kmc.models import BondGrowthOptions
+    from autokmc.sites.adsorbate import (
+        find_adsorbate_sites,
+        optimise_adsorbate_site_positions,
+    )
+    from autokmc.workflow.stages import configured_adsorbate_site_kwargs
+
+    cfg = load_config(_write(tmp_path, YAML_OK))
+
+    assert STANDOFF_FACTOR == pytest.approx(0.90)
+    assert ConstantsCfg().adsorbate_standoff_factor == pytest.approx(0.90)
+    assert cfg.constants.adsorbate_standoff_factor == pytest.approx(0.90)
+    assert BondGrowthOptions().adsorbate_standoff_factor == pytest.approx(0.90)
+    assert configured_adsorbate_site_kwargs(cfg)["standoff_factor"] == pytest.approx(0.90)
+    for function, parameter in (
+        (find_adsorbate_sites, "standoff_factor"),
+        (optimise_adsorbate_site_positions, "standoff_factor"),
+        (expand_bond_sites_for_new_species, "adsorbate_standoff_factor"),
+    ):
+        assert signature(function).parameters[parameter].default == pytest.approx(0.90)
+
+
+@pytest.mark.parametrize("standoff", [0.0, 0.85])
+def test_explicit_standoff_override_is_preserved(tmp_path, standoff):
+    pytest.importorskip("yaml")
+    from autokmc.workflow.stages import configured_adsorbate_site_kwargs
+
+    cfg = load_config(_write(
+        tmp_path,
+        YAML_OK + f"\nconstants:\n  adsorbate_standoff_factor: {standoff}\n",
+    ))
+
+    assert cfg.constants.adsorbate_standoff_factor == pytest.approx(standoff)
+    assert configured_adsorbate_site_kwargs(cfg)["standoff_factor"] == pytest.approx(standoff)
+
+
 def test_loads_every_shared_constant_and_site_geometry_control(tmp_path):
     pytest.importorskip("yaml")
     path = _write(
@@ -434,6 +476,7 @@ def test_all_options_template_lists_every_shared_constant():
     assert cfg.structure.extra_kwargs["orthogonalise"] is False
     assert cfg.structure.surface_side == "top"
     assert cfg.adsorption.max_pair_shells == 10
+    assert cfg.constants.adsorbate_standoff_factor == pytest.approx(0.90)
 
 
 @pytest.mark.parametrize(

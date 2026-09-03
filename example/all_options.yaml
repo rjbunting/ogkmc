@@ -58,10 +58,11 @@ constants:
   #   R_min = factor * (r_cov_adsorbate + r_cov_surface)
   adsorbate_contact_factor: 1.05
 
-  # Optional extra adsorbate lift along the outward surface normal, measured as
-  # a multiple of summed covalent radii. Zero uses the optimized anchor target
-  # without an additional lift.
-  adsorbate_standoff_factor: 0.0
+  # Rigid-body restraint target height above the surface-clique centroid,
+  # measured as a multiple of summed covalent radii. This replaces the
+  # optimized anchor target; it is not an additional lift. Zero uses the
+  # optimized anchor target directly.
+  adsorbate_standoff_factor: 0.90
 
   # Number of rigid-body rotational starting orientations tried when placing
   # an adsorbate. One disables the multi-start search.

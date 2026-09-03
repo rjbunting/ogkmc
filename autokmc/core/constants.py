@@ -74,14 +74,13 @@ CONTACT_FACTOR: float = 1.05
 
 #: Standoff-bond scale used by
 #: :func:`autokmc.sites.adsorbate.optimise_adsorbate_site_positions`.
-#: When ``STANDOFF_FACTOR > 0``, bonded anchors are restrained toward
+#: With the default ``0.90``, bonded anchors are restrained toward
 #: ``clique_centroid + STANDOFF_FACTOR*(r_cov_a + <r_cov_s>)*n_hat``.
-#: When ``0.0`` (default), the anchor-node position computed by
-#: :func:`autokmc.sites.anchors._optimise_position` (already placed at
-#: ``OPT_FACTOR*(r_cov_a+r_cov_s)`` from its clique) is used directly as the
-#: restraint target — no additional lift.  This ensures the adsorbate anchor
-#: sits exactly at the anchor-site position for both slabs and nanoparticles.
-STANDOFF_FACTOR: float = 0.0
+#: This target height is measured from the surface clique, not added to the
+#: optimized anchor height.  An explicit ``0.0`` instead uses the anchor-node
+#: position from :func:`autokmc.sites.anchors._optimise_position` directly as
+#: the restraint target.
+STANDOFF_FACTOR: float = 0.90
 
 #: Default number of rigid-body rotational restarts about the local
 #: outward surface normal used by

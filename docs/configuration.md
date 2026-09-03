@@ -69,7 +69,7 @@ thresholds, remain in that channel's section.
 | `anchor_repulsion_weight` | `0.20` | Weight of the non-bonded $1/r^2$ term used while positioning anchors; zero disables it. |
 | `site_repulsion_cutoff` | `10.0` Å | Radius around the clique centroid included in the repulsion sum; `null` includes all surface atoms. |
 | `adsorbate_contact_factor` | `1.05` | Minimum rigid-body steric-contact factor: $R_\mathrm{min}=f(r_\mathrm{ads}+r_\mathrm{surface})$. |
-| `adsorbate_standoff_factor` | `0.0` | Extra adsorbate lift along the outward surface normal in summed-covalent-radius units. |
+| `adsorbate_standoff_factor` | `0.90` | Rigid-body restraint target height above the surface-clique centroid, in summed-covalent-radius units. Replaces the optimized anchor target; it is not an additional lift. Set `0.0` to use the optimized anchor target directly. |
 | `adsorbate_rotational_restarts` | `6` | Rigid-body starting orientations tried during placement; one disables multi-start. |
 | `typical_neighbor_distance` | `2.5` Å | Typical metal neighbor distance used to choose automatic anchor isomorphism depth. |
 | `adsorbate_bond_tolerance` | `0.4` Å | Tolerance for matching molecular and surface anchor-pair distances. |
