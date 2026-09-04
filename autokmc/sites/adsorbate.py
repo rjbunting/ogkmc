@@ -140,6 +140,7 @@ from autokmc.core.constants import (
     PRUNE_MAX_STEPS,
     HULL_TOL,
     KABSCH_MAX_MAPPINGS,
+    MOLECULAR_HANDEDNESS_RMSD_TOLERANCE,
 )
 
 
@@ -2029,14 +2030,16 @@ def _molecular_mapping_preserves_handedness(
     representative_positions: np.ndarray,
     mapped_positions: np.ndarray,
     *,
-    rmsd_tol: float = 1.0e-6,
+    rmsd_tol: float = MOLECULAR_HANDEDNESS_RMSD_TOLERANCE,
 ) -> bool:
     """Return whether a mapped molecular pose is proper-rotation equivalent.
 
     An improper substrate isometry is safe for a linear, planar, or achiral
     molecular mapping when the resulting atom-ordered geometry can itself be
-    superimposed on the representative by a proper rotation. It is rejected
-    when that test detects a chiral inversion.
+    superimposed on the representative by a proper rotation within
+    ``rmsd_tol``. It is rejected when that test detects a resolved chiral
+    inversion. The default 0.01 Å tolerance accommodates molecular structures
+    converged against a force threshold rather than exact symmetry constraints.
     """
     rotation, translation = _kabsch(
         np.asarray(representative_positions, dtype=float),
@@ -2146,6 +2149,7 @@ def _propagate_adsorbate_member_positions(
     mappings_tested = 0
     outward_rejections = 0
     connectivity_rejections = 0
+    handedness_rejections = 0
 
     for mapping_index, mapping in enumerate(matcher.isomorphisms_iter()):
         if mapping_index >= mapping_limit:
@@ -2191,11 +2195,20 @@ def _propagate_adsorbate_member_positions(
                     rotation,
                     np.zeros(3, dtype=float),
                 )
+                # A molecular graph automorphism need not be an exact
+                # geometric symmetry after finite-tolerance relaxation.
+                # Also test the reflection without atom relabeling, so a
+                # planar molecule's slightly unequal equivalent bonds do
+                # not look like chiral inversion. Retain the mapped test
+                # for nonplanar achiral molecular symmetries.
                 if not _molecular_mapping_preserves_handedness(
                     reference_positions,
                     mapped_reference,
+                ) and not _molecular_mapping_preserves_handedness(
+                    reference_positions,
+                    reference_positions @ rotation.T,
                 ):
-                    connectivity_rejections += 1
+                    handedness_rejections += 1
                     continue
             if not np.isfinite(candidate).all():
                 connectivity_rejections += 1
@@ -2226,6 +2239,7 @@ def _propagate_adsorbate_member_positions(
         "no valid decorated adsorption mapping found "
         f"(tested={mappings_tested}, limit={mapping_limit}, "
         f"outward_rejections={outward_rejections}, "
+        f"handedness_rejections={handedness_rejections}, "
         f"connectivity_rejections={connectivity_rejections})"
     )
 
@@ -4031,7 +4045,7 @@ def optimise_adsorbate_site_positions(
                         raise RuntimeError(
                             "optimise_adsorbate_site_positions: decorated "
                             f"propagation failed for iso-class {ms.iso_class}, "
-                            f"member {m_idx}"
+                            f"member {m_idx}: {exc}"
                         ) from exc
                     pending_positions.append(member_pos)
             for member_index, member_pos in enumerate(pending_positions):

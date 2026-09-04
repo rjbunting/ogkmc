@@ -184,6 +184,13 @@ RAYCAST_N_DISC_SAMPLE: int = 10
 #: still bounding pathological complete-graph blow-ups.
 KABSCH_MAX_MAPPINGS: int = 6969
 
+#: RMSD tolerance (Å) for deciding whether an improper substrate mapping can
+#: be represented by a proper rotation of the molecule.  Molecular geometries
+#: are force-converged rather than algebraically symmetrized, so symmetry-
+#: equivalent atoms can differ at the sub-hundredth-angstrom scale without
+#: representing a resolved chiral inversion.
+MOLECULAR_HANDEDNESS_RMSD_TOLERANCE: float = 1.0e-2
+
 # ---------------------------------------------------------------------------
 # Persistence / CLI / output (consumed by autokmc.io + autokmc.cli)
 # ---------------------------------------------------------------------------

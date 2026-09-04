@@ -340,6 +340,105 @@ def test_reflected_mapping_accepts_achiral_geometry_but_rejects_chiral_inversion
     )
 
 
+def test_handedness_default_tolerates_optimisation_scale_asymmetry():
+    """A small distortion of achiral benzene is below the 0.01 A resolution."""
+    reactant = build_reactant(
+        "C1=CC=CC=C1",
+        add_hydrogens=True,
+        relax=False,
+    )
+    positions = np.asarray(reactant.atoms.positions, dtype=float).copy()
+    _left, _singular_values, right_transpose = np.linalg.svd(
+        positions - positions.mean(axis=0),
+        full_matrices=False,
+    )
+    positions[-1] += 0.005 * right_transpose[-1]
+    reflected = positions * np.array([-1.0, 1.0, 1.0])
+
+    assert not _molecular_mapping_preserves_handedness(
+        positions,
+        reflected,
+        rmsd_tol=1.0e-3,
+    )
+    assert _molecular_mapping_preserves_handedness(positions, reflected)
+
+
+@pytest.mark.parametrize(
+    "smiles",
+    [
+        "[C@H](F)(Cl)Br",
+        "C[C@H](O)C(=O)O",
+        "N[C@@H](C)C(=O)O",
+        "N[C@@H](CO)C(=O)O",
+    ],
+    ids=["bromochlorofluoromethane", "lactic-acid", "alanine", "serine"],
+)
+def test_handedness_default_rejects_resolved_chiral_molecules(smiles):
+    reactant = build_reactant(smiles, add_hydrogens=True, relax=False)
+    positions = np.asarray(reactant.atoms.positions, dtype=float)
+    reflection = np.diag([-1.0, 1.0, 1.0])
+    node_match = nx.algorithms.isomorphism.categorical_node_match(
+        "element",
+        "X",
+    )
+    automorphisms = nx.algorithms.isomorphism.GraphMatcher(
+        reactant.graph,
+        reactant.graph,
+        node_match=node_match,
+    ).isomorphisms_iter()
+
+    n_tested = 0
+    for atom_mapping in automorphisms:
+        decorated_mapping = {
+            ("adsorbate", int(source)): ("adsorbate", int(destination))
+            for source, destination in atom_mapping.items()
+        }
+        reflected = _mapped_adsorbate_positions(
+            positions,
+            decorated_mapping,
+            reflection,
+            np.zeros(3),
+        )
+        assert not _molecular_mapping_preserves_handedness(positions, reflected)
+        # These ordinary tetrahedral stereocentres remain well outside even a
+        # deliberately much looser tolerance than the 0.01 A package default.
+        assert not _molecular_mapping_preserves_handedness(
+            positions,
+            reflected,
+            rmsd_tol=0.1,
+        )
+        n_tested += 1
+    assert n_tested > 0
+
+
+def test_handedness_default_defines_near_planar_resolution():
+    def weakly_pyramidal(height):
+        return np.array([
+            [0.1, 0.2, height],
+            [1.0, 0.0, 0.0],
+            [-0.3, 1.4, 0.0],
+            [-1.0, -0.7, 0.0],
+        ])
+
+    below_resolution = weakly_pyramidal(0.01)
+    resolved = weakly_pyramidal(0.02)
+    reflection = np.array([-1.0, 1.0, 1.0])
+
+    assert _molecular_mapping_preserves_handedness(
+        below_resolution,
+        below_resolution * reflection,
+    )
+    assert not _molecular_mapping_preserves_handedness(
+        below_resolution,
+        below_resolution * reflection,
+        rmsd_tol=1.0e-3,
+    )
+    assert not _molecular_mapping_preserves_handedness(
+        resolved,
+        resolved * reflection,
+    )
+
+
 def test_decorated_propagation_fails_closed_for_nonisomorphic_members():
     graph = nx.Graph()
     graph.graph["cell"] = np.eye(3) * 20.0
@@ -371,6 +470,58 @@ def test_decorated_propagation_fails_closed_for_nonisomorphic_members():
             reactant,
             n_shells=0,
         )
+
+
+def test_reflected_o3_propagation_accepts_unequal_terminal_bonds():
+    """A relaxed planar O3 must survive a reflected, end-swapping site map."""
+    from ase.build import fcc111
+    from autokmc.core.graph import build_graph
+    from autokmc.sites.adsorbate import _geometry_connectivity_mismatch_for_cliques
+    from autokmc.species.reactant import Reactant
+
+    slab = fcc111("Pd", size=(5, 5, 4), a=3.89, vacuum=8.0)
+    slab.arrays["surface"] = np.where(slab.get_tags() == 1, 1, 0)
+    graph = build_graph(slab)
+    center, upper, lower, far_upper = 87, 92, 83, 96
+    representative_cliques = [
+        frozenset({center, upper}), None, frozenset({center, lower}),
+    ]
+    member_cliques = [
+        frozenset({center, upper}), None, frozenset({upper, far_upper}),
+    ]
+    # From the calculator-free representative of an O2+O UMA relaxation.
+    # The two O-O bonds differ by ~0.00036 A at the requested force tolerance.
+    relative_positions = np.array([
+        [0.68766126, 1.11338971, 1.84499996],
+        [1.30413267, 0.00021096, 2.09205529],
+        [0.68766138, -1.11339021, 1.84499967],
+    ])
+    atoms = Atoms("O3", positions=relative_positions)
+    atoms.arrays["surface"] = np.full(3, 2)
+    reactant = Reactant("[O]O[O]", atoms, build_graph(atoms))
+    representative_positions = relative_positions + slab.positions[center]
+    assert _geometry_connectivity_mismatch_for_cliques(
+        graph, representative_cliques, reactant, representative_positions,
+    ) is None
+
+    member_positions = _propagate_adsorbate_member_positions(
+        graph, representative_cliques, member_cliques,
+        representative_positions, reactant, n_shells=1,
+    )
+
+    assert _adsorbate_pose_is_outward(
+        graph, member_cliques, member_positions, graph.graph["pbc"],
+    )
+    assert _geometry_connectivity_mismatch_for_cliques(
+        graph, member_cliques, reactant, member_positions,
+    ) is None
+    # The mapping exchanges the terminal O atoms while preserving the molecule.
+    mapped_atoms = Atoms("O3", positions=member_positions)
+    np.testing.assert_allclose(
+        mapped_atoms.get_all_distances(),
+        atoms.get_all_distances()[::-1, ::-1],
+        atol=1.0e-10,
+    )
 
 
 def test_adsorbate_runtime_geometry_parameters_reach_each_algorithm_stage(
