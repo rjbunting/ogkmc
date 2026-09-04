@@ -412,7 +412,6 @@ def _replace_cached_member_diffusion(
 def _diffusion_seed_path(
     lateral_class: DiffusionLateral,
     *,
-    n_images: int | None,
     current_member_index: int,
 ) -> tuple[list[Atoms] | None, int | None]:
     """Return a detached compatible bare band and its source member."""
@@ -437,7 +436,7 @@ def _diffusion_seed_path(
     except TypeError:
         return None, None
     if (
-        (n_images is not None and len(images) != int(n_images) + 2)
+        len(images) < 3
         or not all(isinstance(image, Atoms) for image in images)
     ):
         return None, None
@@ -586,7 +585,6 @@ def get_applicable_diffusion_for_member(
                 bare_seed_path, bare_seed_member_index = (
                     _diffusion_seed_path(
                         bare_lc,
-                        n_images=(None if image_spacing is not None else n_images),
                         current_member_index=index,
                     )
                 )
@@ -671,9 +669,6 @@ def get_applicable_diffusion_for_member(
                         bare_seed_path, bare_seed_member_index = (
                             _diffusion_seed_path(
                                 capture_lc,
-                                n_images=(
-                                    None if image_spacing is not None else n_images
-                                ),
                                 current_member_index=index,
                             )
                         )

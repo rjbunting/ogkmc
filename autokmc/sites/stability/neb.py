@@ -35,6 +35,7 @@ from autokmc.core.constants import (
     NEB_MAX_ADJACENT_IMAGE_SPACING_MULTIPLIER,
     NEB_METHOD as DEFAULT_NEB_METHOD,
     NEB_METHODS,
+    NEB_SPRING_K,
 )
 from autokmc.io.calculators import (
     CalculatorConfigError,
@@ -458,6 +459,11 @@ def project_neb_path(
     *,
     n_slab: int,
     n_lateral: int,
+    n_images: int | None = None,
+    interpolation: str = "linear",
+    frozen_indices: list[int] | None = None,
+    neb_method: str = DEFAULT_NEB_METHOD,
+    spring_k: float = NEB_SPRING_K,
 ) -> list[Atoms] | None:
     """Project a bare optimized path into a lateral endpoint pair.
 
@@ -466,8 +472,11 @@ def project_neb_path(
     first interpolated linearly with minimum-image displacements.  For each
     interior image, the source path's minimum-image displacement away from its
     own linear path is then transferred to the matching slab and reacting
-    atoms.  Lateral atoms therefore remain on the target linear path. The
-    source and target must represent the same concrete reaction member; a
+    atoms. The final source band may have been shortened by intermediate
+    refinement; its residuals are resampled to ``n_images`` interior images
+    when supplied, using minimum-image interpolation between source frames.
+    Lateral atoms follow the configured target interpolation (linear or IDPP).
+    The source and target must represent the same concrete reaction member; a
     caller must not transfer unrotated Cartesian residuals between different
     symmetry-equivalent members. The returned endpoint images are exact copies
     of ``atoms_initial`` and ``atoms_final``.
@@ -484,10 +493,12 @@ def project_neb_path(
     try:
         n_slab = int(n_slab)
         n_lateral = int(n_lateral)
+        target_n_images = len(source_images) - 2 if n_images is None else int(n_images)
     except (TypeError, ValueError, OverflowError):
         return None
     if (
         len(source_images) < 3
+        or target_n_images < 1
         or n_slab < 0
         or n_lateral < 0
         or len(atoms_initial) != len(atoms_final)
@@ -546,7 +557,6 @@ def project_neb_path(
         dtype=int,
     )
     target_common_indices = np.concatenate((np.arange(n_slab, dtype=int), target_reacting_indices))
-    source_common_indices = np.arange(n_source, dtype=int)
     if (
         not np.array_equal(target_numbers_initial, target_numbers_final)
         or not np.array_equal(
@@ -580,16 +590,24 @@ def project_neb_path(
     target_initial_positions = all_positions[-2]
     target_delta = _minimum_image(all_positions[-1] - target_initial_positions)
 
+    source_fractions = np.linspace(0.0, 1.0, len(source_images))
+    source_residuals = np.zeros((len(source_images), n_source, 3), dtype=float)
+    for index, source_image in enumerate(source_images[1:-1], start=1):
+        source_linear = source_initial_positions + source_fractions[index] * source_delta
+        source_residuals[index] = _minimum_image(source_image.positions - source_linear)
+
     projected = [atoms_initial.copy()]
-    denominator = float(len(source_images) - 1)
-    for image_index, source_image in enumerate(source_images[1:-1], start=1):
+    denominator = float(target_n_images + 1)
+    for image_index in range(1, target_n_images + 1):
         fraction = float(image_index) / denominator
         target_positions = target_initial_positions + fraction * target_delta
-        source_linear = source_initial_positions + fraction * source_delta
-        source_residual = _minimum_image(
-            np.asarray(source_image.positions, dtype=float) - source_linear
+        source_index = fraction * (len(source_images) - 1)
+        left = min(int(source_index), len(source_images) - 2)
+        weight = source_index - left
+        source_residual = source_residuals[left] + weight * _minimum_image(
+            source_residuals[left + 1] - source_residuals[left]
         )
-        target_positions[target_common_indices] += source_residual[source_common_indices]
+        target_positions[target_common_indices] += source_residual
 
         image = atoms_initial.copy()
         image.set_positions(target_positions, apply_constraint=False)
@@ -597,6 +615,25 @@ def project_neb_path(
         projected.append(image)
 
     projected.append(atoms_final.copy())
+    if n_lateral and interpolation == "idpp":
+        # Use the same interpolation and fallback as an unseeded lateral NEB.
+        # Only the neighbours take these positions; the common atoms retain
+        # the optimized bare path, and no production calculator is evaluated.
+        _, interpolated = make_neb_band(
+            atoms_initial,
+            atoms_final,
+            n_images=target_n_images,
+            interpolation=interpolation,
+            spring_k=spring_k,
+            climb=False,
+            calculator=None,
+            frozen_indices=frozen_indices,
+            neb_method=neb_method,
+        )
+        for image, baseline in zip(projected[1:-1], interpolated[1:-1]):
+            image.positions[n_slab:n_slab + n_lateral] = (
+                baseline.positions[n_slab:n_slab + n_lateral]
+            )
     for image in projected:
         image.calc = None
     return projected

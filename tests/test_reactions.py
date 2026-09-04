@@ -250,7 +250,8 @@ def _detached_seed_band() -> list[Atoms]:
     ]
 
 
-def test_diffusion_runs_missing_bare_path_before_lateral_neb(monkeypatch):
+@pytest.mark.parametrize("existing_bare", [False, True])
+def test_diffusion_runs_missing_bare_path_before_lateral_neb(monkeypatch, existing_bare):
     order = []
     bare = SimpleNamespace(
         stable=None,
@@ -258,6 +259,10 @@ def test_diffusion_runs_missing_bare_path_before_lateral_neb(monkeypatch):
         lateral_class=0,
         atoms_neb_path=None,
     )
+    if existing_bare:
+        bare.stable = True
+        bare._warm_start_neb_path = _detached_seed_band()
+        bare._warm_start_member_index = 0
     lateral = SimpleNamespace(
         stable=None,
         members=[0],
@@ -322,7 +327,8 @@ def test_diffusion_runs_missing_bare_path_before_lateral_neb(monkeypatch):
         0,
         object(),
         temperature=500.0,
-        n_images=1,
+        n_images=5,
+        image_spacing=None,
     )
 
     assert reaction is not None
@@ -332,7 +338,7 @@ def test_diffusion_runs_missing_bare_path_before_lateral_neb(monkeypatch):
     assert order == [
         "bare_lookup",
         "lateral_classify",
-        "bare_neb",
+        *([] if existing_bare else ["bare_neb"]),
         "lateral_neb",
     ]
 
@@ -834,21 +840,18 @@ def test_bare_seed_requires_explicit_same_member_provenance(seed_helper):
 
     assert seed_helper(
         lateral_class,
-        n_images=1,
         current_member_index=0,
     ) == (None, None)
 
     lateral_class._warm_start_member_index = 1
     assert seed_helper(
         lateral_class,
-        n_images=1,
         current_member_index=0,
     ) == (None, None)
 
     lateral_class._warm_start_member_index = 0
     path, source_member = seed_helper(
         lateral_class,
-        n_images=1,
         current_member_index=0,
     )
     assert path is not None
@@ -856,7 +859,8 @@ def test_bare_seed_requires_explicit_same_member_provenance(seed_helper):
     assert source_member == 0
 
 
-def test_bond_runs_missing_bare_path_before_lateral_neb(monkeypatch):
+@pytest.mark.parametrize("existing_bare", [False, True])
+def test_bond_runs_missing_bare_path_before_lateral_neb(monkeypatch, existing_bare):
     order = []
     bare = SimpleNamespace(
         stable=None,
@@ -864,6 +868,10 @@ def test_bond_runs_missing_bare_path_before_lateral_neb(monkeypatch):
         lateral_class=0,
         atoms_neb_path=None,
     )
+    if existing_bare:
+        bare.stable = True
+        bare._warm_start_neb_path = _detached_seed_band()
+        bare._warm_start_member_index = 0
     lateral = SimpleNamespace(
         stable=None,
         members=[0],
@@ -928,7 +936,8 @@ def test_bond_runs_missing_bare_path_before_lateral_neb(monkeypatch):
         0,
         object(),
         temperature=500.0,
-        n_images=1,
+        n_images=5,
+        image_spacing=None,
     )
 
     assert reaction is not None
@@ -938,6 +947,6 @@ def test_bond_runs_missing_bare_path_before_lateral_neb(monkeypatch):
     assert order == [
         "bare_lookup",
         "lateral_classify",
-        "bare_neb",
+        *([] if existing_bare else ["bare_neb"]),
         "lateral_neb",
     ]

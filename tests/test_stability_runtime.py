@@ -454,7 +454,8 @@ def test_stalled_neb_refines_only_highest_peak_segment(monkeypatch):
         ),
         verbose=False,
         not_converged_error=RuntimeError,
-        persist_path=True,
+        persist_path=False,
+        capture_path=True,
         initial_path_callback=initial_paths.append,
         band_factory=band_factory,
     )
@@ -486,6 +487,20 @@ def test_stalled_neb_refines_only_highest_peak_segment(monkeypatch):
     assert result.energy_ts == pytest.approx(1.25)
     assert result.climb_performed is True
     assert result.optimizer_steps == 9
+    assert result.path_images is not None
+    assert [image.positions[0, 0] for image in result.path_images] == pytest.approx(
+        [2.1, 3.0, 4.0, 5.1]
+    )
+    # A shorter lateral band can use the retained final segment, even with
+    # successful-run path persistence disabled.
+    lateral_initial = Atoms("OH", positions=[[8, 0, 0], [0, 0, 0]])
+    lateral_final = Atoms("OH", positions=[[9, 0, 0], [6, 0, 0]])
+    projected = neb_module.project_neb_path(
+        result.path_images, lateral_initial, lateral_final,
+        n_slab=0, n_lateral=1, n_images=1,
+    )
+    assert projected is not None
+    np.testing.assert_allclose(projected[1].positions, [[8.5, 0, 0], [2.9, 0, 0]])
 
 
 def test_stalled_neb_honors_multiple_refinement_limit(monkeypatch):
@@ -1615,7 +1630,8 @@ def test_bond_endpoint_failure_retains_last_geometry(monkeypatch):
     assert caught.value.atoms.positions[0, 0] == pytest.approx(3.0)
 
 
-def test_project_neb_path_transfers_bare_curvature_with_mic():
+@pytest.mark.parametrize("n_images", [1, 2, 3, 5])
+def test_project_neb_path_transfers_bare_curvature_with_mic(n_images):
     cell = [10.0, 10.0, 10.0]
     source_initial = Atoms(
         "CuCuH",
@@ -1676,23 +1692,137 @@ def test_project_neb_path_transfers_bare_curvature_with_mic():
         target_final,
         n_slab=2,
         n_lateral=1,
+        n_images=n_images,
     )
 
     assert projected is not None
-    assert len(projected) == 3
+    assert len(projected) == n_images + 2
     assert all(len(image) == len(target_initial) for image in projected)
     assert np.array_equal(projected[0].positions, target_initial.positions)
     assert np.array_equal(projected[-1].positions, target_final.positions)
+    for index, image in enumerate(projected[1:-1], start=1):
+        fraction = index / (n_images + 1)
+        curvature_weight = 2.0 * min(fraction, 1.0 - fraction)
+        expected = target_initial.positions + fraction * np.array(
+            [[2, 0, 0], [2, 0, 0], [2, 2, 0], [2, 0, 0]]
+        )
+        expected += curvature_weight * np.array(
+            [[0.1, 0.4, 0], [0, -0.2, 0], [0, 0, 0], [0.2, 0.6, 0]]
+        )
+        np.testing.assert_allclose(image.positions, expected, atol=1e-14)
+    assert all(image.calc is None for image in projected)
+
+
+@pytest.mark.parametrize("interpolation", ["linear", "idpp"])
+def test_project_neb_path_uses_standard_interpolation_for_neighbours(interpolation):
+    source = [
+        Atoms("CuH", positions=[[0, 0, 0], [x, bend, 2]], cell=[10, 10, 10])
+        for x, bend in [(1, 0), (2, 0.7), (3, 0)]
+    ]
+    initial = Atoms(
+        "CuOH", positions=[[0, 0, 0], [2, 1, 2], [1, 0, 2]], cell=[10, 10, 10]
+    )
+    final = initial.copy()
+    final.positions[1:] = [[1, 2, 2], [3, 0, 2]]
+    _, baseline = neb_module.make_neb_band(
+        initial, final, n_images=3, interpolation=interpolation,
+        spring_k=0.1, climb=False, calculator=None, frozen_indices=[0],
+    )
+    projected = neb_module.project_neb_path(
+        source, initial, final, n_slab=1, n_lateral=1, n_images=3,
+        interpolation=interpolation, frozen_indices=[0], spring_k=0.1,
+    )
+    assert projected is not None
+    for image, interpolated in zip(projected, baseline):
+        np.testing.assert_allclose(image.positions[1], interpolated.positions[1])
     np.testing.assert_allclose(
-        projected[1].positions,
-        [
-            [2.1, 1.4, 0.0],
-            [6.0, 0.8, 0.0],
-            [10.0, 3.0, 0.0],
-            [8.7, 1.6, 0.0],
-        ],
+        [image.positions[-1, 1] for image in projected], [0, 0.35, 0.7, 0.35, 0]
     )
     assert all(image.calc is None for image in projected)
+    if interpolation == "idpp":
+        # Ensure this geometry actually distinguishes IDPP from linear motion.
+        assert not np.allclose(baseline[2].positions[1], [1.5, 1.5, 2])
+
+
+@pytest.mark.parametrize("channel", ["diffusion", "bond"])
+@pytest.mark.parametrize("image_spacing", [None, 0.5])
+def test_lateral_stability_passes_resampled_final_bare_band_to_neb(
+    monkeypatch, channel, image_spacing,
+):
+    module = diffusion_module if channel == "diffusion" else bond_module
+    graph = nx.Graph()
+    graph.add_nodes_from((index, {"element": "H"}) for index in range(1, 5))
+    endpoints = [SimpleNamespace(member_node_ids=[nodes]) for nodes in ([1], [2], [3, 4])]
+    site = SimpleNamespace(
+        iso_class=1, reactant="[H][H]", gas_product=False,
+        template=SimpleNamespace(smiles_a="[H]", smiles_b="[H]", smiles_c="[H][H]"),
+        member_node_ids=[([1, 2], [3, 4])],
+        members=[(endpoints[0], 0, endpoints[1], 0)],
+    )
+    lateral = SimpleNamespace(n_shells=1, lateral_class=1)
+    initial = Atoms(
+        "CuOHH", positions=[[0, 0, 0], [5, 3, 2], [1, 0, 2], [1, 0.7, 2]],
+        cell=[10, 10, 10],
+    )
+    final = initial.copy()
+    final.positions[1, 1] += 1
+    final.positions[2:, 0] += 3
+    # A shortened bare band with one interior image; both lateral image-count
+    # policies below select five interior images for the full endpoint pair.
+    source = [initial[[0, 2, 3]] for _ in range(3)]
+    source[1].positions[1:, 0] += 0.5
+    source[1].positions[1:, 2] += 0.4
+    source[-1].positions[1:, 0] += 1
+    monkeypatch.setattr(module, "_member_clique_union", lambda *_args: frozenset({0}))
+    if channel == "diffusion":
+        def build(*_args, endpoint_position, **_kwargs):
+            atoms = initial if endpoint_position == "a" else final
+            return atoms.copy(), 1, 1, [2, 3], [1, 2]
+
+        monkeypatch.setattr(module, "_build_diffusion_atoms", build)
+        relax_name = "_relax_endpoint"
+        check = module.check_diffusion_stability
+    else:
+        site.member_node_ids = [([1], [2], [3, 4])]
+        site.members = [tuple(item for endpoint in endpoints for item in (endpoint, 0))]
+
+        def build(*_args, endpoint, **_kwargs):
+            atoms = initial if endpoint == "ab" else final
+            return atoms.copy(), 1, 1, [2, 3], [1, 2], {}
+
+        monkeypatch.setattr(module, "_build_bond_atoms", build)
+        monkeypatch.setattr(module, "_ordered_endpoint_nodes", lambda _graph, nodes: nodes)
+        monkeypatch.setattr(
+            module, "_select_c_to_ab_mapping",
+            lambda *_args, **_kwargs: ([3, 4], {"selected_method": "test"}),
+        )
+        relax_name = "_relax_bond_endpoint"
+        check = module.check_bond_site_stability
+    monkeypatch.setattr(module, relax_name, lambda atoms, **_kwargs: (atoms.copy(), 0.0))
+
+    class BandInspected(Exception):
+        pass
+
+    def inspect_band(atoms_a, atoms_b, **kwargs):
+        images = kwargs["initial_path"]
+        assert images is not None
+        assert kwargs["n_images"] == 5
+        assert len(images) == 7
+        assert lateral.neb_initialization == "bare_transfer"
+        np.testing.assert_array_equal(images[0].positions, atoms_a.positions)
+        np.testing.assert_array_equal(images[-1].positions, atoms_b.positions)
+        np.testing.assert_allclose(images[3].positions[1], [5, 3.5, 2])
+        np.testing.assert_allclose(images[3].positions[2:], [[2.5, 0, 2.4], [2.5, 0.7, 2.4]])
+        raise BandInspected
+
+    monkeypatch.setattr(module, "run_neb", inspect_band)
+    with pytest.raises(BandInspected):
+        check(
+            graph, site, 0, lateral, object(), n_images=5,
+            min_images=1,
+            image_spacing=image_spacing, interpolation="linear",
+            neb_seed_path=source, neb_seed_member_index=0,
+        )
 
 
 @pytest.mark.parametrize(
@@ -2553,8 +2683,9 @@ def test_adsorption_thermochemistry_failure_keeps_cached_state_retryable(
     assert lateral.energy_unoccupied == pytest.approx(-1.0)
 
 
+@pytest.mark.parametrize("capture_neb_path", [False, True])
 def test_diffusion_thermochemistry_reuses_cached_endpoints_and_neb(
-    monkeypatch,
+    monkeypatch, capture_neb_path,
 ):
     import autokmc.thermo.free_energy as free_energy_module
 
@@ -2580,6 +2711,10 @@ def test_diffusion_thermochemistry_reuses_cached_endpoints_and_neb(
             "transition": (Atoms("H2"), -1.0),
         }
     )
+    record["neb"] = {
+        "path": [Atoms("H2") for _ in range(3)],
+        "energies_ev": [0.0, 0.5, 0.0],
+    }
     writes = []
     thermo_calls = []
 
@@ -2636,6 +2771,9 @@ def test_diffusion_thermochemistry_reuses_cached_endpoints_and_neb(
         object(),
         calculation_cache_root="/tmp/test-cache",
         calculation_cache_lookup_enabled=True,
+        capture_neb_path=capture_neb_path,
+        n_images=5,
+        image_spacing=None,
         free_energy_options=_thermochemistry_options(),
         free_energy_temperature_k=650.0,
     )
@@ -2646,6 +2784,11 @@ def test_diffusion_thermochemistry_reuses_cached_endpoints_and_neb(
     assert lateral.stale_thermochemistry is None
     assert lateral.stable is True
     assert len(writes) == 1
+
+    if capture_neb_path:
+        assert len(lateral._warm_start_neb_path) == 3
+        assert lateral._warm_start_member_index == 0
+        assert lateral.atoms_neb_path is None
 
 
 def test_diffusion_thermochemistry_failure_keeps_cached_state_retryable(
@@ -2729,8 +2872,9 @@ def test_diffusion_thermochemistry_failure_keeps_cached_state_retryable(
     assert lateral.energy_ts == pytest.approx(-1.0)
 
 
+@pytest.mark.parametrize("capture_neb_path", [False, True])
 def test_bond_thermochemistry_reuses_cached_endpoints_and_neb(
-    monkeypatch,
+    monkeypatch, capture_neb_path,
 ):
     import autokmc.thermo.free_energy as free_energy_module
 
@@ -2764,6 +2908,10 @@ def test_bond_thermochemistry_reuses_cached_endpoints_and_neb(
             "transition": (Atoms("H3"), -2.0),
         }
     )
+    record["neb"] = {
+        "path": [Atoms("H3") for _ in range(3)],
+        "energies_ev": [0.0, 0.5, 0.0],
+    }
     writes = []
     thermo_calls = []
 
@@ -2832,6 +2980,9 @@ def test_bond_thermochemistry_reuses_cached_endpoints_and_neb(
         object(),
         calculation_cache_root="/tmp/test-cache",
         calculation_cache_lookup_enabled=True,
+        capture_neb_path=capture_neb_path,
+        n_images=5,
+        image_spacing=None,
         free_energy_options=_thermochemistry_options(),
         free_energy_temperature_k=600.0,
     )
@@ -2842,6 +2993,11 @@ def test_bond_thermochemistry_reuses_cached_endpoints_and_neb(
     assert lateral.stale_thermochemistry is None
     assert lateral.stable is True
     assert len(writes) == 1
+
+    if capture_neb_path:
+        assert len(lateral._warm_start_neb_path) == 3
+        assert lateral._warm_start_member_index == 0
+        assert lateral.atoms_neb_path is None
 
 
 def test_bond_thermochemistry_failure_keeps_cached_state_retryable(

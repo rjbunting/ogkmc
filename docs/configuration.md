@@ -598,6 +598,17 @@ all images. If the bare calculation fails or its band is incompatible, the
 channel uses its configured interpolation. This behavior is automatic and
 does not change the output-only `persist_neb_path` setting.
 
+The source is the final optimized band, including any shortened segment left
+by intermediate-minimum refinement. Its slab/reacting-atom displacements from
+its own straight path are transferred between the fully relaxed lateral
+endpoints. If the new band needs a different image count, these displacements
+are resampled with minimum-image interpolation instead of discarding the seed.
+Neighbouring adsorbates follow the configured linear or IDPP interpolation;
+the relaxed lateral endpoints remain fixed. Transfer requires the same concrete
+reaction member and compatible atom ordering, elements, cell, and periodicity.
+The full lateral NEB is then optimized normally, including its own intermediate
+refinement and CI-NEB stages when enabled.
+
 ## `free_energy`
 
 | Key | Default | Meaning |

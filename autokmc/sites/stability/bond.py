@@ -2558,7 +2558,7 @@ def check_bond_site_stability(
         "n_shells": int(lc.n_shells),
         "persist_neb_path": bool(persist_neb_path),
         "capture_neb_path": bool(capture_neb_path),
-        "neb_seed_policy": "auto_bare_transfer_v1",
+        "neb_seed_policy": "auto_bare_transfer_resampled_v2",
         "neb_geometry_guard": (
             None
             if image_spacing is None
@@ -2757,10 +2757,7 @@ def check_bond_site_stability(
                 if capture_neb_path:
                     cached_path = list(getattr(lc, "atoms_neb_path", None) or [])
                     cached_interior = len(cached_path) - 2
-                    compatible_count = cached_interior >= 1 and (
-                        image_spacing is not None or cached_interior == int(n_images)
-                    )
-                    if not compatible_count:
+                    if cached_interior < 1:
                         lc.stable = None
                         raise ValueError(
                             "cached bare bond result has no compatible optimized NEB path"
@@ -3157,9 +3154,12 @@ def check_bond_site_stability(
             atoms_c_opt,
             n_slab=n_slab,
             n_lateral=n_lat,
+            n_images=resolved_n_images,
+            interpolation=interpolation,
+            frozen_indices=frozen_indices,
+            neb_method=neb_method,
+            spring_k=spring_k,
         )
-        if projected_seed_path is not None and len(projected_seed_path) != resolved_n_images + 2:
-            projected_seed_path = None
     lc.neb_seed_fingerprint = seed_fingerprint
     lc.neb_initialization = (
         "bare_transfer"
