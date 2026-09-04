@@ -96,6 +96,7 @@ constants:
   # Surface-graph depth used to classify lateral adsorbate environments.
   # Zero counts only adsorbates sharing an anchor surface atom; one also counts
   # adsorbates one surface bond away, and so on.
+  # Free-energy calculations always include all occupied adsorbates.
   lateral_shells: 0
 
 
@@ -452,8 +453,9 @@ adsorption:
 # Free-energy corrections and gas-feed pressure
 # ---------------------------------------------------------------------------
 free_energy:
-  # Run vibrational and ideal-gas free-energy corrections. This is disabled in
-  # the reference file to keep an exploratory run shorter.
+  # Run vibrational and ideal-gas free-energy corrections. Surface vibrations
+  # include all occupied adsorbates together, independent of lateral_shells.
+  # This is disabled here to keep an exploratory run shorter.
   enabled: false
 
   # Feed-wide partial-pressure fallback, in bar, for reactants whose
@@ -475,6 +477,10 @@ free_energy:
 
   # Non-negative low-frequency floor in eV used by thermochemistry.
   min_frequency_ev: 0.0015
+
+  # Reject minima with imaginary modes above this magnitude in eV. Separate
+  # from the real low-frequency filter; used when free energy is enabled.
+  imaginary_mode_tolerance_ev: 0.0015
 
   # Cartesian tolerance in angstrom for molecular symmetry inference.
   symmetry_tolerance: 0.3
@@ -509,6 +515,7 @@ kmc:
   random_seed: 69
 
   # Reclassify local environments after events to capture lateral interactions.
+  # Free-energy runs always include all occupied adsorbates and refresh all rates.
   lateral_interactions: true
 
 

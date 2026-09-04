@@ -392,8 +392,11 @@ required.
 
 ### Free Energy
 
-Free-energy corrections use ASE vibrational analysis. They can be expensive,
-so it is often best to turn them on after the reaction network is behaving:
+Free-energy corrections use one coupled ASE vibrational analysis over every
+adsorbed molecule in the simulated cell, with catalyst atoms held fixed during
+the displacements. Both endpoints include the surviving surface molecules;
+transition states include all adsorbates too when TS vibrations are enabled.
+These calculations can be expensive:
 
 ```yaml
 free_energy:
@@ -403,6 +406,7 @@ free_energy:
   vibration_displacement: 0.01
   vibration_nfree: 2
   include_ts_vibrations: true
+  imaginary_mode_tolerance_ev: 0.0015
   symmetry_tolerance: 0.3
 ```
 
@@ -411,6 +415,21 @@ when free-energy corrections are disabled. A reactant-level
 `partial_pressure_bar` overrides it. Gas thermochemistry is always evaluated at
 the fixed 1-bar standard state; the resolved partial pressure instead scales
 the adsorption rate as the ideal-gas activity `p / p°`.
+
+With free energies enabled, endpoint and NEB structures contain every occupied
+adsorbate, and every event refreshes the complete reaction-rate set. Local
+`constants.lateral_shells` and `kmc.lateral_interactions` settings do not truncate
+this environment. With free energies disabled, those settings retain their
+electronic-only behavior. Old reactive-only free energies are not reused;
+compatible electronic calculations can still supply structures for a new
+vibrational calculation.
+
+Calculated vibrational spectra are also checked for stability. Minima reject
+significant imaginary modes; bond transition states require one, and diffusion
+transition structures allow at most one. The numerical-noise threshold is
+`free_energy.imaginary_mode_tolerance_ev` (default 0.0015 eV). These checks
+require vibrations to be enabled; the transition-state check also requires
+`include_ts_vibrations: true`.
 
 Gas-phase rotational symmetry numbers are inferred from the final molecular
 coordinates with pymatgen and recorded with the detected point group in the

@@ -77,7 +77,7 @@ thresholds, remain in that channel's section.
 | `raycast_coverage_threshold` | `0.7` | Required exposed ray-disc fraction for slab surface classification; must be in `[0, 1]`. |
 | `raycast_disc_samples` | `10` | Ray-disc sampling resolution per axis. |
 | `kabsch_max_mappings` | `6969` | Maximum graph automorphisms examined during local Kabsch alignment. |
-| `lateral_shells` | `0` | Surface-graph depth for lateral environments; zero requires sharing an anchor surface atom. |
+| `lateral_shells` | `0` | Surface-graph depth for electronic-only lateral environments; zero requires sharing an anchor surface atom. Free-energy calculations include all occupied adsorbates. |
 
 The three covalent-radius factors serve different purposes:
 `neighbor_list_multiplier` defines ordinary graph bonds, `co_bond_factor`
@@ -397,7 +397,7 @@ it checks the calculator.
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `smiles` | required | Input SMILES; canonicalized internally. |
-| `add_hydrogens` | `true` | Add implicit hydrogens during molecular construction. |
+| `add_hydrogens` | `true` | Add implicit hydrogens during molecular construction; the resulting atom inventory is retained during coupling, dissociation, and later network expansion. |
 | `relax_in_gas` | `true` | Relax gas geometry. If false, a finite single-point energy is still computed. |
 | `fmax` | `0.05` eV/Å | Force threshold for the optional gas-phase relaxation. |
 | `max_steps` | `500` | Optimizer step limit for the optional gas-phase relaxation. |
@@ -503,7 +503,7 @@ cache or resume contract being able to detect it.
 | `transmission_coefficient` | `1.0` | Non-negative Eyring coefficient. |
 | `log_every` | `100` | Concise KMC progress cadence; `0` disables step messages. |
 | `random_seed` | `69` | Initial random seed. Checkpoint resume restores RNG state. |
-| `lateral_interactions` | `true` | Reclassify local lateral environments after events. |
+| `lateral_interactions` | `true` | Reclassify local lateral environments after events in electronic-only runs. Free-energy runs always use all occupied adsorbates and refresh all rates. |
 
 ## `diffusion`
 
@@ -598,6 +598,9 @@ all images. If the bare calculation fails or its band is incompatible, the
 channel uses its configured interpolation. This behavior is automatic and
 does not change the output-only `persist_neb_path` setting.
 
+The bare warm-start calculation supplies electronic geometry only. The final
+occupied-surface calculation supplies all thermochemistry and KMC rates.
+
 The source is the final optimized band, including any shortened segment left
 by intermediate-minimum refinement. Its slab/reacting-atom displacements from
 its own straight path are transferred between the fully relaxed lateral
@@ -619,6 +622,7 @@ refinement and CI-NEB stages when enabled.
 | `vibration_nfree` | `2` | Must be `2` or `4`. |
 | `include_ts_vibrations` | `true` | Compute transition-state vibrations. |
 | `min_frequency_ev` | `0.0015` eV | Low-frequency floor used by thermochemistry. |
+| `imaginary_mode_tolerance_ev` | `0.0015` eV | Magnitude above which an imaginary mode counts as a vibrational instability; finite and nonnegative. Independent of the real-mode frequency filter. |
 | `symmetry_tolerance` | `0.3` Å | Cartesian tolerance used by pymatgen for molecular point-group and rotational-symmetry inference. |
 | `default_spin` | `0.0` | Gas spin fallback. |
 | `default_geometry` | `auto` | `auto`, `linear`, `nonlinear`, or `monatomic`. |
@@ -631,6 +635,22 @@ thermochemistry always uses a fixed standard-state pressure of 1 bar; the
 resolved partial pressure is applied separately to adsorption rates through
 the ideal-gas activity `p / p°`.
 
+Every surface thermochemistry calculation displaces all adsorbate atoms in the
+simulated cell together, retaining intermolecular Hessian coupling. Catalyst
+atoms are not displaced. Adsorption/desorption includes the remaining
+adsorbates in the empty endpoint; diffusion and bond reactions include all
+adsorbates at both endpoints and, when enabled, the transition state. For a
+gas-product bond endpoint, the separately relaxed remaining surface supplies
+its harmonic correction and the gas molecule supplies ideal-gas
+thermochemistry; the lifted NEB precursor is not used as an equilibrium gas
+reference.
+
+To supply those Hessians, free-energy runs also build complete occupied-surface
+endpoint/NEB structures, regardless of `constants.lateral_shells` or
+`kmc.lateral_interactions`. Each KMC event reclassifies and refreshes all active
+reaction members. The former reactive-only free-energy cache policy is
+incompatible; matching electronic structures may be reused for recalculation.
+
 Free-energy work can dominate runtime. The supplied platinum GPU examples
 disable it intentionally for network-debug runs and can be switched on for
 production thermochemistry. For multi-atom gas species, AutoKMC records the
@@ -638,6 +658,16 @@ inferred rotational symmetry number, point group, tolerance, and inference
 source in the reactant thermochemistry metadata and run manifest. Set a
 reactant-specific `symmetry_number` only when an explicit override is
 scientifically necessary.
+
+When vibrations are enabled, gas and adsorbed minima must have no imaginary
+modes above `imaginary_mode_tolerance_ev`. Bond transition states require
+exactly one significant imaginary mode. Diffusion transition structures allow
+zero or one to retain the supported endpoint-like diffusion treatment; more
+than one is rejected. Invalid surface classes retain their failure diagnostics
+and are excluded from KMC. Gas-reference instability stops preparation.
+Modes at or below the tolerance are treated as numerical noise. With
+`free_energy.enabled: false`, no vibrational stability check is performed;
+`include_ts_vibrations: false` also skips the transition-state mode check.
 
 ## `checkpoint`
 
@@ -648,7 +678,14 @@ scientifically necessary.
 | `every_n_steps` | `1` | Checkpoint cadence. |
 | `resume_from` | `null` | Checkpoint to continue. |
 
-On resume, AutoKMC first reconciles the event and trajectory files to the
+Before resume, AutoKMC verifies the checkpoint's scientific configuration and
+source fingerprint. A legacy checkpoint without that fingerprint cannot resume
+with free energies or a bond network: its vibrational acceptance and existing
+template atom inventories cannot be verified. Such runs require a fresh output
+directory with `checkpoint.resume_from` unset. This does not repair old results
+or templates in place.
+
+For a compatible resume, AutoKMC reconciles the event and trajectory files to the
 checkpoint. It atomically removes trajectory frames beyond the checkpoint step
 and rejects malformed or non-monotonic committed `kmc_step` metadata. It then
 restores the reaction-folder counters, reconstructs the cumulative summary from

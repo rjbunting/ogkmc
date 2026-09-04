@@ -80,7 +80,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from itertools import permutations, product
 from math import factorial
-from typing import TYPE_CHECKING, Any, Iterable
+from typing import TYPE_CHECKING, Any, Iterable, Mapping
 
 import networkx as nx
 from networkx.algorithms import isomorphism
@@ -296,6 +296,10 @@ class BondReactionLateral:
     direct_event_reason: str | None = None
     direct_event_certificate: dict[str, Any] | None = None
     direct_event_network_signature: str | None = None
+    #: Gas C combines a remaining-surface Hessian and isolated-gas modes.
+    #: These separate components identify the state to which each mode list
+    #: belongs; vib_indices_c refers only to the remaining surface.
+    thermochemistry_c_components: dict[str, Any] = field(default_factory=dict)
     if TYPE_CHECKING:
         _fingerprint : tuple = field(init=False, repr=False, compare=False)
         _rate_cache : dict = field(init=False, repr=False, compare=False)
@@ -395,12 +399,25 @@ def rebuild_bond_reverse_indexes(
 # Template generators
 # ---------------------------------------------------------------------------
 
+def _template_inventory_maps(atom_inventory_smiles):
+    """Keep simulated atom inventories separate from registered feed labels."""
+    inventories = {
+        _canon_smiles(label): _canon_smiles(inventory)
+        for label, inventory in (atom_inventory_smiles or {}).items()
+    }
+    aliases: dict[str, str] = {}
+    for label, inventory in inventories.items():
+        aliases.setdefault(inventory, label)
+    return inventories, aliases
+
+
 def derive_dissociation_templates(
     smiles: str | Iterable[str],
     *,
     bond_types: tuple[str, ...] = ("SINGLE", "DOUBLE", "TRIPLE"),
     include_ring_bonds: bool = False,
     add_hydrogens: bool = True,
+    atom_inventory_smiles: Mapping[str, str] | None = None,
 ) -> list[BondReactionTemplate]:
     """Generate ``(B, C) → A`` templates from each input SMILES *A*.
 
@@ -415,6 +432,10 @@ def derive_dissociation_templates(
     smiles, bond_types, include_ring_bonds, add_hydrogens
         Forwarded to :func:`autokmc.species.bond_chemistry.get_all_fragments`
         (the latter receives ``strip_dummies=True``).
+    atom_inventory_smiles
+        Registered species label to SMILES with its simulated H atoms explicit.
+        Overrides ``add_hydrogens`` for those species and reuses known labels
+        for generated fragments, preserving feed identity and gas pressure.
     """
     from autokmc.species.bond_chemistry import get_all_fragments
 
@@ -426,12 +447,13 @@ def derive_dissociation_templates(
     out: list[BondReactionTemplate] = []
     seen: set[tuple[str, str, str]] = set()
 
+    inventories, aliases = _template_inventory_maps(atom_inventory_smiles)
     for raw_a in smiles_list:
         big = _canon_smiles(raw_a)
         try:
             pairs = get_all_fragments(
-                raw_a,
-                add_hydrogens      = add_hydrogens,
+                inventories.get(big, raw_a),
+                add_hydrogens      = False if big in inventories else add_hydrogens,
                 bond_types         = bond_types,
                 include_ring_bonds = include_ring_bonds,
                 strip_dummies      = True,
@@ -446,6 +468,8 @@ def derive_dissociation_templates(
         for p in pairs:
             smi_a = _canon_smiles(p.smiles_a)
             smi_b = _canon_smiles(p.smiles_b)
+            smi_a = aliases.get(smi_a, smi_a)
+            smi_b = aliases.get(smi_b, smi_b)
             # Canonicalise unordered (smi_a, smi_b)
             ordered = tuple(sorted((smi_a, smi_b)))
             key = (ordered[0], ordered[1], big)
@@ -474,6 +498,8 @@ def derive_coupling_templates(
     *,
     include_homo: bool = True,
     include_hetero: bool = True,
+    add_hydrogens: bool = False,
+    atom_inventory_smiles: Mapping[str, str] | None = None,
 ) -> list[BondReactionTemplate]:
     """Generate ``A + B → C`` templates from every (unordered) pair.
 
@@ -492,6 +518,11 @@ def derive_coupling_templates(
     include_hetero : bool
         Include hetero-coupling pairs ``(A, B)`` with ``A != B``.
         Default ``True``.
+    add_hydrogens : bool
+        Materialize implicit H atoms before joining fragments. Default ``False``.
+    atom_inventory_smiles
+        Registered species label to SMILES with its simulated H atoms explicit.
+        Overrides ``add_hydrogens`` for those species; templates keep feed labels.
     """
     from autokmc.species.bond_chemistry import combine_fragments
 
@@ -499,6 +530,13 @@ def derive_coupling_templates(
         smiles_list = [smiles]
     else:
         smiles_list = list(smiles)
+
+    resolved = {
+        label: canonical_atom_inventory_smiles(label, add_hydrogens=add_hydrogens)
+        for label in smiles_list
+    }
+    resolved.update(atom_inventory_smiles or {})
+    inventories, aliases = _template_inventory_maps(resolved)
 
     # Canonicalise + deduplicate inputs.
     canon: list[str] = []
@@ -520,7 +558,10 @@ def derive_coupling_templates(
                 continue
             smi_a, smi_b = canon[i], canon[j]
             try:
-                products = combine_fragments(smi_a, smi_b)
+                products = combine_fragments(
+                    inventories.get(smi_a, smi_a),
+                    inventories.get(smi_b, smi_b),
+                )
             except Exception as exc:
                 _log.warning(
                     "derive_coupling_templates: combine_fragments(%r, %r) failed: %s",
@@ -529,6 +570,7 @@ def derive_coupling_templates(
                 continue
             for sp in products:
                 big = _canon_smiles(sp.smiles)
+                big = aliases.get(big, big)
                 ordered = tuple(sorted((smi_a, smi_b)))
                 key = (ordered[0], ordered[1], big)
                 if key in seen:
@@ -561,11 +603,22 @@ def derive_bond_templates(
     add_hydrogens: bool = True,
     include_homo_coupling: bool = True,
     include_hetero_coupling: bool = True,
+    atom_inventory_smiles: Mapping[str, str] | None = None,
 ) -> list[BondReactionTemplate]:
     """Convenience: union of dissociation + coupling templates.
 
     The combined list is deduplicated by ``(smiles_a, smiles_b, smiles_c)``.
+    ``atom_inventory_smiles`` preserves per-species H policies without changing
+    the labels used by existing adsorption sites and gas reservoirs.
     """
+    # Both families consume the same inventory, including when the caller
+    # supplies a generator instead of a reusable sequence.
+    smiles = [smiles] if isinstance(smiles, str) else list(smiles)
+    inventories = {
+        label: canonical_atom_inventory_smiles(label, add_hydrogens=add_hydrogens)
+        for label in smiles
+    }
+    inventories.update(atom_inventory_smiles or {})
     out: list[BondReactionTemplate] = []
     if include_dissociation:
         out.extend(derive_dissociation_templates(
@@ -573,12 +626,14 @@ def derive_bond_templates(
             bond_types         = bond_types,
             include_ring_bonds = include_ring_bonds,
             add_hydrogens      = add_hydrogens,
+            atom_inventory_smiles = inventories,
         ))
     if include_coupling:
         out.extend(derive_coupling_templates(
             smiles,
             include_homo   = include_homo_coupling,
             include_hetero = include_hetero_coupling,
+            atom_inventory_smiles = inventories,
         ))
 
     # Deduplicate by (smi_a, smi_b, smi_c) — keep first occurrence so

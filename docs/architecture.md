@@ -47,13 +47,19 @@ local recomputation, dynamic network expansion, outputs, checkpoints, and the
 canonical RNG restart state. Each result also carries run-scoped counters,
 gauges, and accumulated wall-clock timings.
 
+The KMC system retains iterable reactant inputs, including generators, before
+reading their electronic energies, free energies, partial pressures, or
+checkpoint data. All consumers therefore use the same gas reservoir.
+
 ## Graph state
 
 The live NetworkX graph contains the catalyst atoms, materialized adsorbate
 atoms, and site bookkeeping. Each concrete adsorbate placement stores its own
 occupancy. Reverse indexes then connect occupied surface cliques to the affected
 adsorption, diffusion, and bond-reaction members. After an event, the KMC engine
-uses these indexes to update only the local rate neighborhood.
+uses these indexes to update the local rate neighborhood in electronic-only
+runs. Free-energy runs refresh all active reaction members because vibrations
+include the entire occupied surface.
 
 Each adsorption, diffusion, and bond site has a persisted `site_id`, and
 `(site_id, member_index)` identifies one concrete member. These stable in-run
@@ -85,6 +91,8 @@ labelled chemical topology and geometry rather than those counters.
 Adsorption and desorption share one lateral class. A gas reactant occupies or
 vacates a concrete surface placement. Adsorption propensities are multiplied
 by the configured partial pressure in bar.
+Lateral graph matching labels the reacting molecule separately from occupied
+neighbors, so removing different molecules cannot reuse one removal energy.
 
 ### Diffusion
 
@@ -94,6 +102,8 @@ transition-state energy. CI-NEB refines that transition only when both raw
 ordinary directional barriers are at least 0.1 eV. Finally, AutoKMC derives the
 forward and reverse rates from one effective transition-state level, preserving
 energy consistency when it applies the minimum barrier floor.
+Lateral graph matching preserves the ordered A/B endpoint roles of cached
+energies; each matched member still supports both firing directions.
 
 If the ordinary band goes 100 optimizer steps without lowering its least
 energetic interior image, AutoKMC inspects the electronic-energy profile for
@@ -129,6 +139,13 @@ stability pruning runs before the one-representative-per-adsorption-triple
 prune, so a geometrically compact but unstable member cannot displace a stable
 candidate prematurely.
 
+Each feed reactant records the atom inventory selected by its
+`add_hydrogens` setting separately from its SMILES label. Initial template
+generation and later network expansion use that inventory for both coupling
+and dissociation. For example, `C=O` with implicit hydrogens added represents
+CH₂O, so coupling it with H retains all three product hydrogens. Feed labels
+and their pressure settings remain associated with the original species.
+
 Bond NEBs use the same single highest-peak segment refinement. Its final
 transition state is still reported as the barrier for the original reversible
 `A + B <=> C` event, with electronic and free energetics referenced to the
@@ -149,7 +166,19 @@ or rates are errors and are never admitted into KMC.
 When `free_energy.enabled` is true:
 
 - gas species use ideal-gas thermochemistry,
-- adsorbed endpoints use harmonic thermochemistry over reactive atoms,
+- surface endpoints and transition states use a coupled Hessian over every
+  adsorbate atom in the simulated cell; catalyst atoms are not displaced,
+- adsorption empty endpoints retain the harmonic correction of surviving
+  adsorbates, and gas-product bond endpoints add that remaining-surface
+  correction to the gas molecule's ideal-gas correction,
+- calculation structures and lateral class identities include all occupied
+  adsorbates, regardless of the local lateral-interaction controls,
+- raw vibrational spectra must have no significant imaginary modes at minima;
+  bond transition states require one, and diffusion transition states permit
+  zero or one under the endpoint-like diffusion policy. The separate
+  `imaginary_mode_tolerance_ev` controls this check before low-frequency
+  thermochemistry filtering; transition-state checks require
+  `include_ts_vibrations`,
 - diffusion and bond endpoints and transition states use their populated free
   energies when available,
 - vibration caches are separated by species, reaction class, iso-class, and

@@ -755,6 +755,11 @@ class _Validator:
             minimum=0.0,
         )
         self.number(
+            cfg.imaginary_mode_tolerance_ev,
+            "free_energy.imaginary_mode_tolerance_ev",
+            minimum=0.0,
+        )
+        self.number(
             cfg.symmetry_tolerance,
             "free_energy.symmetry_tolerance",
             strictly_positive=True,

@@ -96,6 +96,7 @@ from autokmc.species.reactant import (
     build_reactant,
 )
 from autokmc.io.calculators import CalculatorConfigError
+from autokmc.species.smiles import reactant_atom_inventory_smiles
 from autokmc.core.constants import (
     BOND_TOLERANCE,
     BOND_MAX_HOPS,
@@ -745,6 +746,11 @@ def expand_bond_sites_for_new_species(
     # Next, derive every new template that contains this species.
     new_tpls: list[BondReactionTemplate] = []
     pending_template_keys: set[tuple[str, str, str]] = set()
+    inventories = {
+        label: reactant_atom_inventory_smiles(reactant)
+        for label, reactant in reg["species"].items()
+        if reactant is not None
+    }
 
     # Begin with dissociation templates in which this species forms X and Y.
     if include_dissociation:
@@ -753,6 +759,7 @@ def expand_bond_sites_for_new_species(
             bond_types         = bond_types,
             include_ring_bonds = include_ring_bonds,
             add_hydrogens      = add_hydrogens,
+            atom_inventory_smiles = inventories,
         ):
             key = (t.smiles_a, t.smiles_b, t.smiles_c)
             if key not in reg["templates"] and key not in pending_template_keys:
@@ -776,7 +783,9 @@ def expand_bond_sites_for_new_species(
             else:
                 pair_inputs = [cs, z]
                 kwargs = dict(include_homo=False, include_hetero=True)
-            for t in derive_coupling_templates(pair_inputs, **kwargs):
+            for t in derive_coupling_templates(
+                pair_inputs, atom_inventory_smiles=inventories, **kwargs,
+            ):
                 # Keep only templates that contain the species being expanded.
                 if cs not in (t.smiles_a, t.smiles_b):
                     continue

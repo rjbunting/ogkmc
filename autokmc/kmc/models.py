@@ -484,6 +484,15 @@ class KMCSystem:
     calculator: CalculatorResource
     reactants: ReactantInput
 
+    def __post_init__(self) -> None:
+        # Gas energies, Gibbs energies, pressures, and checkpoints all read
+        # this feed. Retain a one-shot iterable before any consumer exhausts
+        # it, so every consumer sees the same species and reservoir settings.
+        if isinstance(self.reactants, Iterable) and not isinstance(
+            self.reactants, (Reactant, dict, list, tuple)
+        ):
+            object.__setattr__(self, "reactants", list(self.reactants))
+
 
 @dataclass(frozen=True)
 class KMCRunRequest:

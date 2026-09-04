@@ -27,6 +27,7 @@ from autokmc.io.config import (
     ReactantCfg,
     RunConfig,
 )
+from autokmc.io.resume_contract import make_resume_contract
 from autokmc.species.reactant import Reactant
 
 
@@ -121,7 +122,19 @@ def test_reactant_partial_pressure_uses_feed_default_unless_overridden():
 def test_resume_skips_fresh_structure_and_site_enumeration(tmp_path, monkeypatch):
     G = nx.Graph()
     reactant = Reactant("C", Atoms("C"), nx.Graph(), energy=0.0)
-    checkpoint = save_checkpoint(
+    cfg = RunConfig(
+        output=OutputCfg(
+            dir=str(tmp_path / "out"),
+            trajectory_dump_every=0,
+            calculation_cache_enabled=False,
+        ),
+        reactants=[ReactantCfg(smiles="C", add_hydrogens=False)],
+        calculator=CalculatorCfg(import_path="ase.calculators.emt.EMT"),
+        kmc=KMCCfg(n_steps=0),
+        free_energy=FreeEnergyCfg(enabled=False),
+        checkpoint=CheckpointCfg(resume_from=str(tmp_path / "checkpoint.pkl")),
+    )
+    save_checkpoint(
         tmp_path / "checkpoint.pkl",
         make_checkpoint_state(
             step=4,
@@ -133,7 +146,10 @@ def test_resume_skips_fresh_structure_and_site_enumeration(tmp_path, monkeypatch
             reactants=[reactant],
             history=[],
             reaction_counts={},
-            metadata={"run_id": "resume-test"},
+            metadata={
+                "run_id": "resume-test",
+                "resume_contract": make_resume_contract(cfg),
+            },
         ),
     )
 
@@ -183,19 +199,6 @@ def test_resume_skips_fresh_structure_and_site_enumeration(tmp_path, monkeypatch
         return original_shutdown(pool, **kwargs)
 
     monkeypatch.setattr(CalculatorPool, "shutdown", tracked_shutdown)
-    cfg = RunConfig(
-        output=OutputCfg(
-            dir=str(tmp_path / "out"),
-            trajectory_dump_every=0,
-            calculation_cache_enabled=False,
-        ),
-        reactants=[ReactantCfg(smiles="C", add_hydrogens=False)],
-        calculator=CalculatorCfg(import_path="ase.calculators.emt.EMT"),
-        kmc=KMCCfg(n_steps=0),
-        free_energy=FreeEnergyCfg(enabled=False),
-        checkpoint=CheckpointCfg(resume_from=str(checkpoint)),
-    )
-
     summary = run_from_config(cfg)
 
     assert summary["steps_executed"] == 0

@@ -56,14 +56,15 @@ Lateral ego-graph conventions
   is added as a leaf (not traversed further).  This captures the nearest
   occupied adsorbate neighbours without recursively nesting their environments.
 * **Self inclusion** — the adsorbate-site's own nodes are included as leaves
-  and stamped ``occupied=True`` in the ego-graph copy, so the isomorphism
-  match is consistent whether the site is physically occupied or not.
+  and stamped ``occupied=True`` and ``endpoint_role="site"`` in the ego-graph
+  copy, so the match is consistent whether the site is physically occupied
+  or not and cannot exchange the reaction target with a neighbouring molecule.
 
 Node-match semantics for isomorphism
 -------------------------------------
 * ``type == "surface"``   : must share ``element``.
 * ``type == "adsorbate"`` : must share ``element``, ``iso_class``, and
-  ``reactant`` (SMILES).
+  ``reactant`` (SMILES), plus the target/spectator ``endpoint_role``.
 
 Public API
 ----------
@@ -192,6 +193,7 @@ def _build_lateral_ego_graph(
     *,
     self_node_ids: frozenset | None = None,
     ignore_occupied_neighbours: bool = False,
+    include_all_occupied: bool = False,
 ) -> nx.Graph:
     """Build an n-shell ego-subgraph for lateral-interaction matching.
 
@@ -216,14 +218,17 @@ def _build_lateral_ego_graph(
     n_shells : int
         BFS depth through surface nodes.
     self_node_ids : frozenset[int] | None
-        Node ids of the adsorbate member being checked.  These are excluded
-        from the returned graph so the site does not appear in its own
-        environment.
+        Node ids of the adsorbate member being checked.  Included as occupied
+        leaves with ``endpoint_role="site"`` so the reaction target cannot
+        be matched to a neighbouring molecule.
     ignore_occupied_neighbours : bool
         When ``True``, neighbouring occupied adsorbate nodes are **not**
         collected as leaves.  Only the site's own *self_node_ids* are added.
         This collapses all members to a single "bare" lateral class (lat0),
         effectively disabling lateral interactions.  Default ``False``.
+    include_all_occupied : bool
+        Include the complete surface and every occupied molecule in the cell.
+        Overrides ``ignore_occupied_neighbours`` for whole-surface vibrations.
 
     Returns
     -------
@@ -234,7 +239,10 @@ def _build_lateral_ego_graph(
     self_ids: frozenset = frozenset(self_node_ids) if self_node_ids else frozenset()
 
     # Static surface BFS (cached, invariant during the KMC loop).
-    visited_full = _surface_bfs_shells(G, seed_clique, n_shells)
+    visited_full = (
+        frozenset(n for n, d in G.nodes(data=True) if d.get("type") == "surface")
+        if include_all_occupied else _surface_bfs_shells(G, seed_clique, n_shells)
+    )
     visited: set = set(visited_full) - self_ids
 
     # Next, collect the adsorbates attached to the local surface set.
@@ -245,6 +253,12 @@ def _build_lateral_ego_graph(
     #      their current ``occupied`` flag on G, because we are evaluating the
     #      environment *as if* this site were occupied.
     ads_leaves: set = set()
+    if include_all_occupied:
+        ads_leaves.update(
+            n for n, d in G.nodes(data=True)
+            if d.get("type") == "adsorbate" and d.get("occupied", False)
+        )
+        ads_leaves.update(n for n in self_ids if n in G)
     for n in visited:
         for nb in G.neighbors(n):
             if nb in visited:
@@ -258,12 +272,15 @@ def _build_lateral_ego_graph(
                 ads_leaves.add(nb)
 
     result = G.subgraph(visited | ads_leaves).copy()
+    result.graph["environment_scope"] = "all_occupied" if include_all_occupied else "local"
 
-    # Stamp the site's own nodes as occupied in the copy so the iso-match
-    # sees them exactly like any other occupied adsorbate leaf.
+    # Preserve the reaction target as well as the occupied configuration.
+    # Removing different molecules from the same occupied graph can have
+    # different energies, so a target must never match a spectator.
     for nid in self_ids:
         if nid in result.nodes:
             result.nodes[nid]["occupied"] = True
+            result.nodes[nid]["endpoint_role"] = "site"
 
     return result
 
@@ -281,6 +298,7 @@ def _lateral_fingerprint(g: nx.Graph) -> tuple:
     * element
     * iso_class  (adsorbate nodes only, else ``-1``)
     * reactant SMILES (adsorbate nodes only, else empty string)
+    * endpoint role (reaction target versus neighbouring adsorbate)
     * graph degree
     """
     node_sigs = tuple(sorted(
@@ -289,11 +307,15 @@ def _lateral_fingerprint(g: nx.Graph) -> tuple:
             d.get("element",   "X"),
             int(d.get("iso_class", -1)) if d.get("type") == "adsorbate" else -1,
             str(d.get("reactant",  "")) if d.get("type") == "adsorbate" else "",
+            str(d.get("endpoint_role", "")) if d.get("type") == "adsorbate" else "",
             g.degree(n),
         )
         for n, d in g.nodes(data=True)
     ))
-    return (g.number_of_nodes(), g.number_of_edges(), node_sigs)
+    return (
+        g.graph.get("environment_scope", "local"),
+        g.number_of_nodes(), g.number_of_edges(), node_sigs,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -305,7 +327,7 @@ def _lateral_node_match(d1: dict, d2: dict) -> bool:
 
     * ``type == "surface"``   → must share ``element``.
     * ``type == "adsorbate"`` → must share ``element``, ``iso_class``, and
-      ``reactant``.
+      ``reactant``, plus ``endpoint_role`` so targets cannot map to spectators.
     """
     if d1.get("type") != d2.get("type"):
         return False
@@ -315,6 +337,8 @@ def _lateral_node_match(d1: dict, d2: dict) -> bool:
         if d1.get("iso_class") != d2.get("iso_class"):
             return False
         if d1.get("reactant") != d2.get("reactant"):
+            return False
+        if d1.get("endpoint_role") != d2.get("endpoint_role"):
             return False
     return True
 
@@ -330,6 +354,7 @@ def check_adsorbate_site_lateral(
     *,
     n_shells: int | None = None,
     ignore_lateral: bool = False,
+    include_all_occupied: bool = False,
 ) -> AdsorbateSiteLateral:
     """Classify the lateral-interaction environment of one specific member.
 
@@ -366,6 +391,9 @@ def check_adsorbate_site_lateral(
         the ego-graph so every member always maps to the single "bare" lat0.
         Effectively disables lateral interactions for this site.  Default
         ``False``.
+    include_all_occupied : bool
+        Classify the whole occupied surface for free-energy calculations,
+        irrespective of ``n_shells`` or ``ignore_lateral``.
 
     Returns
     -------
@@ -426,6 +454,7 @@ def check_adsorbate_site_lateral(
     ego = _build_lateral_ego_graph(
         G, seed_clique, depth, self_node_ids=self_node_ids,
         ignore_occupied_neighbours=ignore_lateral,
+        include_all_occupied=include_all_occupied,
     )
 
     fkey = _lateral_fingerprint(ego)
@@ -449,6 +478,8 @@ def check_adsorbate_site_lateral(
 
     for lc in fp_index.get(fkey, ()):
         if lc.n_shells != depth or lc.ego_graph is None:
+            continue
+        if lc.ego_graph.graph.get("environment_scope", "local") != ego.graph["environment_scope"]:
             continue
         gm = isomorphism.GraphMatcher(
             ego, lc.ego_graph,
@@ -489,6 +520,83 @@ def check_adsorbate_site_lateral(
 # ---------------------------------------------------------------------------
 # Stability-check helpers
 # ---------------------------------------------------------------------------
+
+def _discard_lateral_calculation(lateral_class):
+    """Discard an unusable cache hydration while retaining class identity."""
+    fingerprint = getattr(lateral_class, "_fingerprint", None)
+    replacement = type(lateral_class)(
+        lateral_class=lateral_class.lateral_class,
+        ego_graph=lateral_class.ego_graph,
+        n_shells=lateral_class.n_shells,
+        members=list(lateral_class.members),
+    )
+    lateral_class.__dict__.clear()
+    lateral_class.__dict__.update(replacement.__dict__)
+    if fingerprint is not None:
+        lateral_class._fingerprint = fingerprint
+
+
+def _promote_full_occupied_lateral(site, lateral_class, graph, member_index, fingerprint):
+    """Make direct stability calls use the current complete occupied state.
+
+    A caller may supply an old local class or one from a previous occupancy.
+    Its calculated values cannot be retained when the physical state changes.
+    Reindex existing classes after promotion so future classification remains
+    consistent with the object supplied by the caller.
+    """
+    previous = lateral_class.ego_graph
+    unchanged = (
+        isinstance(previous, nx.Graph)
+        and previous.graph.get("environment_scope") == "all_occupied"
+        and set(previous) == set(graph)
+        and {frozenset(edge) for edge in previous.edges} == {
+            frozenset(edge) for edge in graph.edges
+        }
+        and fingerprint(previous) == fingerprint(graph)
+        and all(
+            previous.nodes[node].get("endpoint_role") == graph.nodes[node].get("endpoint_role")
+            and np.array_equal(
+                previous.nodes[node].get("position"), graph.nodes[node].get("position"),
+            )
+            for node in graph
+        )
+    )
+    if not unchanged:
+        replacement = type(lateral_class)(
+            lateral_class=lateral_class.lateral_class,
+            n_shells=lateral_class.n_shells,
+            members=[int(member_index)],
+        )
+        lateral_class.__dict__.clear()
+        lateral_class.__dict__.update(replacement.__dict__)
+        for index, cached_class in list(getattr(site, "_member_lc", {}).items()):
+            if cached_class is lateral_class:
+                site._member_lc.pop(index, None)
+    lateral_class.ego_graph = graph
+    classes = list(getattr(site, "lateral_classes", []))
+    if all(candidate is not lateral_class for candidate in classes):
+        lateral_class.lateral_class = len(classes)
+        classes.append(lateral_class)
+        site.lateral_classes = classes
+    fp_index: dict = {}
+    for candidate in classes:
+        if candidate.ego_graph is None:
+            continue
+        key = fingerprint(candidate.ego_graph)
+        candidate._fingerprint = key
+        fp_index.setdefault(key, []).append(candidate)
+    site._lateral_fp_index = fp_index
+
+
+def _lateral_node_order(G: nx.Graph, lateral_class, excluded) -> list[int]:
+    """Return the spectator block in the order used by every state builder."""
+    graph = lateral_class.ego_graph
+    seeds = {
+        int(node) for node, data in graph.nodes(data=True)
+        if data.get("type") == "adsorbate" and node not in excluded
+    } if graph is not None else set()
+    return sorted(_expand_to_full_placement(G, seeds) - set(excluded))
+
 
 def _expand_to_full_placement(G: nx.Graph, seed_node_ids: set[int]) -> set[int]:
     """Expand a set of adsorbate node ids to every atom in the same placement.
@@ -564,12 +672,7 @@ def _build_stability_atoms(
     )
 
     # Next, add the neighboring adsorbate atoms.
-    lat_seed: set[int] = set()
-    if lateral_class.ego_graph is not None:
-        for n, d in lateral_class.ego_graph.nodes(data=True):
-            if d.get("type") == "adsorbate" and n not in self_node_ids:
-                lat_seed.add(n)
-    lat_nodes: list[int] = sorted(_expand_to_full_placement(G, lat_seed))
+    lat_nodes = _lateral_node_order(G, lateral_class, self_node_ids)
 
     # Finally, add this adsorbate when the requested state contains it.
     self_nodes: list[int] = (
@@ -858,15 +961,16 @@ def _apply_adsorption_thermochemistry(
 
     from pathlib import Path as _Path
 
-    from autokmc.thermo.free_energy import compute_harmonic_thermo
-
-    vib_idx_occ = list(
-        range(
-            n_slab_occupied + n_lateral_occupied,
-            n_slab_occupied + n_lateral_occupied + n_self_occupied,
-        )
+    from autokmc.thermo.free_energy import (
+        VibrationalStabilityError,
+        compute_harmonic_thermo,
     )
-    vib_idx_unocc: list[int] = []
+
+    # Use one joint Hessian for every molecule present, including the
+    # spectators remaining after desorption. Their modes need not cancel
+    # when adsorption changes intermolecular forces.
+    vib_idx_occ = list(range(n_slab_occupied, len(atoms_occupied)))
+    vib_idx_unocc = list(range(n_slab_occupied, len(atoms_unoccupied)))
     cache_dir_root = (
         _Path(vib_cache_root) if vib_cache_root is not None else None
     )
@@ -888,30 +992,36 @@ def _apply_adsorption_thermochemistry(
         len(atoms_occ_vib),
         vib_idx_occ,
     )
-    occ_thermo = compute_harmonic_thermo(
-        atoms_occ_vib,
-        vib_idx_occ,
-        energy_ev=float(energy_occupied),
-        temperature_k=float(temperature_k),
-        calculator=calculator,
-        options=free_energy_options,
-        cache_dir=(str(per_lat_dir) if per_lat_dir is not None else None),
-        label="occupied",
-        drop_imaginary=True,
-    )
+    def _harm(atoms, indices, energy, label):
+        setattr(lateral_class, f"vib_indices_{label}", list(indices))
+        try:
+            return compute_harmonic_thermo(
+                atoms,
+                indices,
+                energy_ev=float(energy),
+                temperature_k=float(temperature_k),
+                calculator=calculator,
+                options=free_energy_options,
+                cache_dir=(str(per_lat_dir) if per_lat_dir is not None else None),
+                label=label,
+                drop_imaginary=True,
+                stationary_point="minimum",
+            )
+        except VibrationalStabilityError as exc:
+            setattr(lateral_class, f"imaginary_{label}_ev", list(exc.imaginary_ev))
+            lateral_class.stable = False
+            lateral_class.invalid_reason = str(exc)
+            raise SiteStabilityError(str(exc)) from exc
+
+    occ_thermo = _harm(atoms_occ_vib, vib_idx_occ, energy_occupied, "occupied")
 
     atoms_unocc_vib = atoms_unoccupied.copy()
     atoms_unocc_vib.set_constraint([])
-    unocc_thermo = compute_harmonic_thermo(
+    unocc_thermo = _harm(
         atoms_unocc_vib,
         vib_idx_unocc,
-        energy_ev=float(energy_unoccupied),
-        temperature_k=float(temperature_k),
-        calculator=calculator,
-        options=free_energy_options,
-        cache_dir=(str(per_lat_dir) if per_lat_dir is not None else None),
-        label="unoccupied",
-        drop_imaginary=True,
+        energy_unoccupied,
+        "unoccupied",
     )
 
     if occ_thermo is not None:
@@ -1110,6 +1220,15 @@ def check_site_stability(
         nid for nid in adsorbate_site.member_node_ids[member_index]
         if nid in G
     )
+    if free_energy_options is not None and getattr(free_energy_options, "enabled", False):
+        _promote_full_occupied_lateral(
+            adsorbate_site, lateral_class,
+            _build_lateral_ego_graph(
+                G, frozenset(), lateral_class.n_shells,
+                self_node_ids=self_node_ids, include_all_occupied=True,
+            ),
+            member_index, _lateral_fingerprint,
+        )
     cache_kind = "adsorption"
     cache_key: str | None = None
     cache_graph: nx.Graph | None = None
@@ -1137,7 +1256,10 @@ def check_site_stability(
         ),
     }
     if free_energy_options is not None:
+        from autokmc.thermo.free_energy import vibrational_validation_parameters
+
         cache_parameters["free_energy"] = {
+            **vibrational_validation_parameters(free_energy_options),
             "vibration_displacement": float(free_energy_options.vibration_displacement),
             "vibration_nfree": int(free_energy_options.vibration_nfree),
             "include_ts_vibrations": bool(free_energy_options.include_ts_vibrations),
@@ -1215,6 +1337,19 @@ def check_site_stability(
                 },
                 include_properties=cached.get("_cache_match") != "electronic",
             ):
+                if thermochemistry_requested and cache_n_lat_occ:
+                    spectator_nodes = _lateral_node_order(G, lateral_class, self_node_ids)
+                    try:
+                        for endpoint in (
+                            lateral_class.atoms_occupied, lateral_class.atoms_unoccupied,
+                        ):
+                            _check_intended_coordination_stable(
+                                endpoint, G, spectator_nodes, cache_n_slab_occ, 0, nl_mult,
+                                self_node_order=spectator_nodes,
+                            )
+                    except AdsorbateDissociationError:
+                        _discard_lateral_calculation(lateral_class)
+                        raise
                 electronic_only = cached.get("_cache_match") == "electronic"
                 if electronic_only and thermochemistry_requested:
                     # ``apply_cached_states`` marks the electronic states
@@ -1424,6 +1559,12 @@ def check_site_stability(
                 _check_intended_coordination_stable(
                     atoms_opt, G, self_node_ids,
                     n_slab, n_lat, nl_mult,
+                )
+            if thermochemistry_requested and n_lat:
+                spectator_nodes = _lateral_node_order(G, lateral_class, self_node_ids)
+                _check_intended_coordination_stable(
+                    atoms_opt, G, spectator_nodes, n_slab, 0, nl_mult,
+                    self_node_order=spectator_nodes,
                 )
 
             if verbose:

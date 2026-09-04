@@ -57,7 +57,7 @@ from autokmc.core.graph import build_graph
 from autokmc.core.constants import NL_MULT_DEFAULT, RANDOM_SEED
 from autokmc.io.calculators import acquire_calculator
 from autokmc.io.atoms import copy_atoms_with_results
-from autokmc.species.smiles import smiles_to_dirname
+from autokmc.species.smiles import canonical_atom_inventory_smiles, smiles_to_dirname
 from autokmc.utils.logging import get_logger
 from autokmc.utils.optimizers import (
     DEFAULT_OPTIMIZER,
@@ -154,6 +154,9 @@ class Reactant:
     #: Free-floating dict for thermochemistry metadata, including geometry,
     #: rotational-symmetry inference, spin, temperature, and pressure.
     thermo_meta  : dict                        = field(default_factory=dict)
+    #: SMILES with every simulated H explicit; preserves the feed label while
+    #: retaining its configured H policy for subsequent bond-network growth.
+    atom_inventory_smiles : str                = ""
 
 
 # ---------------------------------------------------------------------------
@@ -610,7 +613,15 @@ def build_reactant(
     # 4. Build graph
     graph = build_graph(atoms, nl_mult=nl_mult)
 
-    reactant = Reactant(smiles=smiles, atoms=atoms, graph=graph, energy=energy)
+    reactant = Reactant(
+        smiles=smiles,
+        atoms=atoms,
+        graph=graph,
+        energy=energy,
+        atom_inventory_smiles=canonical_atom_inventory_smiles(
+            smiles, add_hydrogens=add_hydrogens,
+        ),
+    )
 
     # 5. Intramolecular orbits
     reactant.unique_nodes = find_unique_atoms(reactant)

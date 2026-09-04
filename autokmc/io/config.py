@@ -422,6 +422,9 @@ class FreeEnergyCfg:
     #: pickle files.  ``None`` (default) → an ephemeral per-call dir
     #: under the OS temp area is used and removed after analysis.
     cache_dir               : str | None = None
+    #: Imaginary vibrational energies above this magnitude indicate a
+    #: genuine instability rather than numerical near-zero noise.
+    imaginary_mode_tolerance_ev : float = 0.0015
 
 
 @dataclass

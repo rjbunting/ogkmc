@@ -251,7 +251,9 @@ def _detached_seed_band() -> list[Atoms]:
 
 
 @pytest.mark.parametrize("existing_bare", [False, True])
-def test_diffusion_runs_missing_bare_path_before_lateral_neb(monkeypatch, existing_bare):
+@pytest.mark.parametrize("thermo_enabled", [False, True])
+def test_diffusion_runs_missing_bare_path_before_lateral_neb(monkeypatch, existing_bare, thermo_enabled):
+    options = SimpleNamespace(enabled=thermo_enabled)
     order = []
     bare = SimpleNamespace(
         stable=None,
@@ -287,7 +289,8 @@ def test_diffusion_runs_missing_bare_path_before_lateral_neb(monkeypatch, existi
         order.append("bare_lookup")
         return bare
 
-    def classify_lateral(*_args, **_kwargs):
+    def classify_lateral(*_args, **kwargs):
+        assert kwargs["include_all_occupied"] is thermo_enabled
         order.append("lateral_classify")
         return lateral
 
@@ -295,12 +298,14 @@ def test_diffusion_runs_missing_bare_path_before_lateral_neb(monkeypatch, existi
         if lc is bare:
             order.append("bare_neb")
             assert kwargs["capture_neb_path"] is True
+            assert kwargs["free_energy_options"] is None
             lc._warm_start_neb_path = _detached_seed_band()
             lc._warm_start_member_index = member_index
             lc.stable = True
             return 0.0, 0.2, 0.8
 
         order.append("lateral_neb")
+        assert kwargs["free_energy_options"] is options
         assert kwargs["neb_seed_member_index"] == member_index
         assert len(kwargs["neb_seed_path"]) == 3
         lc.energy_a = 0.0
@@ -329,6 +334,7 @@ def test_diffusion_runs_missing_bare_path_before_lateral_neb(monkeypatch, existi
         temperature=500.0,
         n_images=5,
         image_spacing=None,
+        free_energy_options=options,
     )
 
     assert reaction is not None
@@ -860,7 +866,9 @@ def test_bare_seed_requires_explicit_same_member_provenance(seed_helper):
 
 
 @pytest.mark.parametrize("existing_bare", [False, True])
-def test_bond_runs_missing_bare_path_before_lateral_neb(monkeypatch, existing_bare):
+@pytest.mark.parametrize("thermo_enabled", [False, True])
+def test_bond_runs_missing_bare_path_before_lateral_neb(monkeypatch, existing_bare, thermo_enabled):
+    options = SimpleNamespace(enabled=thermo_enabled)
     order = []
     bare = SimpleNamespace(
         stable=None,
@@ -896,7 +904,8 @@ def test_bond_runs_missing_bare_path_before_lateral_neb(monkeypatch, existing_ba
         order.append("bare_lookup")
         return bare
 
-    def classify_lateral(*_args, **_kwargs):
+    def classify_lateral(*_args, **kwargs):
+        assert kwargs["include_all_occupied"] is thermo_enabled
         order.append("lateral_classify")
         return lateral
 
@@ -904,12 +913,14 @@ def test_bond_runs_missing_bare_path_before_lateral_neb(monkeypatch, existing_ba
         if lc is bare:
             order.append("bare_neb")
             assert kwargs["capture_neb_path"] is True
+            assert kwargs["free_energy_options"] is None
             lc._warm_start_neb_path = _detached_seed_band()
             lc._warm_start_member_index = member_index
             lc.stable = True
             return 0.0, 0.2, 0.8
 
         order.append("lateral_neb")
+        assert kwargs["free_energy_options"] is options
         assert kwargs["neb_seed_member_index"] == member_index
         assert len(kwargs["neb_seed_path"]) == 3
         lc.energy_ab = 0.0
@@ -938,6 +949,7 @@ def test_bond_runs_missing_bare_path_before_lateral_neb(monkeypatch, existing_ba
         temperature=500.0,
         n_images=5,
         image_spacing=None,
+        free_energy_options=options,
     )
 
     assert reaction is not None

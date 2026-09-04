@@ -545,6 +545,7 @@ def test_saved_compact_checkpoint_resumes_history_from_committed_events(
     cfg = RunConfig(
         output=OutputCfg(dir=str(output_dir)),
         checkpoint=CheckpointCfg(resume_from=str(checkpoint_path)),
+        free_energy=FreeEnergyCfg(enabled=False),
     )
 
     identity = resolve_run_identity(cfg)
@@ -578,6 +579,7 @@ def test_missing_legacy_log_is_seeded_for_two_hop_compact_resume(tmp_path):
     first_cfg = RunConfig(
         output=OutputCfg(dir=str(output_dir)),
         checkpoint=CheckpointCfg(resume_from=str(legacy_checkpoint)),
+        free_energy=FreeEnergyCfg(enabled=False),
     )
 
     first_identity = resolve_run_identity(first_cfg)
@@ -623,6 +625,7 @@ def test_missing_legacy_log_is_seeded_for_two_hop_compact_resume(tmp_path):
     second_cfg = RunConfig(
         output=OutputCfg(dir=str(output_dir)),
         checkpoint=CheckpointCfg(resume_from=str(compact_checkpoint)),
+        free_energy=FreeEnergyCfg(enabled=False),
     )
 
     second_identity = resolve_run_identity(second_cfg)

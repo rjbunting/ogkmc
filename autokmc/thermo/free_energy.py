@@ -10,9 +10,8 @@ Two regimes:
   reactant, derives the Gibbs free-energy correction from
   :class:`ase.thermochemistry.IdealGasThermo` at ``(T, p)``.
 * **Surface (adsorbate / TS)** — :func:`compute_harmonic_thermo` runs
-  vibrations only on a subset of atom indices (the *reactive* species) so
-  that frozen slab atoms and frozen lateral-shell adsorbates do not enter
-  the vibrational manifold.  The Helmholtz / Gibbs correction comes from
+  vibrations jointly on all adsorbate atoms present in each state. Slab
+  atoms do not enter the vibrational manifold. The Helmholtz / Gibbs correction comes from
   :class:`ase.thermochemistry.HarmonicThermo`.
 
 Adsorption rate convention: the user-facing ``ΔG_ads`` and barrier are
@@ -60,6 +59,39 @@ _log = get_logger(__name__)
 _BAR_PA: float = 1.0e5
 _VIBRATION_LOCKS_GUARD = threading.Lock()
 _VIBRATION_THREAD_LOCKS: dict[str, tuple[threading.Lock, int]] = {}
+VIBRATIONAL_VALIDATION_VERSION = 1
+SURFACE_VIBRATION_SUBSYSTEM = "all_adsorbates_v1"
+
+
+class VibrationalStabilityError(ValueError):
+    """A calculated Hessian has the wrong number of unstable directions."""
+
+    def __init__(
+        self,
+        *,
+        label: str,
+        stationary_point: str,
+        imaginary_ev: list[float],
+        significant_imaginary_ev: list[float],
+        tolerance_ev: float,
+        expected: tuple[int, int],
+    ) -> None:
+        self.label = label
+        self.stationary_point = stationary_point
+        self.imaginary_ev = imaginary_ev
+        self.significant_imaginary_ev = significant_imaginary_ev
+        self.tolerance_ev = tolerance_ev
+        count = len(significant_imaginary_ev)
+        expected_text = (
+            str(expected[0]) if expected[0] == expected[1]
+            else f"{expected[0]} to {expected[1]}"
+        )
+        super().__init__(
+            f"{label}: {stationary_point} has {count} significant imaginary "
+            f"vibrational mode(s), expected {expected_text}; "
+            f"imaginary energies={significant_imaginary_ev!r} eV "
+            f"exceed tolerance {tolerance_ev:g} eV"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -90,11 +122,16 @@ class FreeEnergyOptions:
     include_ts_vibrations : bool
         If ``True``, run a second harmonic vibrational analysis on the
         NEB / bond TS structure (drops the principal imaginary mode).  If
-        ``False``, the TS gets only an averaged endpoint ZPE correction.
+        ``False``, the TS gets the averaged endpoint free-energy correction.
     min_frequency_ev : float
         Modes with ``|E_vib| < min_frequency_ev`` are treated as imaginary /
         spurious and dropped from the harmonic partition function.  The
         raw values are still persisted under ``imaginary_ev``.
+    imaginary_mode_tolerance_ev : float
+        Imaginary mode energies above this magnitude invalidate a minimum.
+        A bond transition state must have exactly one significant imaginary
+        mode; diffusion permits zero or one to preserve endpoint-like maxima.
+        This validation runs before the independent real-mode cutoff.
     symmetry_tolerance : float
         Cartesian tolerance in Angstrom passed to pymatgen's molecular
         point-group analyzer when the gas rotational symmetry number is not
@@ -114,11 +151,71 @@ class FreeEnergyOptions:
     default_spin            : float        = 0.0
     default_geometry        : str          = "auto"   # "auto" | "linear" | "nonlinear" | "monatomic"
     cache_dir               : str | None   = None
+    #: Modes above this imaginary-energy magnitude invalidate a minimum.
+    #: This is independent of the real-mode partition-function cutoff.
+    imaginary_mode_tolerance_ev: float     = 0.0015
 
 
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+def vibrational_validation_parameters(options: FreeEnergyOptions) -> dict[str, Any]:
+    """Fingerprint the vibrational subsystem and its acceptance policy."""
+    return {
+        "vibrational_validation_version": VIBRATIONAL_VALIDATION_VERSION,
+        "surface_vibration_subsystem": SURFACE_VIBRATION_SUBSYSTEM,
+        "imaginary_mode_tolerance_ev": float(getattr(
+            options, "imaginary_mode_tolerance_ev",
+            FreeEnergyOptions.imaginary_mode_tolerance_ev,
+        )),
+    }
+
+
+def _validate_vibrational_stability(
+    energies_ev: Sequence[complex] | Sequence[float],
+    *,
+    tolerance_ev: float,
+    stationary_point: str,
+    label: str,
+) -> None:
+    """Validate raw modes before any partition-function filtering.
+
+    A positive soft mode must never be mistaken for an imaginary mode, even
+    when ``min_frequency_ev`` excludes it from the thermochemical correction.
+    Diffusion retains its explicit endpoint-like maximum policy; only that
+    channel permits a transition-state spectrum with no unstable direction.
+    """
+    expected_by_kind = {
+        "minimum": (0, 0),
+        "transition_state": (1, 1),
+        "diffusion_transition_state": (0, 1),
+    }
+    if stationary_point not in expected_by_kind:
+        raise ValueError(f"Unknown stationary_point {stationary_point!r}")
+    tolerance = float(tolerance_ev)
+    if not np.isfinite(tolerance) or tolerance < 0.0:
+        raise ValueError("imaginary_mode_tolerance_ev must be finite and non-negative")
+    imaginary: list[float] = []
+    for energy in energies_ev:
+        value = complex(energy)
+        if not np.isfinite(value.real) or not np.isfinite(value.imag):
+            raise ValueError(f"{label}: non-finite vibrational energy {energy!r}")
+        if abs(value.imag) > abs(value.real):
+            imaginary.append(float(abs(value.imag)))
+        elif value.real < 0.0:
+            imaginary.append(float(abs(value.real)))
+    significant = [energy for energy in imaginary if energy > tolerance]
+    expected = expected_by_kind[stationary_point]
+    if not expected[0] <= len(significant) <= expected[1]:
+        raise VibrationalStabilityError(
+            label=label,
+            stationary_point=stationary_point,
+            imaginary_ev=imaginary,
+            significant_imaginary_ev=significant,
+            tolerance_ev=tolerance,
+            expected=expected,
+        )
 
 def _ensure_calc(atoms: Atoms, calculator) -> None:
     if atoms.calc is None and calculator is not None:
@@ -625,6 +722,13 @@ def compute_gas_thermo(
             ),
         )
 
+    _validate_vibrational_stability(
+        raw_energies,
+        tolerance_ev=options.imaginary_mode_tolerance_ev,
+        stationary_point="minimum",
+        label=label,
+    )
+
     # IdealGasThermo wants vibrational energies in eV (real, positive).
     # Use `real_ev` which has already been filtered by `_split_real_imag_ev`.
     # The raw `raw_energies` list
@@ -694,11 +798,13 @@ def compute_harmonic_thermo(
     cache_dir: str | Path | None = None,
     label: str = "harm",
     drop_imaginary: bool     = True,
+    stationary_point: str = "minimum",
 ) -> dict[str, Any]:
     """Compute Helmholtz/Gibbs correction via ASE :class:`HarmonicThermo`.
 
-    Only the atoms in *vib_indices* are displaced.  Frozen slab atoms and
-    frozen lateral-shell adsorbates contribute zero by construction.
+    Only the atoms in *vib_indices* are displaced. Surface callers include
+    all adsorbate atoms present in each state together, retaining couplings
+    between molecules; slab atoms contribute zero by construction.
 
     Parameters
     ----------
@@ -707,14 +813,20 @@ def compute_harmonic_thermo(
         not, the calculator is attached and used for the displaced
         single-points).
     vib_indices : iterable[int]
-        Atom indices to displace — typically the *reactive* species.
+        Atom indices to displace — all adsorbates for surface states.
     energy_ev : float
         The relaxed-structure electronic potential energy (cached on the
         lateral-class dataclass).  Used as the ZPE-anchor reference.
     drop_imaginary : bool
-        ``True`` (default) drops imaginary modes from the partition
-        function.  Set ``False`` for TS analysis where you want to keep
-        all modes (the principal imaginary mode is reported separately).
+        ``True`` (default) drops allowed imaginary modes from the partition
+        function. Validation always runs before this filtering.
+    stationary_point : str
+        ``"minimum"`` requires no significant imaginary modes;
+        ``"transition_state"`` requires exactly one. The explicit
+        ``"diffusion_transition_state"`` policy allows zero or one to
+        retain endpoint-like diffusion maxima. Significance uses
+        ``options.imaginary_mode_tolerance_ev`` independently of the
+        real-mode thermochemistry cutoff.
 
     Returns
     -------
@@ -767,6 +879,13 @@ def compute_harmonic_thermo(
             persistent_cache=(
                 cache_dir is not None or options.cache_dir is not None
             ),
+        )
+
+        _validate_vibrational_stability(
+            raw_energies,
+            tolerance_ev=options.imaginary_mode_tolerance_ev,
+            stationary_point=stationary_point,
+            label=label,
         )
 
         # HarmonicThermo wants real, positive energies in eV.
@@ -828,6 +947,7 @@ def compute_harmonic_thermo(
 
 __all__ = [
     "FreeEnergyOptions",
+    "VibrationalStabilityError",
     "compute_gas_thermo",
     "compute_harmonic_thermo",
 ]

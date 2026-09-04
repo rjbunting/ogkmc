@@ -115,7 +115,9 @@ from autokmc.sites.stability.adsorption import (
     AdsorbateDissociationError,
     OptimisationFailedError,
     _surface_bfs_shells,
-    _expand_to_full_placement,
+    _lateral_node_order,
+    _discard_lateral_calculation,
+    _promote_full_occupied_lateral,
     _check_connectivity_stable,
     _check_intended_coordination_stable,
     _bond_set,
@@ -256,7 +258,10 @@ def _bond_lateral_fingerprint(g: nx.Graph) -> tuple:
             for n, d in g.nodes(data=True)
         )
     )
-    return (g.number_of_nodes(), g.number_of_edges(), node_sigs)
+    return (
+        g.graph.get("environment_scope", "local"),
+        g.number_of_nodes(), g.number_of_edges(), node_sigs,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -274,6 +279,7 @@ def _build_bond_lateral_ego_graph(
     c_ids: frozenset,
     is_symmetric: bool,
     ignore_occupied_neighbours: bool = False,
+    include_all_occupied: bool = False,
 ) -> nx.Graph:
     """Build the lateral ego-graph for one bond-reaction triple member.
 
@@ -291,10 +297,20 @@ def _build_bond_lateral_ego_graph(
     )
     endpoint_ids: frozenset = frozenset(a_ids) | frozenset(b_ids) | frozenset(c_ids)
 
-    visited_full = _surface_bfs_shells(G, seed_clique_union, n_shells)
+    visited_full = (
+        frozenset(n for n, d in G.nodes(data=True) if d.get("type") == "surface")
+        if include_all_occupied else _surface_bfs_shells(G, seed_clique_union, n_shells)
+    )
     visited: set = set(visited_full) - endpoint_ids
 
     ads_leaves: set = set()
+    if include_all_occupied:
+        ads_leaves.update(
+            n for n, d in G.nodes(data=True)
+            if d.get("type") == "adsorbate"
+            and d.get("occupied", False)
+            and n not in endpoint_ids
+        )
     if not ignore_occupied_neighbours:
         for n in visited:
             for nb in G.neighbors(n):
@@ -307,6 +323,7 @@ def _build_bond_lateral_ego_graph(
                     ads_leaves.add(nb)
 
     result = G.subgraph(visited | ads_leaves).copy()
+    result.graph["environment_scope"] = "all_occupied" if include_all_occupied else "local"
 
     for ids, role in endpoint_lists:
         for nid in ids:
@@ -353,6 +370,7 @@ def check_bond_site_lateral(
     *,
     n_shells: int = LATERAL_SHELLS_DEFAULT,
     ignore_lateral: bool = False,
+    include_all_occupied: bool = False,
     _assign_member: bool = True,
 ) -> BondReactionLateral:
     """Classify the lateral-interaction environment of one triple member.
@@ -363,6 +381,9 @@ def check_bond_site_lateral(
     appends *member_index* to a matching :class:`BondReactionLateral`
     already on *brs* or creates a new one.  Returns the matching (or new)
     lateral class.
+
+    ``include_all_occupied=True`` includes every occupied surface molecule,
+    overriding local shells and ``ignore_lateral`` for whole-cell free energies.
 
     Raises
     ------
@@ -416,6 +437,7 @@ def check_bond_site_lateral(
         c_ids=c_ids,
         is_symmetric=bool(brs.template.is_symmetric),
         ignore_occupied_neighbours=ignore_lateral,
+        include_all_occupied=include_all_occupied,
     )
 
     fkey = _bond_lateral_fingerprint(ego)
@@ -445,6 +467,8 @@ def check_bond_site_lateral(
 
     for lc in fp_index.get(fkey, ()):
         if lc.n_shells != depth or lc.ego_graph is None:
+            continue
+        if lc.ego_graph.graph.get("environment_scope", "local") != ego.graph["environment_scope"]:
             continue
         gm = isomorphism.GraphMatcher(
             ego,
@@ -1285,12 +1309,7 @@ def _build_bond_atoms(
     )
 
     # Next, add the lateral neighbors without the three reacting placements.
-    lat_seed: set[int] = set()
-    if lc.ego_graph is not None:
-        for n, d in lc.ego_graph.nodes(data=True):
-            if d.get("type") == "adsorbate" and n not in endpoint_id_set:
-                lat_seed.add(int(n))
-    lat_nodes: list[int] = sorted(_expand_to_full_placement(G, lat_seed))
+    lat_nodes = _lateral_node_order(G, lc, endpoint_id_set)
 
     # Finally, assemble the complete structure.
     slab_lat_nodes = slab_nodes + lat_nodes
@@ -1736,6 +1755,7 @@ def _relax_bond_endpoint(
     self_groups: list[tuple[frozenset, list[int], int]],
     state_label: str,
     verbose: bool,
+    lateral_node_order: list[int] | None = None,
 ) -> tuple[Atoms, float]:
     """Relax one bond-reaction endpoint and run the standard stability checks.
 
@@ -1800,6 +1820,11 @@ def _relax_bond_endpoint(
                     lat_offset,
                     nl_mult,
                     self_node_order=self_order,
+                )
+            if lateral_node_order:
+                _check_intended_coordination_stable(
+                    atoms_opt, G, lateral_node_order, n_slab, 0, nl_mult,
+                    self_node_order=lateral_node_order,
                 )
 
             if verbose:
@@ -2019,7 +2044,10 @@ def _apply_bond_thermochemistry(
 
     from pathlib import Path as _Path
 
-    from autokmc.thermo.free_energy import compute_harmonic_thermo
+    from autokmc.thermo.free_energy import (
+        VibrationalStabilityError,
+        compute_harmonic_thermo,
+    )
 
     tpl = brs.template
     process = smiles_to_dirname(f"{tpl.smiles_a}+{tpl.smiles_b}~{tpl.smiles_c}")
@@ -2029,40 +2057,73 @@ def _apply_bond_thermochemistry(
         if cache_root is not None
         else None
     )
-    vib_indices = list(
-        range(
-            n_slab + n_lateral,
-            n_slab + n_lateral + n_reacting,
-        )
-    )
 
     def _harm(atoms, label, energy_ev):
-        return compute_harmonic_thermo(
-            atoms,
-            vib_indices,
-            energy_ev=float(energy_ev),
-            temperature_k=float(temperature_k),
-            calculator=calculator,
-            options=free_energy_options,
-            cache_dir=str(per_lat_dir) if per_lat_dir is not None else None,
-            label=label,
-            drop_imaginary=True,
-        )
+        is_ts = label == "ts"
+        vib_indices = list(range(n_slab, len(atoms)))
+        suffix = label.removeprefix("state_")
+        setattr(lc, f"vib_indices_{suffix}", vib_indices)
+        try:
+            return compute_harmonic_thermo(
+                atoms,
+                vib_indices,
+                energy_ev=float(energy_ev),
+                temperature_k=float(temperature_k),
+                calculator=calculator,
+                options=free_energy_options,
+                cache_dir=str(per_lat_dir) if per_lat_dir is not None else None,
+                label=label,
+                drop_imaginary=True,
+                stationary_point="transition_state" if is_ts else "minimum",
+            )
+        except VibrationalStabilityError as exc:
+            setattr(lc, f"imaginary_{suffix}_ev", list(exc.imaginary_ev))
+            lc.stable = False
+            lc.invalid_reason = str(exc)
+            error = BondTransitionStateInvalidError if is_ts else BondEndpointStabilityError
+            raise error(str(exc)) from exc
 
     ab_thermo = _harm(atoms_ab, "state_ab", energy_ab)
+    lc.thermochemistry_c_components = {}
     if gas_product:
         gas_reactant = brs.gas_reactant
         gas_g = float(getattr(gas_reactant, "gibbs_energy", float("nan")))
         gas_e = float(getattr(gas_reactant, "energy", float("nan")))
         if not np.isfinite(gas_g) or not np.isfinite(gas_e):
             raise ValueError(f"gas product {tpl.smiles_c!r} lacks finite free-energy data")
+        # The thermodynamic product is the separately relaxed remaining
+        # surface plus an ideal gas. The lifted precursor in atoms_c is only
+        # an NEB endpoint and is not this equilibrium reference.
+        surface_atoms = getattr(lc, "atoms_c_gas_reference", None)
+        surface_energy = getattr(lc, "energy_c_gas_reference", None)
+        if (
+            not isinstance(surface_atoms, Atoms)
+            or surface_energy is None
+            or not np.isfinite(float(surface_energy))
+        ):
+            raise ValueError("Gas-product thermochemistry requires the relaxed remaining-surface reference")
+        surface_thermo = _harm(surface_atoms, "state_c", float(surface_energy))
+        lc.thermochemistry_c_components = {
+            "remaining_surface": dict(surface_thermo, state="state_c_gas_reference"),
+            "isolated_gas": {
+                "state": "gas_molecule",
+                "vib_indices": None,
+                "g_corr_ev": gas_g - gas_e,
+                "g_total_ev": gas_g,
+                "zpe_ev": float(getattr(gas_reactant, "zpe", 0.0)),
+                "entropy_ev_per_k": float(getattr(gas_reactant, "entropy", 0.0)),
+                "frequencies_ev": list(getattr(gas_reactant, "frequencies_ev", []) or []),
+                "imaginary_ev": list(getattr(gas_reactant, "imaginary_ev", []) or []),
+            },
+        }
+        correction = surface_thermo["g_corr_ev"] + gas_g - gas_e
         c_thermo = {
-            "g_corr_ev": gas_g - gas_e,
-            "g_total_ev": float(energy_c) + gas_g - gas_e,
-            "zpe_ev": float(getattr(gas_reactant, "zpe", 0.0)),
-            "entropy_ev_per_k": float(getattr(gas_reactant, "entropy", 0.0)),
-            "frequencies_ev": list(getattr(gas_reactant, "frequencies_ev", []) or []),
-            "imaginary_ev": list(getattr(gas_reactant, "imaginary_ev", []) or []),
+            "g_corr_ev": correction,
+            "g_total_ev": float(energy_c) + correction,
+            "zpe_ev": surface_thermo["zpe_ev"] + float(getattr(gas_reactant, "zpe", 0.0)),
+            "entropy_ev_per_k": surface_thermo["entropy_ev_per_k"] + float(getattr(gas_reactant, "entropy", 0.0)),
+            "frequencies_ev": list(surface_thermo["frequencies_ev"]) + list(getattr(gas_reactant, "frequencies_ev", []) or []),
+            "imaginary_ev": list(surface_thermo["imaginary_ev"]) + list(getattr(gas_reactant, "imaginary_ev", []) or []),
         }
     else:
         c_thermo = _harm(atoms_c, "state_c", energy_c)
@@ -2071,6 +2132,7 @@ def _apply_bond_thermochemistry(
         ts_thermo = _harm(atoms_ts, "ts", energy_ts)
     else:
         average = 0.5 * (ab_thermo["g_corr_ev"] + c_thermo["g_corr_ev"])
+        lc.vib_indices_ts = []
         ts_thermo = {
             "g_corr_ev": float(average),
             "g_total_ev": float(energy_ts) + float(average),
@@ -2099,7 +2161,6 @@ def _apply_bond_thermochemistry(
             f"imaginary_{suffix}_ev",
             list(thermo["imaginary_ev"]),
         )
-        setattr(lc, f"vib_indices_{suffix}", list(vib_indices))
 
 
 def _write_bond_calculation_cache(
@@ -2130,6 +2191,7 @@ def _write_bond_calculation_cache(
             "entropy_ab",
             "frequencies_ab_ev",
             "imaginary_ab_ev",
+            "vib_indices_ab",
         )
     }
     props_c = {
@@ -2143,6 +2205,8 @@ def _write_bond_calculation_cache(
             "entropy_c",
             "frequencies_c_ev",
             "imaginary_c_ev",
+            "vib_indices_c",
+            "thermochemistry_c_components",
         )
     }
     props_ts = {
@@ -2154,6 +2218,7 @@ def _write_bond_calculation_cache(
             "entropy_ts",
             "frequencies_ts_ev",
             "imaginary_ts_ev",
+            "vib_indices_ts",
         )
     }
     public_neb_path = getattr(lc, "atoms_neb_path", None)
@@ -2192,6 +2257,7 @@ def _write_bond_calculation_cache(
     gas_surface_energy = getattr(lc, "energy_c_gas_reference", None)
     gas_reactant = getattr(brs, "gas_reactant", None)
     gas_molecule_energy = getattr(gas_reactant, "energy", None)
+    c_components = getattr(lc, "thermochemistry_c_components", {}) or {}
     if (
         gas_product
         and isinstance(gas_surface, Atoms)
@@ -2204,10 +2270,12 @@ def _write_bond_calculation_cache(
                 "state_c_gas_reference": state_payload(
                     gas_surface,
                     energy_ev=float(gas_surface_energy),
+                    properties=c_components.get("remaining_surface", {}),
                 ),
                 "gas_molecule": state_payload(
                     gas_molecule,
                     energy_ev=float(gas_molecule_energy),
+                    properties=c_components.get("isolated_gas", {}),
                 ),
             }
         )
@@ -2487,6 +2555,17 @@ def check_bond_site_stability(
     self_a = frozenset(int(n) for n in a_node_ids if n in G)
     self_b = frozenset(int(n) for n in b_node_ids if n in G)
     self_c = frozenset(int(n) for n in c_node_ids if n in G)
+    if free_energy_options is not None and getattr(free_energy_options, "enabled", False):
+        _promote_full_occupied_lateral(
+            brs, lc,
+            _build_bond_lateral_ego_graph(
+                G, clq_a | clq_b | clq_c, lc.n_shells,
+                a_ids=self_a, b_ids=self_b, c_ids=self_c,
+                is_symmetric=bool(getattr(brs.template, "is_symmetric", False)),
+                include_all_occupied=True,
+            ),
+            member_index, _bond_lateral_fingerprint,
+        )
     cache_kind = "bond"
     cache_key: str | None = None
     cache_graph: nx.Graph | None = None
@@ -2583,7 +2662,10 @@ def check_bond_site_stability(
         ),
     }
     if free_energy_options is not None:
+        from autokmc.thermo.free_energy import vibrational_validation_parameters
+
         cache_parameters["free_energy"] = {
+            **vibrational_validation_parameters(free_energy_options),
             "vibration_displacement": float(free_energy_options.vibration_displacement),
             "vibration_nfree": int(free_energy_options.vibration_nfree),
             "include_ts_vibrations": bool(free_energy_options.include_ts_vibrations),
@@ -2692,6 +2774,29 @@ def check_bond_site_stability(
                 },
                 include_properties=cached.get("_cache_match") != "electronic",
             ):
+                if thermochemistry_requested and n_lat:
+                    spectator_nodes = _lateral_node_order(G, lc, self_a | self_b | self_c)
+                    if gas_product:
+                        assert cached_gas_atoms is not None
+                        surface_c = cached_gas_atoms[0]
+                    else:
+                        surface_c = lc.atoms_c
+                    try:
+                        for endpoint in (lc.atoms_ab, surface_c):
+                            _check_intended_coordination_stable(
+                                endpoint, G, spectator_nodes, n_slab, 0, nl_mult,
+                                self_node_order=spectator_nodes,
+                            )
+                        if gas_product:
+                            _check_connectivity_stable(
+                                lc.atoms_ab[: n_slab + n_lat], surface_c,
+                                n_slab, n_lat, "endpoint_c", nl_mult,
+                                relevant_indices=set(range(n_slab, n_slab + n_lat)),
+                                n_lat=n_lat,
+                            )
+                    except (SurfaceConnectivityError, AdsorbateDissociationError):
+                        _discard_lateral_calculation(lc)
+                        raise
                 cached_refinement = getattr(
                     lc,
                     "neb_intermediate_refinement",
@@ -2895,6 +3000,10 @@ def check_bond_site_stability(
             n_react=n_react,
             G=G,
             self_groups=self_groups_ab,
+            lateral_node_order=(
+                _lateral_node_order(G, lc, self_a | self_b | self_c)
+                if thermochemistry_requested else None
+            ),
             state_label="endpoint_ab",
             verbose=verbose,
         )
@@ -2952,6 +3061,18 @@ def check_bond_site_stability(
                 )
                 E_empty = float(atoms_empty_opt.get_potential_energy())
                 atoms_empty_opt.set_pbc(atoms_empty_init.get_pbc())
+                if thermochemistry_requested and n_lat:
+                    _check_connectivity_stable(
+                        atoms_empty_init, atoms_empty_opt, n_slab, n_lat,
+                        "endpoint_c", nl_mult,
+                        relevant_indices=set(range(n_slab, n_slab + n_lat)),
+                        n_lat=n_lat,
+                    )
+                    spectator_nodes = _lateral_node_order(G, lc, self_a | self_b | self_c)
+                    _check_intended_coordination_stable(
+                        atoms_empty_opt, G, spectator_nodes, n_slab, 0, nl_mult,
+                        self_node_order=spectator_nodes,
+                    )
                 atoms_empty_opt = copy_atoms_with_results(
                     atoms_empty_opt,
                     energy=E_empty,
@@ -2963,6 +3084,14 @@ def check_bond_site_stability(
                 f"Endpoint 'endpoint_c' empty-slab relaxation failed: {exc}"
             )
             wrapped.atoms = exc.atoms
+            wrapped.state_label = "endpoint_c"
+            raise wrapped from exc
+        except (SurfaceConnectivityError, AdsorbateDissociationError) as exc:
+            lc.atoms_c = copy_atoms_with_results(atoms_empty_opt)
+            wrapped = BondEndpointStabilityError(
+                f"Endpoint 'endpoint_c' remaining surface changed topology: {exc}"
+            )
+            wrapped.atoms = lc.atoms_c
             wrapped.state_label = "endpoint_c"
             raise wrapped from exc
         E_c = E_empty + float(gas_energy)
@@ -3114,6 +3243,10 @@ def check_bond_site_stability(
                 n_react=n_react,
                 G=G,
                 self_groups=self_groups_c,
+                lateral_node_order=(
+                    _lateral_node_order(G, lc, self_a | self_b | self_c)
+                    if thermochemistry_requested else None
+                ),
                 state_label="endpoint_c",
                 verbose=verbose,
             )

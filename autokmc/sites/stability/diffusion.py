@@ -28,9 +28,9 @@ Lateral ego-graph conventions (extends :mod:`autokmc.sites.stability.adsorption`
 * **Occupied adsorbate leaves** — every occupied ``type == "adsorbate"``
   node adjacent to the BFS surface set, *excluding* the two endpoints.
 * **Endpoint inclusion** — both endpoints' atoms are added as labelled
-  leaves with ``occupied=True`` and ``endpoint_role="endpoint"``.  The
-  symmetric ``endpoint`` tag (rather than ``a`` / ``b``) ensures the
-  iso-match is symmetric under A ↔ B, as a hop is intrinsically reversible.
+  leaves with ``occupied=True`` and distinct ``endpoint_role="a"`` / ``"b"``
+  labels.  A lateral match preserves the ordering of the cached endpoint
+  energies.  Each member still supports both firing directions.
 
 NEB conventions
 ---------------
@@ -106,7 +106,9 @@ from autokmc.sites.diffusion import (
 )
 from autokmc.sites.stability.adsorption import (
     _surface_bfs_shells,
-    _expand_to_full_placement,
+    _lateral_node_order,
+    _discard_lateral_calculation,
+    _promote_full_occupied_lateral,
     _check_connectivity_stable,
     _check_intended_coordination_stable,
     _bond_set,
@@ -162,28 +164,21 @@ _log = get_logger(__name__)
 # Diffusion-specific lateral predicates
 # ---------------------------------------------------------------------------
 #
-# The adsorption helpers ``_lateral_node_match`` / ``_lateral_fingerprint``
-# do not look at ``endpoint_role``.  For diffusion we *must* preserve the
-# distinction between an endpoint adsorbate (the migrating species at A or
-# B) and a third-party occupied adsorbate that happens to share the same
-# SMILES / iso_class — otherwise two physically different lateral
-# environments (endpoint at site P with neighbour at Q vs. endpoint at Q
-# with neighbour at P) collapse into the same lateral class and we cache
-# the wrong NEB barrier against them.
-#
-# The tag is ``"endpoint"`` for both A and B, so the iso match remains
-# symmetric under A↔B (a hop is intrinsically reversible).
+# Preserve the distinction between endpoint A, endpoint B, and a third-party
+# occupied adsorbate.  The cached energy_a / energy_b belong to the member's
+# ordered endpoints; allowing an isomorphism to exchange A and B would reuse
+# an uphill barrier for a downhill hop without exchanging those energies.
 
 
 def _diffusion_lateral_node_match(d1: dict, d2: dict) -> bool:
     """Lateral-iso predicate for the diffusion ego-graph.
 
     Same as :func:`autokmc.sites.stability.adsorption._lateral_node_match` but
-    additionally requires ``endpoint_role`` and molecular ``reactant_orbit``
-    to agree on
-    adsorbate nodes so endpoints never map onto third-party neighbours of the
-    same SMILES, symmetry-equivalent atoms may be interchanged, and
-    symmetry-inequivalent atoms of the same element remain distinct.
+    additionally requires molecular ``reactant_orbit`` to agree on adsorbate
+    nodes.  Endpoint roles preserve A/B ordering and keep endpoints distinct
+    from third-party neighbours of the same SMILES; symmetry-equivalent atoms
+    may be interchanged, and symmetry-inequivalent atoms of the same element
+    remain distinct.
     """
     if d1.get("type") != d2.get("type"):
         return False
@@ -218,7 +213,10 @@ def _diffusion_lateral_fingerprint(g: nx.Graph) -> tuple:
             for n, d in g.nodes(data=True)
         )
     )
-    return (g.number_of_nodes(), g.number_of_edges(), node_sigs)
+    return (
+        g.graph.get("environment_scope", "local"),
+        g.number_of_nodes(), g.number_of_edges(), node_sigs,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -271,13 +269,14 @@ def _build_diffusion_lateral_ego_graph(
     endpoint_a_ids: frozenset,
     endpoint_b_ids: frozenset,
     ignore_occupied_neighbours: bool = False,
+    include_all_occupied: bool = False,
 ) -> nx.Graph:
     """Build the lateral ego-graph for a diffusion pair.
 
     Mirrors :func:`autokmc.sites.stability.adsorption._build_lateral_ego_graph`
     but seeds the surface BFS from the *union* of both endpoints' bonded
     cliques and treats both endpoints as labelled occupied leaves with a
-    symmetric ``endpoint_role="endpoint"`` tag.
+    distinct ``endpoint_role="a"`` or ``"b"`` tag.
 
     Parameters
     ----------
@@ -294,21 +293,30 @@ def _build_diffusion_lateral_ego_graph(
     ignore_occupied_neighbours : bool
         When ``True``, third-party occupied adsorbate neighbours are **not**
         collected as leaves (endpoints are still added with their role tag).
-        This collapses all members to a single "bare" lateral class,
-        effectively disabling lateral interactions for diffusion.
+        Members with equivalent ordered endpoints share a "bare" lateral
+        class, effectively disabling lateral interactions for diffusion.
         Default ``False``.
     """
     endpoint_ids: frozenset = frozenset(endpoint_a_ids) | frozenset(endpoint_b_ids)
 
     # Static surface BFS (cached on G.graph["_surface_shells_cache"]).
-    visited_full = _surface_bfs_shells(G, seed_clique_union, n_shells)
+    visited_full = (
+        frozenset(n for n, d in G.nodes(data=True) if d.get("type") == "surface")
+        if include_all_occupied else _surface_bfs_shells(G, seed_clique_union, n_shells)
+    )
     visited: set = set(visited_full) - endpoint_ids
 
     # Collect *other* occupied adsorbate leaves adjacent to the BFS set;
-    # endpoints are added explicitly afterwards so we can stamp them with
-    # the symmetric endpoint_role label (preventing them from being
-    # mistaken for third-party occupied adsorbates of the same SMILES).
+    # endpoints are added explicitly afterwards with roles that preserve
+    # their A/B ordering and distinguish them from occupied spectators.
     ads_leaves: set = set()
+    if include_all_occupied:
+        ads_leaves.update(
+            n for n, d in G.nodes(data=True)
+            if d.get("type") == "adsorbate"
+            and d.get("occupied", False)
+            and n not in endpoint_ids
+        )
     if not ignore_occupied_neighbours:
         for n in visited:
             for nb in G.neighbors(n):
@@ -321,11 +329,13 @@ def _build_diffusion_lateral_ego_graph(
                     ads_leaves.add(nb)
 
     result = G.subgraph(visited | ads_leaves).copy()
+    result.graph["environment_scope"] = "all_occupied" if include_all_occupied else "local"
 
     for nid in endpoint_ids:
         if nid not in G:
             continue
         d = G.nodes[nid]
+        role = "a" if nid in endpoint_a_ids else "b"
         if nid not in result:
             result.add_node(
                 nid,
@@ -336,11 +346,11 @@ def _build_diffusion_lateral_ego_graph(
                 reactant_index=int(d.get("reactant_index", -1)),
                 reactant_orbit=_reactant_orbit_label(d),
                 occupied=True,
-                endpoint_role="endpoint",
+                endpoint_role=role,
             )
         else:
             result.nodes[nid]["occupied"] = True
-            result.nodes[nid]["endpoint_role"] = "endpoint"
+            result.nodes[nid]["endpoint_role"] = role
         for sib in d.get("siblings", ()):
             sib = int(sib)
             if sib in result and not result.has_edge(nid, sib):
@@ -366,6 +376,7 @@ def check_diffusion_site_lateral(
     *,
     n_shells: int | None = None,
     ignore_lateral: bool = False,
+    include_all_occupied: bool = False,
     _assign_member: bool = True,
 ) -> DiffusionLateral:
     """Classify the lateral-interaction environment of one hop-pair member.
@@ -385,9 +396,12 @@ def check_diffusion_site_lateral(
         BFS depth.  ``None`` (default) → :data:`LATERAL_SHELLS_DEFAULT`.
     ignore_lateral : bool
         When ``True``, third-party occupied adsorbate neighbours are excluded
-        from the ego-graph so every member always maps to the single bare
-        lat0.  Effectively disables lateral interactions for diffusion.
-        Default ``False``.
+        from the ego-graph.  Members share a bare class when their ordered
+        A/B environments are equivalent.  Effectively disables lateral
+        interactions for diffusion.  Default ``False``.
+    include_all_occupied : bool
+        Classify the complete occupied surface, overriding local-shell and
+        ignored-neighbour approximations for free-energy calculations.
 
     Raises
     ------
@@ -429,6 +443,7 @@ def check_diffusion_site_lateral(
         endpoint_a_ids=endpoint_a_ids,
         endpoint_b_ids=endpoint_b_ids,
         ignore_occupied_neighbours=ignore_lateral,
+        include_all_occupied=include_all_occupied,
     )
 
     fkey = _diffusion_lateral_fingerprint(ego)
@@ -452,6 +467,8 @@ def check_diffusion_site_lateral(
 
     for lc in fp_index.get(fkey, ()):
         if lc.n_shells != depth or lc.ego_graph is None:
+            continue
+        if lc.ego_graph.graph.get("environment_scope", "local") != ego.graph["environment_scope"]:
             continue
         gm = isomorphism.GraphMatcher(
             ego,
@@ -604,12 +621,7 @@ def _build_diffusion_atoms(
     )
 
     # Next, add the lateral neighbors without either endpoint.
-    lat_seed: set[int] = set()
-    if lateral_class.ego_graph is not None:
-        for n, d in lateral_class.ego_graph.nodes(data=True):
-            if d.get("type") == "adsorbate" and n not in endpoint_id_set:
-                lat_seed.add(int(n))
-    lat_nodes: list[int] = sorted(_expand_to_full_placement(G, lat_seed))
+    lat_nodes = _lateral_node_order(G, lateral_class, endpoint_id_set)
 
     # Then add the migrating molecule at the selected endpoint.
     chosen_nodes = a_ordered if endpoint_position == "a" else b_ordered
@@ -692,6 +704,7 @@ def _relax_endpoint(
     self_node_order: list[int] | None,
     state_label: str,
     verbose: bool,
+    lateral_node_order: list[int] | None = None,
 ) -> tuple[Atoms, float]:
     """Relax one endpoint and run the standard stability checks.
 
@@ -755,6 +768,11 @@ def _relax_endpoint(
                 nl_mult,
                 self_node_order=self_node_order,
             )
+            if lateral_node_order:
+                _check_intended_coordination_stable(
+                    atoms_opt, G, lateral_node_order, n_slab, 0, nl_mult,
+                    self_node_order=lateral_node_order,
+                )
 
             if verbose:
                 print(f"  [{state_label}] E={energy:.4f} eV  max|F|={max_force:.4f} eV/Å  stable")
@@ -898,14 +916,11 @@ def _apply_diffusion_thermochemistry(
 
     from pathlib import Path as _Path
 
-    from autokmc.thermo.free_energy import compute_harmonic_thermo
-
-    vib_indices = list(
-        range(
-            n_slab + n_lateral,
-            n_slab + n_lateral + n_migrating,
-        )
+    from autokmc.thermo.free_energy import (
+        VibrationalStabilityError,
+        compute_harmonic_thermo,
     )
+
     cache_dir_root = _Path(vib_cache_root) if vib_cache_root is not None else None
     per_lat_dir = (
         cache_dir_root
@@ -916,17 +931,31 @@ def _apply_diffusion_thermochemistry(
     )
 
     def _harm(atoms, label, energy_ev, drop_imag):
-        return compute_harmonic_thermo(
-            atoms,
-            vib_indices,
-            energy_ev=float(energy_ev),
-            temperature_k=float(temperature_k),
-            calculator=calculator,
-            options=free_energy_options,
-            cache_dir=(str(per_lat_dir) if per_lat_dir is not None else None),
-            label=label,
-            drop_imaginary=drop_imag,
-        )
+        is_ts = label == "ts"
+        vib_indices = list(range(n_slab, len(atoms)))
+        suffix = label.removeprefix("state_")
+        setattr(lateral_class, f"vib_indices_{suffix}", vib_indices)
+        try:
+            return compute_harmonic_thermo(
+                atoms,
+                vib_indices,
+                energy_ev=float(energy_ev),
+                temperature_k=float(temperature_k),
+                calculator=calculator,
+                options=free_energy_options,
+                cache_dir=(str(per_lat_dir) if per_lat_dir is not None else None),
+                label=label,
+                drop_imaginary=drop_imag,
+                stationary_point=(
+                    "diffusion_transition_state" if is_ts else "minimum"
+                ),
+            )
+        except VibrationalStabilityError as exc:
+            setattr(lateral_class, f"imaginary_{suffix}_ev", list(exc.imaginary_ev))
+            lateral_class.stable = False
+            lateral_class.invalid_reason = str(exc)
+            error = TransitionStateInvalidError if is_ts else EndpointStabilityError
+            raise error(str(exc)) from exc
 
     a_thermo = _harm(atoms_a, "state_a", energy_a, True)
     b_thermo = _harm(atoms_b, "state_b", energy_b, True)
@@ -934,6 +963,7 @@ def _apply_diffusion_thermochemistry(
         ts_thermo = _harm(atoms_ts, "ts", energy_ts, True)
     else:
         ts_thermo = None
+        lateral_class.vib_indices_ts = []
 
     if a_thermo is not None:
         lateral_class.g_correction_a = a_thermo["g_corr_ev"]
@@ -988,6 +1018,7 @@ def _write_diffusion_calculation_cache(
             "entropy_a",
             "frequencies_a_ev",
             "imaginary_a_ev",
+            "vib_indices_a",
         )
     }
     props_b = {
@@ -999,6 +1030,7 @@ def _write_diffusion_calculation_cache(
             "entropy_b",
             "frequencies_b_ev",
             "imaginary_b_ev",
+            "vib_indices_b",
         )
     }
     props_ts = {
@@ -1010,6 +1042,7 @@ def _write_diffusion_calculation_cache(
             "entropy_ts",
             "frequencies_ts_ev",
             "imaginary_ts_ev",
+            "vib_indices_ts",
         )
     }
     public_neb_path = getattr(lateral_class, "atoms_neb_path", None)
@@ -1317,6 +1350,16 @@ def check_diffusion_stability(
 
     self_a = frozenset(int(n) for n in a_node_ids if n in G)
     self_b = frozenset(int(n) for n in b_node_ids if n in G)
+    if free_energy_options is not None and getattr(free_energy_options, "enabled", False):
+        _promote_full_occupied_lateral(
+            diffusion_site, lateral_class,
+            _build_diffusion_lateral_ego_graph(
+                G, clq_a | clq_b, lateral_class.n_shells,
+                endpoint_a_ids=self_a, endpoint_b_ids=self_b,
+                include_all_occupied=True,
+            ),
+            member_index, _diffusion_lateral_fingerprint,
+        )
     cache_kind = "diffusion"
     cache_key: str | None = None
     cache_graph: nx.Graph | None = None
@@ -1406,7 +1449,10 @@ def check_diffusion_stability(
         ),
     }
     if free_energy_options is not None:
+        from autokmc.thermo.free_energy import vibrational_validation_parameters
+
         cache_parameters["free_energy"] = {
+            **vibrational_validation_parameters(free_energy_options),
             "vibration_displacement": float(free_energy_options.vibration_displacement),
             "vibration_nfree": int(free_energy_options.vibration_nfree),
             "include_ts_vibrations": bool(free_energy_options.include_ts_vibrations),
@@ -1494,6 +1540,17 @@ def check_diffusion_stability(
                 },
                 include_properties=cached.get("_cache_match") != "electronic",
             ):
+                if thermochemistry_requested and n_lat:
+                    spectator_nodes = _lateral_node_order(G, lateral_class, self_a | self_b)
+                    try:
+                        for endpoint in (lateral_class.atoms_a, lateral_class.atoms_b):
+                            _check_intended_coordination_stable(
+                                endpoint, G, spectator_nodes, n_slab, 0, nl_mult,
+                                self_node_order=spectator_nodes,
+                            )
+                    except AdsorbateDissociationError:
+                        _discard_lateral_calculation(lateral_class)
+                        raise
                 cached_refinement = getattr(
                     lateral_class,
                     "neb_intermediate_refinement",
@@ -1684,6 +1741,10 @@ def check_diffusion_stability(
             G=G,
             self_node_ids=self_a,
             self_node_order=mig_node_order_a,
+            lateral_node_order=(
+                _lateral_node_order(G, lateral_class, self_a | self_b)
+                if thermochemistry_requested else None
+            ),
             state_label="endpoint_a",
             verbose=verbose,
         )
@@ -1732,6 +1793,10 @@ def check_diffusion_stability(
             G=G,
             self_node_ids=self_b,
             self_node_order=mig_node_order_b,
+            lateral_node_order=(
+                _lateral_node_order(G, lateral_class, self_a | self_b)
+                if thermochemistry_requested else None
+            ),
             state_label="endpoint_b",
             verbose=verbose,
         )

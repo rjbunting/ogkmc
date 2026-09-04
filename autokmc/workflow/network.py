@@ -9,7 +9,10 @@ from typing import TYPE_CHECKING, Any
 import networkx as nx
 
 from autokmc.core.graph_state import set_bond_reaction_sites
-from autokmc.species.smiles import canonical_atom_inventory_smiles
+from autokmc.species.smiles import (
+    canonical_atom_inventory_smiles,
+    reactant_atom_inventory_smiles,
+)
 from autokmc.workflow.models import PreparedNetwork, RunIdentity, ThermoRuntime
 from autokmc.workflow.stages import (
     configured_adsorbate_site_kwargs,
@@ -24,7 +27,12 @@ def derive_configured_bond_templates(reactant_configs, reactants, bond_cfg):
     """Derive templates while preserving each feed reactant's H policy."""
     from autokmc.reactions.templates import derive_bond_templates
 
+    reactants = list(reactants)
     reactant_smiles = [reactant.smiles for reactant in reactants]
+    inventories = {
+        reactant.smiles: reactant_atom_inventory_smiles(reactant)
+        for reactant in reactants
+    }
     templates = []
     if bond_cfg.include_dissociation:
         for reactant_cfg, reactant in zip(reactant_configs, reactants):
@@ -36,6 +44,7 @@ def derive_configured_bond_templates(reactant_configs, reactants, bond_cfg):
                     bond_types=tuple(bond_cfg.bond_types),
                     include_ring_bonds=bond_cfg.include_ring_bonds,
                     add_hydrogens=reactant_cfg.add_hydrogens,
+                    atom_inventory_smiles=inventories,
                 )
             )
     if bond_cfg.include_coupling:
@@ -45,6 +54,7 @@ def derive_configured_bond_templates(reactant_configs, reactants, bond_cfg):
                 include_dissociation=False,
                 include_coupling=True,
                 include_homo_coupling=bond_cfg.include_homo_coupling,
+                atom_inventory_smiles=inventories,
             )
         )
 

@@ -269,6 +269,22 @@ def resolve_run_identity(cfg) -> RunIdentity:
     if resume_state is not None:
         stored_contract = resume_state.metadata.get("resume_contract")
         if stored_contract is None:
+            if (
+                cfg.free_energy.enabled
+                or cfg.bond.enabled
+                or bool(resume_state.bond_sites)
+            ):
+                # Legacy thermochemistry cannot distinguish discarded soft
+                # real modes from imaginary modes, and legacy bond templates
+                # may already contain an incorrect hydrogen inventory.  A
+                # partial cache reset cannot validate the restored network.
+                raise ValueError(
+                    "Checkpoint has no scientific resume fingerprint; its "
+                    "vibrational validation and bond-template atom inventory "
+                    "cannot be verified for a free-energy or bond-network "
+                    "run. Start a fresh run in a new output directory with "
+                    "checkpoint.resume_from unset."
+                )
             _log.warning(
                 "Checkpoint has no scientific resume fingerprint; accepting this "
                 "legacy checkpoint with step-based event reconciliation."
@@ -313,6 +329,7 @@ def resolve_thermo_runtime(cfg, identity: RunIdentity) -> ThermoRuntime:
         vibration_nfree=fe_cfg.vibration_nfree,
         include_ts_vibrations=fe_cfg.include_ts_vibrations,
         min_frequency_ev=fe_cfg.min_frequency_ev,
+        imaginary_mode_tolerance_ev=fe_cfg.imaginary_mode_tolerance_ev,
         symmetry_tolerance=fe_cfg.symmetry_tolerance,
         default_spin=fe_cfg.default_spin,
         default_geometry=fe_cfg.default_geometry,
