@@ -84,6 +84,7 @@ from ase.constraints import FixAtoms
 
 from autokmc.io.calculators import acquire_calculator
 from autokmc.io.atoms import copy_atoms_with_results
+from autokmc.core.atom_metadata import apply_atom_metadata, atom_metadata_key
 from autokmc.io.calculation_cache import (
     CalculationFingerprintMemo,
     apply_cached_states,
@@ -106,6 +107,7 @@ from autokmc.sites.diffusion import (
 )
 from autokmc.sites.stability.adsorption import (
     _surface_bfs_shells,
+    _complete_adsorbate_environment,
     _lateral_node_order,
     _discard_lateral_calculation,
     _promote_full_occupied_lateral,
@@ -184,6 +186,8 @@ def _diffusion_lateral_node_match(d1: dict, d2: dict) -> bool:
         return False
     if d1.get("element") != d2.get("element"):
         return False
+    if atom_metadata_key(d1) != atom_metadata_key(d2):
+        return False
     if d1.get("type") == "adsorbate":
         if d1.get("iso_class") != d2.get("iso_class"):
             return False
@@ -204,6 +208,7 @@ def _diffusion_lateral_fingerprint(g: nx.Graph) -> tuple:
             (
                 d.get("type", "X"),
                 d.get("element", "X"),
+                atom_metadata_key(d),
                 int(d.get("iso_class", -1)) if d.get("type") == "adsorbate" else -1,
                 str(d.get("reactant", "")) if d.get("type") == "adsorbate" else "",
                 _reactant_orbit_label(d) if d.get("type") == "adsorbate" else -1,
@@ -328,38 +333,14 @@ def _build_diffusion_lateral_ego_graph(
                 if d.get("occupied", False):
                     ads_leaves.add(nb)
 
-    result = G.subgraph(visited | ads_leaves).copy()
+    result = _complete_adsorbate_environment(G, visited, ads_leaves | set(endpoint_ids))
     result.graph["environment_scope"] = "all_occupied" if include_all_occupied else "local"
 
     for nid in endpoint_ids:
         if nid not in G:
             continue
-        d = G.nodes[nid]
         role = "a" if nid in endpoint_a_ids else "b"
-        if nid not in result:
-            result.add_node(
-                nid,
-                element=d.get("element"),
-                type=d.get("type", "adsorbate"),
-                iso_class=int(d.get("iso_class", -1)),
-                reactant=str(d.get("reactant", "")),
-                reactant_index=int(d.get("reactant_index", -1)),
-                reactant_orbit=_reactant_orbit_label(d),
-                occupied=True,
-                endpoint_role=role,
-            )
-        else:
-            result.nodes[nid]["occupied"] = True
-            result.nodes[nid]["endpoint_role"] = role
-        for sib in d.get("siblings", ()):
-            sib = int(sib)
-            if sib in result and not result.has_edge(nid, sib):
-                result.add_edge(nid, sib, intra_adsorbate=True)
-        clq = d.get("clique")
-        if clq is not None:
-            for surf_id in clq:
-                if surf_id in result and not result.has_edge(nid, surf_id):
-                    result.add_edge(nid, surf_id, anchor_bond=True)
+        result.nodes[nid].update(occupied=True, endpoint_role=role)
 
     return result
 
@@ -667,6 +648,7 @@ def _build_diffusion_atoms(
             pbc=pbc,
         )
 
+    apply_atom_metadata(atoms, [G.nodes[node] for node in slab_lat_nodes + a_ordered])
     if frozen_indices:
         atoms.set_constraint(FixAtoms(indices=list(frozen_indices)))
 

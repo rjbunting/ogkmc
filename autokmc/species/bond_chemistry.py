@@ -166,7 +166,7 @@ def _rdkit_mol_from_smiles(smiles: str, *, add_hydrogens: bool):
         )
     ]
     if only_atoms:
-        mol = Chem.AddHs(mol, onlyOnAtoms=only_atoms)
+        mol = Chem.AddHs(mol, onlyOnAtoms=only_atoms, explicitOnly=not add_hydrogens)
 
     # Embed + quick MMFF pre-relax so positions are meaningful.
     params = AllChem.ETKDGv3()
@@ -220,8 +220,22 @@ def _rdkit_mol_from_atoms(atoms):
     symbols = atoms.get_chemical_symbols()
     rwmol = Chem.RWMol()
 
-    for sym in symbols:
+    from ase.data import atomic_masses, atomic_numbers
+
+    isotope_table = Chem.GetPeriodicTable()
+    for sym, mass in zip(symbols, atoms.get_masses()):
         atom = Chem.Atom(sym)
+        number = atomic_numbers[sym]
+        if not _np.isclose(mass, atomic_masses[number], rtol=0.0, atol=1e-8):
+            isotope = int(round(float(mass)))
+            isotope_mass = isotope_table.GetMassForIsotope(number, isotope)
+            if isotope_mass <= 0 or not _np.isclose(
+                mass, isotope_mass, rtol=0.0, atol=1e-3,
+            ):
+                raise ValueError(
+                    f"Cannot represent {sym} mass {mass:g} as an isotope in SMILES"
+                )
+            atom.SetIsotope(isotope)
         atom.SetNoImplicit(True)
         rwmol.AddAtom(atom)
 
@@ -898,7 +912,7 @@ def _parse_fragment_smiles(smiles_or_obj, add_hydrogens: bool = False):
             )
         ]
         if only:
-            mol = Chem.AddHs(mol, onlyOnAtoms=only)
+            mol = Chem.AddHs(mol, onlyOnAtoms=only, explicitOnly=not add_hydrogens)
         rw = RWMol(mol)
         _set_no_implicit(rw)
         return rw.GetMol()

@@ -171,6 +171,49 @@ def test_analysis_window_controls_observed_rate(tmp_path):
     assert result["products"][0]["rate_hz"] == pytest.approx(0.5)
 
 
+@pytest.mark.parametrize("bounds", [
+    {"end_time_s": 100.0}, {"start_time_s": -1.0},
+    {"start_time_s": float("nan")}, {"end_time_s": float("inf")},
+    {"start_time_s": 8.0, "end_time_s": 7.0},
+])
+def test_analysis_rejects_unobserved_or_invalid_exposure_without_replacing_results(tmp_path, bounds):
+    _write_run(tmp_path, _co2_mechanism_events())
+    analyze_run(tmp_path)
+    rates_path = tmp_path / "analysis" / "product_rates.csv"
+    previous = rates_path.read_bytes()
+    with pytest.raises(AnalysisError):
+        analyze_run(tmp_path, **bounds)
+    assert rates_path.read_bytes() == previous
+
+
+def test_analysis_window_cannot_precede_restarted_run_initial_time(tmp_path):
+    _write_run(tmp_path, [])
+    path = tmp_path / "run_manifest.json"
+    manifest = json.loads(path.read_text())
+    manifest["initial_state"]["time_s"] = 5.0
+    path.write_text(json.dumps(manifest))
+    with pytest.raises(AnalysisError, match="recorded simulation interval"):
+        analyze_run(tmp_path, start_time_s=0.0)
+    assert analyze_run(tmp_path)["duration_s"] == 5.0
+
+
+def test_unfinalized_run_bounds_and_rate_blocks_use_last_recorded_event(tmp_path):
+    _write_run(tmp_path, _co2_mechanism_events(), final_time=None)
+    with pytest.raises(AnalysisError, match="recorded simulation interval"):
+        analyze_run(tmp_path, end_time_s=100.0)
+    result = analyze_run(tmp_path, n_blocks=2)
+    assert result["products"][0]["rate_hz"] == pytest.approx(1 / 6)
+    with (tmp_path / "analysis" / "rate_blocks.csv").open() as handle:
+        blocks = list(csv.DictReader(handle))
+    assert sum(int(row["count"]) for row in blocks) == 1
+
+
+def test_analyze_cli_rejects_extrapolated_end(tmp_path, capsys):
+    _write_run(tmp_path, _co2_mechanism_events())
+    assert cli_main(["analyze", str(tmp_path), "--end-time", "100"]) != 0
+    assert "recorded simulation interval" in capsys.readouterr().err
+
+
 def test_analyze_cli_writes_tables(tmp_path, capsys):
     _write_run(tmp_path, _co2_mechanism_events())
     assert cli_main(["analyze", str(tmp_path), "--blocks", "2"]) == 0

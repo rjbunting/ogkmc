@@ -416,13 +416,15 @@ def test_same_label_vibration_runs_are_serialized_and_reuse_cache(
 
     from ase.vibrations import Vibrations
 
-    monkeypatch.setattr(
-        Vibrations,
-        "clean",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("active displacement locks must not be deleted")
-        ),
-    )
+    original_clean = Vibrations.clean
+
+    def clean_stale_files(vibration, *, empty_files=False):
+        # Cleanup must run under the whole-workflow lock, with no forces in
+        # flight, and must preserve every completed displacement.
+        assert empty_files is True
+        return original_clean(vibration, empty_files=empty_files)
+
+    monkeypatch.setattr(Vibrations, "clean", clean_stale_files)
     tracker = Tracker()
     pool = CalculatorPool(
         [HarmonicCalculator(tracker), HarmonicCalculator(tracker)],

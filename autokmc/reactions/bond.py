@@ -387,7 +387,7 @@ def _bond_energetics_cached(
     key = (
         round(float(temperature),              9),
         round(float(transmission_coefficient), 9),
-        round(gas_pressure_bar, 12),
+        float(gas_pressure_bar),
         str(direction),
         bool(use_g),
     )

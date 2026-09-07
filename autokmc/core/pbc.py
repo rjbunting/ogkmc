@@ -8,6 +8,29 @@ import numpy as np
 from ase.geometry import find_mic
 
 
+def slab_outward_normal(graph, position) -> np.ndarray:
+    """Return the exposed face's normal for a slab aligned with Cartesian z.
+
+    Keep whole-slab bounds in graph metadata so local ego graphs use the same
+    face as the original structure. Hand-built graphs infer those bounds.
+    """
+    side = graph.graph.get("surface_side")
+    if side == "bottom":
+        sign = -1.0
+    elif side == "top":
+        sign = 1.0
+    else:
+        bounds = graph.graph.get("slab_z_bounds")
+        if bounds is None:
+            heights = [
+                float(data["position"][2]) for _, data in graph.nodes(data=True)
+                if data.get("type") in {"bulk", "surface"} and "position" in data
+            ]
+            bounds = (min(heights), max(heights)) if heights else (0.0, 0.0)
+        sign = -1.0 if float(position[2]) < 0.5 * (bounds[0] + bounds[1]) else 1.0
+    return np.array([0.0, 0.0, sign])
+
+
 def has_real_cell(cell) -> bool:
     """Return True when *cell* is a full-rank 3D lattice cell."""
     cell_arr = np.asarray(cell, dtype=float)
@@ -185,6 +208,7 @@ def wrap_positions_into_cell(
 
 
 __all__ = [
+    "slab_outward_normal",
     "full_pbc_for_cell",
     "graph_pbc_for_atoms",
     "has_real_cell",

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -107,40 +108,44 @@ def run_from_config(cfg: RunConfig, *, config_path: str | None = None) -> dict:
         ensure_run_output_available(cfg)
         telemetry = RuntimeTelemetry()
         with telemetry_context(telemetry):
-            try:
-                return _run_from_config(
-                    cfg,
-                    config_path=config_path,
-                    telemetry=telemetry,
-                )
-            except BaseException as exc:
-                gauges = telemetry.to_dict().get("gauges", {})
-                try:
-                    fail_run_manifest(
-                        Path(cfg.output.dir) / cfg.output.run_manifest_filename,
-                        exc,
-                        status=(
-                            "interrupted"
-                            if isinstance(exc, (KeyboardInterrupt, InterruptedError))
-                            else "failed"
-                        ),
-                        last_durable_step=(
-                            int(gauges["kmc.last_step"])
-                            if "kmc.last_step" in gauges
-                            else None
-                        ),
-                        last_durable_time_s=(
-                            float(gauges["kmc.time_s"])
-                            if "kmc.time_s" in gauges
-                            else None
-                        ),
-                        cfg=cfg,
-                    )
-                except Exception:
-                    _log.exception(
-                        "Could not publish terminal failure state to run manifest"
-                    )
-                raise
+            return _run_from_config(
+                cfg, config_path=config_path, telemetry=telemetry,
+            )
+
+
+@contextmanager
+def _record_started_run_failure(cfg, telemetry):
+    """Publish failures only after this invocation owns a manifest segment."""
+    try:
+        yield
+    except BaseException as exc:
+        gauges = telemetry.to_dict().get("gauges", {})
+        try:
+            fail_run_manifest(
+                Path(cfg.output.dir) / cfg.output.run_manifest_filename,
+                exc,
+                status=(
+                    "interrupted"
+                    if isinstance(exc, (KeyboardInterrupt, InterruptedError))
+                    else "failed"
+                ),
+                last_durable_step=(
+                    int(gauges["kmc.last_step"])
+                    if "kmc.last_step" in gauges
+                    else None
+                ),
+                last_durable_time_s=(
+                    float(gauges["kmc.time_s"])
+                    if "kmc.time_s" in gauges
+                    else None
+                ),
+                cfg=cfg,
+            )
+        except Exception:
+            _log.exception(
+                "Could not publish terminal failure state to run manifest"
+            )
+        raise
 
 
 def _run_from_config(
@@ -173,32 +178,33 @@ def _run_from_config(
         is_resume=identity.is_resume,
     )
 
-    # First, prepare the calculator used by every later stage.
-    update_run_manifest(
-        identity.manifest_path,
-        status="preparing",
-        current_stage="stage_1_calculator",
-    )
-    _stage("Stage 1/7: preparing calculator", verbose=progress_run)
-    calculators = prepare_calculator(cfg, verbose=verbose_run)
-    calc_resource = calculators.resource
-
-    try:
-        return _run_after_calculator_preparation(
-            cfg,
-            config_path=config_path,
-            telemetry=telemetry,
-            wall_started_s=wall_started_s,
-            identity=identity,
-            started_at=started_at,
-            verbose_run=verbose_run,
-            progress_run=progress_run,
-            calculators=calculators,
+    with _record_started_run_failure(cfg, telemetry):
+        # First, prepare the calculator used by every later stage.
+        update_run_manifest(
+            identity.manifest_path,
+            status="preparing",
+            current_stage="stage_1_calculator",
         )
-    finally:
-        # The pipeline owns the calculator pool after Stage 1. Keep it open
-        # through every preparation stage, and release it when the run ends.
-        _shutdown_calculator_resource(calc_resource)
+        _stage("Stage 1/7: preparing calculator", verbose=progress_run)
+        calculators = prepare_calculator(cfg, verbose=verbose_run)
+        calc_resource = calculators.resource
+
+        try:
+            return _run_after_calculator_preparation(
+                cfg,
+                config_path=config_path,
+                telemetry=telemetry,
+                wall_started_s=wall_started_s,
+                identity=identity,
+                started_at=started_at,
+                verbose_run=verbose_run,
+                progress_run=progress_run,
+                calculators=calculators,
+            )
+        finally:
+            # The pipeline owns the calculator pool after Stage 1. Keep it open
+            # through every preparation stage, and release it when the run ends.
+            _shutdown_calculator_resource(calc_resource)
 
 
 def _run_after_calculator_preparation(

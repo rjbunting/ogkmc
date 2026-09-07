@@ -11,6 +11,7 @@ from ase.calculators.singlepoint import SinglePointCalculator
 from ase.constraints import FixAtoms
 
 from autokmc.core.pbc import full_pbc_for_cell
+from autokmc.core.atom_metadata import apply_atom_metadata
 
 
 def copy_atoms_with_results(
@@ -143,6 +144,7 @@ def atoms_from_graph(G: nx.Graph) -> Atoms:
 		pbc = np.asarray(G.graph.get("pbc", full_pbc_for_cell(cell)), dtype=bool)
 
 	atoms = Atoms(symbols=symbols, positions=positions, cell=cell, pbc=pbc)
+	apply_atom_metadata(atoms, [G.nodes[node] for node in all_ids])
 
 	# Extended-XYZ atom arrays preserve the graph identity needed to interpret
 	# every KMC frame after the run, rather than only its Cartesian geometry.

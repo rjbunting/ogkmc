@@ -51,7 +51,7 @@ def _apply_composition(
         return result
     rng = np.random.default_rng(seed=seed)
     indices = rng.permutation(n_total)
-    syms = np.array(result.get_chemical_symbols())
+    syms = np.array(result.get_chemical_symbols(), dtype=object)
 
     total_fraction = float(sum(composition.values()))
     if total_fraction <= 0.0:

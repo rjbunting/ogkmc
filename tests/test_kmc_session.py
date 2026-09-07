@@ -100,6 +100,8 @@ def test_checkpoint_syncs_event_prefix_before_serializing_state():
         def sync_for_checkpoint(self):
             calls.append("trajectory_sync")
 
+        committed_offset = 8192
+
     class Reactions:
         def sync_for_checkpoint(self):
             calls.append("event_sync")
@@ -141,6 +143,7 @@ def test_checkpoint_syncs_event_prefix_before_serializing_state():
     assert calls[:2] == ["trajectory_sync", "event_sync"]
     assert calls[2]["committed_event_count"] == 7
     assert calls[2]["committed_event_offset"] == 4096
+    assert calls[2]["committed_trajectory_offset"] == 8192
     assert "history" not in calls[2]
 
 

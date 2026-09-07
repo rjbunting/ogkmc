@@ -45,8 +45,9 @@ def test_smiles_to_atoms_fallback_embedding_is_deterministic_and_checked(monkeyp
             self.useRandomCoords = False
 
     chem = ModuleType("rdkit.Chem")
-    chem.MolFromSmiles = lambda _smiles: FakeMol()
-    chem.AddHs = lambda mol, onlyOnAtoms=None: mol
+    chem.SmilesParserParams = SimpleNamespace
+    chem.MolFromSmiles = lambda _smiles, _params=None: FakeMol()
+    chem.AddHs = lambda mol, onlyOnAtoms=None, explicitOnly=False: mol
     all_chem = ModuleType("rdkit.Chem.AllChem")
     all_chem.ETKDGv3 = FakeParams
     all_chem.EmbedParameters = FakeParams
@@ -138,6 +139,7 @@ def test_species_package_exports_public_api():
     import autokmc.species as species
 
     assert species.Reactant.__name__ == "Reactant"
+    assert issubclass(species.ReactantConnectivityError, RuntimeError)
     assert callable(species.build_reactant)
     assert callable(species.get_all_fragments)
     assert callable(species.combine_fragments)
@@ -198,8 +200,7 @@ def test_rdkit_isolated_h_warning_is_suppressed(capfd):
 def test_gas_cache_dir_uses_safe_smiles_label(monkeypatch, tmp_path):
     import autokmc.species.reactant as reactant_mod
 
-    atoms = reactant_mod._smiles_to_atoms("[O]")
-    atoms.arrays["surface"] = [2]
+    atoms = reactant_mod._smiles_to_atoms("[C]/[O]")
 
     class FakeCalc:
         pass
@@ -218,10 +219,10 @@ def test_gas_cache_dir_uses_safe_smiles_label(monkeypatch, tmp_path):
             "entropy_ev_per_k": 0.0,
             "frequencies_ev": [],
             "imaginary_ev": [],
-            "geometry": "monatomic",
+            "geometry": "linear",
             "symmetry_number": 1,
             "symmetry_number_source": "inferred",
-            "point_group": "K_h",
+            "point_group": "C_inf_v",
             "symmetry_tolerance": 0.3,
             "spin": 0,
             "temperature_k": 500.0,
@@ -246,7 +247,7 @@ def test_gas_cache_dir_uses_safe_smiles_label(monkeypatch, tmp_path):
 
     assert captured["cache_dir"].endswith("gas_(C)_(O)")
     assert reactant.thermo_meta["symmetry_number_source"] == "inferred"
-    assert reactant.thermo_meta["point_group"] == "K_h"
+    assert reactant.thermo_meta["point_group"] == "C_inf_v"
     assert reactant.thermo_meta["symmetry_tolerance"] == pytest.approx(0.3)
 
 

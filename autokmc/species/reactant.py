@@ -12,7 +12,8 @@ Pipeline
    relaxed total energy onto the :class:`Reactant`.
 3. Tag every atom as ``surface = 2`` (molecules will adsorb onto a
    surface; they are neither bulk nor surface themselves).
-4. Build a :class:`networkx.Graph` via :func:`~autokmc.core.graph.build_graph`.
+4. Build a :class:`networkx.Graph` via :func:`~autokmc.core.graph.build_graph`
+   and validate its atom identities and bonds against the requested molecule.
 5. Compute intramolecular automorphism orbits (per element) — the
    "unique nodes" used for de-duplicating equivalent anchor permutations
    in :mod:`autokmc.sites.adsorbate`.
@@ -54,6 +55,7 @@ from ase import Atoms
 from ase.optimize import BFGS, FIRE, LBFGS, MDMin
 
 from autokmc.core.graph import build_graph
+from autokmc.core.atom_metadata import node_mass, physical_node_match
 from autokmc.core.constants import NL_MULT_DEFAULT, RANDOM_SEED
 from autokmc.io.calculators import acquire_calculator
 from autokmc.io.atoms import copy_atoms_with_results
@@ -82,6 +84,14 @@ class ReactantDefinitionError(ValueError):
     construct a 3-D conformer.  Calculator, optimisation, I/O, and runtime
     failures deliberately use other exception types so callers can retry
     them without permanently classifying the species as invalid.
+    """
+
+
+class ReactantConnectivityError(RuntimeError):
+    """The generated gas structure does not represent the requested molecule.
+
+    This is a geometry/calculator failure, not a permanently invalid SMILES.
+    Runtime species expansion therefore retains its normal retry behavior.
     """
 
 
@@ -163,6 +173,76 @@ class Reactant:
 # Internal helpers
 # ---------------------------------------------------------------------------
 
+def _molecule_from_smiles(smiles: str, *, add_hydrogens: bool):
+    """Parse the exact indexed atom/bond inventory used for gas construction."""
+    silence_rdkit_warnings()
+    from rdkit import Chem
+
+    parser = Chem.SmilesParserParams()
+    parser.removeHs = False
+    mol = Chem.MolFromSmiles(smiles, parser)
+    if mol is None:
+        raise ReactantDefinitionError(
+            f"RDKit could not parse SMILES: {smiles!r}"
+        )
+    # Bracket hydrogens belong to the explicit inventory even when implicit
+    # valence-filling hydrogens are disabled (e.g. [OH] still contains O and H).
+    hydrogen_hosts = [
+        atom.GetIdx() for atom in mol.GetAtoms()
+        if atom.GetNumExplicitHs() > 0
+        or (add_hydrogens and atom.GetNumImplicitHs() > 0)
+    ]
+    if hydrogen_hosts:
+        mol = Chem.AddHs(
+            mol, onlyOnAtoms=hydrogen_hosts, explicitOnly=not add_hydrogens,
+        )
+    return mol
+
+
+def _validate_reactant_graph(
+    graph: nx.Graph, smiles: str, *, add_hydrogens: bool, nl_mult: float,
+) -> None:
+    """Require the produced graph to match the intended indexed bond graph.
+
+    ASE optimization retains atom order, so comparing indexed bonds also
+    prevents an isomorphism from concealing transfers between distinct atoms.
+    Graph edges encode adjacency only, not bond order or stereochemistry.
+    """
+    molecule = _molecule_from_smiles(smiles, add_hydrogens=add_hydrogens)
+    expected_nodes = set(range(molecule.GetNumAtoms()))
+    if set(graph) != expected_nodes:
+        raise ReactantConnectivityError(
+            f"Gas structure for {smiles!r} has atom indices {sorted(graph)!r}; "
+            f"expected {sorted(expected_nodes)!r} from the requested molecule"
+        )
+    for atom in molecule.GetAtoms():
+        index = atom.GetIdx()
+        expected: dict[str, Any] = {"element": atom.GetSymbol()}
+        if atom.GetIsotope():
+            expected["atom_arrays"] = {"masses": atom.GetMass()}
+        actual = graph.nodes[index]
+        if actual.get("element") != expected["element"] or node_mass(actual) != node_mass(expected):
+            raise ReactantConnectivityError(
+                f"Gas structure for {smiles!r} changed atom {index}: expected "
+                f"{expected['element']} with mass {node_mass(expected):g} u, got "
+                f"{actual.get('element')} with mass {node_mass(actual):g} u"
+            )
+    expected_bonds = {
+        tuple(sorted((bond.GetBeginAtomIdx(), bond.GetEndAtomIdx())))
+        for bond in molecule.GetBonds()
+    }
+    actual_bonds = {tuple(sorted(edge)) for edge in graph.edges()}
+    missing = sorted(expected_bonds - actual_bonds)
+    extra = sorted(actual_bonds - expected_bonds)
+    if missing or extra:
+        raise ReactantConnectivityError(
+            f"Gas structure for {smiles!r} does not match its requested connectivity "
+            f"(nl_mult={nl_mult:g}): missing bonds {missing!r}; extra bonds {extra!r}. "
+            "Bond pairs use zero-based indices in the constructed molecule. "
+            "Check the generated geometry and neighbor-list cutoff."
+        )
+
+
 def _smiles_to_atoms(
     smiles: str,
     *,
@@ -194,7 +274,6 @@ def _smiles_to_atoms(
     """
     silence_rdkit_warnings()
     try:
-        from rdkit import Chem
         from rdkit.Chem import AllChem
     except ImportError as e:
         raise ImportError(
@@ -202,37 +281,7 @@ def _smiles_to_atoms(
             "Install it with:  conda install -c conda-forge rdkit"
         ) from e
 
-    mol = Chem.MolFromSmiles(smiles)
-    if mol is None:
-        raise ReactantDefinitionError(
-            f"RDKit could not parse SMILES: {smiles!r}"
-        )
-
-    if add_hydrogens:
-        # Only add Hs to atoms that *want* them — i.e. those with a
-        # non-zero implicit-H count given the SMILES.  This matches the
-        # SMILES author's intent: e.g. "[O]" stays as a bare O, but "O"
-        # gets two Hs (water).  Build a per-atom mask before calling
-        # AddHs so atoms with closed/forced valences are preserved.
-        only_atoms = [a.GetIdx() for a in mol.GetAtoms()
-                      if a.GetNumImplicitHs() > 0 or a.GetNumExplicitHs() > 0]
-        if only_atoms:
-            mol = Chem.AddHs(mol, onlyOnAtoms=only_atoms)
-    else:
-        # Even when add_hydrogens=False, always materialise H atoms that
-        # are **explicitly** specified in the bracket SMILES notation
-        # (GetNumExplicitHs() > 0).  These are genuinely part of the
-        # molecular formula — for example, the product of coupling [O]+[H]
-        # is written by RDKit as "[OH]" where the H is an explicit H count
-        # on O, not an implicit valence-fill H.  Skipping AddHs for these
-        # atoms would give a 1-atom (bare O) Reactant for a 2-atom (O-H)
-        # molecule, causing |A|+|B| ≠ |C| mismatches in bond NEB checks.
-        # Atoms with only implicit H (e.g. unreacted [O] radical) have
-        # GetNumExplicitHs()==0 and are left untouched.
-        only_explicit = [a.GetIdx() for a in mol.GetAtoms()
-                         if a.GetNumExplicitHs() > 0]
-        if only_explicit:
-            mol = Chem.AddHs(mol, onlyOnAtoms=only_explicit)
+    mol = _molecule_from_smiles(smiles, add_hydrogens=add_hydrogens)
 
     params = AllChem.ETKDGv3()
     params.randomSeed = int(random_seed)
@@ -256,6 +305,14 @@ def _smiles_to_atoms(
     numbers   = [atom.GetAtomicNum() for atom in mol.GetAtoms()]
 
     atoms = Atoms(numbers=numbers, positions=positions, pbc=False)
+    # Atomic numbers alone erase isotopes such as [2H] and [13C]. Retain ASE's
+    # default masses for unlabelled atoms and RDKit's mass for explicit isotopes.
+    isotope_atoms = [atom for atom in mol.GetAtoms() if atom.GetIsotope()]
+    if isotope_atoms:
+        masses = atoms.get_masses()
+        for atom in isotope_atoms:
+            masses[atom.GetIdx()] = atom.GetMass()
+        atoms.set_masses(masses)
     atoms.center(vacuum=6.0)   # add vacuum so periodic-code tools don't complain
     return atoms
 
@@ -337,8 +394,8 @@ def find_unique_atoms(reactant: "Reactant") -> dict[str, list[list[int]]]:
     """Return intramolecular automorphism orbits of *reactant.graph*, by element.
 
     Two atoms are in the same orbit if there exists a graph automorphism
-    (with ``categorical_node_match("element", "X")``) that maps one to
-    the other.  The grouping is then partitioned by chemical element.
+    preserving elements and per-atom inputs (including isotope masses) that
+    maps one to the other. The grouping is partitioned by chemical element.
 
     Algorithm
     ---------
@@ -348,7 +405,7 @@ def find_unique_atoms(reactant: "Reactant") -> dict[str, list[list[int]]]:
     automorphisms — this is the orbit of *i*.  Identical orbits are
     deduplicated.
 
-    For molecules with no non-trivial automorphisms (e.g. CO, H₂O), every
+    For molecules with no non-trivial automorphisms (e.g. CO), every
     atom is its own singleton orbit.
 
     Parameters
@@ -368,7 +425,7 @@ def find_unique_atoms(reactant: "Reactant") -> dict[str, list[list[int]]]:
     {'O': [[0]], 'H': [[1, 2]]}
     """
     G = reactant.graph
-    node_match = isomorphism.categorical_node_match("element", "X")
+    node_match = physical_node_match
     gm = isomorphism.GraphMatcher(G, G, node_match=node_match)
 
     # orbit[i] = set of nodes that node i is mapped to under any automorphism
@@ -530,6 +587,13 @@ def build_reactant(
         Dataclass with all fields populated (``smiles``, ``atoms``, ``graph``,
         ``energy``, ``unique_nodes``, ``anchor_atoms``, ``anchor_orbit``).
 
+    Raises
+    ------
+    ReactantConnectivityError
+        The final geometry's graph differs from the requested atom and bond
+        inventory. Validation also runs when ASE relaxation is disabled or no
+        calculator is supplied, before thermochemistry or site generation.
+
     Examples
     --------
     >>> from autokmc.species.reactant import build_reactant
@@ -610,8 +674,11 @@ def build_reactant(
     #    not part of the surface — they will adsorb onto it).
     atoms.arrays["surface"] = np.full(len(atoms), 2, dtype=np.int8)
 
-    # 4. Build graph
+    # 4. Validate the actual produced graph before accepting a gas reference.
     graph = build_graph(atoms, nl_mult=nl_mult)
+    _validate_reactant_graph(
+        graph, smiles, add_hydrogens=add_hydrogens, nl_mult=nl_mult,
+    )
 
     reactant = Reactant(
         smiles=smiles,

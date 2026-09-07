@@ -54,6 +54,8 @@ class CheckpointState:
 	# are optional only for checkpoints written before schema version 3.
 	committed_event_count: int | None = None
 	committed_event_offset: int | None = None
+	# Optional for older v4 snapshots and runs without trajectory output.
+	committed_trajectory_offset: int | None = None
 
 
 def _is_hashable(value) -> bool:
@@ -180,6 +182,7 @@ def make_checkpoint_state(
 	rng_state: dict[str, Any] | None = None,
 	committed_event_count: int | None = None,
 	committed_event_offset: int | None = None,
+	committed_trajectory_offset: int | None = None,
 	metadata: dict[str, Any] | None = None,
 ) -> CheckpointState:
 	# Copy one persistent root mapping in a single traversal.  This both keeps a
@@ -220,6 +223,9 @@ def make_checkpoint_state(
 		),
 		committed_event_offset=(
 			None if committed_event_offset is None else int(committed_event_offset)
+		),
+		committed_trajectory_offset=(
+			None if committed_trajectory_offset is None else int(committed_trajectory_offset)
 		),
 	)
 

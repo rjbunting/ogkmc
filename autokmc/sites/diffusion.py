@@ -65,6 +65,7 @@ from autokmc.sites.adsorbate import (
 )
 from autokmc.sites.identity import SiteId, site_identifier
 from autokmc.sites.stability.adsorption import _surface_bfs_shells
+from autokmc.core.atom_metadata import atom_metadata_key
 from autokmc.core.constants import (
     DIFFUSION_MAX_HOPS,
     DIFFUSION_PRUNE_BY_ADS_PAIR,
@@ -388,6 +389,7 @@ def _build_pair_ego_graph(
             result.add_node(
                 nid,
                 element        = d.get("element"),
+                atom_arrays=d.get("atom_arrays", {}),
                 type           = d.get("type", "adsorbate"),
                 iso_class      = int(d.get("iso_class", -1)),
                 reactant       = str(d.get("reactant",  "")),
@@ -400,10 +402,10 @@ def _build_pair_ego_graph(
             result.nodes[nid]["occupied"]      = True
             result.nodes[nid]["endpoint_role"] = "endpoint"
         # Restore intramolecular edges.
-        for sib in d.get("siblings", ()):
+        for sib in G.neighbors(nid):
             sib = int(sib)
-            if sib in result and not result.has_edge(nid, sib):
-                result.add_edge(nid, sib, intra_adsorbate=True)
+            if sib in endpoint_ids and sib in result:
+                result.add_edge(nid, sib, **G.edges[nid, sib])
         # Restore anchor bonds to bonded surface atoms.
         clq = d.get("clique")
         if clq is not None:
@@ -428,6 +430,8 @@ def _pair_node_match(d1: dict, d2: dict) -> bool:
         return False
     if d1.get("element") != d2.get("element"):
         return False
+    if atom_metadata_key(d1) != atom_metadata_key(d2):
+        return False
     if d1.get("type") == "adsorbate":
         if d1.get("iso_class") != d2.get("iso_class"):
             return False
@@ -451,6 +455,7 @@ def _pair_fingerprint(g: nx.Graph) -> tuple:
         (
             d.get("type",    "X"),
             d.get("element", "X"),
+            atom_metadata_key(d),
             int(d.get("iso_class",      -1)) if d.get("type") == "adsorbate" else -1,
             str(d.get("reactant",       "")) if d.get("type") == "adsorbate" else "",
             _reactant_orbit_label(d) if d.get("type") == "adsorbate" else -1,

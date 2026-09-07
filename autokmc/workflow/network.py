@@ -101,8 +101,10 @@ class SpeciesNetworkBuilder:
         all_reactants = list(reactants)
         all_sites = list(feed_sites)
         initial_sites = list(feed_sites)
-        diffusion_sites = self._discover_diffusion(all_sites)
         bond_sites = self._discover_bonds(all_reactants, all_sites)
+        # Bond discovery materializes fragment/product placements as well as
+        # feed placements. They must all have diffusion before KMC starts.
+        diffusion_sites = self._discover_diffusion(all_sites)
         return PreparedNetwork(
             reactants=all_reactants,
             adsorbate_sites=all_sites,

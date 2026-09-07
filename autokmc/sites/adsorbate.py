@@ -79,6 +79,8 @@ Public API
 
 from __future__ import annotations
 
+from autokmc.core.pbc import slab_outward_normal
+
 import os
 import warnings
 from dataclasses import dataclass, field
@@ -96,6 +98,9 @@ from autokmc.core.pbc import (
     periodic_image_offsets,
     unwrap_positions_about_reference,
     wrap_positions_into_cell,
+)
+from autokmc.core.atom_metadata import (
+    apply_atom_metadata, atom_metadata, atom_metadata_key, physical_node_match,
 )
 from autokmc.io.calculators import CalculatorConfigError, acquire_calculator
 from autokmc.sites.anchors import (
@@ -505,9 +510,9 @@ def _candidate_indices_in_annulus(
 def _outward_normal_at(
     G: nx.Graph, p: np.ndarray, pbc: np.ndarray
 ) -> np.ndarray:
-    """Unit outward direction at *p*: +z for slabs, radial-out for NPs."""
+    """Unit outward direction at *p*: exposed slab face or radial-out for NPs."""
     if pbc.any():
-        return np.array([0.0, 0.0, 1.0])
+        return slab_outward_normal(G, p)
     surf_pos = np.array(
         [d["position"] for _, d in G.nodes(data=True)
          if d.get("type") == "surface"],
@@ -576,7 +581,12 @@ def _full_adsorbate_positions(
                               [-axis[1], axis[0], 0.0]])
                 rel = rel @ (np.eye(3) + s * K + (1.0 - cos) * (K @ K)).T
             elif cos < 0.0:
-                rel = -rel
+                # A half-turn about any perpendicular axis is a proper
+                # rotation. Negating all coordinates would invert chirality.
+                basis = np.eye(3)[int(np.argmin(np.abs(v)))]
+                axis = np.cross(v, basis)
+                axis /= np.linalg.norm(axis)
+                rel = rel @ (2.0 * np.outer(axis, axis) - np.eye(3))
 
         # Planar one-anchor fragments such as CH3 have a near-zero centroid
         # of the non-bonded atoms.  Aligning that numerical noise to the
@@ -630,7 +640,7 @@ def _full_adsorbate_positions(
                               [-axis[1], axis[0], 0.0]])
                 rel = rel @ (np.eye(3) + s * K + (1.0 - cos) * (K @ K)).T
             elif cos < 0.0:
-                rel = -rel
+                _rotate_from_to(v, n_out)
     return rel + p_target
 
 
@@ -655,8 +665,8 @@ def _adsorbate_pose_is_outward(
         if not rows:
             continue
         if is_slab:
-            z_ref = max(float(p[2]) for p in rows)
-            if float(pos_arr[int(atom_i), 2] - z_ref) <= margin:
+            normal = slab_outward_normal(G, np.mean(rows, axis=0))
+            if float(np.dot(pos_arr[int(atom_i)], normal) - np.max(np.array(rows) @ normal)) <= margin:
                 return False
             continue
         centroid = np.asarray(rows, dtype=float).mean(axis=0)
@@ -684,8 +694,38 @@ def _canonical_subset_key(
     subset: tuple[int, ...],
     orbit_id: dict[int, tuple[str, int]],
 ) -> tuple:
-    """Orbit-multiset signature — equal keys → symmetry-equivalent subsets."""
+    """Coarse candidate bucket; equality does not prove subset equivalence."""
     return tuple(sorted(orbit_id[i] for i in subset))
+
+
+def _inequivalent_anchor_subsets(reactant_graph, subsets, orbit_id):
+    """Reduce whole marked subsets under a single molecular automorphism.
+
+    Individual atom orbits only prefilter comparisons. Exact marked-graph
+    matching avoids enumerating the potentially enormous automorphism group.
+    """
+    representatives: dict[tuple, list[nx.Graph]] = {}
+    canonical = []
+    for subset in subsets:
+        if not _anchor_subset_allowed(subset, orbit_id):
+            continue
+        key = _canonical_subset_key(subset, orbit_id)
+        marked = reactant_graph.copy()
+        selected = set(subset)
+        for node in marked:
+            marked.nodes[node]["selected_anchor"] = node in selected
+        matches = representatives.setdefault(key, [])
+        if any(nx.is_isomorphic(
+            marked, previous,
+            node_match=lambda a, b: (
+                a["selected_anchor"] == b["selected_anchor"]
+                and physical_node_match(a, b)
+            ),
+        ) for previous in matches):
+            continue
+        matches.append(marked)
+        canonical.append(subset)
+    return canonical
 
 
 def _anchor_subset_allowed(
@@ -717,6 +757,7 @@ def _fingerprint(g: nx.Graph) -> tuple:
         (
             d.get("coordination_role", "substrate"),
             d.get("element", "X"),
+            atom_metadata_key(d),
             g.degree(n),
         )
         for n, d in g.nodes(data=True)
@@ -950,7 +991,7 @@ def _ensure_anchor_sites(
     """Lazily run :func:`~autokmc.sites.anchors.find_anchor_sites` if needed."""
     cap_by_element = G.graph.get(ANCHOR_K_MAX_BY_ELEMENT, {})
     needs_enumeration = element not in G.graph.get("anchor_sites", {})
-    if not needs_enumeration and anchor_k_max is not None:
+    if not needs_enumeration:
         if element in cap_by_element:
             needs_enumeration = cap_by_element[element] != anchor_k_max
         else:
@@ -1315,6 +1356,7 @@ def _materialise_adsorbate_nodes(
                     is_bonded       = (clq is not None),
                     siblings        = tuple(n for n in node_ids if n != nid),
                     optimised       = False,
+                    atom_arrays     = atom_metadata(reactant.atoms, i),
                 )
 
             # Intramolecular edges (mirror reactant.graph topology).
@@ -1363,6 +1405,7 @@ def _build_pruning_atoms(
     react_sym: list[str],
     *,
     frozen_indices: list[int] | None = None,
+    reactant_atoms=None,
 ):
     """Build an ASE Atoms object for a bare (no lateral neighbours) stability check.
 
@@ -1408,6 +1451,17 @@ def _build_pruning_atoms(
     pbc  = full_pbc_for_cell(cell)
 
     atoms = Atoms(symbols=symbols, positions=positions, cell=cell, pbc=pbc)
+    representative_ids = ms.member_node_ids[0] if ms.member_node_ids else []
+    if reactant_atoms is not None:
+        ads_metadata = [
+            {"element": symbol, "atom_arrays": atom_metadata(reactant_atoms, i)}
+            for i, symbol in enumerate(react_sym)
+        ]
+    elif len(representative_ids) == n_ads:
+        ads_metadata = [G.nodes[node] for node in representative_ids]
+    else:
+        ads_metadata = [{"element": symbol} for symbol in react_sym]
+    apply_atom_metadata(atoms, [G.nodes[node] for node in slab_nodes] + ads_metadata)
     atoms.arrays["surface"] = surface_array
     if frozen_indices:
         atoms.set_constraint(FixAtoms(indices=list(frozen_indices)))
@@ -2099,10 +2153,12 @@ def _propagate_adsorbate_member_positions(
         reactant.graph,
         n_shells,
     )
-    node_match = isomorphism.categorical_node_match(
-        ["coordination_role", "element"],
-        ["substrate", "X"],
-    )
+    def node_match(left, right):
+        return (
+            left.get("coordination_role", "substrate")
+            == right.get("coordination_role", "substrate")
+            and physical_node_match(left, right)
+        )
     edge_match = isomorphism.categorical_edge_match(
         "coordination_kind",
         "substrate",
@@ -2415,6 +2471,7 @@ def prune_unstable_adsorbate_sites(
         try:
             atoms_init, n_slab, n_ads, node_to_ase = _build_pruning_atoms(
                 G, ms, react_sym, frozen_indices=frozen_indices,
+                reactant_atoms=reactant.atoms,
             )
         except Exception as exc:
             _log.warning(
@@ -2506,8 +2563,9 @@ def prune_unstable_adsorbate_sites(
                 ms.iso_class, exc,
             )
             if verbose:
+                outcome = "PRUNED" if did_not_converge else "FAILED"
                 print(
-                    f"  PRUNED iso={ms.iso_class}: {optimization_stage} "
+                    f"  {outcome} iso={ms.iso_class}: {optimization_stage} "
                     f"optimization failed ({exc})"
                 )
             _persist_invalid(
@@ -2525,6 +2583,10 @@ def prune_unstable_adsorbate_sites(
                     else None
                 ),
             )
+            # Backend/I/O errors do not establish instability. Preserve the
+            # failed geometry above, then let runtime expansion retry or abort.
+            if not did_not_converge:
+                raise
             n_pruned += 1
             _remove_iso_class_nodes(G, ms)
             continue
@@ -2993,10 +3055,12 @@ def find_adsorbate_sites(
 
     cell, cell_inv, pbc, use_mic = _get_cell(G)
     orbit_id   = _orbit_id_of(reactant)
-    node_match = isomorphism.categorical_node_match(
-        ["coordination_role", "element"],
-        ["substrate", "X"],
-    )
+    def node_match(left, right):
+        return (
+            left.get("coordination_role", "substrate")
+            == right.get("coordination_role", "substrate")
+            and physical_node_match(left, right)
+        )
     edge_match = isomorphism.categorical_edge_match(
         "coordination_kind",
         "substrate",
@@ -3022,15 +3086,9 @@ def find_adsorbate_sites(
     else:
         all_subsets = [tuple(anchors)]
 
-    seen_subset_keys: set = set()
-    canonical_subsets: list[tuple[int, ...]] = []
-    for sub in all_subsets:
-        if not _anchor_subset_allowed(sub, orbit_id):
-            continue
-        key = _canonical_subset_key(sub, orbit_id)
-        if key not in seen_subset_keys:
-            seen_subset_keys.add(key)
-            canonical_subsets.append(sub)
+    canonical_subsets = _inequivalent_anchor_subsets(
+        reactant.graph, all_subsets, orbit_id,
+    )
 
     # The enumeration pass builds candidate placements at the selected depth.
     def _run_pass(depth: int) -> list[AdsorbateSite]:

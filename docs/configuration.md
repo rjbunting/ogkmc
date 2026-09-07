@@ -85,6 +85,45 @@ determines which multi-coordinate anchor cliques can exist, and
 `structure.surface_radius_factor` changes the ray-casting discs used only for
 slab surface classification.
 
+### Lateral interaction range
+
+With `free_energy.enabled: false` and `kmc.lateral_interactions: true`,
+`constants.lateral_shells` controls the range of surrounding occupied molecules
+included in electronic-energy calculations. Zero includes only molecules
+sharing an anchor surface atom; one also includes molecules attached to
+nearest-neighbor surface atoms, and larger values extend this range.
+
+The finite range is intentional: it truncates longer-range lateral interactions
+to keep local calculations and classification tractable. It can introduce
+small reaction-energy errors and nonzero closed-cycle energy sums when
+different channels retain different surrounding molecules. Increase
+`constants.lateral_shells` until the energies of interest converge. Including
+the complete occupied environment consistently across channels resolves this
+truncation. Larger neighborhoods increase calculation cost and can create
+more distinct lateral classes.
+
+For example, this fragment selects two hops for electronic-only calculations:
+
+```yaml
+constants:
+  lateral_shells: 2
+kmc:
+  lateral_interactions: true
+free_energy:
+  enabled: false
+```
+
+In the [CO/Cu(111) UMA example](architecture.md#cocu111-example), increasing
+from one to two hops removed a 6.93 meV relaxed cycle discrepancy because two
+hops covered the entire occupied environment in that cell. The required range
+and remaining error depend on the system and coverage.
+
+`diffusion.max_hops` controls which diffusion moves are generated; it does not
+set the lateral interaction range. When `kmc.lateral_interactions: false`,
+electronic-only calculations omit surrounding occupied molecules regardless
+of `constants.lateral_shells`. Free-energy calculations always include all
+occupied adsorbates and do not use this local truncation.
+
 ## `optimization`
 
 ```yaml
@@ -335,7 +374,7 @@ structures in one call."
 | `min_vacuum_size` | `12.0` Å | Minimum vacuum thickness. |
 | `goal_x`, `goal_y` | `12.0` Å | Target lateral dimensions. |
 | `n_freeze_layers` | `2` | Number of bottom layers to constrain. |
-| `surface_side` | `top` | Slab face classified as exposed: `top`, `bottom`, or `both`. |
+| `surface_side` | `top` | Slab face classified as exposed: `top`, `bottom`, or `both`. Anchors and molecules extend outward from each selected face (+z at the top, -z at the bottom). |
 | `surface_radius_factor` | `1.0` | Covalent-radius multiplier for slab ray-casting discs. |
 | `nanoparticle_hull_tolerance_factor` | `0.5` | Covalent-radius multiplier for nanoparticle hull-atom classification tolerance. |
 | `fmax` | `0.05` eV/Å | Structure relaxation threshold. |
@@ -403,8 +442,27 @@ it checks the calculator.
 | `max_steps` | `500` | Optimizer step limit for the optional gas-phase relaxation. |
 | `partial_pressure_bar` | `null` | Species partial pressure; when omitted, inherits `free_energy.pressure_bar`. Zero prevents gas adsorption. |
 | `symmetry_number` | `null` | Optional ideal-gas symmetry-number override. By default it is inferred from the final gas geometry with pymatgen. |
-| `spin` | `null` | Spin value used by ideal-gas thermochemistry. |
+| `spin` | `null` | Spin value used by ideal-gas thermochemistry and, when explicitly supplied, to seed molecular initial magnetic moments. |
 | `geometry` | `null` | `auto`, `linear`, `nonlinear`, or `monatomic`. |
+
+Isotope labels in SMILES set ASE isotope masses. For example, `[2H][2H]`
+constructs deuterium with approximately `2.014102 u` per atom. These masses
+are preserved in adsorption structures, reaction paths, thermochemistry, and
+fragmentation/coupling of Reactant or ASE Atoms inputs. Unlabelled atoms retain
+ASE's elemental masses. Atoms inputs with arbitrary masses that cannot be
+represented by isotope-labelled SMILES are rejected during fragmentation or
+coupling instead of silently changing their masses.
+
+With `add_hydrogens: false`, only written hydrogen atoms and bracket hydrogen
+counts are materialized. For example, `[H]C` contains one H and one C, while
+`[CH3]` contains one C and three H atoms.
+
+The produced gas graph is checked against the input SMILES after optional
+relaxation, including its materialized hydrogen inventory. Missing or extra
+bonds cause `ReactantConnectivityError`; the diagnostic reports atom-index
+pairs and the applied `constants.neighbor_list_multiplier`. Atom counts,
+elements, and isotope masses must also agree. `relax_in_gas: false` skips ASE
+optimization but retains this validation of the generated structure.
 
 Feed reactants define which desorbing gas species are excluded from the strict
 post-processing product definition. Species auto-built from bond templates
@@ -493,6 +551,9 @@ cache or resume contract being able to detect it.
 | `n_shells_anchor` | `null` | Anchor-environment graph depth; `null` selects it automatically from molecular reach. |
 | `pair_n_shells` | `1` | Local graph depth used to classify multi-anchor molecular placements. |
 | `max_pair_shells` | `10` | Maximum allowed surface-graph path length between anchors in one placement. |
+
+Changing `anchor_k_max` on a reused graph rebuilds its anchor cache, including
+when changing a finite cap to `null` (`None` in Python) for uncapped enumeration.
 
 ## `kmc`
 
@@ -655,9 +716,17 @@ Free-energy work can dominate runtime. The supplied platinum GPU examples
 disable it intentionally for network-debug runs and can be switched on for
 production thermochemistry. For multi-atom gas species, AutoKMC records the
 inferred rotational symmetry number, point group, tolerance, and inference
-source in the reactant thermochemistry metadata and run manifest. Set a
+source in the reactant thermochemistry metadata and run manifest. Rotational
+symmetry counts only operations that preserve isotope masses: HD has symmetry
+number 1, while H2 and D2 have 2. The reported nonlinear point group describes
+the elemental geometry before filtering operations by isotope. Set a
 reactant-specific `symmetry_number` only when an explicit override is
 scientifically necessary.
+
+Interrupted vibration calculations can reuse completed displacements on retry.
+Abandoned empty cache files are removed under the same lock that serializes
+calculations sharing a cache, so active displacement writes remain protected.
+The Python thermochemistry helpers use `atoms.calc` when `calculator` is omitted.
 
 When vibrations are enabled, gas and adsorbed minima must have no imaginary
 modes above `imaginary_mode_tolerance_ev`. Bond transition states require
@@ -686,7 +755,10 @@ directory with `checkpoint.resume_from` unset. This does not repair old results
 or templates in place.
 
 For a compatible resume, AutoKMC reconciles the event and trajectory files to the
-checkpoint. It atomically removes trajectory frames beyond the checkpoint step
-and rejects malformed or non-monotonic committed `kmc_step` metadata. It then
+checkpoint. It atomically removes uncommitted trajectory bytes, including an
+interrupted final append, and rejects malformed or non-monotonic committed
+`kmc_step` metadata. It then
 restores the reaction-folder counters, reconstructs the cumulative summary from
-`events.jsonl`, and continues with the saved NumPy or Python RNG state.
+`events.jsonl`, and continues with the saved NumPy or Python RNG state, including
+the original NumPy bit-generator type. A resume rejected during compatibility
+validation leaves the previous run manifest unchanged.

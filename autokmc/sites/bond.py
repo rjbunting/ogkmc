@@ -85,8 +85,9 @@ from typing import TYPE_CHECKING, Any, Iterable, Mapping
 import networkx as nx
 from networkx.algorithms import isomorphism
 
-from autokmc.io.calculators import CalculatorConfigError, acquire_calculator
+from autokmc.io.calculators import acquire_calculator
 from autokmc.core.pbc import full_pbc_for_cell
+from autokmc.core.atom_metadata import apply_atom_metadata, atom_metadata_key
 from autokmc.sites.adsorbate import (
     AdsorbateSite,
 )
@@ -948,6 +949,7 @@ def _build_triple_ego_graph(
                 result.add_node(
                     nid,
                     element        = d.get("element"),
+                    atom_arrays    = d.get("atom_arrays", {}),
                     type           = d.get("type", "adsorbate"),
                     iso_class      = int(d.get("iso_class", -1)),
                     reactant       = str(d.get("reactant",  "")),
@@ -959,10 +961,10 @@ def _build_triple_ego_graph(
             else:
                 result.nodes[nid]["occupied"]      = True
                 result.nodes[nid]["endpoint_role"] = role
-            for sib in d.get("siblings", ()):
+            for sib in G.neighbors(nid):
                 sib = int(sib)
-                if sib in result and not result.has_edge(nid, sib):
-                    result.add_edge(nid, sib, intra_adsorbate=True)
+                if sib in endpoint_ids and sib in result:
+                    result.add_edge(nid, sib, **G.edges[nid, sib])
             clq = d.get("clique")
             if clq is not None:
                 for surf_id in clq:
@@ -982,7 +984,7 @@ class _TripleEgoBlueprint:
     only when an exact ``GraphMatcher`` fallback is necessary.
     """
 
-    nodes: tuple[tuple[int, tuple[str, str, int, str, int, str]], ...]
+    nodes: tuple[tuple[int, tuple[str, str, int, str, int, str, str]], ...]
     edges: tuple[tuple[int, int], ...]
 
 
@@ -991,14 +993,14 @@ def _triple_match_label(
     *,
     endpoint_role: str | None = None,
     endpoint_default: bool = False,
-) -> tuple[str, str, int, str, int, str]:
+) -> tuple[str, str, int, str, int, str, str]:
     """Return the exact node attributes observed by ``_triple_node_match``."""
     node_type = data.get("type", "adsorbate" if endpoint_default else None)
     type_label = "" if node_type is None else str(node_type)
     element = data.get("element")
     element_label = "" if element is None else str(element)
     if node_type != "adsorbate":
-        return (type_label, element_label, -1, "", -1, "")
+        return (type_label, element_label, -1, "", -1, "", atom_metadata_key(data))
     role = (
         endpoint_role
         if endpoint_role is not None
@@ -1011,6 +1013,7 @@ def _triple_match_label(
         str(data.get("reactant", "")),
         _reactant_orbit_label(data),
         str(role or ""),
+        atom_metadata_key(data),
     )
 
 
@@ -1043,7 +1046,7 @@ def _build_triple_ego_blueprint(
         | (set(record_c.surface_shell) if record_c is not None else set())
     ) - endpoint_ids
     base_nodes = visited
-    labels: dict[int, tuple[str, str, int, str, int, str]] = {}
+    labels: dict[int, tuple[str, str, int, str, int, str, str]] = {}
     for node_id in base_nodes:
         labels[int(node_id)] = _triple_match_label(G.nodes[node_id])
     for node_id, role in endpoint_roles.items():
@@ -1062,8 +1065,8 @@ def _build_triple_ego_blueprint(
             edge = tuple(sorted((int(node_id), int(neighbour))))
             edges.add(edge)
 
-    # Endpoint nodes are added after the base subgraph.  Preserve the
-    # historical sibling and anchor-bond reconstruction exactly.
+    # Endpoint nodes are added after the base subgraph. Copy actual molecular
+    # bonds; siblings records placement membership, not bond connectivity.
     current_nodes = set(base_nodes)
     for record, _ in endpoint_records:
         for node_id in record.node_ids:
@@ -1071,9 +1074,9 @@ def _build_triple_ego_blueprint(
                 continue
             current_nodes.add(int(node_id))
             data = G.nodes[node_id]
-            for sibling in data.get("siblings", ()):
+            for sibling in G.neighbors(node_id):
                 sibling = int(sibling)
-                if sibling in current_nodes:
+                if sibling in endpoint_ids and sibling in current_nodes:
                     edges.add(tuple(sorted((int(node_id), sibling))))
             clique = data.get("clique")
             if clique is not None:
@@ -1099,10 +1102,12 @@ def _materialise_triple_blueprint(blueprint: _TripleEgoBlueprint) -> nx.Graph:
             reactant,
             reactant_orbit,
             endpoint_role,
+            metadata_key,
         ) = label
         attributes: dict[str, Any] = {
             "type": node_type,
             "element": element,
+            "atom_metadata_key": metadata_key,
         }
         if node_type == "adsorbate":
             attributes.update(
@@ -1248,6 +1253,8 @@ def _triple_node_match(d1: dict, d2: dict) -> bool:
         return False
     if d1.get("element") != d2.get("element"):
         return False
+    if atom_metadata_key(d1) != atom_metadata_key(d2):
+        return False
     if d1.get("type") == "adsorbate":
         if d1.get("iso_class") != d2.get("iso_class"):
             return False
@@ -1270,6 +1277,7 @@ def _triple_fingerprint(g: nx.Graph) -> tuple:
         (
             d.get("type",    "X"),
             d.get("element", "X"),
+            atom_metadata_key(d),
             int(d.get("iso_class",      -1)) if d.get("type") == "adsorbate" else -1,
             str(d.get("reactant",       "")) if d.get("type") == "adsorbate" else "",
             _reactant_orbit_label(d) if d.get("type") == "adsorbate" else -1,
@@ -1882,6 +1890,7 @@ def _build_ab_pruning_atoms(
     pbc  = full_pbc_for_cell(cell)
 
     atoms = Atoms(symbols=symbols, positions=positions, cell=cell, pbc=pbc)
+    apply_atom_metadata(atoms, [G.nodes[node] for node in slab_nodes + a_nids + b_nids])
     atoms.arrays["surface"] = surface_array
     if frozen_indices:
         atoms.set_constraint(FixAtoms(indices=list(frozen_indices)))
@@ -1913,10 +1922,10 @@ def _intended_ab_edges(
         for u, v in react_b.graph.edges():
             edges.add(frozenset((ab_offset + int(u), ab_offset + int(v))))
 
-    # A anchor bonds — read per-member cliques (placement-specific).
-    a_member_cliques = getattr(site_a, "_member_cliques", None)
-    if a_member_cliques is not None and m_a < len(a_member_cliques):
-        for i, clq in enumerate(a_member_cliques[m_a]):
+    # Members retain one entry per atom, including unbound atoms. The reverse
+    # index's _member_cliques omits None entries and cannot supply atom indices.
+    if m_a < len(site_a.members):
+        for i, clq in enumerate(site_a.members[m_a]):
             if clq is None:
                 continue
             ads_idx = n_slab + int(i)
@@ -1927,9 +1936,8 @@ def _intended_ab_edges(
                 edges.add(frozenset((ads_idx, ase_surf)))
 
     # B anchor bonds.
-    b_member_cliques = getattr(site_b, "_member_cliques", None)
-    if b_member_cliques is not None and m_b < len(b_member_cliques):
-        for i, clq in enumerate(b_member_cliques[m_b]):
+    if m_b < len(site_b.members):
+        for i, clq in enumerate(site_b.members[m_b]):
             if clq is None:
                 continue
             ads_idx = ab_offset + int(i)
@@ -2021,7 +2029,7 @@ def prune_unstable_bond_sites(
         return list(bond_sites)
 
     from autokmc.io.atoms import copy_atoms_with_results
-    from autokmc.structure import optimise_structure
+    from autokmc.structure import StructureOptimisationError, optimise_structure
     from autokmc.core.graph import build_graph
 
     debug_dir = None
@@ -2127,7 +2135,10 @@ def prune_unstable_bond_sites(
                     forces=forces,
                 )
         except Exception as exc:
-            if isinstance(exc, CalculatorConfigError):
+            if not (
+                isinstance(exc, StructureOptimisationError)
+                and exc.converged is False
+            ):
                 raise
             _log.debug(
                 "prune_unstable_bond_sites: relaxation raised %s", exc,

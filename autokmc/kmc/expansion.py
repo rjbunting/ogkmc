@@ -565,8 +565,150 @@ def _ensure_species_known(
 
 
 # ---------------------------------------------------------------------------
-# Public API — main expansion entry point
+# Diffusion discovery, independent of bond-template expansion
 # ---------------------------------------------------------------------------
+
+def _pending_diffusion_sites(
+    G: nx.Graph, reg: dict, species: Iterable[str],
+) -> list[AdsorbateSite]:
+    """Find species whose ready adsorption placements have not been searched.
+
+    The diffusion store retains a species key even when no legal hops exist.
+    This records a completed search independently of bond-template expansion.
+    Adsorption placements for a species are constructed together and stay
+    immutable once indexed.
+    """
+    existing = get_diffusion_sites(G) or {}
+    pending: list[AdsorbateSite] = []
+    seen: set[SiteId] = set()
+    for smi in sorted(set(species)):
+        for site in reg.get("adsorbate_sites", {}).get(smi, []):
+            if site.reactant in existing:
+                continue
+            identifier = site_identifier(site)
+            if identifier not in seen:
+                pending.append(site)
+                seen.add(identifier)
+    return pending
+
+
+def _ensure_species_diffusion(
+    G: nx.Graph,
+    reg: dict,
+    cs: str,
+    species: Iterable[str],
+    *,
+    diffusion_max_hops: int,
+    diffusion_n_shells_pair: int,
+    diffusion_prune_by_ads_pair: bool | None,
+    verbose: bool,
+) -> None:
+    """Discover missing hops and append them without replacing existing rates."""
+    species = tuple(sorted(set(species)))
+    new_ads_sites = _pending_diffusion_sites(G, reg, species)
+    if not new_ads_sites:
+        return
+    if verbose:
+        n_members = sum(len(s.member_node_ids) for s in new_ads_sites)
+        print(
+            f"  [KMC] diffusion expansion: {len(new_ads_sites)} "
+            f"new adsorbate iso-class(es), {n_members} placement(s); "
+            "enumerating hop permutations"
+        )
+    diff_kwargs: dict = dict(
+        max_hops            = diffusion_max_hops,
+        n_shells_pair       = diffusion_n_shells_pair,
+        verbose             = verbose,
+    )
+    if diffusion_prune_by_ads_pair is not None:
+        diff_kwargs["prune_by_adsorption_pair"] = diffusion_prune_by_ads_pair
+
+    existing_diff: dict = dict(get_diffusion_sites(G) or {})
+    existing_diff_cliques = _preserve_reverse_index(
+        G,
+        DIFFUSION_CLIQUE_TO_MEMBERS,
+    )
+    existing_diff_surfaces = _preserve_reverse_index(
+        G,
+        DIFFUSION_SURFACE_NODE_TO_MEMBERS,
+    )
+
+    def _enumerate_diffusion_sites() -> dict:
+        try:
+            return find_diffusion_sites(
+                G,
+                new_ads_sites,
+                **diff_kwargs,
+            )
+        except Exception:
+            # The enumerator replaces graph-level stores as it works.
+            # Restore the pre-expansion state before retrying or
+            # surfacing the terminal error.
+            set_diffusion_sites(G, existing_diff)
+            if existing_diff_cliques is None:
+                G.graph.pop(DIFFUSION_CLIQUE_TO_MEMBERS, None)
+            else:
+                G.graph[DIFFUSION_CLIQUE_TO_MEMBERS] = (
+                    existing_diff_cliques
+                )
+            if existing_diff_surfaces is None:
+                G.graph.pop(DIFFUSION_SURFACE_NODE_TO_MEMBERS, None)
+            else:
+                G.graph[DIFFUSION_SURFACE_NODE_TO_MEMBERS] = (
+                    existing_diff_surfaces
+                )
+            raise
+
+    new_diff = _retry_expansion_operation(
+        reg,
+        cs,
+        "find_diffusion_sites",
+        _enumerate_diffusion_sites,
+    )
+
+    # ``find_diffusion_sites`` overwrites ``G.graph["diffusion_sites"]``
+    # with whatever it just enumerated.  Merge with existing entries
+    # so previously-discovered diffusion channels are preserved.
+    merged: dict[str, list[DiffusionSite]] = {
+        k: list(v) for k, v in existing_diff.items()
+    }
+    accepted_new_diffusion: list[DiffusionSite] = []
+    for smi, sites in new_diff.items():
+        merged.setdefault(smi, [])
+        # Avoid duplicate DiffusionSite identity on re-entry.
+        seen_ds = {site_identifier(x) for x in merged[smi]}
+        for ds in sites:
+            identifier = site_identifier(ds)
+            if identifier not in seen_ds:
+                merged[smi].append(ds)
+                seen_ds.add(identifier)
+                accepted_new_diffusion.append(ds)
+    set_diffusion_sites(G, merged)
+    if (
+        existing_diff_cliques is not None
+        and existing_diff_surfaces is not None
+    ):
+        _append_diffusion_reverse_indexes(
+            G,
+            existing_diff_cliques,
+            existing_diff_surfaces,
+            accepted_new_diffusion,
+        )
+        G.graph[DIFFUSION_CLIQUE_TO_MEMBERS] = existing_diff_cliques
+        G.graph[DIFFUSION_SURFACE_NODE_TO_MEMBERS] = (
+            existing_diff_surfaces
+        )
+    else:
+        # Legacy graphs may not have reverse indexes yet; build the
+        # complete pair once, after which expansions append to it.
+        rebuild_diffusion_reverse_indexes(G, merged)
+    if verbose:
+        added = sum(len(v) for v in new_diff.values())
+        print(
+            f"  → diffusion: +{added} diffusion iso-class(es) across "
+            f"species {list(species)}"
+        )
+
 
 def expand_bond_sites_for_new_species(
     G: nx.Graph,
@@ -623,12 +765,13 @@ def expand_bond_sites_for_new_species(
 ) -> list[BondReactionSite]:
     """Add a newly-formed species to the bond-reaction registry and expand.
 
-    Idempotent: if *new_smiles* is already in the registry the function
-    returns ``[]`` without rebuilding anything.
+    Idempotent: completed bond expansion is not repeated. When requested,
+    missing diffusion channels are discovered even for an expanded species
+    or a species with no new bond templates.
 
     Steps
     -----
-    1. Canonicalise *new_smiles*; bail out if already known.
+    1. Canonicalise *new_smiles*; reuse already constructed species and sites.
     2. Build a :class:`~autokmc.species.reactant.Reactant` and find
        :class:`~autokmc.sites.adsorbate.AdsorbateSite`'s for it.
     3. Derive new :class:`BondReactionTemplate`'s centred on the new
@@ -643,7 +786,9 @@ def expand_bond_sites_for_new_species(
     4. For every species *X*, *Y*, *W* referenced by the new templates
        that is **not** yet in the registry, build its Reactant + sites
        (a one-shot per species — see :func:`_ensure_species_known`).
-    5. Run :func:`autokmc.sites.bond.find_bond_sites` for the new
+    5. When enabled, discover diffusion for the new species and every ready
+       species referenced by its templates, preserving existing channels.
+    6. Run :func:`autokmc.sites.bond.find_bond_sites` for the new
        templates against the cumulative AdsorbateSite list, append the
        resulting :class:`BondReactionSite`'s to
        ``G.graph["bond_reaction_sites"]`` with continuous global
@@ -678,6 +823,9 @@ def expand_bond_sites_for_new_species(
     include_homo_coupling : bool
         Include the homo-coupling template ``new_smiles + new_smiles → W``.
         Default ``True``.
+    find_diffusion : bool
+        Discover missing hops independently of whether new bond templates
+        exist. A completed search with no legal hops is also remembered.
     verbose : bool
 
     Returns
@@ -730,6 +878,14 @@ def expand_bond_sites_for_new_species(
     if not cs:
         return []
     if cs in reg["expanded_species"]:
+        if find_diffusion:
+            _ensure_species_diffusion(
+                G, reg, cs, [cs],
+                diffusion_max_hops=diffusion_max_hops,
+                diffusion_n_shells_pair=diffusion_n_shells_pair,
+                diffusion_prune_by_ads_pair=diffusion_prune_by_ads_pair,
+                verbose=verbose,
+            )
         if verbose:
             print(f"  SKIPPED species {cs!r}: already expanded")
         return []
@@ -822,12 +978,8 @@ def expand_bond_sites_for_new_species(
             print(
                 f"  → species {cs!r}: no new templates generated"
             )
-        # No new templates were found, so mark the species as complete and do
-        # not repeat this work on later KMC steps.
-        reg["expanded_species"].add(cs)
-        return []
 
-    if verbose:
+    if verbose and new_tpls:
         n_dissoc = sum(1 for t in new_tpls if t.source == "dissociation")
         n_couple = sum(1 for t in new_tpls if t.source == "coupling")
         print(
@@ -837,24 +989,17 @@ def expand_bond_sites_for_new_species(
         )
 
     # After the templates are built, materialize every species they reference.
-    newly_built: list[str] = []
-    if cs in reg["adsorbate_sites"]:
-        newly_built.append(cs)
+    diffusion_species = {cs}
     unavailable_species: set[str] = set()
     checked_species: set[str] = set()
     for t in new_tpls:
         for smi in (t.smiles_a, t.smiles_b, t.smiles_c):
+            diffusion_species.add(smi)
             if auto_build_leaf_species and smi not in checked_species:
                 checked_species.add(smi)
-                was_ready = (
-                    reg["species"].get(smi) is not None
-                    and smi in reg["adsorbate_sites"]
-                )
                 available = ensure_species_known(smi)
                 if not available:
                     unavailable_species.add(smi)
-                elif not was_ready and reg["adsorbate_sites"].get(smi):
-                    newly_built.append(smi)
 
     if unavailable_species:
         viable_templates: list[BondReactionTemplate] = []
@@ -887,123 +1032,19 @@ def expand_bond_sites_for_new_species(
             )
         new_tpls = viable_templates
 
+    if find_diffusion:
+        _ensure_species_diffusion(
+            G, reg, cs, diffusion_species,
+            diffusion_max_hops=diffusion_max_hops,
+            diffusion_n_shells_pair=diffusion_n_shells_pair,
+            diffusion_prune_by_ads_pair=diffusion_prune_by_ads_pair,
+            verbose=verbose,
+        )
+
     if not new_tpls:
+        # Requested diffusion discovery is complete even without new chemistry.
         reg["expanded_species"].add(cs)
         return []
-
-    # New species also need diffusion pairs before they can move on the
-    # surface. Enumerate pairs for only their sites, and merge the results into
-    # the existing graph store.
-    if find_diffusion and newly_built:
-        new_ads_sites: list[AdsorbateSite] = []
-        seen_ids: set[SiteId] = set()
-        for smi in newly_built:
-            for s in reg["adsorbate_sites"].get(smi, []):
-                identifier = site_identifier(s)
-                if identifier not in seen_ids:
-                    seen_ids.add(identifier)
-                    new_ads_sites.append(s)
-        if new_ads_sites:
-            if verbose:
-                n_members = sum(len(s.member_node_ids) for s in new_ads_sites)
-                print(
-                    f"  [KMC] diffusion expansion: {len(new_ads_sites)} "
-                    f"new adsorbate iso-class(es), {n_members} placement(s); "
-                    "enumerating hop permutations"
-                )
-            diff_kwargs: dict = dict(
-                max_hops            = diffusion_max_hops,
-                n_shells_pair       = diffusion_n_shells_pair,
-                verbose             = verbose,
-            )
-            if diffusion_prune_by_ads_pair is not None:
-                diff_kwargs["prune_by_adsorption_pair"] = diffusion_prune_by_ads_pair
-
-            existing_diff: dict = dict(get_diffusion_sites(G) or {})
-            existing_diff_cliques = _preserve_reverse_index(
-                G,
-                DIFFUSION_CLIQUE_TO_MEMBERS,
-            )
-            existing_diff_surfaces = _preserve_reverse_index(
-                G,
-                DIFFUSION_SURFACE_NODE_TO_MEMBERS,
-            )
-
-            def _enumerate_diffusion_sites() -> dict:
-                try:
-                    return find_diffusion_sites(
-                        G,
-                        new_ads_sites,
-                        **diff_kwargs,
-                    )
-                except Exception:
-                    # The enumerator replaces graph-level stores as it works.
-                    # Restore the pre-expansion state before retrying or
-                    # surfacing the terminal error.
-                    set_diffusion_sites(G, existing_diff)
-                    if existing_diff_cliques is None:
-                        G.graph.pop(DIFFUSION_CLIQUE_TO_MEMBERS, None)
-                    else:
-                        G.graph[DIFFUSION_CLIQUE_TO_MEMBERS] = (
-                            existing_diff_cliques
-                        )
-                    if existing_diff_surfaces is None:
-                        G.graph.pop(DIFFUSION_SURFACE_NODE_TO_MEMBERS, None)
-                    else:
-                        G.graph[DIFFUSION_SURFACE_NODE_TO_MEMBERS] = (
-                            existing_diff_surfaces
-                        )
-                    raise
-
-            new_diff = _retry_expansion_operation(
-                reg,
-                cs,
-                "find_diffusion_sites",
-                _enumerate_diffusion_sites,
-            )
-
-            # ``find_diffusion_sites`` overwrites ``G.graph["diffusion_sites"]``
-            # with whatever it just enumerated.  Merge with existing entries
-            # so previously-discovered diffusion channels are preserved.
-            merged: dict[str, list[DiffusionSite]] = {
-                k: list(v) for k, v in existing_diff.items()
-            }
-            accepted_new_diffusion: list[DiffusionSite] = []
-            for smi, sites in new_diff.items():
-                merged.setdefault(smi, [])
-                # Avoid duplicate DiffusionSite identity on re-entry.
-                seen_ds = {site_identifier(x) for x in merged[smi]}
-                for ds in sites:
-                    identifier = site_identifier(ds)
-                    if identifier not in seen_ds:
-                        merged[smi].append(ds)
-                        seen_ds.add(identifier)
-                        accepted_new_diffusion.append(ds)
-            set_diffusion_sites(G, merged)
-            if (
-                existing_diff_cliques is not None
-                and existing_diff_surfaces is not None
-            ):
-                _append_diffusion_reverse_indexes(
-                    G,
-                    existing_diff_cliques,
-                    existing_diff_surfaces,
-                    accepted_new_diffusion,
-                )
-                G.graph[DIFFUSION_CLIQUE_TO_MEMBERS] = existing_diff_cliques
-                G.graph[DIFFUSION_SURFACE_NODE_TO_MEMBERS] = (
-                    existing_diff_surfaces
-                )
-            else:
-                # Legacy graphs may not have reverse indexes yet; build the
-                # complete pair once, after which expansions append to it.
-                rebuild_diffusion_reverse_indexes(G, merged)
-            if verbose:
-                added = sum(len(v) for v in new_diff.values())
-                print(
-                    f"  → diffusion: +{added} diffusion iso-class(es) across "
-                    f"species {newly_built}"
-                )
 
     # With every referenced species available, enumerate the new bond-reaction
     # iso-classes.
@@ -1157,7 +1198,7 @@ def expand_bond_sites_after_event(
     Inspects *reaction* and, when it is a
     :class:`~autokmc.reactions.bond.BondReaction` (``kind == "bond"``), triggers
     :func:`expand_bond_sites_for_new_species` for any species that has not
-    yet been fully expanded:
+    yet been fully expanded, and checks for missing diffusion when enabled:
 
     * **Coupling** ``A + B → C``: expands for ``smiles_c``.  This is the
       primary path that introduces a genuinely new product species.

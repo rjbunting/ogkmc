@@ -351,6 +351,9 @@ class KMCOutputManager:
             # writer. In that compatibility mode there is no reconstructible
             # source of truth, so retaining history is required for correctness.
             payload["history"] = list(self.runtime.history)
+        trajectory_offset = getattr(trajectory, "committed_offset", None)
+        if isinstance(trajectory_offset, int):
+            payload["committed_trajectory_offset"] = trajectory_offset
         if force:
             result = writer.maybe_write(force=True, **payload)
         else:

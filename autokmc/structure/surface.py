@@ -373,6 +373,7 @@ def find_surface_atoms_raycasting(
     else:  # "both"
         surface_mask = (wins_top >= threshold_count) | (wins_bot >= threshold_count)
 
+    atoms.info["_autokmc_surface_side"] = which
     surface_indices = np.where(surface_mask)[0].astype(int)
     return surface_mask, surface_indices
 

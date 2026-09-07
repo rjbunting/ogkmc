@@ -424,6 +424,15 @@ electronic-only behavior. Old reactive-only free energies are not reused;
 compatible electronic calculations can still supply structures for a new
 vibrational calculation.
 
+In electronic-only runs, the local lateral interaction range is an intentional
+approximation that truncates longer-range interactions. It can introduce small
+reaction-energy errors and closed-cycle energy discrepancies. Increase
+`constants.lateral_shells` with `kmc.lateral_interactions: true` until the
+energies converge. In a CO/Cu(111) UMA example, extending one hop to two removed
+a 6.93 meV cycle discrepancy by including all surrounding CO molecules. See
+[lateral interaction range and the measured example](docs/architecture.md#lateral-interaction-range)
+and the [configuration controls](docs/configuration.md#lateral-interaction-range).
+
 Calculated vibrational spectra are also checked for stability. Minima reject
 significant imaginary modes; bond transition states require one, and diffusion
 transition structures allow at most one. The numerical-noise threshold is

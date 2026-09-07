@@ -270,7 +270,7 @@ class KMCSession:
                 print(f"[KMC] Step {step}: sampler returned None — stopping.")
             return "sampler_returned_none"
 
-        tau_s = float(np.log(1.0 / time_draw) / total_rate)
+        tau_s = float(-np.log(time_draw) / total_rate)
         runtime.current_time_s += tau_s
         transition = outputs.capture_transition(reaction)
         affected_cliques = execute_reaction(self.system.graph, reaction)

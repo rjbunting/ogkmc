@@ -235,7 +235,8 @@ def _vibration_cache_lock(cache_dir: Path, label: str):
 
     ASE represents an in-progress displacement with an empty JSON file.
     Deleting empty files before a run can therefore remove another process's
-    active lock.  A separate advisory lock protects the complete same-label
+    active lock. Remove abandoned empty files only after acquiring this
+    whole-workflow lock. A separate advisory lock protects the complete same-label
     workflow, while the small in-process registry covers platforms where file
     locks are process-scoped.
     """
@@ -382,15 +383,38 @@ def _infer_rotational_symmetry_number(
         analyzer = PointGroupAnalyzer(molecule, tolerance=tol)
         symmetry_number = int(analyzer.get_rotational_symmetry_number())
         point_group = str(analyzer.sch_symbol)
+        # Pymatgen's elemental symmetry operations can exchange isotopes.
+        # Count only proper rotations that also preserve the nuclear masses.
+        from scipy.optimize import linear_sum_assignment
 
-        # Pymatgen releases before 2025 disagree on the rotational symmetry
-        # number of linear homonuclear diatomics: the point group is reported
-        # correctly as D*h, but ``get_rotational_symmetry_number`` may return
-        # one instead of two.  The diatomic result is exact from composition,
-        # so make it independent of the installed pymatgen version.
-        if len(atoms) == 2:
-            symbols = atoms.get_chemical_symbols()
-            symmetry_number = 2 if symbols[0] == symbols[1] else 1
+        coordinates = np.asarray(analyzer.centered_mol.cart_coords)
+        masses = atoms.get_masses()
+        same_nuclei = (
+            (atoms.numbers[:, None] == atoms.numbers[None, :])
+            & np.isclose(masses[:, None], masses[None, :], rtol=0.0, atol=1e-8)
+        )
+
+        def preserves_nuclei(transformed):
+            distances = np.linalg.norm(
+                transformed[:, None, :] - coordinates[None, :, :], axis=2,
+            )
+            left, right = linear_sum_assignment(
+                np.where(same_nuclei, distances, np.inf),
+            )
+            return bool(np.all(distances[left, right] <= tol))
+
+        if point_group in {"D*h", "C*v"}:
+            # A linear molecule has symmetry number two exactly when end-for-
+            # end reversal preserves its nuclei. Some pymatgen versions omit
+            # that proper half-turn from the finite operation list.
+            symmetry_number = 2 if preserves_nuclei(-coordinates) else 1
+            point_group = "D*h" if symmetry_number == 2 else "C*v"
+        else:
+            symmetry_number = sum(
+                1 for operation in analyzer.get_symmetry_operations()
+                if np.isclose(np.linalg.det(operation.rotation_matrix), 1.0, atol=1e-4)
+                and preserves_nuclei(operation.operate_multi(coordinates))
+            )
     except Exception as exc:
         raise ValueError(
             "Could not infer the gas-phase rotational symmetry number from "
@@ -440,6 +464,9 @@ def _vibrate(
         delta        = float(options.vibration_displacement),
         nfree        = int(options.vibration_nfree),
     )
+    # The outer cache lock excludes live writers. A failed displacement can
+    # leave an empty ASE lock file, which must be retried rather than reused.
+    vib.clean(empty_files=True)
     vib.run()
     energies = list(vib.get_energies())
     real_ev, imag_ev = _split_real_imag_ev(
@@ -512,6 +539,7 @@ def _vibrate_parallel(
             "Cannot run vibration calculation because its cache is not writable"
         )
     vibration._check_old_pickles()
+    vibration.clean(empty_files=True)
 
     def _calculate(displacement, displaced: Atoms) -> None:
         with vibration.cache.lock(displacement.name) as handle:
@@ -682,6 +710,7 @@ def compute_gas_thermo(
 
     from ase.thermochemistry import IdealGasThermo
 
+    calculator = calculator if calculator is not None else atoms.calc
     snap = atoms.copy()
     snap.set_pbc(False)
     if calculator is not None:
@@ -862,6 +891,7 @@ def compute_harmonic_thermo(
 
     from ase.thermochemistry import HarmonicThermo
 
+    calculator = calculator if calculator is not None else atoms.calc
     snap = atoms.copy()
     _normalise_harmonic_pbc(snap)
     if calculator is not None:

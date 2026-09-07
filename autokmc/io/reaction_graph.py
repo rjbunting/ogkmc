@@ -14,6 +14,8 @@ from typing import Any, Iterable, Mapping
 
 import networkx as nx
 
+from autokmc.core.atom_metadata import atom_metadata_key
+
 
 REACTION_GRAPH_SCHEMA = "autokmc-reaction-graph-v1"
 
@@ -26,6 +28,7 @@ def _node_label(data: Mapping[str, Any]) -> str:
             str(data.get("reactant", "")),
             str(data.get("reactant_index", "")),
             str(data.get("endpoint_role", "")),
+            str(data.get("atom_metadata_key", atom_metadata_key(data))),
         )
     )
 
@@ -68,6 +71,7 @@ def normalise_reaction_graph(
         attrs: dict[str, Any] = {
             "type": node_type,
             "element": str(raw.get("element", "X")),
+            "atom_metadata_key": raw.get("atom_metadata_key", atom_metadata_key(raw)),
         }
         if node_type == "adsorbate":
             attrs["reactant"] = str(raw.get("reactant", ""))
