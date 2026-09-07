@@ -78,6 +78,8 @@ Public API
 
 from __future__ import annotations
 
+from autokmc.core.pbc import slab_outward_normal
+
 import itertools
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -92,6 +94,7 @@ from ase.constraints import FixAtoms
 
 from autokmc.io.calculators import acquire_calculator
 from autokmc.io.atoms import copy_atoms_with_results
+from autokmc.core.atom_metadata import apply_atom_metadata, atom_metadata, atom_metadata_key, node_mass
 from autokmc.io.calculation_cache import (
     CalculationFingerprintMemo,
     apply_cached_states,
@@ -115,6 +118,7 @@ from autokmc.sites.stability.adsorption import (
     AdsorbateDissociationError,
     OptimisationFailedError,
     _surface_bfs_shells,
+    _complete_adsorbate_environment,
     _lateral_node_order,
     _discard_lateral_calculation,
     _promote_full_occupied_lateral,
@@ -230,6 +234,8 @@ def _bond_lateral_node_match(d1: dict, d2: dict) -> bool:
         return False
     if d1.get("element") != d2.get("element"):
         return False
+    if atom_metadata_key(d1) != atom_metadata_key(d2):
+        return False
     if d1.get("type") == "adsorbate":
         if d1.get("iso_class") != d2.get("iso_class"):
             return False
@@ -249,6 +255,7 @@ def _bond_lateral_fingerprint(g: nx.Graph) -> tuple:
             (
                 d.get("type", "X"),
                 d.get("element", "X"),
+                atom_metadata_key(d),
                 int(d.get("iso_class", -1)) if d.get("type") == "adsorbate" else -1,
                 str(d.get("reactant", "")) if d.get("type") == "adsorbate" else "",
                 _reactant_orbit_label(d) if d.get("type") == "adsorbate" else -1,
@@ -322,38 +329,14 @@ def _build_bond_lateral_ego_graph(
                 if d.get("occupied", False):
                     ads_leaves.add(nb)
 
-    result = G.subgraph(visited | ads_leaves).copy()
+    result = _complete_adsorbate_environment(G, visited, ads_leaves | set(endpoint_ids))
     result.graph["environment_scope"] = "all_occupied" if include_all_occupied else "local"
 
     for ids, role in endpoint_lists:
         for nid in ids:
             if nid not in G:
                 continue
-            d = G.nodes[nid]
-            if nid not in result:
-                result.add_node(
-                    nid,
-                    element=d.get("element"),
-                    type=d.get("type", "adsorbate"),
-                    iso_class=int(d.get("iso_class", -1)),
-                    reactant=str(d.get("reactant", "")),
-                    reactant_index=int(d.get("reactant_index", -1)),
-                    reactant_orbit=_reactant_orbit_label(d),
-                    occupied=True,
-                    endpoint_role=role,
-                )
-            else:
-                result.nodes[nid]["occupied"] = True
-                result.nodes[nid]["endpoint_role"] = role
-            for sib in d.get("siblings", ()):
-                sib = int(sib)
-                if sib in result and not result.has_edge(nid, sib):
-                    result.add_edge(nid, sib, intra_adsorbate=True)
-            clq = d.get("clique")
-            if clq is not None:
-                for surf_id in clq:
-                    if surf_id in result and not result.has_edge(nid, surf_id):
-                        result.add_edge(nid, surf_id, anchor_bond=True)
+            result.nodes[nid].update(occupied=True, endpoint_role=role)
 
     return result
 
@@ -756,6 +739,7 @@ def _greedy_pair_c_to_ab(
     *,
     cell=None,
     pbc=None,
+    ab_masses: Sequence[float] | None = None,
 ) -> list[int]:
     """Reorder *c_nodes* so that c[k]'s element matches ab[k]'s and c[k]'s
     physical position is closest (per element class) to ab[k]'s.
@@ -781,14 +765,14 @@ def _greedy_pair_c_to_ab(
     )
     pbc = full_pbc_for_cell(cell) if pbc is None else np.asarray(pbc, dtype=bool)
 
-    c_remaining_by_elem: dict[str, list[int]] = {}
+    c_remaining_by_elem: dict[tuple, list[int]] = {}
     for nid in c_nodes:
-        elem = G.nodes[nid]["element"]
+        elem = (G.nodes[nid]["element"], node_mass(G.nodes[nid]) if ab_masses is not None else None)
         c_remaining_by_elem.setdefault(elem, []).append(int(nid))
 
     ordered: list[int] = []
     for k, (sym, pos) in enumerate(zip(ab_symbols, ab_positions)):
-        candidates = c_remaining_by_elem.get(sym)
+        candidates = c_remaining_by_elem.get((sym, ab_masses[k] if ab_masses is not None else None))
         if not candidates:
             raise ValueError(
                 f"Bond NEB pairing: AB atom {k} has element {sym!r} but "
@@ -821,6 +805,7 @@ def _hungarian_pair_c_to_ab(
     *,
     cell=None,
     pbc=None,
+    ab_masses: Sequence[float] | None = None,
 ) -> list[int]:
     """Return the same-element assignment minimizing total MIC distance."""
     if len(c_nodes) != len(ab_symbols):
@@ -832,14 +817,19 @@ def _hungarian_pair_c_to_ab(
     cell = np.asarray(G.graph.get("cell", np.eye(3)) if cell is None else cell, dtype=float)
     pbc = full_pbc_for_cell(cell) if pbc is None else np.asarray(pbc, dtype=bool)
 
-    c_by_elem: dict[str, list[int]] = {}
+    c_by_elem: dict[tuple, list[int]] = {}
     for nid in c_nodes:
-        c_by_elem.setdefault(str(G.nodes[nid]["element"]), []).append(int(nid))
+        identity = (str(G.nodes[nid]["element"]), node_mass(G.nodes[nid]) if ab_masses is not None else None)
+        c_by_elem.setdefault(identity, []).append(int(nid))
 
     ordered: list[int | None] = [None] * len(ab_symbols)
     ab_pos = np.asarray(ab_positions, dtype=float)
-    for sym in sorted(set(ab_symbols)):
-        ab_idx = [i for i, s in enumerate(ab_symbols) if s == sym]
+    ab_identities = [
+        (symbol, ab_masses[i] if ab_masses is not None else None)
+        for i, symbol in enumerate(ab_symbols)
+    ]
+    for sym in sorted(set(ab_identities)):
+        ab_idx = [i for i, identity in enumerate(ab_identities) if identity == sym]
         candidates = c_by_elem.get(sym, [])
         if len(candidates) != len(ab_idx):
             raise ValueError(
@@ -939,18 +929,24 @@ def _align_gas_product_to_target(
     gas_edges: set[frozenset[int]] | None = None,
     target_edges: set[frozenset[int]] | None = None,
     matching_trials: int = BOND_MATCHING_TRIALS,
+    gas_masses: Sequence[float] | None = None,
+    target_masses: Sequence[float] | None = None,
 ) -> tuple[np.ndarray, list[int], dict]:
     """Return gas positions assigned/oriented to best match target positions."""
     gas_positions = np.asarray(gas_positions, dtype=float)
     gas_centered = gas_positions - gas_positions.mean(axis=0)
     target_centered = np.asarray(target_positions_centered, dtype=float)
+    gas_labels = _mass_labels(gas_symbols, gas_masses)
+    target_labels = _mass_labels(target_symbols, target_masses)
+    if sorted(gas_labels) != sorted(target_labels):
+        raise ValueError("Bond NEB gas-product pairing requires matching element and isotope masses")
 
     connectivity_orders: list[list[int]] = []
     if target_edges:
         connectivity_orders = _connectivity_preserving_orders(
-            gas_symbols,
+            gas_labels,
             set(gas_edges or ()),
-            target_symbols,
+            target_labels,
             target_edges,
             limit=max(1, int(matching_trials)),
         )
@@ -999,9 +995,9 @@ def _align_gas_product_to_target(
         return ordered, order, diag
 
     order = _assign_indices_by_element(
-        gas_symbols,
+        gas_labels,
         gas_centered,
-        target_symbols,
+        target_labels,
         target_centered,
     )
     rotated_all = gas_centered.copy()
@@ -1010,9 +1006,9 @@ def _align_gas_product_to_target(
         R = _kabsch_rotation(P, target_centered)
         rotated_all = gas_centered @ R
         new_order = _assign_indices_by_element(
-            gas_symbols,
+            gas_labels,
             rotated_all,
-            target_symbols,
+            target_labels,
             target_centered,
         )
         if new_order == order:
@@ -1032,6 +1028,15 @@ def _align_gas_product_to_target(
         "connectivity_preserved": True if target_edges is not None else None,
     }
     return ordered, order, diag
+
+
+def _mass_labels(symbols: Sequence[str], masses: Sequence[float] | None) -> list[str]:
+    """Matching labels conserve isotope identity without constraining partial charges."""
+    if masses is None:
+        return list(symbols)
+    if len(symbols) != len(masses):
+        raise ValueError("Atom mapping requires one mass per symbol")
+    return [f"{symbol}:{float(mass).hex()}" for symbol, mass in zip(symbols, masses)]
 
 
 def _select_c_to_ab_mapping(
@@ -1076,6 +1081,7 @@ def _select_c_to_ab_mapping(
     pbc = full_pbc_for_cell(cell)
     raw_orders: list[tuple[str, list[int]]] = []
     reactant_edges: set[frozenset[int]] | None = None
+    ab_masses = None
     if ab_node_order is not None:
         ab_node_order = [int(node) for node in ab_node_order]
         if len(ab_node_order) != len(ab_symbols):
@@ -1090,6 +1096,15 @@ def _select_c_to_ab_mapping(
                 "with a different element pattern."
             )
         reactant_edges = _endpoint_connectivity_edges(G, ab_node_order)
+        ab_masses = [node_mass(G.nodes[node]) for node in ab_node_order]
+
+    ab_labels = _mass_labels(ab_symbols, ab_masses)
+    c_labels = _mass_labels(
+        [str(G.nodes[node]["element"]) for node in c_present],
+        [node_mass(G.nodes[node]) for node in c_present] if ab_masses is not None else None,
+    )
+    if sorted(ab_labels) != sorted(c_labels):
+        raise ValueError("Bond NEB pairing: element and isotope mass multisets must match")
 
     if method in {"auto", "reactant_index"}:
         try:
@@ -1110,6 +1125,7 @@ def _select_c_to_ab_mapping(
                     c_present,
                     cell=cell,
                     pbc=pbc,
+                    ab_masses=ab_masses,
                 ),
             )
         )
@@ -1122,6 +1138,7 @@ def _select_c_to_ab_mapping(
             c_present,
             cell=cell,
             pbc=pbc,
+            ab_masses=ab_masses,
         )
         raw_orders.append(("hungarian", hungarian))
         trial_budget = max(0, int(matching_trials) - len(raw_orders))
@@ -1129,18 +1146,17 @@ def _select_c_to_ab_mapping(
             raw_orders.extend(
                 _candidate_orders_from_swaps(
                     hungarian,
-                    ab_symbols,
+                    ab_labels,
                     limit=trial_budget,
                 )
             )
 
     if reactant_edges:
-        c_symbols = [str(G.nodes[node]["element"]) for node in c_present]
         c_edges = _endpoint_connectivity_edges(G, c_present)
         connectivity_orders = _connectivity_preserving_orders(
-            c_symbols,
+            c_labels,
             c_edges,
-            ab_symbols,
+            ab_labels,
             reactant_edges,
             limit=max(1, int(matching_trials)),
         )
@@ -1156,6 +1172,10 @@ def _select_c_to_ab_mapping(
     seen: set[tuple[int, ...]] = set()
     candidates: list[_MappingCandidate] = []
     for name, order in raw_orders:
+        if ab_masses is not None and [node_mass(G.nodes[node]) for node in order] != ab_masses:
+            if method == "reactant_index":
+                raise ValueError("Bond NEB reactant_index pairing changes isotope masses")
+            continue
         key = tuple(int(n) for n in order)
         if key in seen:
             continue
@@ -1297,6 +1317,10 @@ def _build_bond_atoms(
                 "Bond NEB layout: C pairing produced a different "
                 "element pattern than the AB block — pairing is broken."
             )
+        if [node_mass(G.nodes[node]) for node in react_node_ids] != [
+            node_mass(G.nodes[node]) for node in react_node_ids_ab
+        ]:
+            raise ValueError("Bond NEB layout: C pairing changes isotope masses")
 
     positions_react = [np.asarray(G.nodes[n]["position"], dtype=float) for n in react_node_ids]
 
@@ -1353,6 +1377,7 @@ def _build_bond_atoms(
             pbc=pbc,
         )
 
+    apply_atom_metadata(atoms, [G.nodes[node] for node in slab_lat_nodes + react_node_ids])
     if frozen_indices:
         atoms.set_constraint(FixAtoms(indices=list(frozen_indices)))
 
@@ -1423,6 +1448,8 @@ def _gas_product_neb_endpoint(
         gas_edges=gas_edges,
         target_edges=target_edges,
         matching_trials=matching_trials,
+        gas_masses=gas_atoms.get_masses(),
+        target_masses=atoms_ab.get_masses()[react_slice],
     )
 
     requested_lift = float(lift_height)
@@ -1433,8 +1460,13 @@ def _gas_product_neb_endpoint(
     )
     lift_scores: list[dict] = []
     best_payload: tuple[float, np.ndarray, dict] | None = None
+    lift_normal = (
+        slab_outward_normal(G, centroid)
+        if np.asarray(G.graph.get("connectivity_pbc", G.graph.get("pbc", [True, True, False]))).any()
+        else np.array([0.0, 0.0, 1.0])
+    )
     for h in lift_candidates:
-        lifted_center = centroid + np.array([0.0, 0.0, float(h)])
+        lifted_center = centroid + float(h) * lift_normal
         lifted_positions = np.asarray(
             [p + lifted_center for p in gas_aligned_centered],
             dtype=float,
@@ -1462,6 +1494,13 @@ def _gas_product_neb_endpoint(
     symbols = list(atoms_c.get_chemical_symbols())
     symbols[react_slice] = target_symbols
     atoms_c.set_chemical_symbols(symbols)
+    apply_atom_metadata(atoms_c, [
+        {"element": atom.symbol, "atom_arrays": atom_metadata(atoms_empty, i)}
+        for i, atom in enumerate(atoms_empty)
+    ] + [
+        {"element": gas_symbols[i], "atom_arrays": atom_metadata(gas_atoms, i)}
+        for i in gas_order
+    ])
 
     diagnostics = {
         "requested_method": "gas_product_connectivity_kabsch",

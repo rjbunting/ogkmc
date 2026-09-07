@@ -87,8 +87,7 @@ def _expected_graph(G: nx.Graph, node_ids: Iterable[int]) -> nx.Graph:
     for left, left_id in enumerate(ordered):
         for right in range(left + 1, len(ordered)):
             right_id = ordered[right]
-            siblings = G.nodes[left_id].get("siblings") or ()
-            if G.has_edge(left_id, right_id) or right_id in siblings:
+            if G.has_edge(left_id, right_id):
                 out.add_edge(left, right)
     return out
 

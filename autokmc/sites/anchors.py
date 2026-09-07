@@ -65,6 +65,7 @@ Public API
 
 from __future__ import annotations
 
+
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -78,11 +79,13 @@ from ase.data import (
     atomic_numbers as _ASE_AN,
 )
 
+from autokmc.core.atom_metadata import atom_metadata_key, physical_node_match
 from autokmc.core.pbc import (
     full_pbc_for_cell,
     minimum_image_distances,
     minimum_image_vectors,
     periodic_image_offsets,
+    slab_outward_normal,
     unwrap_positions_about_reference,
     wrap_positions_into_cell,
 )
@@ -348,7 +351,7 @@ def _build_ego_graph(
 def _fingerprint(g: nx.Graph) -> tuple:
     """Cheap graph fingerprint — unequal keys → guaranteed non-isomorphic."""
     elem_deg = tuple(sorted(
-        (d["element"], g.degree(n))
+        (d["element"], atom_metadata_key(d), g.degree(n))
         for n, d in g.nodes(data=True)
     ))
     return (
@@ -513,9 +516,8 @@ def _kabsch_align_ego(
     for n in mem_ego.nodes:
         mem_ego.nodes[n]["_seed"] = (n in mem_seed)
 
-    node_match = isomorphism.categorical_node_match(
-        ["element", "_seed"], ["X", False]
-    )
+    def node_match(left, right):
+        return left.get("_seed", False) == right.get("_seed", False) and physical_node_match(left, right)
     matcher = isomorphism.GraphMatcher(rep_ego, mem_ego, node_match=node_match)
     if not matcher.is_isomorphic():
         return None, None
@@ -572,8 +574,9 @@ def _outward_height_for_clique(
 ) -> float:
     """Signed outward height of *position* above a surface clique."""
     if use_mic:
-        z_ref = max(float(G.nodes[int(n)]["position"][2]) for n in clique)
-        return float(np.asarray(position, dtype=float)[2] - z_ref)
+        rows = np.array([G.nodes[int(n)]["position"] for n in clique], dtype=float)
+        normal = slab_outward_normal(G, rows.mean(axis=0))
+        return float(np.dot(position, normal) - np.max(rows @ normal))
     centroid = _clique_centroid(G, clique, cell, cell_inv, pbc, use_mic)
     normal = _outward_normal(G, centroid)
     return float(np.dot(np.asarray(position, dtype=float) - centroid, normal))
@@ -598,9 +601,9 @@ def _optimise_position(
     where i loops over bonded atoms in *clique*, j over nearby non-bonded
     surface atoms (restricted to the n-shell ego and within *repulsion_cutoff*).
 
-    Periodic slabs use L-BFGS-B with a hard z-floor at the highest bonded-atom
-    z coordinate (valid for the orthogonalised slabs produced by
-    :mod:`autokmc.structure` where the surface normal is aligned with +z).
+    Periodic slabs use L-BFGS-B with a bound outside the selected exposed
+    face: +z for the top face and -z for the bottom face. Slab builders
+    align the surface with the Cartesian xy plane.
     Nanoparticles use SLSQP constrained to the outward half-space.
     """
     from scipy.optimize import minimize
@@ -647,9 +650,7 @@ def _optimise_position(
         return E
 
     if use_mic:
-        # Slab: start above the highest bonded atom along +z (valid because
-        # :func:`autokmc.structure._orthogonalise_slab` guarantees the
-        # surface normal is aligned with the cartesian z-axis).
+        # Start outside the bonded atoms along the selected face normal.
         if cell_inv is not None:
             dv_b = b_pos - b_pos[0]
             mic_rel = minimum_image_vectors(dv_b, cell, pbc)
@@ -657,12 +658,13 @@ def _optimise_position(
             mic_rel = b_pos - b_pos[0]
         lat_d = np.linalg.norm(mic_rel[:, :2] - mic_rel[:, :2].mean(0), axis=1)
         h     = np.sqrt(np.maximum(0.0, d_ideal ** 2 - lat_d ** 2))
-        z_min = float(b_pos[:, 2].max()) + max(float(h.mean()), 0.25)
-        z0    = z_min
+        sign = float(slab_outward_normal(G, centroid)[2])
+        outward_limit = float(np.max(sign * b_pos[:, 2])) + max(float(h.mean()), 0.25)
+        z0 = sign * outward_limit
         x0    = np.array([centroid[0], centroid[1], z0])
         res   = minimize(obj, x0, method="L-BFGS-B",
                          bounds=[(None, None), (None, None),
-                                 (z_min, None)])
+                                 (z0, None) if sign > 0 else (None, z0)])
     else:
         # Nanoparticle: constrained to the outward half-space.
         n_out  = _outward_normal(G, centroid)
@@ -814,8 +816,8 @@ def _enumerate_cliques(
       of a periodic image of the NP) and is dropped.
     * **Slabs** — a clique whose centroid sits below the lowest surface
       atom along the local outward normal is similarly buried beneath the
-      surface and dropped.  The outward normal is just ``+z`` for the
-      canonically aligned slabs that :mod:`autokmc.structure` produces.
+      surface and dropped. Top and bottom faces use +z and -z respectively;
+      cliques spanning both exposed faces are rejected.
     """
     if k_max is not None and int(k_max) < 1:
         raise ValueError("k_max must be at least 1 when supplied")
@@ -835,7 +837,7 @@ def _enumerate_cliques(
     )
 
     hull_eq: np.ndarray | None = None
-    z_floor: float | None      = None
+    slab_faces: dict[float, float] = {}
 
     if not use_mic:
         # For a nanoparticle, use the convex hull of its surface atoms.
@@ -850,13 +852,12 @@ def _enumerate_cliques(
             except Exception:
                 hull_eq = None
     else:
-        # For a slab, remove cliques with a centroid below the surface.
-        # All builders align the slab cell (surface ‖ xy plane, outward
-        # normal = +z), so a simple z-floor is sufficient and
-        # cheap.  ``hull_tolerance`` is reused as the (negative) Å tolerance
-        # below the lowest surface atom that we still accept.
-        if len(surf_pos):
-            z_floor = float(surf_pos[:, 2].min()) + hull_tolerance
+        # Keep an independent inward boundary for each exposed slab face.
+        # hull_tolerance is the allowed negative distance below that face.
+        for position in surf_pos:
+            sign = float(slab_outward_normal(G, position)[2])
+            height = sign * float(position[2])
+            slab_faces[sign] = min(slab_faces.get(sign, height), height)
 
     sites: dict[int, list[frozenset]] = {}
     seen: set[frozenset] = set()
@@ -873,7 +874,7 @@ def _enumerate_cliques(
             continue
         seen.add(key)
 
-        if hull_eq is not None or z_floor is not None:
+        if hull_eq is not None or slab_faces:
             c = _clique_centroid(G, key, cell, cell_inv, pbc, use_mic)
             if hull_eq is not None:
                 if (
@@ -881,8 +882,16 @@ def _enumerate_cliques(
                     < hull_tolerance
                 ):
                     continue   # buried inside the NP hull
-            elif z_floor is not None and c[2] < z_floor:
-                continue       # buried beneath the slab surface
+            elif slab_faces:
+                signs = {
+                    float(slab_outward_normal(G, G.nodes[n]["position"])[2])
+                    for n in key
+                }
+                if len(signs) != 1:
+                    continue  # a clique cannot join opposite slab faces
+                sign = signs.pop()
+                if sign * c[2] < slab_faces[sign] + hull_tolerance:
+                    continue
 
         sites.setdefault(k, []).append(key)
 
@@ -903,7 +912,7 @@ def _reduce_by_isomorphism(
     Two cliques belong to the same iso-class iff their n-shell ego-subgraphs
     are graph-isomorphic under element-label matching.
     """
-    node_match = isomorphism.categorical_node_match("element", "X")
+    node_match = physical_node_match
     unique: dict[int, list[AnchorSite]] = {}
 
     cell, cell_inv, pbc, use_mic = _get_cell(G)

@@ -559,6 +559,10 @@ def create_output_sinks(
                 if identity.resume_state is not None
                 else None
             ),
+            resume_committed_offset=(
+                getattr(identity.resume_state, "committed_trajectory_offset", None)
+                if identity.resume_state is not None else None
+            ),
         )
         recovery = (
             identity.event_commit.recovery

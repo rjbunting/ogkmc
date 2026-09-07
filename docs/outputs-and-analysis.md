@@ -207,7 +207,8 @@ mask should be used when reconstructing constraints from the file.
 Schema-v4 checkpoints are compact restart snapshots. They store the live graph,
 known sites and reactants, occupancy, reaction counts, frozen indices, RNG
 state, scientific-config fingerprint, and exact committed `events.jsonl` count
-and byte offset. Routine checkpoints leave the compatibility `history` field
+and byte offset, plus the durable trajectory byte offset when trajectory output
+is enabled. Routine checkpoints leave the compatibility `history` field
 empty because AutoKMC reconstructs committed history from `events.jsonl`
 instead of copying it into every snapshot. A standalone API run keeps history
 only when it has a checkpoint writer but no event writer.
@@ -245,8 +246,9 @@ Continuation semantics are cumulative:
 - reaction folders discovered after the checkpoint are moved recoverably to
   `uncommitted_reactions/after_checkpoint_step_<N>/`, so their rolled-back
   scientific state cannot remain authoritative,
-- `kmc.extxyz` is reconciled by `kmc_step`: frames beyond the checkpoint step
-  are removed by atomic replacement before new frames are appended,
+- `kmc.extxyz` is reconciled to its committed byte prefix when recorded,
+  or by `kmc_step` for older checkpoints. Uncommitted appends, including partial
+  frames, are removed by atomic replacement before new frames are appended,
 - reaction counts and first/last steps are restored,
 - cumulative summary and reaction-folder counters are recovered during the
   same streaming validation pass,
@@ -260,12 +262,16 @@ a checkpoint or final close makes the corresponding rows durable. Python
 callers that explicitly need the historic list can iterate it or call
 `list(result["history"])`; doing so streams the committed prefix on demand.
 
-Trajectory reconciliation requires every readable frame to have a non-negative
-integer `kmc_step`. The committed prefix must be strictly increasing, and a
+Trajectory reconciliation requires every committed frame to have a non-negative
+integer `kmc_step`. New checkpoints record the exact durable trajectory byte
+boundary, so even a torn atom-count or metadata line in the next append can be
+discarded. Older checkpoints discard incomplete tails only when the available
+frame metadata establishes that they are uncommitted. The committed prefix must be strictly increasing, and a
 committed frame cannot appear after a crash-tail frame. AutoKMC rejects those
 ambiguous or malformed histories without modifying the original file. A
 missing or empty trajectory remains valid for legacy runs that did not persist
-trajectory frames.
+trajectory frames. A trajectory shorter than a recorded committed byte boundary
+is rejected. Final-frame marking preserves existing checkpoint byte boundaries.
 
 Scientific settings must match the checkpoint. The explicit safe-change
 allowlist is limited to `kmc.n_steps`, `kmc.log_every`, `output.log_level`, and
@@ -310,6 +316,14 @@ For a selected analysis window of duration `D`:
 observed product rate = number of product desorptions / D
 TOF = observed product rate / number of classified surface atoms
 ```
+
+Both analysis bounds must be finite and lie inside the recorded simulation
+interval, from `initial_state.time_s` to `result.final_time_s` in the run
+manifest. The end must be greater than the start. If the final time has not
+been recorded, the latest event bounds the available interval. Requests beyond
+these limits fail before replacing existing analysis outputs; the analyzer
+does not add unobserved time to the rate denominator. A recorded final time
+later than the last event still includes that observed period without events.
 
 The product-rate interval is the exact two-sided 95% Garwood Poisson interval.
 It is not a normal approximation. `rate_blocks.csv` divides the selected window

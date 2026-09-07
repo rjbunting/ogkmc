@@ -61,6 +61,7 @@ def canonical_atom_inventory_smiles(
             molecule = Chem.AddHs(
                 molecule,
                 onlyOnAtoms=explicit_hydrogen_atoms,
+                explicitOnly=not add_hydrogens,
             )
         return Chem.MolToSmiles(molecule, canonical=True)
     except Exception:

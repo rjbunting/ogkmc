@@ -1895,15 +1895,15 @@ def test_adsorbate_pruning_persists_last_geometry_when_optimizer_raises(
         lambda atoms, *_args, **_kwargs: (atoms.copy(), 0.0, 0),
     )
 
-    stable = prune_unstable_adsorbate_sites(
-        graph,
-        [site],
-        reactant,
-        calculator=object(),
-        diagnostics_dir=tmp_path / "diagnostics",
-    )
+    with pytest.raises(StructureOptimisationError, match="forced failure"):
+        prune_unstable_adsorbate_sites(
+            graph,
+            [site],
+            reactant,
+            calculator=object(),
+            diagnostics_dir=tmp_path / "diagnostics",
+        )
 
-    assert stable == []
     folder = (
         tmp_path
         / "diagnostics"

@@ -461,7 +461,7 @@ def test_output_factory_passes_checkpoint_step_to_trajectory_resume(
         output_dir=tmp_path,
         manifest_path=tmp_path / "run_manifest.json",
         run_id="output-resume-test",
-        resume_state=SimpleNamespace(step=17),
+        resume_state=SimpleNamespace(step=17, committed_trajectory_offset=1024),
     )
 
     sinks = create_output_sinks(cfg, identity, {})
@@ -469,6 +469,7 @@ def test_output_factory_passes_checkpoint_step_to_trajectory_resume(
 
     assert captured["append"] is True
     assert captured["resume_checkpoint_step"] == 17
+    assert captured["resume_committed_offset"] == 1024
 
 
 def test_compact_checkpoint_history_is_restored_from_shared_event_recovery(

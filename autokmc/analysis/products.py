@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import shutil
 import tempfile
@@ -242,13 +243,37 @@ def analyze_run(
         for item in manifest.get("feed_reactants", [])
     }
     initial = manifest.get("initial_state", {})
-    t_start = float(initial.get("time_s", 0.0) if start_time_s is None else start_time_s)
+    observed_start = float(initial.get("time_s", 0.0))
     result_meta = manifest.get("result") or {}
     configured_end = result_meta.get("final_time_s")
-    end_value = configured_end if end_time_s is None else end_time_s
-    t_end = None if end_value is None else float(end_value)
-    end_known_during_scan = t_end is not None
-    if t_end is not None and t_end <= t_start:
+    if not math.isfinite(observed_start):
+        raise AnalysisError("recorded initial time must be finite")
+    if configured_end is None:
+        # Without a finalized manifest, the recorded events bound the available
+        # exposure. Resolve this before accepting a user-supplied analysis end.
+        observed_end = observed_start
+        with events_path.open("r", encoding="utf-8") as source:
+            for line in source:
+                if not line.strip():
+                    continue
+                timestamp = float(json.loads(line)["time_s"])
+                if not math.isfinite(timestamp):
+                    raise AnalysisError("recorded event times must be finite")
+                observed_end = max(observed_end, timestamp)
+    else:
+        observed_end = float(configured_end)
+    if not math.isfinite(observed_end) or observed_end < observed_start:
+        raise AnalysisError("recorded final time must be finite and not precede initial time")
+    t_start = observed_start if start_time_s is None else float(start_time_s)
+    t_end = observed_end if end_time_s is None else float(end_time_s)
+    if not math.isfinite(t_start) or not math.isfinite(t_end):
+        raise AnalysisError("analysis time bounds must be finite")
+    if t_start < observed_start or t_end > observed_end:
+        raise AnalysisError(
+            f"analysis window [{t_start}, {t_end}] lies outside the recorded "
+            f"simulation interval [{observed_start}, {observed_end}]"
+        )
+    if t_end <= t_start:
         raise AnalysisError("analysis end time must be greater than start time")
 
     final_destination = (
@@ -281,7 +306,6 @@ def analyze_run(
     mechanism_steps: dict[tuple[str, str], list[str]] = {}
     block_counts: Counter[tuple[str, int]] = Counter()
     incomplete_events = 0
-    last_time = float(initial.get("time_s", 0.0))
     n_events = 0
 
     with events_path.open("r", encoding="utf-8") as source, product_events_path.open(
@@ -312,7 +336,6 @@ def analyze_run(
                     f"definition: {exc}"
                 ) from exc
             n_events += 1
-            last_time = max(last_time, event_time)
             if "inputs" not in event or "outputs" not in event:
                 raise AnalysisError(
                     f"event line {line_number} predates schema v2 and has no inputs/outputs"
@@ -417,19 +440,10 @@ def analyze_run(
                     + "\n"
                 )
 
-    if t_end is None:
-        t_end = last_time
     duration = float(t_end - t_start)
     if duration <= 0.0:
         raise AnalysisError("event log has no positive KMC analysis duration")
     n_surface_atoms = int(manifest.get("catalyst", {}).get("n_surface_atoms", 0) or 0)
-    if not end_known_during_scan and n_blocks > 0:
-        with product_events_path.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                item = json.loads(line)
-                fraction = (float(item["time_s"]) - t_start) / duration
-                block = min(n_blocks - 1, max(0, int(fraction * n_blocks)))
-                block_counts[(str(item["product"]), block)] += 1
 
     product_rows = build_product_rate_rows(
         product_counts,

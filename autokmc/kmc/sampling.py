@@ -185,7 +185,7 @@ def sample_tau(q_total: float, rng: random.Random | np.random.Generator) -> floa
     u = float(rng.random())
     if u <= 0.0:
         u = float(np.nextafter(0.0, 1.0))
-    return float(np.log(1.0 / u) / q_total)
+    return float(-np.log(u) / q_total)
 
 
 def choose_reaction(

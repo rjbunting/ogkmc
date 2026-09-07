@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from autokmc.core.graph_state import get_bond_registry, get_diffusion_sites
+from autokmc.kmc.expansion import _pending_diffusion_sites
 from autokmc.kmc.models import (
     KMCChannels,
     KMCFunctions,
@@ -63,6 +64,7 @@ class DynamicNetworkExpander:
             getattr(reaction, "kind", None) == "bond"
             and produced_species
             and produced_species.issubset(expanded_species)
+            and not self._needs_diffusion(produced_species, registry_before)
         ):
             increment("kmc.expansion.already_expanded")
             return changes
@@ -147,6 +149,25 @@ class DynamicNetworkExpander:
                 changes,
             )
         return changes
+
+    def _needs_diffusion(self, species: set[str], registry: dict) -> bool:
+        """Bond expansion alone does not prove that hops are discovered/active."""
+        if not self.channels.bond_growth_options.find_diffusion:
+            return False
+        if _pending_diffusion_sites(self.system.graph, registry, species):
+            return True
+        labels = {
+            site.reactant
+            for smi in species
+            for site in registry.get("adsorbate_sites", {}).get(smi, [])
+        }
+        discovered = get_diffusion_sites(self.system.graph) or {}
+        active = self.runtime.reaction_index._diffusion_ids
+        return any(
+            site_identifier(site) not in active
+            for label in labels
+            for site in discovered.get(label, [])
+        )
 
     def _announce_event(self, reaction) -> None:
         if not self.settings.verbose:

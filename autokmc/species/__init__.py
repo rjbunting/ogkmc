@@ -11,6 +11,7 @@ from autokmc.species.bond_chemistry import (
 )
 from autokmc.species.reactant import (
     Reactant,
+    ReactantConnectivityError,
     ReactantDefinitionError,
     build_reactant,
     find_anchor_atoms,
@@ -20,6 +21,7 @@ from autokmc.species.smiles import canonical_smiles, smiles_to_dirname
 
 __all__ = [
     "Reactant",
+    "ReactantConnectivityError",
     "ReactantDefinitionError",
     "build_reactant",
     "find_anchor_atoms",

@@ -51,10 +51,10 @@ Lateral ego-graph conventions
   being checked.
 * **BFS frontier** — only ``type == "surface"`` nodes are traversed.  Anchor
   bookkeeping nodes are always skipped.
-* **Occupied adsorbate leaves** — after the BFS, any occupied
-  ``type == "adsorbate"`` node adjacent to *any* surface node in the BFS set
-  is added as a leaf (not traversed further).  This captures the nearest
-  occupied adsorbate neighbours without recursively nesting their environments.
+* **Occupied molecules** — after the BFS, occupied adsorbates touching the
+  surface shell select complete molecular placements. All atoms, molecular
+  bonds, and surface attachments of those placements are included without
+  recursively selecting further neighbours from outside the original shell.
 * **Self inclusion** — the adsorbate-site's own nodes are included as leaves
   and stamped ``occupied=True`` and ``endpoint_role="site"`` in the ego-graph
   copy, so the match is consistent whether the site is physically occupied
@@ -92,6 +92,7 @@ from ase.neighborlist import NeighborList, natural_cutoffs
 
 from autokmc.io.calculators import acquire_calculator
 from autokmc.io.atoms import copy_atoms_with_results
+from autokmc.core.atom_metadata import apply_atom_metadata, atom_metadata_key
 from autokmc.io.calculation_cache import (
     CalculationFingerprintMemo,
     apply_cached_states,
@@ -186,6 +187,33 @@ def _surface_bfs_shells(
     return out
 
 
+def _complete_adsorbate_environment(
+    G: nx.Graph,
+    surface_nodes: set,
+    adsorbate_nodes: set,
+) -> nx.Graph:
+    """Include complete selected molecules and their surface attachments.
+
+    The shell selects neighbouring placements. Their complete topology must
+    then participate in classification, just as all their atoms participate
+    in the energy calculation. Do not collect further molecules from the
+    extra attachment nodes outside the original shell.
+    """
+    molecules = _expand_to_full_placement(G, adsorbate_nodes)
+    surfaces = set(surface_nodes)
+    for node in molecules:
+        surfaces.update(
+            surface for surface in (G.nodes[node].get("clique") or ())
+            if surface in G and G.nodes[surface].get("type") == "surface"
+        )
+    result = G.subgraph(surfaces | molecules).copy()
+    for node in molecules:
+        for surface in G.nodes[node].get("clique") or ():
+            if surface in result and not result.has_edge(node, surface):
+                result.add_edge(node, surface, anchor_bond=True)
+    return result
+
+
 def _build_lateral_ego_graph(
     G: nx.Graph,
     seed_clique: frozenset,
@@ -198,9 +226,9 @@ def _build_lateral_ego_graph(
     """Build an n-shell ego-subgraph for lateral-interaction matching.
 
     Traverses only ``type == "surface"`` nodes (anchor nodes are always
-    skipped).  After the BFS is complete, every occupied
-    ``type == "adsorbate"`` node that is adjacent to at least one surface node
-    in the BFS set — and is not in *self_node_ids* — is included as a leaf.
+    skipped). After the BFS, occupied adsorbate nodes adjacent to the surface
+    shell select whole molecular placements. Their complete atom topology and
+    surface attachments are included, together with the target placement.
 
     The static surface-only BFS is delegated to
     :func:`_surface_bfs_shells` so the result is cached across every call
@@ -271,7 +299,7 @@ def _build_lateral_ego_graph(
             elif not ignore_occupied_neighbours and d.get("occupied", False):
                 ads_leaves.add(nb)
 
-    result = G.subgraph(visited | ads_leaves).copy()
+    result = _complete_adsorbate_environment(G, visited, ads_leaves | set(self_ids))
     result.graph["environment_scope"] = "all_occupied" if include_all_occupied else "local"
 
     # Preserve the reaction target as well as the occupied configuration.
@@ -332,6 +360,8 @@ def _lateral_node_match(d1: dict, d2: dict) -> bool:
     if d1.get("type") != d2.get("type"):
         return False
     if d1.get("element") != d2.get("element"):
+        return False
+    if atom_metadata_key(d1) != atom_metadata_key(d2):
         return False
     if d1.get("type") == "adsorbate":
         if d1.get("iso_class") != d2.get("iso_class"):
@@ -697,6 +727,7 @@ def _build_stability_atoms(
         cell      = cell,
         pbc       = pbc,
     )
+    apply_atom_metadata(atoms, [G.nodes[node] for node in all_node_ids])
 
     if frozen_indices:
         atoms.set_constraint(FixAtoms(indices=list(frozen_indices)))
@@ -1527,9 +1558,9 @@ def check_site_stability(
             if frozen_indices:
                 free_mask = np.ones(len(atoms_opt), dtype=bool)
                 free_mask[list(frozen_indices)] = False
-                max_force = float(np.linalg.norm(forces[free_mask], axis=1).max())
+                max_force = float(np.linalg.norm(forces[free_mask], axis=1).max(initial=0.0))
             else:
-                max_force = float(np.linalg.norm(forces, axis=1).max())
+                max_force = float(np.linalg.norm(forces, axis=1).max(initial=0.0))
 
             if max_force > fmax:
                 raise OptimisationFailedError(

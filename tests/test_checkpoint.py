@@ -44,6 +44,7 @@ def test_checkpoint_roundtrip_strips_calculators(tmp_path):
         rng_state={"type": "numpy-generator", "state": {"counter": 4}},
         committed_event_count=3,
         committed_event_offset=712,
+        committed_trajectory_offset=1024,
         metadata={"run_id": "run-123"},
     )
     path = save_checkpoint(tmp_path / "checkpoint.pkl", state)
@@ -57,6 +58,7 @@ def test_checkpoint_roundtrip_strips_calculators(tmp_path):
     assert loaded.rng_state == {"type": "numpy-generator", "state": {"counter": 4}}
     assert loaded.committed_event_count == 3
     assert loaded.committed_event_offset == 712
+    assert loaded.committed_trajectory_offset == 1024
     assert loaded.metadata["run_id"] == "run-123"
 
 

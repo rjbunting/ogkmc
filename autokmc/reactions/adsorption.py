@@ -298,7 +298,7 @@ def _energetics_cached(
         round(float(transmission_coefficient),   9),
         round(float(e_gas),                      9),
         round(float(g_gas) if use_g else 0.0,    9),
-        round(float(pressure_bar),               9),
+        float(pressure_bar),
         bool(occupied),
         bool(use_g),
     )

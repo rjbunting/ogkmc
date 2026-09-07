@@ -220,7 +220,7 @@ def test_materialised_site_positions_are_wrapped_for_skew_slab():
 
     anchors = find_anchor_sites(G, "O", k_max=3)
     reactant = build_reactant("[O]", add_hydrogens=False)
-    sites = find_adsorbate_sites(G, reactant, prune_stable_only=False)
+    sites = find_adsorbate_sites(G, reactant, anchor_k_max=3, prune_stable_only=False)
 
     cell_inv = np.linalg.inv(np.asarray(G.graph["cell"], dtype=float))
     pbc_axes = np.where(np.asarray(G.graph["pbc"], dtype=bool))[0]

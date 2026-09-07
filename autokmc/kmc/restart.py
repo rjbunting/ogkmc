@@ -29,10 +29,21 @@ def restore_rng_state(rng, payload: dict | None):
         return rng
     kind = payload.get("kind")
     if kind == "numpy":
+        state = payload["state"]
+        generator_name = state.get("bit_generator")
+        generator_type = getattr(np.random, str(generator_name), None)
+        if (
+            not isinstance(generator_type, type)
+            or not issubclass(generator_type, np.random.BitGenerator)
+        ):
+            raise ValueError(f"unsupported NumPy bit generator: {generator_name!r}")
         numpy_generator = (
-            rng if isinstance(rng, np.random.Generator) else np.random.default_rng()
+            rng
+            if isinstance(rng, np.random.Generator)
+            and type(rng.bit_generator) is generator_type
+            else np.random.Generator(generator_type())
         )
-        numpy_generator.bit_generator.state = payload["state"]
+        numpy_generator.bit_generator.state = state
         return numpy_generator
     if kind == "python":
         python_generator = rng if isinstance(rng, random.Random) else random.Random()

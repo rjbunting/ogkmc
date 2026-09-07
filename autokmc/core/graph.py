@@ -53,6 +53,7 @@ from ase.data import covalent_radii as ASE_COVALENT_RADII
 from ase.neighborlist import NeighborList, natural_cutoffs
 
 from autokmc.core.constants import NEIGHBORLIST_SKIN, NL_MULT_DEFAULT
+from autokmc.core.atom_metadata import atom_metadata
 from autokmc.core.pbc import graph_pbc_for_atoms
 from autokmc.utils.logging import get_logger
 
@@ -145,6 +146,13 @@ def build_graph(
     positions      = atoms.get_positions()
     symbols        = atoms.get_chemical_symbols()
     atomic_numbers = atoms.get_atomic_numbers()
+    material = np.asarray(surface_mask) != 2
+    if material.any():
+        G.graph["slab_z_bounds"] = (
+            float(positions[material, 2].min()), float(positions[material, 2].max()),
+        )
+    if "_autokmc_surface_side" in atoms.info:
+        G.graph["surface_side"] = atoms.info["_autokmc_surface_side"]
 
     for i in range(len(atoms)):
         G.add_node(
@@ -154,6 +162,7 @@ def build_graph(
             index           = i,
             type            = _TYPE_MAP.get(int(surface_mask[i]), "bulk"),
             covalent_radius = float(ASE_COVALENT_RADII[atomic_numbers[i]]),
+            atom_arrays     = atom_metadata(atoms, i),
         )
 
     # Next, record whether a bond crosses each periodic boundary. Material

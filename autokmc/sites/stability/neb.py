@@ -44,6 +44,7 @@ from autokmc.io.calculators import (
     primary_calculator,
 )
 from autokmc.io.atoms import copy_atoms_with_results
+from autokmc.sites.stability.intermediate_pruning import CompositeDirectEventDetected
 from autokmc.sites.stability.band_eval import (
     BandEvaluator,
     BandImageCalculator,
@@ -1681,7 +1682,9 @@ def run_neb(
                         "Could not retain failed NEB path for diagnostics: %s",
                         callback_exc,
                     )
-            if isinstance(exc, (CalculatorConfigError, not_converged_error)):
+            if isinstance(exc, (
+                CalculatorConfigError, not_converged_error, CompositeDirectEventDetected,
+            )):
                 raise
             raise not_converged_error(
                 f"NEB optimization failed: {type(exc).__name__}: {exc}"

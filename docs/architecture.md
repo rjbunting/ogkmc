@@ -33,8 +33,10 @@ KMC and finalizes the run. The complete sequence is:
 3. Classify surface atoms and build the atom-connectivity graph.
 4. Build gas-phase reactants from SMILES. With `relax_in_gas: false`, AutoKMC
    skips geometry relaxation but still requires a finite single-point energy.
+   The final molecular graph must match the requested atom and bond inventory.
 5. Enumerate adsorption placements and optionally prune unstable classes.
-6. Derive diffusion and `A + B <=> C` bond-changing channels.
+6. Derive `A + B <=> C` bond-changing channels and materialize their fragment
+   and product adsorption placements, then enumerate diffusion for all species.
 7. Run rejection-free BKL/Gillespie KMC with local rate-index updates and
    on-the-fly network expansion.
 8. Persist cumulative outputs and, separately, post-process the event log.
@@ -50,6 +52,28 @@ gauges, and accumulated wall-clock timings.
 The KMC system retains iterable reactant inputs, including generators, before
 reading their electronic energies, free energies, partial pressures, or
 checkpoint data. All consumers therefore use the same gas reservoir.
+
+When diffusion is enabled, both feed species and generated surface products
+receive a diffusion search. Runtime expansion performs this search even when
+a product yields no new bond templates, all proposed templates are filtered
+out, or its bond network was already expanded. A completed search with no
+legal hops is remembered. Newly discovered hops are evaluated and inserted
+into the KMC rate index; repeated expansion preserves existing channels and
+their rates. Setting `diffusion.enabled: false` disables these searches.
+
+Before accepting a gas reference, `build_reactant` compares the graph built
+from its final coordinates with the bonds specified by the input SMILES,
+using the same hydrogen policy and atom ordering as molecular construction.
+Missing or additional bonds, changed atom counts, elements, or isotope masses
+raise `ReactantConnectivityError` before thermochemistry or adsorption-site
+generation. This validation also applies to RDKit-generated structures when
+ASE relaxation is disabled or no calculator is supplied. The exception is a
+runtime geometry failure, so dynamic expansion retries and reports exhaustion
+without permanently classifying a valid molecular definition as invalid.
+
+The comparison uses the configured neighbor-list cutoff and the graph's
+undirected adjacency. It does not infer bond orders or stereochemistry from
+coordinates. Force convergence alone does not satisfy this connectivity check.
 
 ## Graph state
 
@@ -83,6 +107,28 @@ Run-local identifiers such as `site_id`, graph node ids, adsorption
 within one simulation, but are not portable scientific identifiers across
 independently enumerated structures. Portable database matching therefore uses
 labelled chemical topology and geometry rather than those counters.
+
+Real atom nodes retain a copy of their per-atom ASE input arrays, including
+initial magnetic moments, initial charges, isotope masses, tags, and custom
+arrays. Calculation builders and trajectory snapshots restore those arrays in
+their exact atom order. Explicit isotope labels in SMILES, such as `[2H][2H]`,
+set the corresponding isotope masses; atoms without isotope labels retain
+ASE's elemental masses. Molecular and site symmetry, lateral classes, and
+portable reaction graphs distinguish these inputs. Bond-path atom matching
+also preserves isotope masses across endpoints. Old graphs that already lost
+this information need rebuilding from the original inputs.
+
+Adsorption enumeration reduces anchor subsets only when one molecular graph
+automorphism maps the entire selected subset onto another. Individual atom
+orbits serve as a preliminary grouping. For example, benzene's adjacent, meta,
+and opposite carbon pairs remain separate even though every carbon belongs to
+the same individual orbit. Retained placements still undergo the usual geometry
+and potential-based stability checks.
+
+Process graphs retain the actual intramolecular bonds from the live graph.
+The `siblings` attribute identifies all atoms in one placement; it does not
+declare bonds. Bond endpoint pruning likewise retains the original atom indices
+when checking surface attachments, including atoms with no surface bond.
 
 ## Reaction channels
 
@@ -151,6 +197,61 @@ transition state is still reported as the barrier for the original reversible
 `A + B <=> C` event, with electronic and free energetics referenced to the
 original A+B and C states rather than the selected intermediate minima.
 
+## Lateral interaction range
+
+Electronic-only calculations use an intentional finite-range approximation for
+lateral interactions. `constants.lateral_shells` sets the number of
+surface-graph hops used to select surrounding occupied molecules. Molecules
+outside that neighborhood are omitted from the calculation, truncating their
+longer-range interactions with the reacting molecule and the retained
+environment. This approximation limits calculation cost and the number of
+distinct lateral environments.
+
+Once the shell selects a neighboring molecule, classification includes all of
+its atoms, molecular bonds, and surface attachments, including attachments
+outside the shell. This keeps cached energies specific to the complete
+molecules used in the calculation. Extra attachment nodes do not select
+additional neighboring molecules.
+
+The truncation can introduce small errors in reaction energies and small
+nonzero sums of energy changes around closed reaction cycles. Adsorption and
+desorption select neighbors around one placement, while diffusion selects
+neighbors around both endpoints. A surrounding molecule can therefore lie
+outside one channel's neighborhood but inside another's, giving slightly
+different energies for the same intended surface state. This is an intentional
+limitation of the local interaction range.
+
+### CO/Cu(111) example
+
+An electronic-energy calculation with UMA `uma-s-1p2` (`oc20`) used a four-layer,
+4×4 Cu(111) slab (64 Cu atoms, lattice constant 3.615 Å), three surrounding CO
+molecules, and one additional CO adsorbing at atop site A, moving to adjacent
+atop site B, then desorbing. The bottom two Cu layers were fixed; the remaining
+atoms were relaxed to forces below 0.005 eV/Å, with all CO retaining their atop
+coordination. One surrounding CO was two graph hops from A but one from B.
+
+| Lateral range | Adsorption energy at A (eV) | Energy sum for adsorption A → diffusion A–B → desorption B (meV) |
+| --- | ---: | ---: |
+| One hop | −0.362268 | −6.932 |
+| Two hops / all surrounding CO | −0.343179 | 0 |
+
+The one-hop adsorption energy differed from the all-neighbor result by
+19.1 meV. Holding coordinates fixed also gave a cycle residual of −4.11 meV,
+showing the contribution from neighbor selection independently of relaxation.
+These are small errors for this example, rather than universal error bounds.
+
+Increasing `constants.lateral_shells` extends the interaction range and can
+resolve the truncation error. In this 4×4 cell, two hops include every occupied
+molecule, so all channels use the same environment and the cycle closes.
+For other cells and coverages, increase the hop count until the relevant
+energies converge; two hops are not a universal cutoff. See the
+[range configuration](configuration.md#lateral-interaction-range).
+
+When `free_energy.enabled: true`, calculation structures already include all
+occupied adsorbates in the simulated cell, irrespective of the local shell
+setting. The finite-hop truncation described here applies to electronic-only
+local environments.
+
 ## Rates and free energy
 
 Rates use an Eyring prefactor:
@@ -208,6 +309,9 @@ Scientific and persistence failures are explicit:
   `bond_registry.expansion_failures` diagnostics, and raises after exhaustion;
   only invalid molecular definitions are permanently excluded,
 - unexpected calculator and thermochemistry exceptions propagate,
+- calculator failures during adsorption or bond endpoint pruning propagate
+  to the expansion retry mechanism instead of permanently discarding sites;
+  adsorption failure geometries are still saved before the error is raised,
 - requested event, trajectory, summary, and checkpoint writes must succeed,
 - JSON output rejects nonfinite numeric values,
 - an inconsistent event history is rejected by strict offline analysis,
