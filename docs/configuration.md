@@ -683,7 +683,7 @@ refinement and CI-NEB stages when enabled.
 | `vibration_nfree` | `2` | Must be `2` or `4`. |
 | `include_ts_vibrations` | `true` | Compute transition-state vibrations. |
 | `min_frequency_ev` | `0.0015` eV | Low-frequency floor used by thermochemistry. |
-| `imaginary_mode_tolerance_ev` | `0.0015` eV | Magnitude above which an imaginary mode counts as a vibrational instability; finite and nonnegative. Independent of the real-mode frequency filter. |
+| `imaginary_mode_tolerance_ev` | `0.01` eV | Magnitude above which an imaginary mode counts as a vibrational instability; finite and nonnegative. Independent of the real-mode frequency filter. |
 | `symmetry_tolerance` | `0.3` Å | Cartesian tolerance used by pymatgen for molecular point-group and rotational-symmetry inference. |
 | `default_spin` | `0.0` | Gas spin fallback. |
 | `default_geometry` | `auto` | `auto`, `linear`, `nonlinear`, or `monatomic`. |

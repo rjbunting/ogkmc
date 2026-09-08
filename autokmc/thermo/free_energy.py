@@ -153,7 +153,7 @@ class FreeEnergyOptions:
     cache_dir               : str | None   = None
     #: Modes above this imaginary-energy magnitude invalidate a minimum.
     #: This is independent of the real-mode partition-function cutoff.
-    imaginary_mode_tolerance_ev: float     = 0.0015
+    imaginary_mode_tolerance_ev: float     = 0.01
 
 
 # ---------------------------------------------------------------------------

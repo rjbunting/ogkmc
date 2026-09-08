@@ -43,12 +43,12 @@ def test_imaginary_tolerance_reaches_runtime(tmp_path, extension, tolerance):
     identity = RunIdentity(tmp_path, tmp_path / "manifest.json", "test")
     runtime = resolve_thermo_runtime(cfg, identity)
 
-    expected = 0.0015 if tolerance is None else tolerance
+    expected = 0.01 if tolerance is None else tolerance
     assert cfg.free_energy.imaginary_mode_tolerance_ev == pytest.approx(expected)
     assert runtime.options.imaginary_mode_tolerance_ev == pytest.approx(expected)
     assert runtime.options.min_frequency_ev == pytest.approx(0.0015)
-    assert FreeEnergyCfg.imaginary_mode_tolerance_ev == pytest.approx(0.0015)
-    assert FreeEnergyOptions.imaginary_mode_tolerance_ev == pytest.approx(0.0015)
+    assert FreeEnergyCfg.imaginary_mode_tolerance_ev == pytest.approx(0.01)
+    assert FreeEnergyOptions.imaginary_mode_tolerance_ev == pytest.approx(0.01)
 
 
 @pytest.mark.parametrize(

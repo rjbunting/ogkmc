@@ -424,7 +424,7 @@ class FreeEnergyCfg:
     cache_dir               : str | None = None
     #: Imaginary vibrational energies above this magnitude indicate a
     #: genuine instability rather than numerical near-zero noise.
-    imaginary_mode_tolerance_ev : float = 0.0015
+    imaginary_mode_tolerance_ev : float = 0.01
 
 
 @dataclass
