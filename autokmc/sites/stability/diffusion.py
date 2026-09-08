@@ -898,10 +898,7 @@ def _apply_diffusion_thermochemistry(
 
     from pathlib import Path as _Path
 
-    from autokmc.thermo.free_energy import (
-        VibrationalStabilityError,
-        compute_harmonic_thermo,
-    )
+    from autokmc.thermo.free_energy import compute_harmonic_thermo
 
     cache_dir_root = _Path(vib_cache_root) if vib_cache_root is not None else None
     per_lat_dir = (
@@ -913,31 +910,20 @@ def _apply_diffusion_thermochemistry(
     )
 
     def _harm(atoms, label, energy_ev, drop_imag):
-        is_ts = label == "ts"
         vib_indices = list(range(n_slab, len(atoms)))
         suffix = label.removeprefix("state_")
         setattr(lateral_class, f"vib_indices_{suffix}", vib_indices)
-        try:
-            return compute_harmonic_thermo(
-                atoms,
-                vib_indices,
-                energy_ev=float(energy_ev),
-                temperature_k=float(temperature_k),
-                calculator=calculator,
-                options=free_energy_options,
-                cache_dir=(str(per_lat_dir) if per_lat_dir is not None else None),
-                label=label,
-                drop_imaginary=drop_imag,
-                stationary_point=(
-                    "diffusion_transition_state" if is_ts else "minimum"
-                ),
-            )
-        except VibrationalStabilityError as exc:
-            setattr(lateral_class, f"imaginary_{suffix}_ev", list(exc.imaginary_ev))
-            lateral_class.stable = False
-            lateral_class.invalid_reason = str(exc)
-            error = TransitionStateInvalidError if is_ts else EndpointStabilityError
-            raise error(str(exc)) from exc
+        return compute_harmonic_thermo(
+            atoms,
+            vib_indices,
+            energy_ev=float(energy_ev),
+            temperature_k=float(temperature_k),
+            calculator=calculator,
+            options=free_energy_options,
+            cache_dir=(str(per_lat_dir) if per_lat_dir is not None else None),
+            label=label,
+            drop_imaginary=drop_imag,
+        )
 
     a_thermo = _harm(atoms_a, "state_a", energy_a, True)
     b_thermo = _harm(atoms_b, "state_b", energy_b, True)
@@ -1431,10 +1417,10 @@ def check_diffusion_stability(
         ),
     }
     if free_energy_options is not None:
-        from autokmc.thermo.free_energy import vibrational_validation_parameters
+        from autokmc.thermo.free_energy import SURFACE_VIBRATION_SUBSYSTEM
 
         cache_parameters["free_energy"] = {
-            **vibrational_validation_parameters(free_energy_options),
+            "surface_vibration_subsystem": SURFACE_VIBRATION_SUBSYSTEM,
             "vibration_displacement": float(free_energy_options.vibration_displacement),
             "vibration_nfree": int(free_energy_options.vibration_nfree),
             "include_ts_vibrations": bool(free_energy_options.include_ts_vibrations),

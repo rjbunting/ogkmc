@@ -117,7 +117,6 @@ adsorption:
 free_energy:
   enabled: false
   pressure_bar: 1.0
-  imaginary_mode_tolerance_ev: 0.01  # Used when free energy is enabled.
 
 kmc:
   temperature_k: 300.0

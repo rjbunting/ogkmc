@@ -406,7 +406,6 @@ free_energy:
   vibration_displacement: 0.01
   vibration_nfree: 2
   include_ts_vibrations: true
-  imaginary_mode_tolerance_ev: 0.01
   symmetry_tolerance: 0.3
 ```
 
@@ -432,13 +431,6 @@ energies converge. In a CO/Cu(111) UMA example, extending one hop to two removed
 a 6.93 meV cycle discrepancy by including all surrounding CO molecules. See
 [lateral interaction range and the measured example](docs/architecture.md#lateral-interaction-range)
 and the [configuration controls](docs/configuration.md#lateral-interaction-range).
-
-Calculated vibrational spectra are also checked for stability. Minima reject
-significant imaginary modes; bond transition states require one, and diffusion
-transition structures allow at most one. The numerical-noise threshold is
-`free_energy.imaginary_mode_tolerance_ev` (default 0.01 eV). These checks
-require vibrations to be enabled; the transition-state check also requires
-`include_ts_vibrations: true`.
 
 Gas-phase rotational symmetry numbers are inferred from the final molecular
 coordinates with pymatgen and recorded with the detected point group in the

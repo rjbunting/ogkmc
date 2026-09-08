@@ -478,10 +478,6 @@ free_energy:
   # Non-negative low-frequency floor in eV used by thermochemistry.
   min_frequency_ev: 0.0015
 
-  # Reject minima with imaginary modes above this magnitude in eV. Separate
-  # from the real low-frequency filter; used when free energy is enabled.
-  imaginary_mode_tolerance_ev: 0.01
-
   # Cartesian tolerance in angstrom for molecular symmetry inference.
   symmetry_tolerance: 0.3
 

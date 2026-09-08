@@ -992,10 +992,7 @@ def _apply_adsorption_thermochemistry(
 
     from pathlib import Path as _Path
 
-    from autokmc.thermo.free_energy import (
-        VibrationalStabilityError,
-        compute_harmonic_thermo,
-    )
+    from autokmc.thermo.free_energy import compute_harmonic_thermo
 
     # Use one joint Hessian for every molecule present, including the
     # spectators remaining after desorption. Their modes need not cancel
@@ -1025,24 +1022,17 @@ def _apply_adsorption_thermochemistry(
     )
     def _harm(atoms, indices, energy, label):
         setattr(lateral_class, f"vib_indices_{label}", list(indices))
-        try:
-            return compute_harmonic_thermo(
-                atoms,
-                indices,
-                energy_ev=float(energy),
-                temperature_k=float(temperature_k),
-                calculator=calculator,
-                options=free_energy_options,
-                cache_dir=(str(per_lat_dir) if per_lat_dir is not None else None),
-                label=label,
-                drop_imaginary=True,
-                stationary_point="minimum",
-            )
-        except VibrationalStabilityError as exc:
-            setattr(lateral_class, f"imaginary_{label}_ev", list(exc.imaginary_ev))
-            lateral_class.stable = False
-            lateral_class.invalid_reason = str(exc)
-            raise SiteStabilityError(str(exc)) from exc
+        return compute_harmonic_thermo(
+            atoms,
+            indices,
+            energy_ev=float(energy),
+            temperature_k=float(temperature_k),
+            calculator=calculator,
+            options=free_energy_options,
+            cache_dir=(str(per_lat_dir) if per_lat_dir is not None else None),
+            label=label,
+            drop_imaginary=True,
+        )
 
     occ_thermo = _harm(atoms_occ_vib, vib_idx_occ, energy_occupied, "occupied")
 
@@ -1287,10 +1277,10 @@ def check_site_stability(
         ),
     }
     if free_energy_options is not None:
-        from autokmc.thermo.free_energy import vibrational_validation_parameters
+        from autokmc.thermo.free_energy import SURFACE_VIBRATION_SUBSYSTEM
 
         cache_parameters["free_energy"] = {
-            **vibrational_validation_parameters(free_energy_options),
+            "surface_vibration_subsystem": SURFACE_VIBRATION_SUBSYSTEM,
             "vibration_displacement": float(free_energy_options.vibration_displacement),
             "vibration_nfree": int(free_energy_options.vibration_nfree),
             "include_ts_vibrations": bool(free_energy_options.include_ts_vibrations),

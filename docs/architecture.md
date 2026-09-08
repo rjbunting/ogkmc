@@ -274,12 +274,8 @@ When `free_energy.enabled` is true:
   correction to the gas molecule's ideal-gas correction,
 - calculation structures and lateral class identities include all occupied
   adsorbates, regardless of the local lateral-interaction controls,
-- raw vibrational spectra must have no significant imaginary modes at minima;
-  bond transition states require one, and diffusion transition states permit
-  zero or one under the endpoint-like diffusion policy. The separate
-  `imaginary_mode_tolerance_ev` controls this check before low-frequency
-  thermochemistry filtering; transition-state checks require
-  `include_ts_vibrations`,
+- thermochemistry records the spectra and omits imaginary modes from the
+  default free-energy corrections,
 - diffusion and bond endpoints and transition states use their populated free
   energies when available,
 - vibration caches are separated by species, reaction class, iso-class, and

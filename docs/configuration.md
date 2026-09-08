@@ -683,7 +683,6 @@ refinement and CI-NEB stages when enabled.
 | `vibration_nfree` | `2` | Must be `2` or `4`. |
 | `include_ts_vibrations` | `true` | Compute transition-state vibrations. |
 | `min_frequency_ev` | `0.0015` eV | Low-frequency floor used by thermochemistry. |
-| `imaginary_mode_tolerance_ev` | `0.01` eV | Magnitude above which an imaginary mode counts as a vibrational instability; finite and nonnegative. Independent of the real-mode frequency filter. |
 | `symmetry_tolerance` | `0.3` Å | Cartesian tolerance used by pymatgen for molecular point-group and rotational-symmetry inference. |
 | `default_spin` | `0.0` | Gas spin fallback. |
 | `default_geometry` | `auto` | `auto`, `linear`, `nonlinear`, or `monatomic`. |
@@ -728,15 +727,9 @@ Abandoned empty cache files are removed under the same lock that serializes
 calculations sharing a cache, so active displacement writes remain protected.
 The Python thermochemistry helpers use `atoms.calc` when `calculator` is omitted.
 
-When vibrations are enabled, gas and adsorbed minima must have no imaginary
-modes above `imaginary_mode_tolerance_ev`. Bond transition states require
-exactly one significant imaginary mode. Diffusion transition structures allow
-zero or one to retain the supported endpoint-like diffusion treatment; more
-than one is rejected. Invalid surface classes retain their failure diagnostics
-and are excluded from KMC. Gas-reference instability stops preparation.
-Modes at or below the tolerance are treated as numerical noise. With
-`free_energy.enabled: false`, no vibrational stability check is performed;
-`include_ts_vibrations: false` also skips the transition-state mode check.
+Thermochemistry records real and imaginary mode energies. Imaginary modes
+and real modes below `min_frequency_ev` are omitted from the default
+free-energy corrections.
 
 ## `checkpoint`
 

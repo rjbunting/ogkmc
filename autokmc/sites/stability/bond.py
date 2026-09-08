@@ -2083,10 +2083,7 @@ def _apply_bond_thermochemistry(
 
     from pathlib import Path as _Path
 
-    from autokmc.thermo.free_energy import (
-        VibrationalStabilityError,
-        compute_harmonic_thermo,
-    )
+    from autokmc.thermo.free_energy import compute_harmonic_thermo
 
     tpl = brs.template
     process = smiles_to_dirname(f"{tpl.smiles_a}+{tpl.smiles_b}~{tpl.smiles_c}")
@@ -2098,29 +2095,20 @@ def _apply_bond_thermochemistry(
     )
 
     def _harm(atoms, label, energy_ev):
-        is_ts = label == "ts"
         vib_indices = list(range(n_slab, len(atoms)))
         suffix = label.removeprefix("state_")
         setattr(lc, f"vib_indices_{suffix}", vib_indices)
-        try:
-            return compute_harmonic_thermo(
-                atoms,
-                vib_indices,
-                energy_ev=float(energy_ev),
-                temperature_k=float(temperature_k),
-                calculator=calculator,
-                options=free_energy_options,
-                cache_dir=str(per_lat_dir) if per_lat_dir is not None else None,
-                label=label,
-                drop_imaginary=True,
-                stationary_point="transition_state" if is_ts else "minimum",
-            )
-        except VibrationalStabilityError as exc:
-            setattr(lc, f"imaginary_{suffix}_ev", list(exc.imaginary_ev))
-            lc.stable = False
-            lc.invalid_reason = str(exc)
-            error = BondTransitionStateInvalidError if is_ts else BondEndpointStabilityError
-            raise error(str(exc)) from exc
+        return compute_harmonic_thermo(
+            atoms,
+            vib_indices,
+            energy_ev=float(energy_ev),
+            temperature_k=float(temperature_k),
+            calculator=calculator,
+            options=free_energy_options,
+            cache_dir=str(per_lat_dir) if per_lat_dir is not None else None,
+            label=label,
+            drop_imaginary=True,
+        )
 
     ab_thermo = _harm(atoms_ab, "state_ab", energy_ab)
     lc.thermochemistry_c_components = {}
@@ -2701,10 +2689,10 @@ def check_bond_site_stability(
         ),
     }
     if free_energy_options is not None:
-        from autokmc.thermo.free_energy import vibrational_validation_parameters
+        from autokmc.thermo.free_energy import SURFACE_VIBRATION_SUBSYSTEM
 
         cache_parameters["free_energy"] = {
-            **vibrational_validation_parameters(free_energy_options),
+            "surface_vibration_subsystem": SURFACE_VIBRATION_SUBSYSTEM,
             "vibration_displacement": float(free_energy_options.vibration_displacement),
             "vibration_nfree": int(free_energy_options.vibration_nfree),
             "include_ts_vibrations": bool(free_energy_options.include_ts_vibrations),

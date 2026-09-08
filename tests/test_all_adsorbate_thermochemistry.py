@@ -15,7 +15,7 @@ from autokmc.sites.adsorbate import AdsorbateSite, AdsorbateSiteLateral
 from autokmc.sites.bond import BondReactionLateral
 from autokmc.sites.diffusion import DiffusionLateral
 from autokmc.sites.stability import adsorption as adsorption_stability
-from autokmc.sites.stability.bond import BondEndpointStabilityError, _apply_bond_thermochemistry
+from autokmc.sites.stability.bond import _apply_bond_thermochemistry
 from autokmc.sites.stability.diffusion import _apply_diffusion_thermochemistry
 from autokmc.thermo import free_energy
 
@@ -103,18 +103,18 @@ def _diagonal_atoms(symbols, curvatures):
     return atoms
 
 
-def test_unstable_spectator_in_unoccupied_endpoint_invalidates_adsorption():
+def test_unoccupied_spectator_spectrum_is_recorded():
     lc = AdsorbateSiteLateral(0)
-    with pytest.raises(adsorption_stability.SiteStabilityError, match="unoccupied"):
-        adsorption_stability._apply_adsorption_thermochemistry(
-            lc, SimpleNamespace(reactant="[H]", iso_class=0),
-            atoms_occupied=_diagonal_atoms("CuOH", [1, 1, 1]),
-            atoms_unoccupied=_diagonal_atoms("CuO", [1, [-1, 1, 1]]),
-            energy_occupied=0., energy_unoccupied=0., n_slab_occupied=1,
-            n_lateral_occupied=1, n_self_occupied=1, calculator=DiagonalCalculator(),
-            free_energy_options=free_energy.FreeEnergyOptions(), temperature_k=300., vib_cache_root=None,
-        )
-    assert lc.stable is False
+    lc.stable = True
+    adsorption_stability._apply_adsorption_thermochemistry(
+        lc, SimpleNamespace(reactant="[H]", iso_class=0),
+        atoms_occupied=_diagonal_atoms("CuOH", [1, 1, 1]),
+        atoms_unoccupied=_diagonal_atoms("CuO", [1, [-1, 1, 1]]),
+        energy_occupied=0., energy_unoccupied=0., n_slab_occupied=1,
+        n_lateral_occupied=1, n_self_occupied=1, calculator=DiagonalCalculator(),
+        free_energy_options=free_energy.FreeEnergyOptions(), temperature_k=300., vib_cache_root=None,
+    )
+    assert lc.stable is True
     assert lc.vib_indices_unoccupied == [1]
     assert len(lc.imaginary_unoccupied_ev) == 1
 
@@ -176,23 +176,23 @@ def test_bond_all_adsorbates_and_gas_remaining_surface_reference(gas_product):
         assert len(lc.frequencies_c_ev) == 9
 
 
-def test_gas_product_rejects_unstable_remaining_surface():
+def test_gas_product_records_remaining_surface_spectrum():
     lc = BondReactionLateral(0)
     lc.atoms_c_gas_reference = _diagonal_atoms("CuN", [1, [-1, 1, 1]])
     lc.energy_c_gas_reference = -4.
     gas = SimpleNamespace(energy=-3., gibbs_energy=-3.2)
     site = SimpleNamespace(iso_class=0, gas_reactant=gas,
                            template=SimpleNamespace(smiles_a="[H]", smiles_b="[H]", smiles_c="[H][H]"))
-    with pytest.raises(BondEndpointStabilityError, match="state_c"):
-        _apply_bond_thermochemistry(
-            lc, site, atoms_ab=_diagonal_atoms("CuNH2", [1, 4, 1, 1]),
-            atoms_c=_diagonal_atoms("CuNH2", [1, 4, 1, 1]),
-            atoms_ts=_diagonal_atoms("CuNH2", [1, 2, [-1, 1, 1], 1]),
-            energy_ab=-10., energy_c=-7., energy_ts=-5., n_slab=1, n_lateral=1, n_reacting=2,
-            gas_product=True, calculator=DiagonalCalculator(),
-            free_energy_options=free_energy.FreeEnergyOptions(), temperature_k=300., vib_cache_root=None,
-        )
-    assert lc.stable is False
+    lc.stable = True
+    _apply_bond_thermochemistry(
+        lc, site, atoms_ab=_diagonal_atoms("CuNH2", [1, 4, 1, 1]),
+        atoms_c=_diagonal_atoms("CuNH2", [1, 4, 1, 1]),
+        atoms_ts=_diagonal_atoms("CuNH2", [1, 2, [-1, 1, 1], 1]),
+        energy_ab=-10., energy_c=-7., energy_ts=-5., n_slab=1, n_lateral=1, n_reacting=2,
+        gas_product=True, calculator=DiagonalCalculator(),
+        free_energy_options=free_energy.FreeEnergyOptions(), temperature_k=300., vib_cache_root=None,
+    )
+    assert lc.stable is True
     assert lc.vib_indices_c == [1]
     assert len(lc.imaginary_c_ev) == 1
 
@@ -230,11 +230,6 @@ def test_reactive_only_cache_reuses_electronics_but_recomputes_all_adsorbate_fre
     kwargs = dict(max_steps=3, free_energy_options=options, free_energy_temperature_k=300.,
                   calculation_cache_root=str(tmp_path / "calculations"), calculation_cache_lookup_enabled=True,
                   vib_cache_root=str(tmp_path / "vibrations"))
-    original_parameters = free_energy.vibrational_validation_parameters
-
-    def old_parameters(opts):
-        return {key: value for key, value in original_parameters(opts).items() if key != "surface_vibration_subsystem"}
-
     def old_thermo(lc, _site, *, atoms_occupied, energy_occupied, energy_unoccupied, **_kwargs):
         result = free_energy.compute_harmonic_thermo(
             atoms_occupied, [3], energy_ev=energy_occupied, temperature_k=300.,
@@ -246,7 +241,7 @@ def test_reactive_only_cache_reuses_electronics_but_recomputes_all_adsorbate_fre
         lc.g_correction_unoccupied = 0.
 
     with monkeypatch.context() as legacy:
-        legacy.setattr(free_energy, "vibrational_validation_parameters", old_parameters)
+        legacy.setattr(free_energy, "SURFACE_VIBRATION_SUBSYSTEM", "reactive_atoms_v0")
         legacy.setattr(adsorption_stability, "_apply_adsorption_thermochemistry", old_thermo)
         adsorption_stability.check_site_stability(graph, site, 0, old, calculator, **kwargs)
     assert old.stable is True
