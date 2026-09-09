@@ -11,7 +11,7 @@ from typing import Any
 import numpy as np
 from ase import Atoms
 from ase.constraints import FixAtoms
-from ase.io import read as ase_read
+from autokmc.io.extxyz import read_atoms as ase_read
 
 
 class StructureInputError(ValueError):

@@ -156,6 +156,8 @@ def test_optimized_results_survive_reaction_database_round_trip(tmp_path):
     root = tmp_path / "reaction_db"
     occupied = _atoms()
     unoccupied = _atoms(0.1)
+    occupied.new_array("bulk_wyckoff", np.array(["a", "", ""]))
+    unoccupied.new_array("bulk_wyckoff", np.array(["a", "two words", "_"]))
     occupied_forces = np.full((len(occupied), 3), 0.15)
     unoccupied_forces = np.full((len(unoccupied), 3), -0.05)
     occupied.calc = SinglePointCalculator(
@@ -178,6 +180,7 @@ def test_optimized_results_survive_reaction_database_round_trip(tmp_path):
     assert hit is not None
     loaded_occupied = hit["states"]["occupied"]["atoms"]
     assert loaded_occupied.get_potential_energy() == pytest.approx(-10.5)
+    assert loaded_occupied.arrays["bulk_wyckoff"].tolist() == ["a", "", ""]
     np.testing.assert_allclose(loaded_occupied.get_forces(), occupied_forces)
 
     lateral = SimpleNamespace(stable=None)
@@ -190,6 +193,7 @@ def test_optimized_results_survive_reaction_database_round_trip(tmp_path):
         },
     )
     assert lateral.atoms_occupied.get_potential_energy() == pytest.approx(-10.5)
+    assert lateral.atoms_unoccupied.arrays["bulk_wyckoff"].tolist() == ["a", "two words", "_"]
     np.testing.assert_allclose(
         lateral.atoms_unoccupied.get_forces(),
         unoccupied_forces,

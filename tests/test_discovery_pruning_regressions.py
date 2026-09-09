@@ -9,6 +9,7 @@ import pytest
 from ase import Atoms
 from ase.build import fcc111
 from ase.calculators.calculator import Calculator, all_changes
+from ase.io import read as ase_read
 
 from autokmc.core.graph import build_graph
 from autokmc.io.calculators import CalculatorConfigError
@@ -168,11 +169,19 @@ def _oxygen_bound_co_pair(swap=False):
 
 
 @pytest.mark.parametrize("swap", [False, True])
-def test_bond_pruning_preserves_atom_indices_past_unbound_atoms(swap):
+def test_bond_pruning_preserves_atom_indices_past_unbound_atoms(swap, tmp_path):
     graph, species, site = _oxygen_bound_co_pair(swap)
+    for node in (0, 1):
+        graph.nodes[node].setdefault("atom_arrays", {})["bulk_wyckoff"] = "a"
     assert prune_unstable_bond_sites(
         graph, [site], species, ControlledCalculator(), frozen_indices=[0, 1],
+        debug_output_dir=tmp_path,
     ) == [site]
+    paths = sorted(tmp_path.glob("bond_iso_*/endpoint_ab_*.extxyz"))
+    assert len(paths) == 2
+    for path in paths:
+        atoms = ase_read(path)
+        assert atoms.arrays["bulk_wyckoff"].tolist() == ["a", "a", "_", "_", "_"]
 
 
 def test_bond_pruning_propagates_calculator_failure_without_removing_channels():

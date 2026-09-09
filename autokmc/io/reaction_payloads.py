@@ -268,6 +268,7 @@ def build_bond_payload(
             else None
         ),
         "kind_directions": ["couple", "dissoc"],
+        "ts_energy_diagnostic": getattr(lc, "ts_energy_diagnostic", None),
         "gas_product": bool(getattr(reaction.site, "gas_product", False)),
         "description": description,
         "neb_images": _neb_image_payload(lc),

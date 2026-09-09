@@ -11,8 +11,7 @@ from pathlib import Path
 from typing import Any, Mapping, SupportsIndex, cast
 
 from ase import Atoms
-from ase.io import read as ase_read
-from ase.io import write as ase_write
+from autokmc.io.extxyz import read_atoms as ase_read, write_extxyz as ase_write
 
 from autokmc.core.constants import TRAJ_DUMP_EVERY
 from autokmc.io._files import atomic_output_path, ensure_directory, fsync_directory

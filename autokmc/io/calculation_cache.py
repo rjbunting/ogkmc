@@ -32,8 +32,7 @@ import networkx as nx
 import numpy as np
 from ase import Atoms
 from ase.constraints import FixAtoms
-from ase.io import read as ase_read
-from ase.io import write as ase_write
+from autokmc.io.extxyz import read_atoms as ase_read, write_extxyz as ase_write
 
 from autokmc.io._files import atomic_output_path, write_json_atomic
 from autokmc.io.atoms import copy_atoms_with_results

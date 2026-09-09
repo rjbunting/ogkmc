@@ -147,6 +147,19 @@ firing statistics. Its immutable `discovery_step` records when the reaction
 entered the discovered network. The `.extxyz` files preserve the structures
 behind these values.
 
+All structure outputs write a complete value for every declared per-atom
+column. Missing string metadata (for example, a slab's `bulk_wyckoff` label
+on an adsorbate) appears as `_`. Strings containing whitespace or quotes use
+percent-escaped tokens. The `autokmc_extxyz_string_arrays` comment metadata
+retains original values and types; AutoKMC restores them when loading structures
+or cached results. Standard EXTXYZ readers can open the files directly.
+
+An accepted bond NEB image with endpoint-like or below-endpoint energy has a
+`ts_energy_diagnostic` entry in `reaction.json`. It records the energy condition
+and the minimum KMC barrier while `valid` remains `true`. The raw transition
+energy and barriers remain available alongside the effective energies and KMC
+barriers; these reactions are stored in the normal reaction tree.
+
 For a gas-product bond reaction, AutoKMC stores the thermodynamic C state as two
 independent calculation inputs. `state_c_gas_reference.extxyz` contains the
 relaxed surface and lateral environment without a molecule in the vacuum.

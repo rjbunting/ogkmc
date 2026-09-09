@@ -22,8 +22,8 @@ to be evaluated lazily, only when the KMC loop actually needs them:
    :class:`~autokmc.sites.bond.BondReactionLateral`.
 
 3. The **NEB transition-state energy** ``energy_ts`` between the two
-   endpoints, with CI refinement only when both ordinary directional barriers
-   are at least the KMC floor, plus the standard connectivity guards.
+   endpoints, with CI refinement when enabled, plus the standard connectivity
+   guards. Endpoint-like energies are recorded and accepted with the KMC floor.
 
 See :func:`check_bond_site_stability`.
 
@@ -64,8 +64,8 @@ Public API
 * :class:`BondStabilityError`           — base error.
 * :class:`BondEndpointStabilityError`   — endpoint relaxation failed.
 * :class:`BondNEBNotConvergedError`     — NEB band did not converge.
-* :class:`BondTransitionStateInvalidError` — TS lost connectivity / collapsed
-  onto an endpoint.
+* :class:`BondTransitionStateInvalidError` — TS has nonfinite energies or
+  invalid reacting-block connectivity.
 * (Re-exported) :class:`SurfaceConnectivityError`,
   :class:`AdsorbateDissociationError`,
   :class:`OptimisationFailedError`     — from
@@ -79,6 +79,7 @@ Public API
 from __future__ import annotations
 
 from autokmc.core.pbc import slab_outward_normal
+from autokmc.core.constants import EA_MIN
 
 import itertools
 from collections.abc import Mapping, Sequence
@@ -210,11 +211,10 @@ class BondNEBNotConvergedError(BondStabilityError):
 
 
 class BondTransitionStateInvalidError(BondStabilityError):
-    """The converged transition state is not a meaningful saddle.
+    """The converged transition state has invalid energies or connectivity.
 
-    Raised when the highest NEB image either collapses back onto one of the
-    relaxed endpoints (no barrier) or loses surface / adsorbate
-    connectivity (numerical instability rather than a real saddle).
+    Endpoint-like energies alone are accepted with the effective KMC barrier
+    floor and recorded separately from stability failures.
     """
 
 
@@ -1909,14 +1909,16 @@ def _check_bond_ts_validity(
     n_interior: int,
     e_c_path: float | None = None,
     energy_tol: float = 1e-3,
-) -> None:
-    """Validate that the highest-energy NEB image is a real saddle.
+) -> dict[str, Any] | None:
+    """Validate the selected NEB image and return any low-barrier diagnostic.
 
     Mirrors :func:`autokmc.sites.stability.diffusion._check_ts_validity` with
     one key relaxation: the AB and C endpoints **legitimately** differ by
     exactly one intra-reacting-block bond, so the TS bond topology is
     accepted whenever it matches *either* endpoint (i.e. the saddle has
-    not split off into a third species).
+    not split off into a third species). Energies indistinguishable from a
+    physical path endpoint are accepted; the rate calculation applies EA_MIN
+    without changing the recorded electronic energies.
     """
     c_endpoint_energy = float(e_c if e_c_path is None else e_c_path)
     if not (
@@ -1930,38 +1932,6 @@ def _check_bond_ts_validity(
             f"(E_ab={e_ab}, E_c={e_c}, "
             f"E_c_path={c_endpoint_energy}, E_ts={e_ts})."
         )
-    e_max_endpoint = max(float(e_ab), c_endpoint_energy)
-    if float(e_ts) < e_max_endpoint - float(energy_tol):
-        _log.warning(
-            "Bond NEB has no genuine saddle: E_ts=%.4f eV is below "
-            "max(E_ab, E_c_path)=%.4f eV (tol=%.3f). "
-            "The KMC barrier will be floored at EA_MIN.",
-            e_ts,
-            e_max_endpoint,
-            energy_tol,
-        )
-
-    if n_interior >= 1:
-        # Check energy proximity regardless of image index — a TS image at
-        # position k=2 can still collapse to an endpoint energy if the NEB
-        # is nearly flat near that end.  Restricting to ts_index == 1 or
-        # ts_index == n_interior misses these interior-image collapses.
-        # This also detects an interior image that has collapsed to an endpoint
-        # energy even when it is not adjacent to that endpoint in the band.
-        if abs(float(e_ts) - float(e_ab)) < float(energy_tol):
-            raise BondTransitionStateInvalidError(
-                f"TS image (k={ts_index}) has energy indistinguishable from "
-                f"endpoint AB: E_ts={e_ts:.4f} eV ≈ E_ab={e_ab:.4f} eV "
-                f"(tol={energy_tol})."
-            )
-        if abs(float(e_ts) - c_endpoint_energy) < float(energy_tol):
-            raise BondTransitionStateInvalidError(
-                f"TS image (k={ts_index}) has energy indistinguishable from "
-                "the physical endpoint C: "
-                f"E_ts={e_ts:.4f} eV ≈ E_c_path={c_endpoint_energy:.4f} eV "
-                f"(tol={energy_tol})."
-            )
-
     # Intra-reacting-block bond topology — TS must match AB *or* C
     # (the bond change happens on exactly one side of the saddle).
     if n_react >= 2:
@@ -1984,6 +1954,30 @@ def _check_bond_ts_validity(
                 f"both bonds_AB={sorted(map(tuple, bonds_ab_in))} and "
                 f"bonds_C={sorted(map(tuple, bonds_c_in))}."
             )
+
+    # Inspect every selected image, including maxima far from either end.
+    endpoint_matches = [
+        label for label, energy in (("AB", float(e_ab)), ("C", c_endpoint_energy))
+        if n_interior >= 1 and abs(float(e_ts) - energy) < float(energy_tol)
+    ]
+    below_endpoint = float(e_ts) < max(float(e_ab), c_endpoint_energy) - float(energy_tol)
+    if not endpoint_matches and not below_endpoint:
+        return None
+    return {
+        "status": "accepted_low_barrier",
+        "reason": "endpoint_energy_indistinguishable" if endpoint_matches else "below_path_endpoint",
+        "endpoint_matches": endpoint_matches,
+        "below_path_endpoint": bool(below_endpoint),
+        "transition_image_index": int(ts_index),
+        "n_interior": int(n_interior),
+        "energy_tolerance_ev": float(energy_tol),
+        "energy_ts_ev": float(e_ts),
+        "energy_ab_path_ev": float(e_ab),
+        "energy_c_path_ev": c_endpoint_energy,
+        "barrier_ab_path_raw_ev": float(e_ts) - float(e_ab),
+        "barrier_c_path_raw_ev": float(e_ts) - c_endpoint_energy,
+        "kmc_barrier_floor_ev": float(EA_MIN),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -2361,6 +2355,7 @@ def _write_bond_calculation_cache(
         reaction_graph=cache_graph,
         neb=neb,
         lateral_attributes={
+            "ts_energy_diagnostic": getattr(lc, "ts_energy_diagnostic", None),
             "atom_matching_method": getattr(
                 lc,
                 "atom_matching_method",
@@ -2528,10 +2523,10 @@ def check_bond_site_stability(
        constant, enable its climbing image, and converge it again regardless of
        raw barrier height. All images share one acquired calculator via ASE's
        SingleCalculatorNEB-style path.
-    4. Identify the TS as the highest-energy interior image; validate
-       (no fragmentation into a third species, no collapse onto an
-       endpoint); store all energies / atoms / (optional) full band on
-       *lc*.
+    4. Identify the TS as the highest-energy interior image; validate finite
+       energies and no fragmentation into a third species. Record endpoint-like
+       energies as accepted low-barrier diagnostics; store all energies / atoms
+       / (optional) full band on *lc*. KMC rates use the standard EA_MIN floor.
 
     On success ``lc.stable`` is set to ``True`` and the energies / relaxed
     atoms are persisted on the lateral class.
@@ -2549,7 +2544,7 @@ def check_bond_site_stability(
     BondNEBNotConvergedError
         NEB band did not reach *fmax* in *max_steps*.
     BondTransitionStateInvalidError
-        TS image fragmented or collapsed onto an endpoint.
+        TS image fragmented or TS/endpoint energies are nonfinite.
     """
     if member_index < 0 or member_index >= len(brs.member_node_ids):
         raise IndexError(
@@ -2593,6 +2588,9 @@ def check_bond_site_stability(
             ),
             member_index, _bond_lateral_fingerprint,
         )
+    # A new evaluation or cache hydration must not retain a diagnostic from
+    # an earlier transition state on this mutable lateral class.
+    lc.ts_energy_diagnostic = None
     cache_kind = "bond"
     cache_key: str | None = None
     cache_graph: nx.Graph | None = None
@@ -2622,6 +2620,7 @@ def check_bond_site_stability(
         and free_energy_temperature_k is not None
     )
     cache_parameters = {
+        "ts_energy_policy": "accept_endpoint_like_with_kmc_floor_v1",
         "fmax": float(fmax),
         "max_steps": int(max_steps),
         "optimizer": str(optimizer).strip().lower(),
@@ -3517,7 +3516,7 @@ def check_bond_site_stability(
         if neb_result.refinement_final_energy is not None
         else E_c_path
     )
-    _check_bond_ts_validity(
+    lc.ts_energy_diagnostic = _check_bond_ts_validity(
         atoms_ts,
         validation_initial,
         validation_final,
@@ -3560,6 +3559,16 @@ def check_bond_site_stability(
     lc.direct_event_reason = None
     lc.direct_event_certificate = None
     lc.stable = True
+    if lc.ts_energy_diagnostic is not None:
+        _log.warning(
+            "bond_iso=%d m=%d lat=%d: TS image (k=%d) has endpoint-like "
+            "or lower energy (E_ts=%.4f eV, E_ab_path=%.4f eV, "
+            "E_c_path=%.4f eV, tol=%.3f); accepted for KMC with the "
+            "EA_MIN=%.3f eV barrier floor; recorded in ts_energy_diagnostic",
+            brs.iso_class, member_index, lc.lateral_class, k_ts, E_ts,
+            validation_initial_energy, validation_final_path_energy,
+            lc.ts_energy_diagnostic["energy_tolerance_ev"], EA_MIN,
+        )
     if verbose:
         print(
             f"  [NEB] converged=True steps={neb_result.optimizer_steps}  "

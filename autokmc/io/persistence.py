@@ -60,7 +60,7 @@ from pathlib import Path
 from typing import Any, TextIO, cast
 
 from ase import Atoms
-from ase.io import write as ase_write
+from autokmc.io.extxyz import write_extxyz as ase_write
 
 from autokmc.core.constants import (
     PERSISTENCE_SCHEMA_VERSION,  # noqa: F401 - legacy compatibility re-export

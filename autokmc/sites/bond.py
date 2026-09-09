@@ -301,6 +301,9 @@ class BondReactionLateral:
     #: These separate components identify the state to which each mode list
     #: belongs; vib_indices_c refers only to the remaining surface.
     thermochemistry_c_components: dict[str, Any] = field(default_factory=dict)
+    #: Accepted endpoint-like/below-endpoint NEB energy, retained in reaction
+    #: output and calculation caches without replacing the raw energies.
+    ts_energy_diagnostic: dict[str, Any] | None = None
     if TYPE_CHECKING:
         _fingerprint : tuple = field(init=False, repr=False, compare=False)
         _rate_cache : dict = field(init=False, repr=False, compare=False)
@@ -2043,7 +2046,7 @@ def prune_unstable_bond_sites(
         if debug_dir is None:
             return
         try:
-            from ase.io import write as ase_write
+            from autokmc.io.extxyz import write_extxyz as ase_write
 
             out_dir = debug_dir / f"bond_iso_{int(bond_iso):03d}"
             out_dir.mkdir(parents=True, exist_ok=True)

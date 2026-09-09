@@ -2304,25 +2304,185 @@ def test_gas_precursor_relaxation_fixes_environment_and_keeps_molecule(
 
 def test_bond_ts_validation_uses_physical_precursor_energy():
     atoms = Atoms("H", positions=[[0.0, 0.0, 0.0]])
-    with pytest.raises(
-        BondTransitionStateInvalidError,
-        match="physical endpoint C",
-    ):
+    diagnostic = _check_bond_ts_validity(
+        atoms, atoms.copy(), atoms.copy(),
+        n_slab=0, n_lat=0, n_react=1, nl_mult=1.2,
+        e_ab=0.0, e_c=-2.0, e_c_path=0.2, e_ts=0.2,
+        ts_index=1, n_interior=1,
+    )
+    assert diagnostic["status"] == "accepted_low_barrier"
+    assert diagnostic["endpoint_matches"] == ["C"]
+    assert diagnostic["energy_c_path_ev"] == pytest.approx(0.2)
+    assert diagnostic["barrier_c_path_raw_ev"] == pytest.approx(0.0)
+
+
+@pytest.mark.parametrize("ts_index", [1, 8, 10])
+@pytest.mark.parametrize(
+    ("e_ab", "e_c", "e_ts", "matches"),
+    [
+        (-438.9345, -438.7345, -438.7340, ["C"]),
+        (-438.7345, -438.9345, -438.7340, ["AB"]),
+        (-438.7345, -438.7345, -438.7345, ["AB", "C"]),
+        (-438.9345, -438.7345, -438.7350, ["C"]),
+        (0.0, -0.2, -0.1, []),
+    ],
+)
+def test_bond_ts_validation_records_endpoint_like_energy(
+    ts_index, e_ab, e_c, e_ts, matches,
+):
+    atoms = Atoms("H", positions=[[0.0, 0.0, 0.0]])
+    diagnostic = _check_bond_ts_validity(
+        atoms, atoms.copy(), atoms.copy(),
+        n_slab=0, n_lat=0, n_react=1, nl_mult=1.2,
+        e_ab=e_ab, e_c=e_c, e_ts=e_ts, ts_index=ts_index, n_interior=10,
+    )
+    assert diagnostic["status"] == "accepted_low_barrier"
+    assert diagnostic["endpoint_matches"] == matches
+    assert diagnostic["transition_image_index"] == ts_index
+    assert diagnostic["energy_ts_ev"] == e_ts
+    assert diagnostic["kmc_barrier_floor_ev"] == pytest.approx(0.1)
+
+
+def test_bond_ts_validation_leaves_resolved_barrier_without_diagnostic():
+    atoms = Atoms("H", positions=[[0.0, 0.0, 0.0]])
+    assert _check_bond_ts_validity(
+        atoms, atoms.copy(), atoms.copy(),
+        n_slab=0, n_lat=0, n_react=1, nl_mult=1.2,
+        e_ab=0.0, e_c=0.2, e_ts=0.5, ts_index=8, n_interior=10,
+    ) is None
+
+
+def test_bond_endpoint_like_energy_does_not_accept_third_species():
+    # AB contains H2 + H, C contains a connected H3 chain; the TS has three
+    # isolated atoms, so neither valid endpoint topology is preserved.
+    atoms_ab = Atoms("H3", positions=[[0, 0, 0], [0.7, 0, 0], [3, 0, 0]])
+    atoms_c = Atoms("H3", positions=[[0, 0, 0], [0.7, 0, 0], [1.4, 0, 0]])
+    atoms_ts = Atoms("H3", positions=[[0, 0, 0], [3, 0, 0], [6, 0, 0]])
+    with pytest.raises(BondTransitionStateInvalidError, match="fragmented"):
         _check_bond_ts_validity(
-            atoms,
-            atoms.copy(),
-            atoms.copy(),
-            n_slab=0,
-            n_lat=0,
-            n_react=1,
-            nl_mult=1.2,
-            e_ab=0.0,
-            e_c=-2.0,
-            e_c_path=0.2,
-            e_ts=0.2,
-            ts_index=1,
-            n_interior=1,
+            atoms_ts, atoms_ab, atoms_c,
+            n_slab=0, n_lat=0, n_react=3, nl_mult=1.2,
+            e_ab=0.0, e_c=0.2, e_ts=0.2005, ts_index=8, n_interior=10,
         )
+
+
+@pytest.mark.parametrize("persist_neb_path", [False, True])
+@pytest.mark.parametrize("higher_endpoint", ["AB", "C"])
+def test_endpoint_like_bond_is_admitted_persisted_and_cached(
+    monkeypatch, tmp_path, caplog, persist_neb_path, higher_endpoint,
+):
+    import json
+
+    from autokmc.io.persistence import ReactionWriter
+    from autokmc.reactions.bond import (
+        _bond_energetics_cached, get_applicable_bond_reaction_for_member,
+    )
+    import autokmc.reactions.bond as reaction_module
+    from autokmc.sites.bond import BondReactionLateral
+
+    e_ab, e_c = -438.9345, -438.7345
+    if higher_endpoint == "AB":
+        e_ab, e_c = e_c, e_ab
+    e_ts = -438.7340
+    atoms_ab = Atoms("H2", positions=[[0, 0, 0], [2, 0, 0]], cell=[10, 10, 10])
+    atoms_c = Atoms("H2", positions=[[0, 0, 0], [0.7, 0, 0]], cell=[10, 10, 10])
+    graph = nx.Graph()
+    graph.add_nodes_from((index, {"element": "H"}) for index in range(1, 5))
+    endpoints = [SimpleNamespace(member_node_ids=[nodes]) for nodes in ([1], [2], [3, 4])]
+    site = SimpleNamespace(
+        iso_class=0, gas_product=False,
+        template=SimpleNamespace(smiles_a="[H]", smiles_b="[H]", smiles_c="[H][H]"),
+        member_node_ids=[([1], [2], [3, 4])],
+        members=[tuple(item for endpoint in endpoints for item in (endpoint, 0))],
+    )
+    lateral = BondReactionLateral(lateral_class=0, ego_graph=nx.Graph())
+    monkeypatch.setattr(bond_module, "_member_clique_union", lambda *_args: frozenset({0}))
+    monkeypatch.setattr(bond_module, "_ordered_endpoint_nodes", lambda _graph, nodes: nodes)
+    monkeypatch.setattr(
+        bond_module, "_select_c_to_ab_mapping",
+        lambda *_args, **_kwargs: ([3, 4], {"selected_method": "test"}),
+    )
+    monkeypatch.setattr(
+        bond_module, "_build_bond_atoms",
+        lambda *_args, endpoint, **_kwargs: (
+            (atoms_ab if endpoint == "ab" else atoms_c).copy(), 0, 0, [0, 1], [1, 2], {},
+        ),
+    )
+    monkeypatch.setattr(bond_module, "normalise_reaction_graph", lambda *_args, **_kwargs: nx.Graph())
+    monkeypatch.setattr(bond_module, "calculator_identity", lambda _calculator: {"class": "test.Calculator"})
+    relax_calls = []
+    neb_calls = []
+
+    def relax(atoms, *, state_label, **_kwargs):
+        relax_calls.append(state_label)
+        energy = e_ab if state_label == "endpoint_ab" else e_c
+        atoms.calc = SinglePointCalculator(atoms, energy=energy, forces=np.zeros((2, 3)))
+        return atoms, energy
+
+    def run_neb(initial, final, **kwargs):
+        neb_calls.append(kwargs)
+        assert kwargs["climb"] is True
+        path = [initial] + [final.copy() for _ in range(10)] + [final]
+        energies = [e_ab] + [e_ts] * 10 + [e_c]
+        for atoms, energy in zip(path, energies):
+            atoms.calc = SinglePointCalculator(atoms, energy=energy, forces=np.zeros((2, 3)))
+        return neb_module.NEBRunResult(
+            atoms_ts=path[8], energy_ts=e_ts, transition_index=8,
+            n_interior=10, optimizer_steps=4, climb_performed=True,
+            path_images=path, path_energies=energies,
+        )
+
+    monkeypatch.setattr(bond_module, "_relax_bond_endpoint", relax)
+    monkeypatch.setattr(bond_module, "run_neb", run_neb)
+    monkeypatch.setattr(reaction_module, "is_bond_applicable", lambda *_args: (True, "couple"))
+    monkeypatch.setattr(reaction_module, "check_bond_site_lateral", lambda *_args, **_kwargs: lateral)
+    cache_root = str(tmp_path / "cache")
+    options = dict(
+        temperature=500.0, lateral_interactions=False,
+        n_images=10, image_spacing=None, persist_neb_path=persist_neb_path,
+        calculation_cache_root=cache_root, calculation_cache_lookup_enabled=True,
+    )
+    reaction = get_applicable_bond_reaction_for_member(graph, site, 0, object(), **options)
+    assert reaction is not None
+    assert lateral.stable is True
+    assert lateral.invalid_reason is None
+    assert lateral.energy_ts == e_ts
+    assert reaction.rate > 0.0
+    assert reaction.barrier == pytest.approx(0.1 if higher_endpoint == "AB" else 0.3)
+    reverse = _bond_energetics_cached(lateral, "dissoc", temperature=500.0)
+    assert reverse[1] == pytest.approx(0.1 if higher_endpoint == "C" else 0.3)
+    assert reaction.barrier - reverse[1] == pytest.approx(e_c - e_ab)
+    assert "accepted for KMC" in caplog.text
+    assert "marking as invalid" not in caplog.text
+    diagnostic = lateral.ts_energy_diagnostic
+    assert diagnostic["endpoint_matches"] == [higher_endpoint]
+    assert diagnostic["transition_image_index"] == 8
+
+    writer = ReactionWriter(tmp_path / "output")
+    folder = writer.ensure_reaction(reaction, step=0)
+    writer.close()
+    payload = json.loads((folder / "reaction.json").read_text())
+    assert payload["valid"] is True
+    assert payload["ts_energy_diagnostic"] == diagnostic
+    assert payload["energies_ev"]["transition_raw"] == e_ts
+    assert payload["barriers_ev"]["couple_kmc"] == pytest.approx(reaction.barrier)
+    assert payload["barriers_ev"]["dissoc_kmc"] == pytest.approx(reverse[1])
+    assert (folder / "ts.extxyz").is_file()
+    assert (folder / "neb_path.extxyz").is_file() == persist_neb_path
+    assert not (tmp_path / "output" / "diagnostics" / "invalid_bond").exists()
+
+    # A fresh lateral class must recover the diagnostic from the real cache,
+    # without needing the optional full NEB path or rerunning the calculations.
+    lateral = BondReactionLateral(lateral_class=0, ego_graph=nx.Graph())
+    restored = get_applicable_bond_reaction_for_member(graph, site, 0, object(), **options)
+    assert restored is not None
+    assert restored.lateral_class is lateral
+    assert lateral.ts_energy_diagnostic == diagnostic
+    assert lateral.stable is True
+    assert lateral.energy_ts == e_ts
+    assert restored.barrier == pytest.approx(reaction.barrier)
+    assert relax_calls == ["endpoint_ab", "endpoint_c"]
+    assert len(neb_calls) == 1
 
 
 @pytest.mark.parametrize(
@@ -2900,6 +3060,7 @@ def test_bond_thermochemistry_reuses_cached_endpoints_and_neb(
         n_shells=1,
         lateral_class=4,
         ego_graph=nx.Graph(),
+        ts_energy_diagnostic={"status": "stale_previous_transition"},
     )
     record = _electronic_record(
         {
@@ -2991,6 +3152,7 @@ def test_bond_thermochemistry_reuses_cached_endpoints_and_neb(
     assert thermo_calls == [600.0, 600.0, 600.0]
     assert lateral.g_ab == pytest.approx(-2.4)
     assert lateral.stale_thermochemistry is None
+    assert lateral.ts_energy_diagnostic is None
     assert lateral.stable is True
     assert len(writes) == 1
 

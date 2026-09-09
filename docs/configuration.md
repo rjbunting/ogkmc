@@ -224,15 +224,21 @@ the source stage and, for rollback, the checkpoint's maximum NEB force and
 optimizer step. It also records the total refinement count and configured
 limit.
 
-The retained ordinary transition energy remains the raw recorded value. At
+The calculated transition energy remains the raw recorded value. At
 rate construction, both reversible directions use the same effective level,
 `max(E_ts, max(E_initial, E_final) + 0.1 eV)`. Thus the direction from the
 higher-energy endpoint receives the 0.1 eV minimum while the opposite barrier
 also includes the endpoint energy difference; this preserves detailed energy
 consistency rather than independently forcing both directions to 0.1 eV.
-Because the retained ordinary image is not a climbing-image stationary point,
-AutoKMC also skips its TS vibrational calculation and uses the existing
-average endpoint free-energy correction for that transition level.
+
+Bond NEB images whose energy is within 0.001 eV of either physical path
+endpoint are admitted after the finite-energy and reacting-block topology
+checks. This also applies to the molecular precursor endpoint of a gas-product
+reaction and to the endpoints of a refined NEB segment. The accepted condition,
+image index, endpoint energies, raw path barriers, tolerance, and minimum KMC
+barrier are recorded in `ts_energy_diagnostic` in `reaction.json` and the
+calculation cache. Energies below a path endpoint are recorded the same way.
+The configured NEB stages and TS vibrational calculations still run.
 
 `neb_method` selects ASE's NEB force and tangent formulation for both the
 ordinary and climbing-image stages. Valid values are:
