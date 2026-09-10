@@ -96,7 +96,8 @@ constants:
   # Surface-graph depth used to classify lateral adsorbate environments.
   # Zero counts only adsorbates sharing an anchor surface atom; one also counts
   # adsorbates one surface bond away, and so on.
-  # Free-energy calculations always include all occupied adsorbates.
+  # The same range controls electronic energies and free-energy corrections
+  # for the reacting adsorbate and complete selected neighboring molecules.
   lateral_shells: 0
 
 
@@ -454,7 +455,8 @@ adsorption:
 # ---------------------------------------------------------------------------
 free_energy:
   # Run vibrational and ideal-gas free-energy corrections. Surface vibrations
-  # include all occupied adsorbates together, independent of lateral_shells.
+  # include reacting adsorbates and neighbors within constants.lateral_shells
+  # together; kmc.lateral_interactions: false omits the neighbors.
   # This is disabled here to keep an exploratory run shorter.
   enabled: false
 
@@ -510,8 +512,9 @@ kmc:
   # Non-negative seed for reproducible fresh runs. Resume restores RNG state.
   random_seed: 69
 
-  # Reclassify local environments after events to capture lateral interactions.
-  # Free-energy runs always include all occupied adsorbates and refresh all rates.
+  # Include occupied neighbors in reaction energies and classification.
+  # The constants.lateral_shells range also applies to free-energy corrections.
+  # False omits neighbors even when free_energy is enabled.
   lateral_interactions: true
 
 

@@ -174,18 +174,6 @@ def _unique_members(members: list[tuple[Any, int]]) -> list[tuple[Any, int]]:
     return result
 
 
-def _all_active_members(
-    sites: list[Any], active_ids: set[SiteId] | None,
-) -> list[tuple[Any, int]]:
-    """Every materialized member affected by whole-surface free energies."""
-    return _unique_members([
-        (site, member_index)
-        for site in sites
-        if active_ids is None or site_identifier(site) in active_ids
-        for member_index in range(len(site.member_node_ids))
-    ])
-
-
 def _members_by_site(
     members: list[tuple[Any, int]],
 ) -> list[tuple[Any, list[int]]]:
@@ -288,77 +276,65 @@ def recompute_affected_sites(
     """Refresh every reaction whose lateral environment may have changed."""
     increment("kmc.recompute.affected_cliques", len(affected_cliques))
     set_gauge("kmc.recompute.last_affected_cliques", len(affected_cliques))
-    include_all_occupied = bool(getattr(free_energy_options, "enabled", False))
-    if not affected_cliques and not include_all_occupied:
+    if not affected_cliques:
         return [], []
 
     adsorption_ids = (
         rxn_index._adsorbate_ids if rxn_index is not None else None
     )
     adsorption_members: list[tuple[AdsorbateSite, int]] | None
-    if include_all_occupied:
-        # Any occupancy change can alter the modes of any surface molecule.
-        # Local reverse indexes cannot bound those free-energy dependencies.
-        adsorption_members = _all_active_members(adsorbate_sites, adsorption_ids)
-    else:
-        adsorption_members = _lateral_shell_members(
+    adsorption_members = _lateral_shell_members(
+        graph,
+        affected_cliques,
+        adsorption_ids,
+        max_n_shells,
+    )
+    if adsorption_members is None:
+        adsorption_members = _fallback_adsorption_members(
             graph,
+            adsorbate_sites,
             affected_cliques,
-            adsorption_ids,
             max_n_shells,
+            adsorption_ids,
         )
-        if adsorption_members is None:
-            adsorption_members = _fallback_adsorption_members(
-                graph,
-                adsorbate_sites,
-                affected_cliques,
-                max_n_shells,
-                adsorption_ids,
-            )
     adsorption_members = _unique_members(adsorption_members)
 
     diffusion_ids = (
         rxn_index._diffusion_ids if rxn_index is not None else None
     )
     diffusion_members: list[tuple[DiffusionSite, int]] | None
-    if include_all_occupied:
-        diffusion_members = _all_active_members(list(diffusion_sites or []), diffusion_ids)
-    else:
-        diffusion_members = _diffusion_lateral_shell_members(
+    diffusion_members = _diffusion_lateral_shell_members(
+        graph,
+        affected_cliques,
+        diffusion_ids,
+        max_n_shells,
+    )
+    if diffusion_members is None:
+        diffusion_members = _fallback_diffusion_members(
             graph,
+            list(diffusion_sites or []),
             affected_cliques,
-            diffusion_ids,
             max_n_shells,
+            diffusion_ids,
         )
-        if diffusion_members is None:
-            diffusion_members = _fallback_diffusion_members(
-                graph,
-                list(diffusion_sites or []),
-                affected_cliques,
-                max_n_shells,
-                diffusion_ids,
-            )
     diffusion_members = _unique_members(diffusion_members)
 
     bond_ids = rxn_index._bond_ids if rxn_index is not None else None
     bond_members: list[tuple[BondReactionSite, int]] | None
-    if include_all_occupied:
-        bond_members = _all_active_members(list(bond_sites or []), bond_ids)
-    else:
-        bond_members = _bond_lateral_shell_members(
+    bond_members = _bond_lateral_shell_members(
+        graph,
+        affected_cliques,
+        bond_ids,
+        max_n_shells,
+    )
+    if bond_members is None:
+        bond_members = _fallback_bond_members(
             graph,
+            list(bond_sites or []),
             affected_cliques,
-            bond_ids,
             max_n_shells,
+            bond_ids,
         )
-        if bond_members is None:
-            bond_members = _fallback_bond_members(
-                graph,
-                list(bond_sites or []),
-                affected_cliques,
-                max_n_shells,
-                bond_ids,
-            )
     bond_members = _unique_members(bond_members)
 
     n_affected_members = (

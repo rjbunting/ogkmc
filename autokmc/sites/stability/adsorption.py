@@ -221,7 +221,6 @@ def _build_lateral_ego_graph(
     *,
     self_node_ids: frozenset | None = None,
     ignore_occupied_neighbours: bool = False,
-    include_all_occupied: bool = False,
 ) -> nx.Graph:
     """Build an n-shell ego-subgraph for lateral-interaction matching.
 
@@ -254,9 +253,6 @@ def _build_lateral_ego_graph(
         collected as leaves.  Only the site's own *self_node_ids* are added.
         This collapses all members to a single "bare" lateral class (lat0),
         effectively disabling lateral interactions.  Default ``False``.
-    include_all_occupied : bool
-        Include the complete surface and every occupied molecule in the cell.
-        Overrides ``ignore_occupied_neighbours`` for whole-surface vibrations.
 
     Returns
     -------
@@ -267,10 +263,7 @@ def _build_lateral_ego_graph(
     self_ids: frozenset = frozenset(self_node_ids) if self_node_ids else frozenset()
 
     # Static surface BFS (cached, invariant during the KMC loop).
-    visited_full = (
-        frozenset(n for n, d in G.nodes(data=True) if d.get("type") == "surface")
-        if include_all_occupied else _surface_bfs_shells(G, seed_clique, n_shells)
-    )
+    visited_full = _surface_bfs_shells(G, seed_clique, n_shells)
     visited: set = set(visited_full) - self_ids
 
     # Next, collect the adsorbates attached to the local surface set.
@@ -281,12 +274,6 @@ def _build_lateral_ego_graph(
     #      their current ``occupied`` flag on G, because we are evaluating the
     #      environment *as if* this site were occupied.
     ads_leaves: set = set()
-    if include_all_occupied:
-        ads_leaves.update(
-            n for n, d in G.nodes(data=True)
-            if d.get("type") == "adsorbate" and d.get("occupied", False)
-        )
-        ads_leaves.update(n for n in self_ids if n in G)
     for n in visited:
         for nb in G.neighbors(n):
             if nb in visited:
@@ -300,7 +287,7 @@ def _build_lateral_ego_graph(
                 ads_leaves.add(nb)
 
     result = _complete_adsorbate_environment(G, visited, ads_leaves | set(self_ids))
-    result.graph["environment_scope"] = "all_occupied" if include_all_occupied else "local"
+    result.graph["environment_scope"] = "local"
 
     # Preserve the reaction target as well as the occupied configuration.
     # Removing different molecules from the same occupied graph can have
@@ -384,7 +371,6 @@ def check_adsorbate_site_lateral(
     *,
     n_shells: int | None = None,
     ignore_lateral: bool = False,
-    include_all_occupied: bool = False,
 ) -> AdsorbateSiteLateral:
     """Classify the lateral-interaction environment of one specific member.
 
@@ -421,9 +407,6 @@ def check_adsorbate_site_lateral(
         the ego-graph so every member always maps to the single "bare" lat0.
         Effectively disables lateral interactions for this site.  Default
         ``False``.
-    include_all_occupied : bool
-        Classify the whole occupied surface for free-energy calculations,
-        irrespective of ``n_shells`` or ``ignore_lateral``.
 
     Returns
     -------
@@ -484,7 +467,6 @@ def check_adsorbate_site_lateral(
     ego = _build_lateral_ego_graph(
         G, seed_clique, depth, self_node_ids=self_node_ids,
         ignore_occupied_neighbours=ignore_lateral,
-        include_all_occupied=include_all_occupied,
     )
 
     fkey = _lateral_fingerprint(ego)
@@ -564,58 +546,6 @@ def _discard_lateral_calculation(lateral_class):
     lateral_class.__dict__.update(replacement.__dict__)
     if fingerprint is not None:
         lateral_class._fingerprint = fingerprint
-
-
-def _promote_full_occupied_lateral(site, lateral_class, graph, member_index, fingerprint):
-    """Make direct stability calls use the current complete occupied state.
-
-    A caller may supply an old local class or one from a previous occupancy.
-    Its calculated values cannot be retained when the physical state changes.
-    Reindex existing classes after promotion so future classification remains
-    consistent with the object supplied by the caller.
-    """
-    previous = lateral_class.ego_graph
-    unchanged = (
-        isinstance(previous, nx.Graph)
-        and previous.graph.get("environment_scope") == "all_occupied"
-        and set(previous) == set(graph)
-        and {frozenset(edge) for edge in previous.edges} == {
-            frozenset(edge) for edge in graph.edges
-        }
-        and fingerprint(previous) == fingerprint(graph)
-        and all(
-            previous.nodes[node].get("endpoint_role") == graph.nodes[node].get("endpoint_role")
-            and np.array_equal(
-                previous.nodes[node].get("position"), graph.nodes[node].get("position"),
-            )
-            for node in graph
-        )
-    )
-    if not unchanged:
-        replacement = type(lateral_class)(
-            lateral_class=lateral_class.lateral_class,
-            n_shells=lateral_class.n_shells,
-            members=[int(member_index)],
-        )
-        lateral_class.__dict__.clear()
-        lateral_class.__dict__.update(replacement.__dict__)
-        for index, cached_class in list(getattr(site, "_member_lc", {}).items()):
-            if cached_class is lateral_class:
-                site._member_lc.pop(index, None)
-    lateral_class.ego_graph = graph
-    classes = list(getattr(site, "lateral_classes", []))
-    if all(candidate is not lateral_class for candidate in classes):
-        lateral_class.lateral_class = len(classes)
-        classes.append(lateral_class)
-        site.lateral_classes = classes
-    fp_index: dict = {}
-    for candidate in classes:
-        if candidate.ego_graph is None:
-            continue
-        key = fingerprint(candidate.ego_graph)
-        candidate._fingerprint = key
-        fp_index.setdefault(key, []).append(candidate)
-    site._lateral_fp_index = fp_index
 
 
 def _lateral_node_order(G: nx.Graph, lateral_class, excluded) -> list[int]:
@@ -1177,6 +1107,9 @@ def check_site_stability(
     On success the potential energies are stored on *lateral_class* and
     returned as ``(E_occupied, E_unoccupied)``.
 
+    Free-energy corrections use the reacting and neighboring adsorbates in
+    the supplied lateral class, without expanding its configured shell range.
+
     Parameters
     ----------
     G : nx.Graph
@@ -1241,15 +1174,6 @@ def check_site_stability(
         nid for nid in adsorbate_site.member_node_ids[member_index]
         if nid in G
     )
-    if free_energy_options is not None and getattr(free_energy_options, "enabled", False):
-        _promote_full_occupied_lateral(
-            adsorbate_site, lateral_class,
-            _build_lateral_ego_graph(
-                G, frozenset(), lateral_class.n_shells,
-                self_node_ids=self_node_ids, include_all_occupied=True,
-            ),
-            member_index, _lateral_fingerprint,
-        )
     cache_kind = "adsorption"
     cache_key: str | None = None
     cache_graph: nx.Graph | None = None

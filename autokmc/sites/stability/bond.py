@@ -122,7 +122,6 @@ from autokmc.sites.stability.adsorption import (
     _complete_adsorbate_environment,
     _lateral_node_order,
     _discard_lateral_calculation,
-    _promote_full_occupied_lateral,
     _check_connectivity_stable,
     _check_intended_coordination_stable,
     _bond_set,
@@ -286,7 +285,6 @@ def _build_bond_lateral_ego_graph(
     c_ids: frozenset,
     is_symmetric: bool,
     ignore_occupied_neighbours: bool = False,
-    include_all_occupied: bool = False,
 ) -> nx.Graph:
     """Build the lateral ego-graph for one bond-reaction triple member.
 
@@ -304,20 +302,10 @@ def _build_bond_lateral_ego_graph(
     )
     endpoint_ids: frozenset = frozenset(a_ids) | frozenset(b_ids) | frozenset(c_ids)
 
-    visited_full = (
-        frozenset(n for n, d in G.nodes(data=True) if d.get("type") == "surface")
-        if include_all_occupied else _surface_bfs_shells(G, seed_clique_union, n_shells)
-    )
+    visited_full = _surface_bfs_shells(G, seed_clique_union, n_shells)
     visited: set = set(visited_full) - endpoint_ids
 
     ads_leaves: set = set()
-    if include_all_occupied:
-        ads_leaves.update(
-            n for n, d in G.nodes(data=True)
-            if d.get("type") == "adsorbate"
-            and d.get("occupied", False)
-            and n not in endpoint_ids
-        )
     if not ignore_occupied_neighbours:
         for n in visited:
             for nb in G.neighbors(n):
@@ -330,7 +318,7 @@ def _build_bond_lateral_ego_graph(
                     ads_leaves.add(nb)
 
     result = _complete_adsorbate_environment(G, visited, ads_leaves | set(endpoint_ids))
-    result.graph["environment_scope"] = "all_occupied" if include_all_occupied else "local"
+    result.graph["environment_scope"] = "local"
 
     for ids, role in endpoint_lists:
         for nid in ids:
@@ -353,7 +341,6 @@ def check_bond_site_lateral(
     *,
     n_shells: int = LATERAL_SHELLS_DEFAULT,
     ignore_lateral: bool = False,
-    include_all_occupied: bool = False,
     _assign_member: bool = True,
 ) -> BondReactionLateral:
     """Classify the lateral-interaction environment of one triple member.
@@ -364,9 +351,6 @@ def check_bond_site_lateral(
     appends *member_index* to a matching :class:`BondReactionLateral`
     already on *brs* or creates a new one.  Returns the matching (or new)
     lateral class.
-
-    ``include_all_occupied=True`` includes every occupied surface molecule,
-    overriding local shells and ``ignore_lateral`` for whole-cell free energies.
 
     Raises
     ------
@@ -420,7 +404,6 @@ def check_bond_site_lateral(
         c_ids=c_ids,
         is_symmetric=bool(brs.template.is_symmetric),
         ignore_occupied_neighbours=ignore_lateral,
-        include_all_occupied=include_all_occupied,
     )
 
     fkey = _bond_lateral_fingerprint(ego)
@@ -2531,6 +2514,9 @@ def check_bond_site_stability(
     On success ``lc.stable`` is set to ``True`` and the energies / relaxed
     atoms are persisted on the lateral class.
 
+    Free-energy corrections use the reacting and neighboring adsorbates in
+    the supplied lateral class, without expanding its configured shell range.
+
     Raises
     ------
     IndexError
@@ -2577,17 +2563,6 @@ def check_bond_site_stability(
     self_a = frozenset(int(n) for n in a_node_ids if n in G)
     self_b = frozenset(int(n) for n in b_node_ids if n in G)
     self_c = frozenset(int(n) for n in c_node_ids if n in G)
-    if free_energy_options is not None and getattr(free_energy_options, "enabled", False):
-        _promote_full_occupied_lateral(
-            brs, lc,
-            _build_bond_lateral_ego_graph(
-                G, clq_a | clq_b | clq_c, lc.n_shells,
-                a_ids=self_a, b_ids=self_b, c_ids=self_c,
-                is_symmetric=bool(getattr(brs.template, "is_symmetric", False)),
-                include_all_occupied=True,
-            ),
-            member_index, _bond_lateral_fingerprint,
-        )
     # A new evaluation or cache hydration must not retain a diagnostic from
     # an earlier transition state on this mutable lateral class.
     lc.ts_energy_diagnostic = None

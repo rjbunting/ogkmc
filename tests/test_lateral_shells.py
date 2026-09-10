@@ -125,7 +125,7 @@ def test_adsorption_classifier_receives_lateral_shell_depth(monkeypatch):
     )
 
     assert reaction is None
-    assert calls == [{"n_shells": 2, "ignore_lateral": False, "include_all_occupied": False}]
+    assert calls == [{"n_shells": 2, "ignore_lateral": False}]
 
 
 def test_diffusion_classifier_receives_lateral_shell_depth(monkeypatch):
@@ -160,7 +160,7 @@ def test_diffusion_classifier_receives_lateral_shell_depth(monkeypatch):
     )
 
     assert reaction is None
-    assert calls == [{"n_shells": 2, "ignore_lateral": False, "include_all_occupied": False}]
+    assert calls == [{"n_shells": 2, "ignore_lateral": False}]
 
 
 def test_bond_classifier_receives_lateral_shell_depth(monkeypatch):
@@ -195,4 +195,4 @@ def test_bond_classifier_receives_lateral_shell_depth(monkeypatch):
     )
 
     assert reaction is None
-    assert calls == [{"n_shells": 2, "ignore_lateral": False, "include_all_occupied": False}]
+    assert calls == [{"n_shells": 2, "ignore_lateral": False}]

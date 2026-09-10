@@ -268,6 +268,7 @@ class KMCCfg:
     transmission_coefficient: float = DEFAULT_TRANSMISSION_COEFFICIENT
     log_every: int = 100
     random_seed: int = RANDOM_SEED
+    #: Include neighbors within lateral_shells in electronic and free-energy calculations.
     lateral_interactions: bool = True
 
 

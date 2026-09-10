@@ -1,4 +1,4 @@
-"""Direct stability APIs cannot omit occupied spectator molecules in FE mode."""
+"""Free energies use exactly the molecules in the selected local environment."""
 
 from types import SimpleNamespace
 
@@ -6,10 +6,10 @@ import networkx as nx
 import numpy as np
 import pytest
 
-from autokmc.sites.adsorbate import AdsorbateSiteLateral
-from autokmc.sites.bond import BondReactionLateral
-from autokmc.sites.diffusion import DiffusionLateral
 from autokmc.sites.stability import adsorption, bond, diffusion
+from autokmc.reactions import adsorption as adsorption_reactions
+from autokmc.reactions import bond as bond_reactions
+from autokmc.reactions import diffusion as diffusion_reactions
 from autokmc.thermo.free_energy import FreeEnergyOptions
 
 
@@ -55,35 +55,95 @@ def _site(nodes, clique):
 
 
 @pytest.mark.parametrize("family", ["adsorption", "diffusion", "bond"])
-@pytest.mark.parametrize("already_full", [False, True])
-@pytest.mark.parametrize("registered", [False, True])
-def test_direct_stability_promotes_current_whole_surface(
-    family, already_full, registered, monkeypatch,
+@pytest.mark.parametrize("lateral_interactions", [False, True])
+@pytest.mark.parametrize("lateral_shells", [0, 1, 2])
+@pytest.mark.parametrize("thermo_enabled", [False, True])
+def test_reaction_lateral_range_controls_actual_atoms(
+    family, lateral_interactions, lateral_shells, thermo_enabled, monkeypatch,
 ):
     graph = _graph()
     site_a, site_b, site_c = _site([10], 0), _site([11], 1), _site([20, 21], 0)
-    local_graph = graph.subgraph([0, 10]).copy()
-    if already_full:
-        local_graph.graph["environment_scope"] = "all_occupied"
+    # CO is two surface hops from adsorption, one from the diffusion/bond
+    # endpoint union. A second occupied molecule is outside every tested range.
+    for node in (3, 4):
+        graph.add_node(node, type="surface", element="Cu", index=node,
+                       position=[5.0 * node, 0.0, 0.0])
+        graph.add_edge(node - 1, node)
+    graph.remove_edge(2, 40)
+    graph.add_edge(4, 40)
+    graph.nodes[40].update(occupied=True, clique=frozenset({4}), position=[20, 0, 1.6])
+    args = ()
+    calculator = None
     if family == "adsorption":
-        module = adsorption
-        parent = site_a
-        lateral = AdsorbateSiteLateral(0, ego_graph=local_graph, members=[0, 1])
-        check = module.check_site_stability
-        classify = module.check_adsorbate_site_lateral
-        builder_name = "_build_stability_atoms"
-        expected_reacting = 1
+        module, parent = adsorption, site_a
+        getter = adsorption_reactions.get_applicable_reaction_for_member
+        builder_name, n_reacting = "_build_stability_atoms", 1
+        args = ({"[H]": 0.0},)
     elif family == "diffusion":
         module = diffusion
         parent = SimpleNamespace(
             iso_class=0, member_node_ids=[([10], [11])],
             members=[(site_a, 0, site_b, 0)], lateral_classes=[],
         )
-        lateral = DiffusionLateral(0, ego_graph=local_graph, members=[0, 1])
+        getter = diffusion_reactions.get_applicable_diffusion_for_member
+        builder_name, n_reacting = "_build_diffusion_atoms", 1
+    else:
+        module = bond
+        graph.nodes[11]["occupied"] = True
+        parent = SimpleNamespace(
+            iso_class=0, member_node_ids=[([10], [11], [20, 21])],
+            members=[(site_a, 0, site_b, 0, site_c, 0)], lateral_classes=[],
+            template=SimpleNamespace(is_symmetric=True),
+            _member_cliques=[(site_a._member_cliques[0], site_b._member_cliques[0],
+                              site_c._member_cliques[0])],
+        )
+        getter = bond_reactions.get_applicable_bond_reaction_for_member
+        builder_name, n_reacting = "_build_bond_atoms", 2
+        calculator = object()
+        # Inspect the physical reaction, bypassing the optional bare NEB seed.
+        monkeypatch.setattr(bond_reactions, "get_bond_bare_lateral", lambda *a, **k: None)
+    build = getattr(module, builder_name)
+    captured = []
+
+    def inspect(*args, **kwargs):
+        captured.append(build(*args, **kwargs))
+        raise _BuiltState
+
+    monkeypatch.setattr(module, builder_name, inspect)
+    with pytest.raises(_BuiltState):
+        getter(
+            graph, parent, 0, calculator, *args, temperature=500.0,
+            lateral_interactions=lateral_interactions, lateral_shells=lateral_shells,
+            free_energy_options=FreeEnergyOptions(enabled=thermo_enabled),
+        )
+    atoms, n_slab, n_lat = captured[0][:3]
+    includes_co = lateral_interactions and lateral_shells >= (2 if family == "adsorption" else 1)
+    assert n_slab == 5
+    assert n_lat == (2 if includes_co else 0)
+    assert len(atoms) == n_slab + n_lat + n_reacting
+    assert ("C" in atoms.get_chemical_symbols()) is includes_co
+    assert "N" not in atoms.get_chemical_symbols()
+
+
+@pytest.mark.parametrize("family", ["adsorption", "diffusion", "bond"])
+@pytest.mark.parametrize("n_shells", [0, 2])
+def test_direct_stability_keeps_selected_local_environment(family, n_shells, monkeypatch):
+    graph = _graph()
+    site_a, site_b, site_c = _site([10], 0), _site([11], 1), _site([20, 21], 0)
+    if family == "adsorption":
+        module, parent = adsorption, site_a
+        check = module.check_site_stability
+        classify = module.check_adsorbate_site_lateral
+        builder_name, expected_reacting = "_build_stability_atoms", 1
+    elif family == "diffusion":
+        module = diffusion
+        parent = SimpleNamespace(
+            iso_class=0, member_node_ids=[([10], [11])],
+            members=[(site_a, 0, site_b, 0)], lateral_classes=[],
+        )
         check = module.check_diffusion_stability
         classify = module.check_diffusion_site_lateral
-        builder_name = "_build_diffusion_atoms"
-        expected_reacting = 1
+        builder_name, expected_reacting = "_build_diffusion_atoms", 1
     else:
         module = bond
         parent = SimpleNamespace(
@@ -91,21 +151,16 @@ def test_direct_stability_promotes_current_whole_surface(
             members=[(site_a, 0, site_b, 0, site_c, 0)], lateral_classes=[],
             template=SimpleNamespace(is_symmetric=True),
         )
-        lateral = BondReactionLateral(0, ego_graph=local_graph, members=[0, 1])
         check = module.check_bond_site_stability
         classify = module.check_bond_site_lateral
-        builder_name = "_build_bond_atoms"
-        expected_reacting = 2
-    lateral.stable = True
-    lateral.g_stale = 123.0
-    parent.lateral_classes = [lateral] if registered else []
-    parent._member_lc = {0: lateral, 1: lateral}
+        builder_name, expected_reacting = "_build_bond_atoms", 2
+    lateral = classify(graph, parent, 0, n_shells=n_shells)
+    original_graph = lateral.ego_graph
     build = getattr(module, builder_name)
     captured = []
 
     def inspect(*args, **kwargs):
-        result = build(*args, **kwargs)
-        captured.append(result)
+        captured.append(build(*args, **kwargs))
         raise _BuiltState
 
     monkeypatch.setattr(module, builder_name, inspect)
@@ -116,19 +171,11 @@ def test_direct_stability_promotes_current_whole_surface(
             free_energy_temperature_k=500.0,
         )
     atoms, n_slab, n_lat = captured[0][:3]
-    assert (n_slab, n_lat) == (3, 2)
+    assert (n_slab, n_lat) == (3, 2 if n_shells == 2 else 0)
     assert len(atoms) == n_slab + n_lat + expected_reacting
-    assert atoms.get_chemical_symbols()[n_slab:n_slab + n_lat] == ["C", "O"]
-    assert {30, 31} <= set(lateral.ego_graph)
-    assert 40 not in lateral.ego_graph
-    assert lateral.ego_graph.graph["environment_scope"] == "all_occupied"
-    assert lateral.stable is None
-    assert not hasattr(lateral, "g_stale")
-    assert lateral.members == [0]
-    assert parent._member_lc == {}
-    assert any(lateral is item for group in parent._lateral_fp_index.values() for item in group)
-    assert parent.lateral_classes == [lateral]
-    assert classify(graph, parent, 0, include_all_occupied=True) is lateral
+    assert lateral.ego_graph is original_graph
+    assert lateral.ego_graph.graph["environment_scope"] == "local"
+    assert classify(graph, parent, 0, n_shells=n_shells) is lateral
 
 
 def test_intended_spectator_topology_detects_already_missing_remote_bond():
@@ -151,7 +198,10 @@ def test_intended_spectator_topology_detects_already_missing_remote_bond():
 
 
 @pytest.mark.parametrize("valid_spectator", [False, True])
-def test_direct_adsorption_computes_stationary_full_surface_modes(valid_spectator):
+@pytest.mark.parametrize("lateral_shells", [0, 2])
+def test_direct_adsorption_computes_stationary_surface_modes(
+    valid_spectator, lateral_shells,
+):
     from ase.calculators.calculator import Calculator, all_changes
 
     graph = _graph()
@@ -177,24 +227,25 @@ def test_direct_adsorption_computes_stationary_full_surface_modes(valid_spectato
             self.results = {"energy": 0.5 * float(np.sum(delta**2)), "forces": -delta}
 
     site = _site([10], 0)
-    lateral = AdsorbateSiteLateral(0, ego_graph=graph.subgraph([0, 10]).copy())
+    lateral = adsorption.check_adsorbate_site_lateral(graph, site, 0, n_shells=lateral_shells)
     arguments = dict(
         calculator=HarmonicWells(), frozen_indices=[0, 1, 2],
         free_energy_options=FreeEnergyOptions(enabled=True),
         free_energy_temperature_k=500.0,
     )
-    if not valid_spectator:
+    if not valid_spectator and lateral_shells == 2:
         with pytest.raises(adsorption.AdsorbateDissociationError, match="intended surface bond"):
             adsorption.check_site_stability(graph, site, 0, lateral, **arguments)
         return
     adsorption.check_site_stability(graph, site, 0, lateral, **arguments)
     assert lateral.stable is True
-    assert len(lateral.atoms_occupied) == 6
-    assert len(lateral.atoms_unoccupied) == 5
-    assert lateral.vib_indices_occupied == [3, 4, 5]
-    assert lateral.vib_indices_unoccupied == [3, 4]
-    assert len(lateral.frequencies_occupied_ev) == 9
-    assert len(lateral.frequencies_unoccupied_ev) == 6
+    assert len(lateral.atoms_occupied) == (6 if lateral_shells == 2 else 4)
+    assert len(lateral.atoms_unoccupied) == (5 if lateral_shells == 2 else 3)
+    assert lateral.vib_indices_occupied == ([3, 4, 5] if lateral_shells == 2 else [3])
+    assert lateral.vib_indices_unoccupied == ([3, 4] if lateral_shells == 2 else [])
+    assert len(lateral.frequencies_occupied_ev) == (9 if lateral_shells == 2 else 3)
+    assert len(lateral.frequencies_unoccupied_ev) == (6 if lateral_shells == 2 else 0)
+    assert lateral.g_occupied != pytest.approx(lateral.energy_occupied)
 
 
 @pytest.mark.parametrize("family", ["adsorption", "diffusion", "bond", "gas_bond"])
@@ -206,7 +257,7 @@ def test_cached_spectator_is_validated_before_free_energy_reuse(family, match, m
     site_a, site_b, site_c = _site([10], 0), _site([11], 1), _site([20, 21], 0)
     if family == "adsorption":
         module, parent = adsorption, site_a
-        lateral = AdsorbateSiteLateral(0)
+        classify = module.check_adsorbate_site_lateral
         check = module.check_site_stability
         names = ["occupied", "unoccupied"]
         initial_name = "occupied_initial"
@@ -217,7 +268,7 @@ def test_cached_spectator_is_validated_before_free_energy_reuse(family, match, m
             iso_class=0, reactant="[H]", member_node_ids=[([10], [11])],
             members=[(site_a, 0, site_b, 0)], lateral_classes=[],
         )
-        lateral = DiffusionLateral(0)
+        classify = module.check_diffusion_site_lateral
         check = module.check_diffusion_stability
         names = ["state_a", "state_b", "transition"]
         initial_name = "state_a_initial"
@@ -229,7 +280,7 @@ def test_cached_spectator_is_validated_before_free_energy_reuse(family, match, m
             members=[(site_a, 0, site_b, 0, site_c, 0)], lateral_classes=[],
             template=SimpleNamespace(is_symmetric=True),
         )
-        lateral = BondReactionLateral(0)
+        classify = module.check_bond_site_lateral
         check = module.check_bond_site_stability
         names = ["state_ab", "state_c", "transition"]
         initial_name = "state_ab_initial"
@@ -243,7 +294,7 @@ def test_cached_spectator_is_validated_before_free_energy_reuse(family, match, m
             parent.template.smiles_c = "[H][H]"
             parent.member_node_ids = [([10], [11], [])]
             parent.members = [(site_a, 0, site_b, 0, None, -1)]
-    parent.lateral_classes = [lateral]
+    lateral = classify(graph, parent, 0, n_shells=2)
     calls = []
 
     def load(*args, **kwargs):
@@ -252,7 +303,7 @@ def test_cached_spectator_is_validated_before_free_energy_reuse(family, match, m
         if family == "adsorption":
             endpoints[1] = endpoints[1][:-1]
         # Old endpoint passed a local reacting-molecule check even though its
-        # unchanged remote molecule was already detached from its intended site.
+        # unchanged selected neighbor was already detached from its intended site.
         if family != "gas_bond":
             endpoints[1].positions[3:5, 2] += 8.0
         record = {

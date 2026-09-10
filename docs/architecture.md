@@ -199,7 +199,7 @@ original A+B and C states rather than the selected intermediate minima.
 
 ## Lateral interaction range
 
-Electronic-only calculations use an intentional finite-range approximation for
+Electronic and free-energy calculations use an intentional finite-range approximation for
 lateral interactions. `constants.lateral_shells` sets the number of
 surface-graph hops used to select surrounding occupied molecules. Molecules
 outside that neighborhood are omitted from the calculation, truncating their
@@ -267,13 +267,18 @@ or rates are errors and are never admitted into KMC.
 When `free_energy.enabled` is true:
 
 - gas species use ideal-gas thermochemistry,
-- surface endpoints and transition states use a coupled Hessian over every
-  adsorbate atom in the simulated cell; catalyst atoms are not displaced,
+- surface endpoints and transition states use a coupled Hessian over the
+  adsorbate atoms included in the calculation; catalyst atoms are not displaced,
 - adsorption empty endpoints retain the harmonic correction of surviving
   adsorbates, and gas-product bond endpoints add that remaining-surface
   correction to the gas molecule's ideal-gas correction,
-- calculation structures and lateral class identities include all occupied
-  adsorbates, regardless of the local lateral-interaction controls,
+- with `kmc.lateral_interactions: true`, calculation structures, lateral class
+  identities, and vibrations include the reacting adsorbate plus complete
+  neighboring molecules selected within `constants.lateral_shells`; each event
+  refreshes rates that depend on the changed local environment,
+- with `kmc.lateral_interactions: false`, surrounding adsorbates are omitted
+  from structures, vibrations, and lateral classification; free energies remain
+  enabled for the reacting species and rate refresh follows local occupancy,
 - thermochemistry records the spectra and omits imaginary modes from the
   default free-energy corrections,
 - diffusion and bond endpoints and transition states use their populated free

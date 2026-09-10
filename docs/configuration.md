@@ -77,7 +77,7 @@ thresholds, remain in that channel's section.
 | `raycast_coverage_threshold` | `0.7` | Required exposed ray-disc fraction for slab surface classification; must be in `[0, 1]`. |
 | `raycast_disc_samples` | `10` | Ray-disc sampling resolution per axis. |
 | `kabsch_max_mappings` | `6969` | Maximum graph automorphisms examined during local Kabsch alignment. |
-| `lateral_shells` | `0` | Surface-graph depth for electronic-only lateral environments; zero requires sharing an anchor surface atom. Free-energy calculations include all occupied adsorbates. |
+| `lateral_shells` | `0` | Surface-graph depth for lateral environments in electronic and free-energy calculations; zero requires sharing an anchor surface atom. Selected neighboring molecules participate in full, including their vibrational corrections. |
 
 The three covalent-radius factors serve different purposes:
 `neighbor_list_multiplier` defines ordinary graph bonds, `co_bond_factor`
@@ -87,9 +87,9 @@ slab surface classification.
 
 ### Lateral interaction range
 
-With `free_energy.enabled: false` and `kmc.lateral_interactions: true`,
-`constants.lateral_shells` controls the range of surrounding occupied molecules
-included in electronic-energy calculations. Zero includes only molecules
+With `kmc.lateral_interactions: true`, `constants.lateral_shells` controls the
+range of surrounding occupied molecules included in both electronic-energy
+and free-energy calculations. Zero includes only molecules
 sharing an anchor surface atom; one also includes molecules attached to
 nearest-neighbor surface atoms, and larger values extend this range.
 
@@ -102,7 +102,8 @@ the complete occupied environment consistently across channels resolves this
 truncation. Larger neighborhoods increase calculation cost and can create
 more distinct lateral classes.
 
-For example, this fragment selects two hops for electronic-only calculations:
+For example, this fragment selects two hops for energies and coupled vibrational
+corrections of the reacting adsorbate and its selected neighbors:
 
 ```yaml
 constants:
@@ -110,7 +111,7 @@ constants:
 kmc:
   lateral_interactions: true
 free_energy:
-  enabled: false
+  enabled: true
 ```
 
 In the [CO/Cu(111) UMA example](architecture.md#cocu111-example), increasing
@@ -120,9 +121,15 @@ and remaining error depend on the system and coverage.
 
 `diffusion.max_hops` controls which diffusion moves are generated; it does not
 set the lateral interaction range. When `kmc.lateral_interactions: false`,
-electronic-only calculations omit surrounding occupied molecules regardless
-of `constants.lateral_shells`. Free-energy calculations always include all
-occupied adsorbates and do not use this local truncation.
+all calculations omit surrounding occupied molecules regardless of
+`constants.lateral_shells` or `free_energy.enabled`. Free-energy corrections
+remain enabled for the reacting adsorbates and gas species. Site blocking and
+reaction applicability still follow the actual surface occupancy.
+
+The shell search starts at the reacting site's anchor surface atoms, or the
+union of all endpoint anchors for diffusion and bond reactions. Selecting any
+anchored atom of a neighboring molecule includes that entire molecule, without
+recursively adding further neighbors through its other anchors.
 
 ## `optimization`
 
@@ -570,7 +577,7 @@ when changing a finite cap to `null` (`None` in Python) for uncapped enumeration
 | `transmission_coefficient` | `1.0` | Non-negative Eyring coefficient. |
 | `log_every` | `100` | Concise KMC progress cadence; `0` disables step messages. |
 | `random_seed` | `69` | Initial random seed. Checkpoint resume restores RNG state. |
-| `lateral_interactions` | `true` | Reclassify local lateral environments after events in electronic-only runs. Free-energy runs always use all occupied adsorbates and refresh all rates. |
+| `lateral_interactions` | `true` | Include neighboring molecules within `constants.lateral_shells` in reaction energies, free-energy corrections, and classification. `false` omits neighboring molecules in both electronic and free-energy modes. |
 
 ## `diffusion`
 
@@ -701,21 +708,25 @@ thermochemistry always uses a fixed standard-state pressure of 1 bar; the
 resolved partial pressure is applied separately to adsorption rates through
 the ideal-gas activity `p / p°`.
 
-Every surface thermochemistry calculation displaces all adsorbate atoms in the
-simulated cell together, retaining intermolecular Hessian coupling. Catalyst
-atoms are not displaced. Adsorption/desorption includes the remaining
-adsorbates in the empty endpoint; diffusion and bond reactions include all
-adsorbates at both endpoints and, when enabled, the transition state. For a
-gas-product bond endpoint, the separately relaxed remaining surface supplies
-its harmonic correction and the gas molecule supplies ideal-gas
-thermochemistry; the lifted NEB precursor is not used as an equilibrium gas
-reference.
+Surface thermochemistry displaces the reacting adsorbate and all atoms of the
+selected local neighboring molecules together, retaining their intermolecular
+Hessian coupling. Catalyst atoms are not displaced. Adsorption/desorption
+includes the selected neighbors in the empty endpoint; diffusion and bond
+reactions include the same selected neighbors at both endpoints and, when
+enabled, the transition state. For a gas-product bond endpoint, the separately
+relaxed slab plus local neighbors supplies its harmonic correction and the gas
+molecule supplies ideal-gas thermochemistry; the lifted NEB precursor is not
+used as an equilibrium gas reference.
 
-To supply those Hessians, free-energy runs also build complete occupied-surface
-endpoint/NEB structures, regardless of `constants.lateral_shells` or
-`kmc.lateral_interactions`. Each KMC event reclassifies and refreshes all active
-reaction members. The former reactive-only free-energy cache policy is
-incompatible; matching electronic structures may be reused for recalculation.
+`constants.lateral_shells` limits these endpoint/NEB structures and vibrations
+just as it limits electronic calculations. With `kmc.lateral_interactions: false`,
+only the reacting adsorbates enter the structures and vibrations. Rate refresh
+uses local occupancy dependencies to update the affected environments while
+retaining site blocking and applicability.
+
+Free energies from the former whole-surface and reactive-only cache policies
+are incompatible; matching electronic structures may be reused for local
+thermochemistry recalculation.
 
 Free-energy work can dominate runtime. The supplied platinum GPU examples
 disable it intentionally for network-debug runs and can be switched on for

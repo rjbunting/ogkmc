@@ -559,7 +559,6 @@ def get_applicable_diffusion_for_member(
                 index,
                 n_shells=lateral_shells,
                 ignore_lateral=not lateral_interactions,
-                include_all_occupied=bool(getattr(free_energy_options, "enabled", False)),
             )
         except CalculatorConfigError:
             raise
@@ -618,7 +617,7 @@ def get_applicable_diffusion_for_member(
                             calculator,
                             capture_neb_path=True,
                             # The bare band is an electronic warm start only.
-                            # Rates use the full occupied-surface calculation
+                            # Rates use the selected local-environment calculation
                             # below, including its complete adsorbate Hessian.
                             **{**stability_kwargs, "free_energy_options": None},
                         )

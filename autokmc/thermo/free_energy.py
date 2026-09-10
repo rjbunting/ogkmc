@@ -10,8 +10,9 @@ Two regimes:
   reactant, derives the Gibbs free-energy correction from
   :class:`ase.thermochemistry.IdealGasThermo` at ``(T, p)``.
 * **Surface (adsorbate / TS)** — :func:`compute_harmonic_thermo` runs
-  vibrations jointly on all adsorbate atoms present in each state. Slab
-  atoms do not enter the vibrational manifold. The Helmholtz / Gibbs correction comes from
+  vibrations jointly on the reacting adsorbate and complete neighboring
+  molecules selected within the lateral shell range. Slab atoms do not enter
+  the vibrational manifold. The Helmholtz / Gibbs correction comes from
   :class:`ase.thermochemistry.HarmonicThermo`.
 
 Adsorption rate convention: the user-facing ``ΔG_ads`` and barrier are
@@ -59,7 +60,7 @@ _log = get_logger(__name__)
 _BAR_PA: float = 1.0e5
 _VIBRATION_LOCKS_GUARD = threading.Lock()
 _VIBRATION_THREAD_LOCKS: dict[str, tuple[threading.Lock, int]] = {}
-SURFACE_VIBRATION_SUBSYSTEM = "all_adsorbates_v1"
+SURFACE_VIBRATION_SUBSYSTEM = "local_adsorbates_v1"
 
 
 # ---------------------------------------------------------------------------
@@ -742,7 +743,7 @@ def compute_harmonic_thermo(
         not, the calculator is attached and used for the displaced
         single-points).
     vib_indices : iterable[int]
-        Atom indices to displace — all adsorbates for surface states.
+        Atom indices to displace — all adsorbates in the selected local structure.
     energy_ev : float
         The relaxed-structure electronic potential energy (cached on the
         lateral-class dataclass).  Used as the ZPE-anchor reference.

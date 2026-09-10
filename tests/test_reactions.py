@@ -290,7 +290,7 @@ def test_diffusion_runs_missing_bare_path_before_lateral_neb(monkeypatch, existi
         return bare
 
     def classify_lateral(*_args, **kwargs):
-        assert kwargs["include_all_occupied"] is thermo_enabled
+        assert kwargs["ignore_lateral"] is False
         order.append("lateral_classify")
         return lateral
 
@@ -905,7 +905,7 @@ def test_bond_runs_missing_bare_path_before_lateral_neb(monkeypatch, existing_ba
         return bare
 
     def classify_lateral(*_args, **kwargs):
-        assert kwargs["include_all_occupied"] is thermo_enabled
+        assert kwargs["ignore_lateral"] is False
         order.append("lateral_classify")
         return lateral
 

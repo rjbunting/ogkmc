@@ -214,7 +214,10 @@ class AdsorptionSpectatorCalculator(Calculator):
         self.results = {"energy": float(energy), "forces": forces}
 
 
-def test_reactive_only_cache_reuses_electronics_but_recomputes_all_adsorbate_free_energy(tmp_path, monkeypatch):
+@pytest.mark.parametrize("legacy_policy", ["reactive_atoms_v0", "all_adsorbates_v1"])
+def test_legacy_cache_reuses_electronics_but_recomputes_local_free_energy(
+    tmp_path, monkeypatch, legacy_policy,
+):
     atoms = Atoms("Cu2OH", positions=[[2.6, 0, 0], [0, 0, 0], [2.6, 0, 1.7], [0, 0, 1.7]],
                   cell=[20, 20, 20], pbc=True)
     atoms.arrays["surface"] = np.array([1, 1, 2, 2])
@@ -241,7 +244,7 @@ def test_reactive_only_cache_reuses_electronics_but_recomputes_all_adsorbate_fre
         lc.g_correction_unoccupied = 0.
 
     with monkeypatch.context() as legacy:
-        legacy.setattr(free_energy, "SURFACE_VIBRATION_SUBSYSTEM", "reactive_atoms_v0")
+        legacy.setattr(free_energy, "SURFACE_VIBRATION_SUBSYSTEM", legacy_policy)
         legacy.setattr(adsorption_stability, "_apply_adsorption_thermochemistry", old_thermo)
         adsorption_stability.check_site_stability(graph, site, 0, old, calculator, **kwargs)
     assert old.stable is True

@@ -613,7 +613,6 @@ def get_applicable_bond_reaction_for_member(
                 index,
                 n_shells=lateral_shells,
                 ignore_lateral=not lateral_interactions,
-                include_all_occupied=bool(getattr(free_energy_options, "enabled", False)),
             )
         except CalculatorConfigError:
             raise
@@ -666,7 +665,7 @@ def get_applicable_bond_reaction_for_member(
                             capture_lc,
                             calculator,
                             capture_neb_path=True,
-                            # Only the full occupied-surface state below
+                            # Only the selected local-environment state below
                             # supplies thermochemistry and rates.
                             **{**stability_kwargs, "free_energy_options": None},
                         )

@@ -392,10 +392,12 @@ required.
 
 ### Free Energy
 
-Free-energy corrections use one coupled ASE vibrational analysis over every
-adsorbed molecule in the simulated cell, with catalyst atoms held fixed during
-the displacements. Both endpoints include the surviving surface molecules;
-transition states include all adsorbates too when TS vibrations are enabled.
+Free-energy corrections use one coupled ASE vibrational analysis over the
+reacting adsorbate and the occupied neighboring molecules selected by
+`constants.lateral_shells`, with catalyst atoms held fixed during the
+displacements. The complete selected molecules participate, including atoms
+without direct surface bonds. Both endpoints retain the selected neighbors;
+transition states use the same local environment when TS vibrations are enabled.
 These calculations can be expensive:
 
 ```yaml
@@ -415,16 +417,18 @@ when free-energy corrections are disabled. A reactant-level
 the fixed 1-bar standard state; the resolved partial pressure instead scales
 the adsorption rate as the ideal-gas activity `p / p°`.
 
-With free energies enabled, endpoint and NEB structures contain every occupied
-adsorbate, and every event refreshes the complete reaction-rate set. Local
-`constants.lateral_shells` and `kmc.lateral_interactions` settings do not truncate
-this environment. With free energies disabled, those settings retain their
-electronic-only behavior. Old reactive-only free energies are not reused;
-compatible electronic calculations can still supply structures for a new
-vibrational calculation.
+The lateral shell range controls endpoint structures, NEB structures, lateral
+classification, and vibrational corrections in both electronic and free-energy
+runs. For diffusion and bond reactions, the range starts from the union of
+all endpoint anchor atoms, so both endpoints share the same selected neighbors.
+Setting `kmc.lateral_interactions: false` omits surrounding occupied molecules;
+free-energy corrections then cover only the reacting adsorbates and gas species.
+Each event refreshes rates whose local environment or applicability can change.
+Old free energies from the whole-surface or reactive-only policies are not
+reused; compatible electronic calculations can supply structures for a new
+local vibrational calculation.
 
-In electronic-only runs, the local lateral interaction range is an intentional
-approximation that truncates longer-range interactions. It can introduce small
+The local lateral interaction range is an intentional approximation that truncates longer-range interactions. It can introduce small
 reaction-energy errors and closed-cycle energy discrepancies. Increase
 `constants.lateral_shells` with `kmc.lateral_interactions: true` until the
 energies converge. In a CO/Cu(111) UMA example, extending one hop to two removed

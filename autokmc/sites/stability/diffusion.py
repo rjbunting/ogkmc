@@ -110,7 +110,6 @@ from autokmc.sites.stability.adsorption import (
     _complete_adsorbate_environment,
     _lateral_node_order,
     _discard_lateral_calculation,
-    _promote_full_occupied_lateral,
     _check_connectivity_stable,
     _check_intended_coordination_stable,
     _bond_set,
@@ -274,7 +273,6 @@ def _build_diffusion_lateral_ego_graph(
     endpoint_a_ids: frozenset,
     endpoint_b_ids: frozenset,
     ignore_occupied_neighbours: bool = False,
-    include_all_occupied: bool = False,
 ) -> nx.Graph:
     """Build the lateral ego-graph for a diffusion pair.
 
@@ -305,23 +303,13 @@ def _build_diffusion_lateral_ego_graph(
     endpoint_ids: frozenset = frozenset(endpoint_a_ids) | frozenset(endpoint_b_ids)
 
     # Static surface BFS (cached on G.graph["_surface_shells_cache"]).
-    visited_full = (
-        frozenset(n for n, d in G.nodes(data=True) if d.get("type") == "surface")
-        if include_all_occupied else _surface_bfs_shells(G, seed_clique_union, n_shells)
-    )
+    visited_full = _surface_bfs_shells(G, seed_clique_union, n_shells)
     visited: set = set(visited_full) - endpoint_ids
 
     # Collect *other* occupied adsorbate leaves adjacent to the BFS set;
     # endpoints are added explicitly afterwards with roles that preserve
     # their A/B ordering and distinguish them from occupied spectators.
     ads_leaves: set = set()
-    if include_all_occupied:
-        ads_leaves.update(
-            n for n, d in G.nodes(data=True)
-            if d.get("type") == "adsorbate"
-            and d.get("occupied", False)
-            and n not in endpoint_ids
-        )
     if not ignore_occupied_neighbours:
         for n in visited:
             for nb in G.neighbors(n):
@@ -334,7 +322,7 @@ def _build_diffusion_lateral_ego_graph(
                     ads_leaves.add(nb)
 
     result = _complete_adsorbate_environment(G, visited, ads_leaves | set(endpoint_ids))
-    result.graph["environment_scope"] = "all_occupied" if include_all_occupied else "local"
+    result.graph["environment_scope"] = "local"
 
     for nid in endpoint_ids:
         if nid not in G:
@@ -357,7 +345,6 @@ def check_diffusion_site_lateral(
     *,
     n_shells: int | None = None,
     ignore_lateral: bool = False,
-    include_all_occupied: bool = False,
     _assign_member: bool = True,
 ) -> DiffusionLateral:
     """Classify the lateral-interaction environment of one hop-pair member.
@@ -380,9 +367,6 @@ def check_diffusion_site_lateral(
         from the ego-graph.  Members share a bare class when their ordered
         A/B environments are equivalent.  Effectively disables lateral
         interactions for diffusion.  Default ``False``.
-    include_all_occupied : bool
-        Classify the complete occupied surface, overriding local-shell and
-        ignored-neighbour approximations for free-energy calculations.
 
     Raises
     ------
@@ -424,7 +408,6 @@ def check_diffusion_site_lateral(
         endpoint_a_ids=endpoint_a_ids,
         endpoint_b_ids=endpoint_b_ids,
         ignore_occupied_neighbours=ignore_lateral,
-        include_all_occupied=include_all_occupied,
     )
 
     fkey = _diffusion_lateral_fingerprint(ego)
@@ -1243,6 +1226,9 @@ def check_diffusion_stability(
     On success ``lateral_class.stable`` is set to ``True`` and the energies
     / relaxed atoms are persisted on the lateral class.
 
+    Free-energy corrections use the reacting and neighboring adsorbates in
+    the supplied lateral class, without expanding its configured shell range.
+
     Parameters
     ----------
     G : nx.Graph
@@ -1318,16 +1304,6 @@ def check_diffusion_stability(
 
     self_a = frozenset(int(n) for n in a_node_ids if n in G)
     self_b = frozenset(int(n) for n in b_node_ids if n in G)
-    if free_energy_options is not None and getattr(free_energy_options, "enabled", False):
-        _promote_full_occupied_lateral(
-            diffusion_site, lateral_class,
-            _build_diffusion_lateral_ego_graph(
-                G, clq_a | clq_b, lateral_class.n_shells,
-                endpoint_a_ids=self_a, endpoint_b_ids=self_b,
-                include_all_occupied=True,
-            ),
-            member_index, _diffusion_lateral_fingerprint,
-        )
     cache_kind = "diffusion"
     cache_key: str | None = None
     cache_graph: nx.Graph | None = None

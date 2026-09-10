@@ -451,7 +451,6 @@ def get_applicable_reaction_for_member(
                 index,
                 n_shells=lateral_shells,
                 ignore_lateral=not lateral_interactions,
-                include_all_occupied=bool(getattr(free_energy_options, "enabled", False)),
             )
         except (ValueError, IndexError) as exc:
             site._member_lc.pop(index, None)
