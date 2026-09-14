@@ -117,6 +117,7 @@ DIAGNOSTICS_DIR = "diagnostics"
 INVALID_ADSORPTION_DIR = "invalid_adsorption"
 INVALID_DIFFUSION_DIR = "invalid_diffusion"
 INVALID_BOND_DIR = "invalid_bond"
+BARE_NEB_DIR = "bare_neb"
 
 
 def _atomic_json(path: Path, payload: Any) -> None:
@@ -257,26 +258,32 @@ def _quarantine_uncommitted_reaction_folders(
     )
     invalid_bond_root = output_dir / DIAGNOSTICS_DIR / INVALID_BOND_DIR
     roots = (
-        (reactions_root, Path()),
+        (reactions_root, Path(), "*/*/*", "reaction.json"),
         (
             invalid_diffusion_root,
             Path(DIAGNOSTICS_DIR) / INVALID_DIFFUSION_DIR,
+            "*/*", "reaction.json",
         ),
         (
             invalid_bond_root,
             Path(DIAGNOSTICS_DIR) / INVALID_BOND_DIR,
+            "*/*", "reaction.json",
+        ),
+        (
+            output_dir / DIAGNOSTICS_DIR / BARE_NEB_DIR,
+            Path(DIAGNOSTICS_DIR) / BARE_NEB_DIR,
+            "*/*/*", "diagnostic.json",
         ),
     )
-    leaf_folders: list[tuple[Path, Path, Path]] = []
-    for root, recovery_prefix in roots:
-        pattern = "*/*/*" if root == reactions_root else "*/*"
+    leaf_folders: list[tuple[Path, Path, Path, str]] = []
+    for root, recovery_prefix, pattern, metadata_name in roots:
         leaf_folders.extend(
-            (path, root, recovery_prefix)
+            (path, root, recovery_prefix, metadata_name)
             for path in root.glob(pattern)
             if path.is_dir()
         )
-    for folder, authoritative_root, recovery_prefix in sorted(leaf_folders):
-        metadata_path = folder / "reaction.json"
+    for folder, authoritative_root, recovery_prefix, metadata_name in sorted(leaf_folders):
+        metadata_path = folder / metadata_name
         incomplete = not metadata_path.is_file()
         discovery_step = (
             None if incomplete else _read_discovery_step(metadata_path)
@@ -301,8 +308,9 @@ def _quarantine_uncommitted_reaction_folders(
         quarantined.append(destination)
         if incomplete:
             _log.warning(
-                "Moved incomplete reaction folder with no reaction.json "
+                "Moved incomplete calculation folder with no %s "
                 "outside the authoritative hierarchy to %s",
+                metadata_name,
                 destination,
             )
         else:
@@ -745,6 +753,7 @@ class ReactionWriter:
         self._pending_payloads: dict[tuple[str, str, int, int], dict[str, Any]] = {}
         self._reaction_definitions: dict[str, dict[str, Any]] = {}
         self._reconciled_bond_keys: set[tuple[str, str, int, int]] = set()
+        self._bare_neb_signatures: dict[Path, tuple] = {}
         self._index: ReactionIndexWriter | None = None
         if append and checkpoint_step is not None:
             _quarantine_uncommitted_reaction_folders(
@@ -1538,6 +1547,132 @@ class ReactionWriter:
         return folder
 
     # ------------------------------------------------------------------
+    def write_bare_neb(self, site, lc, *, kind: str, step: int = 0) -> Path | None:
+        """Save a seed-only calculation without registering a KMC reaction.
+
+        The captured band is an output even when ``persist_neb_path`` is false.
+        Failed/partial attempts retain every structure available at the flush.
+        """
+        if kind not in {"bond", "diffusion"}:
+            raise ValueError(f"unsupported bare NEB kind: {kind}")
+        if not getattr(lc, "_seed_only", False) or getattr(lc, "members", None):
+            return None
+        if kind == "bond":
+            template = site.template
+            smiles = f"{template.smiles_a}+{template.smiles_b}↔{template.smiles_c}"
+            endpoints = ("ab", "c")
+        else:
+            smiles = str(site.reactant)
+            endpoints = ("a", "b")
+
+        # Public paths retain failed bands; successful non-persistent runs
+        # retain the optimized seed privately instead.
+        public_path = getattr(lc, "atoms_neb_path", None)
+        neb_path = public_path or getattr(lc, "_warm_start_neb_path", None)
+        path_energies = getattr(
+            lc,
+            "neb_path_energies" if public_path else "_warm_start_neb_energies",
+            None,
+        )
+        structure_candidates: dict[str, Atoms | list[Atoms] | None] = {
+            f"state_{endpoint}{suffix}": getattr(lc, f"atoms_{endpoint}{suffix}", None)
+            for endpoint in endpoints
+            for suffix in ("_initial", "")
+        }
+        structure_candidates.update({
+            "ts": getattr(lc, "atoms_ts", None),
+            "neb_refinement_initial": getattr(lc, "atoms_neb_refinement_initial", None),
+            "neb_refinement_final": getattr(lc, "atoms_neb_refinement_final", None),
+            "neb_path_initial": getattr(lc, "atoms_neb_path_initial", None),
+            "neb_path": neb_path,
+        })
+        structures = {
+            name: atoms for name, atoms in structure_candidates.items()
+            if atoms is not None and (isinstance(atoms, Atoms) or len(atoms) > 0)
+        }
+        stable = getattr(lc, "stable", None)
+        failure_reason = getattr(lc, "last_failure_reason", None)
+        direct_status = getattr(lc, "direct_event_status", None)
+        reason = (
+            getattr(lc, "invalid_reason", None)
+            or failure_reason
+            or getattr(lc, "direct_event_reason", None)
+        )
+        if stable is None and not reason and not structures and direct_status != "composite":
+            return None  # Classification alone is not a calculation.
+        if kind == "bond":
+            _prepare_bond_gas_reference_assets(site, lc)
+            for name, attribute in (
+                ("state_c_gas_reference", "atoms_c_gas_reference"),
+                ("gas_molecule", "atoms_gas_molecule"),
+            ):
+                gas_atoms = getattr(lc, attribute, None)
+                if isinstance(gas_atoms, Atoms):
+                    structures[name] = gas_atoms
+        status = (
+            "composite_direct_event" if direct_status == "composite"
+            else "numerical_failure" if failure_reason
+            else "invalid" if stable is False
+            else "completed" if stable is True
+            else "incomplete"
+        )
+        energies = {
+            f"state_{endpoint}": getattr(lc, f"energy_{endpoint}", None)
+            for endpoint in endpoints
+        }
+        energies["transition_raw"] = getattr(lc, "energy_ts", None)
+        if kind == "bond":
+            energies["state_c_gas_reference"] = getattr(lc, "energy_c_gas_reference", None)
+            energies["gas_molecule"] = getattr(getattr(site, "gas_reactant", None), "energy", None)
+        folder = (
+            self.output_dir / DIAGNOSTICS_DIR / BARE_NEB_DIR / kind
+            / _smiles_to_dirname(smiles)
+            / _kind_folder_name(kind, site.iso_class, lc.lateral_class)
+        )
+        signature = (
+            status, reason, tuple(energies.items()), tuple(path_energies or []),
+            tuple((name, id(atoms)) for name, atoms in structures.items()),
+        )
+        if status != "incomplete" and self._bare_neb_signatures.get(folder) == signature:
+            return folder
+
+        metadata_path = folder / "diagnostic.json"
+        discovery_step = _read_discovery_step(metadata_path) if metadata_path.is_file() else None
+        ensure_directory(folder)
+        for name, atoms in structures.items():
+            images = (
+                _safe_atoms_copy(atoms) if isinstance(atoms, Atoms)
+                else [_safe_atoms_copy(image) for image in atoms]
+            )
+            _atomic_extxyz(folder / f"{name}.extxyz", images)
+        _atomic_json(metadata_path, {
+            "artifact_type": "autokmc-bare-neb-diagnostic",
+            "schema_version": "1",
+            "run_id": self.run_id,
+            "kind": kind,
+            "iso_class": int(site.iso_class),
+            "lateral_class": int(lc.lateral_class),
+            "reactant_smiles": smiles,
+            "gas_product": bool(getattr(site, "gas_product", False)),
+            "purpose": "no-lateral NEB warm start",
+            "lateral_interactions": False,
+            "seed_only": True,
+            "discovery_step": int(step) if discovery_step is None else discovery_step,
+            "diagnostic_status": status,
+            "stable": stable,
+            "failure_reason": reason,
+            "source_member_index": getattr(lc, "_warm_start_member_index", None),
+            "energies_ev": energies,
+            "neb_path_energies_ev": list(path_energies or []),
+            "neb_intermediate_refinement": getattr(lc, "neb_intermediate_refinement", None),
+            "direct_event_certificate": getattr(lc, "direct_event_certificate", None),
+            "ts_energy_diagnostic": getattr(lc, "ts_energy_diagnostic", None),
+            "atoms": {name: f"{name}.extxyz" for name in structures},
+            "calculator": dict(self._calc_meta),
+        })
+        self._bare_neb_signatures[folder] = signature
+        return folder
+
     def write_invalid_diffusion(self, ds, lc, *, step: int = 0) -> Path:
         """Write an on-disk record for a diffusion lateral class that failed NEB.
 

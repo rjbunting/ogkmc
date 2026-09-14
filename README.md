@@ -388,7 +388,9 @@ would change atom-index connectivity.
 Bond NEBs use the same automatic bare-first initialization as diffusion NEBs:
 the no-neighbour lateral class is calculated on demand and its optimized band
 seeds classes with neighbouring adsorbates. No additional configuration key is
-required.
+required. Bare calculations used only as NEB seeds are saved under
+`diagnostics/bare_neb/{bond,diffusion}/`, including their captured paths and
+calculation status, even when `persist_neb_path` is false.
 
 ### Free Energy
 

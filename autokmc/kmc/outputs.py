@@ -13,6 +13,24 @@ from autokmc.kmc.restart import capture_rng_state, reactants_for_checkpoint
 from autokmc.sites.diffusion import DiffusionSite
 
 
+def persist_bare_neb_calculations(writer, channels: KMCChannels, *, step: int) -> None:
+    """Flush internal reference calculations during normal and failed sweeps."""
+    write_bare = getattr(writer, "write_bare_neb", None)
+    if not callable(write_bare):
+        return
+    for kind, sites in (
+        ("diffusion", channels.diffusion_sites),
+        ("bond", channels.bond_sites),
+    ):
+        for site in sites:
+            for lateral_class in site.lateral_classes:
+                if (
+                    getattr(lateral_class, "_seed_only", False)
+                    and not getattr(lateral_class, "members", None)
+                ):
+                    write_bare(site, lateral_class, kind=kind, step=step)
+
+
 class KMCOutputManager:
     """Keep optional output callbacks out of the scientific event loop."""
 
@@ -176,6 +194,11 @@ class KMCOutputManager:
             self.channels.bond_sites,
             step=self.runtime.start_step,
         )
+        persist_bare_neb_calculations(
+            self.observers.reaction_writer,
+            self.channels,
+            step=self.runtime.start_step,
+        )
 
         trajectory_writer = self.observers.trajectory_writer
         if (
@@ -294,6 +317,11 @@ class KMCOutputManager:
         )
         self.persist_invalid_bond_sites(
             self.channels.bond_sites,
+            step=step,
+        )
+        persist_bare_neb_calculations(
+            self.observers.reaction_writer,
+            self.channels,
             step=step,
         )
 

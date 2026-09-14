@@ -227,6 +227,7 @@ def test_manifest_exists_while_preparing_and_tracks_failure(tmp_path):
     assert payload["artifacts"]["invalid_adsorption"]["status"] == "missing"
     assert payload["artifacts"]["invalid_diffusion"]["status"] == "missing"
     assert payload["artifacts"]["invalid_bond"]["status"] == "missing"
+    assert payload["artifacts"]["bare_neb"]["status"] == "missing"
 
 
 def test_artifact_inventory_hashes_files_and_summarizes_directories(tmp_path):

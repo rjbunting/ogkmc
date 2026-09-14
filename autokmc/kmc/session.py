@@ -18,7 +18,7 @@ from autokmc.kmc.models import (
     KMCRuntime,
 )
 from autokmc.kmc.network import DynamicNetworkExpander
-from autokmc.kmc.outputs import KMCOutputManager
+from autokmc.kmc.outputs import KMCOutputManager, persist_bare_neb_calculations
 from autokmc.kmc.restart import final_occupancy_by_species
 from autokmc.utils.telemetry import (
     RuntimeTelemetry,
@@ -218,6 +218,7 @@ class KMCSession:
                             )
                             n_invalid += 1
 
+            persist_bare_neb_calculations(writer, self.channels, step=int(step))
             sync = getattr(writer, "sync_for_checkpoint", None)
             if callable(sync):
                 sync()

@@ -16,6 +16,7 @@ from autokmc.io.performance import (
     write_performance_diagnostics,
 )
 from autokmc.io.persistence import (
+    BARE_NEB_DIR,
     DIAGNOSTICS_DIR,
     INVALID_ADSORPTION_DIR,
     INVALID_BOND_DIR,
@@ -155,6 +156,7 @@ def _output_paths(
         "invalid_bond": str(
             identity.output_dir / DIAGNOSTICS_DIR / INVALID_BOND_DIR
         ),
+        "bare_neb": str(identity.output_dir / DIAGNOSTICS_DIR / BARE_NEB_DIR),
         "n_unique_reactions": sinks.reactions.n_unique_reactions,
         "checkpoint": checkpoint_path,
     }

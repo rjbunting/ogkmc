@@ -20,6 +20,7 @@ RUN_DIR/
     invalid_adsorption/
     invalid_diffusion/
     invalid_bond/
+    bare_neb/
   analysis/                      # after `autokmc analyze`
 ```
 
@@ -185,6 +186,20 @@ Invalid bond candidates are handled analogously under
 Failure folders retain every available initial, converged, or last-known
 endpoint and automatically retain both the initial and final NEB bands,
 regardless of the successful-run `persist_neb_path` setting.
+
+Bare (no lateral interactions) calculations used only to initialize bond and
+diffusion NEBs are saved under
+`diagnostics/bare_neb/bond/<process>/bond_isoX_latY/` and
+`diagnostics/bare_neb/diffusion/<species>/diff_isoX_latY/`.
+Each folder contains `diagnostic.json` with calculation status, failure reason
+when applicable, electronic energies, and paths to all available endpoint,
+transition-state, and NEB structures. The captured optimized bare band is saved
+as `neb_path.extxyz` even when `persist_neb_path` is false and calculation-cache
+writing is disabled. These reference calculations do not enter the reaction
+index, event log, or discovered-reaction counts. A bare class that becomes an
+actual applicable reaction is also written through the normal reaction output.
+Bare diagnostics are flushed after reaction sweeps and on handled failures;
+folders from beyond a resumed checkpoint are moved to `uncommitted_reactions/`.
 
 Adsorption candidates rejected during MLIP pruning are written under
 `diagnostics/invalid_adsorption/<species>/ads_isoX/`. Each folder contains

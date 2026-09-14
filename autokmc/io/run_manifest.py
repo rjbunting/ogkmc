@@ -666,6 +666,11 @@ def configured_artifact_descriptors(
             "type": "invalid-bond-diagnostics-directory",
             "schema_version": REACTION_DOCUMENT_SCHEMA_VERSION,
         },
+        "bare_neb": {
+            "path": root / "diagnostics" / "bare_neb",
+            "type": "bare-neb-diagnostics-directory",
+            "schema_version": "1",
+        },
     }
 
 
@@ -869,6 +874,7 @@ def discover_quarantine_locations(
         not in {
             ("diagnostics", "invalid_diffusion"),
             ("diagnostics", "invalid_bond"),
+            ("diagnostics", "bare_neb"),
         }
     }
     invalid_diffusion_leaves = {
@@ -885,8 +891,15 @@ def discover_quarantine_locations(
         )
         if path.is_dir()
     }
+    bare_neb_leaves = {
+        path
+        for path in quarantine_root.glob(
+            "after_checkpoint_step_*/diagnostics/bare_neb/*/*/*"
+        )
+        if path.is_dir()
+    }
     leaves = sorted(
-        regular_leaves | invalid_diffusion_leaves | invalid_bond_leaves
+        regular_leaves | invalid_diffusion_leaves | invalid_bond_leaves | bare_neb_leaves
     )
     return [_display_path(path, root) for path in leaves[: max(0, maximum)]]
 
