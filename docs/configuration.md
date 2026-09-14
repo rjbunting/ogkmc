@@ -470,6 +470,17 @@ With `add_hydrogens: false`, only written hydrogen atoms and bracket hydrogen
 counts are materialized. For example, `[H]C` contains one H and one C, while
 `[CH3]` contains one C and three H atoms.
 
+SMILES must describe one connected molecule, without dummy atoms, trailing
+names, or CXSMILES extensions. Atom-map numbers do not distinguish species;
+isotopes and stereochemistry do. Duplicate feeds are rejected by both their
+normalized labels and their materialized atom inventories.
+
+The CO spellings `[C]=O` and `[C-]#[O+]` both use AutoKMC's neutral `[C]=O`
+bond-chemistry convention. When `bond.enabled: true`, other formally charged
+species are rejected because the enumerator uses a charge-free radical model.
+This restriction also applies to the direct fragmentation and coupling APIs.
+It is not a general resonance, tautomer, or spin-state equivalence rule.
+
 The produced gas graph is checked against the input SMILES after optional
 relaxation, including its materialized hydrogen inventory. Missing or extra
 bonds cause `ReactantConnectivityError`; the diagnostic reports atom-index

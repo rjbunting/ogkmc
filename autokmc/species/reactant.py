@@ -59,7 +59,9 @@ from autokmc.core.atom_metadata import node_mass, physical_node_match
 from autokmc.core.constants import NL_MULT_DEFAULT, RANDOM_SEED
 from autokmc.io.calculators import acquire_calculator
 from autokmc.io.atoms import copy_atoms_with_results
-from autokmc.species.smiles import canonical_atom_inventory_smiles, smiles_to_dirname
+from autokmc.species.smiles import (
+    canonical_atom_inventory_smiles, molecule_from_smiles, SmilesError, smiles_to_dirname,
+)
 from autokmc.utils.logging import get_logger
 from autokmc.utils.optimizers import (
     DEFAULT_OPTIMIZER,
@@ -175,28 +177,10 @@ class Reactant:
 
 def _molecule_from_smiles(smiles: str, *, add_hydrogens: bool):
     """Parse the exact indexed atom/bond inventory used for gas construction."""
-    silence_rdkit_warnings()
-    from rdkit import Chem
-
-    parser = Chem.SmilesParserParams()
-    parser.removeHs = False
-    mol = Chem.MolFromSmiles(smiles, parser)
-    if mol is None:
-        raise ReactantDefinitionError(
-            f"RDKit could not parse SMILES: {smiles!r}"
-        )
-    # Bracket hydrogens belong to the explicit inventory even when implicit
-    # valence-filling hydrogens are disabled (e.g. [OH] still contains O and H).
-    hydrogen_hosts = [
-        atom.GetIdx() for atom in mol.GetAtoms()
-        if atom.GetNumExplicitHs() > 0
-        or (add_hydrogens and atom.GetNumImplicitHs() > 0)
-    ]
-    if hydrogen_hosts:
-        mol = Chem.AddHs(
-            mol, onlyOnAtoms=hydrogen_hosts, explicitOnly=not add_hydrogens,
-        )
-    return mol
+    try:
+        return molecule_from_smiles(smiles, add_hydrogens=add_hydrogens)
+    except SmilesError as exc:
+        raise ReactantDefinitionError(str(exc)) from exc
 
 
 def _validate_reactant_graph(

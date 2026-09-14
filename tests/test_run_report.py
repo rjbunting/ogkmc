@@ -234,7 +234,7 @@ def test_generate_run_report_analyzes_compact_v3_events(tmp_path):
     report = generate_run_report(tmp_path, n_blocks=2)
 
     assert report["status"] == "complete"
-    assert report["products"][0]["product"] == "[OH]"
+    assert report["products"][0]["product"] == "[H][O]"
     assert report["products"][0]["count"] == 1
     assert report["coverage"]["time_average_occupied_placements"] == pytest.approx(
         0.5

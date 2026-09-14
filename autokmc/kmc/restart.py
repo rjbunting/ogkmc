@@ -11,7 +11,7 @@ import numpy as np
 from autokmc.core.graph_state import get_bond_registry
 from autokmc.sites.adsorbate import AdsorbateSite
 from autokmc.species.reactant import Reactant
-from autokmc.species.smiles import canonical_smiles
+from autokmc.species.smiles import reactant_atom_inventory_smiles
 
 
 def capture_rng_state(rng) -> dict | None:
@@ -79,7 +79,7 @@ def reactants_for_checkpoint(reactants, graph: nx.Graph) -> list:
         if item is None:
             continue
         if isinstance(item, Reactant):
-            key = canonical_smiles(item.smiles)
+            key = reactant_atom_inventory_smiles(item)
             if key in seen_species:
                 continue
             seen_species.add(key)

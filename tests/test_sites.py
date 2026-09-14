@@ -12,6 +12,7 @@ from ase import Atoms
 from ase.calculators.singlepoint import SinglePointCalculator
 from ase.io import read as ase_read
 
+from autokmc.species.smiles import smiles_to_dirname
 from autokmc.sites.anchors import (
     _build_ego_graph,
     _enumerate_cliques,
@@ -1830,7 +1831,7 @@ def test_adsorbate_pruning_persists_mlip_rejected_structures(
         tmp_path
         / "diagnostics"
         / "invalid_adsorption"
-        / "(O)"
+        / smiles_to_dirname("[O]")
         / "ads_iso0"
     )
     assert (folder / "initial.extxyz").is_file()
@@ -1908,7 +1909,7 @@ def test_adsorbate_pruning_persists_last_geometry_when_optimizer_raises(
         tmp_path
         / "diagnostics"
         / "invalid_adsorption"
-        / "(O)"
+        / smiles_to_dirname("[O]")
         / "ads_iso0"
     )
     optimized = ase_read(folder / "optimized.extxyz")
@@ -1984,7 +1985,7 @@ def test_adsorbate_pruning_reports_rigid_stage_nonconvergence(
         tmp_path
         / "diagnostics"
         / "invalid_adsorption"
-        / "(O)"
+        / smiles_to_dirname("[O]")
         / "ads_iso0"
     )
     optimized = ase_read(folder / "optimized.extxyz")

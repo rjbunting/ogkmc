@@ -807,6 +807,11 @@ class ReactionWriter:
                     relative = path.relative_to(self.reactions_root)
                     sub, species = relative.parts[:2]
                 payload = json.loads(path.read_text(encoding="utf-8"))
+                # Folder spelling is a presentation detail. Reconstruct the
+                # current key from metadata while retaining the actual path
+                # for legacy directories created before collision-safe names.
+                if payload.get("reactant_smiles"):
+                    species = _smiles_to_dirname(str(payload["reactant_smiles"]))
                 restored_sub = (
                     str(diagnostic_invalid)
                     if diagnostic_invalid
@@ -1017,7 +1022,7 @@ class ReactionWriter:
             _prepare_bond_gas_reference_assets(reaction.site, lc)
 
         if key in self._folder_meta:
-            self._folder_paths.setdefault(key, folder)
+            folder = self._folder_paths.setdefault(key, folder)
             if sub == "bond":
                 _write_missing_bond_result_assets(
                     folder,
@@ -1778,6 +1783,7 @@ class ReactionWriter:
             / species
             / _kind_folder_name("bond", iso, lat)
         )
+        folder = self._folder_paths.get(key, folder)
         ensure_directory(folder)
         _prepare_bond_gas_reference_assets(brs, lc)
         structure_specs = (

@@ -494,7 +494,7 @@ class _Validator:
                     f"[{facet_index}][{value_index}]",
                 )
 
-    def reactants(self, reactants: list[Any]) -> None:
+    def reactants(self, reactants: list[Any], *, bond_enabled: bool = False) -> None:
         if not reactants:
             self.fail("reactants must contain at least one species")
 
@@ -502,8 +502,12 @@ class _Validator:
 
         silence_rdkit_warnings()
         from rdkit import Chem
+        from autokmc.species.smiles import (
+            canonical_smiles, molecule_from_smiles, require_charge_free,
+        )
 
         seen: dict[str, int] = {}
+        seen_inventories: dict[str, int] = {}
         for index, reactant in enumerate(reactants):
             prefix = f"reactants[{index}]"
             if not isinstance(reactant.smiles, str) or not reactant.smiles.strip():
@@ -539,7 +543,11 @@ class _Validator:
                     f"{reactant.geometry!r}"
                 )
             try:
-                molecule = Chem.MolFromSmiles(reactant.smiles)
+                molecule = molecule_from_smiles(
+                    reactant.smiles, add_hydrogens=reactant.add_hydrogens,
+                )
+                if bond_enabled:
+                    require_charge_free(molecule)
             except Exception as exc:
                 self.fail(
                     f"{prefix}.smiles could not be parsed by RDKit: "
@@ -550,15 +558,17 @@ class _Validator:
                     f"{prefix}.smiles could not be parsed by RDKit: "
                     f"{reactant.smiles!r}"
                 )
-            canonical = Chem.MolToSmiles(molecule, canonical=True)
-            if canonical in seen:
-                first = seen[canonical]
+            canonical = canonical_smiles(reactant.smiles)
+            inventory = Chem.MolToSmiles(molecule, canonical=True)
+            if canonical in seen or inventory in seen_inventories:
+                first = seen.get(canonical, seen_inventories.get(inventory))
                 self.fail(
                     f"{prefix}.smiles duplicates reactants[{first}].smiles "
                     f"after canonicalisation ({canonical!r}); combine their "
                     "feed settings into one reactant entry"
                 )
             seen[canonical] = index
+            seen_inventories[inventory] = index
 
     def adsorption(self, cfg: Any) -> None:
         self.boolean(
@@ -866,7 +876,7 @@ class _Validator:
         self.constants(cfg.constants)
         self.optimization(cfg.optimization)
         self.structure(cfg.structure)
-        self.reactants(cfg.reactants)
+        self.reactants(cfg.reactants, bond_enabled=cfg.bond.enabled)
         self.adsorption(cfg.adsorption)
         self.kmc(cfg.kmc)
         self.diffusion(cfg.diffusion)

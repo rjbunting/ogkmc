@@ -96,7 +96,9 @@ from autokmc.species.reactant import (
     build_reactant,
 )
 from autokmc.io.calculators import CalculatorConfigError
-from autokmc.species.smiles import reactant_atom_inventory_smiles
+from autokmc.species.smiles import (
+    canonical_atom_inventory_smiles, reactant_atom_inventory_smiles,
+)
 from autokmc.core.constants import (
     BOND_TOLERANCE,
     BOND_MAX_HOPS,
@@ -301,8 +303,27 @@ def initialise_bond_registry(
     else:
         reactant_items = cast(Iterable[Reactant], reactants)
         items = [(reactant.smiles, reactant) for reactant in reactant_items]
+    pending = dict(reg["species"])
+    inventory_labels = {
+        reactant_atom_inventory_smiles(reactant): label
+        for label, reactant in pending.items() if isinstance(reactant, Reactant)
+    }
     for smi, r in items:
-        reg["species"][_canon_smiles(smi)] = r
+        label = _canon_smiles(smi)
+        previous = pending.get(label)
+        if previous is not None and previous is not r:
+            raise ValueError(f"Species label {label!r} is already registered; reuse its reactant")
+        if isinstance(r, Reactant):
+            inventory = reactant_atom_inventory_smiles(r)
+            previous_label = inventory_labels.get(inventory)
+            if previous_label is not None and previous_label != label:
+                raise ValueError(
+                    f"Species {label!r} duplicates the atom inventory of {previous_label!r}; "
+                    "reuse the registered species"
+                )
+            inventory_labels[inventory] = label
+        pending[label] = r
+    reg["species"].update(pending)
 
     # Next, register their adsorbate sites.
     if adsorbate_sites is not None:
@@ -342,7 +363,14 @@ def bond_species_known(G: nx.Graph, smiles: str) -> bool:
     reg = get_bond_registry(G)
     if not reg:
         return False
-    return _canon_smiles(smiles) in reg["species"]
+    if _canon_smiles(smiles) in reg["species"]:
+        return True
+    inventory = canonical_atom_inventory_smiles(smiles)
+    return any(
+        isinstance(reactant, Reactant)
+        and reactant_atom_inventory_smiles(reactant) == inventory
+        for reactant in reg["species"].values()
+    )
 
 
 def _rebuild_bond_reverse_indexes(

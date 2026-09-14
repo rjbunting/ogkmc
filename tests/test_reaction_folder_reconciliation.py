@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
+from autokmc.species.smiles import smiles_to_dirname
 from autokmc.io.config import OutputCfg, RunConfig
 from autokmc.io.persistence import ReactionWriter, reconcile_event_log
 from autokmc.io.reaction_index import load_reaction_index
@@ -17,7 +18,7 @@ def _reaction_metadata_path(root, *, lateral_class: int):
         root
         / "reactions"
         / "adsorption"
-        / "(C-)#(O+)"
+        / smiles_to_dirname("[C-]#[O+]")
         / f"iso0_lat{lateral_class}"
         / "reaction.json"
     )
@@ -164,7 +165,7 @@ def test_resume_quarantines_folders_discovered_after_checkpoint(
         / "uncommitted_reactions"
         / "after_checkpoint_step_1"
         / "adsorption"
-        / "(C-)#(O+)"
+        / smiles_to_dirname("[C-]#[O+]")
         / "iso0_lat1"
     )
     assert json.loads((recovered / "reaction.json").read_text())[

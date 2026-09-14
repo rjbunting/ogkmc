@@ -94,7 +94,9 @@ from autokmc.sites.adsorbate import (
 from autokmc.sites.identity import SiteId, member_identifier, site_identifier
 from autokmc.sites.diffusion import _member_clique_union, _reactant_orbit_label
 from autokmc.sites.stability.adsorption import _surface_bfs_shells
-from autokmc.species.smiles import canonical_atom_inventory_smiles
+from autokmc.species.smiles import (
+    canonical_atom_inventory_smiles, canonical_smiles, SmilesError,
+)
 from autokmc.core.constants import (
     BOND_MAX_HOPS,
     BOND_PAIR_N_SHELLS,
@@ -114,8 +116,8 @@ _log = get_logger(__name__)
 # ---------------------------------------------------------------------------
 
 def _canon_smiles(smi: str) -> str:
-    """Return atom-inventory-safe canonical SMILES for bond chemistry."""
-    return canonical_atom_inventory_smiles(smi)
+    """Normalize a species label while retaining its explicit hydrogens."""
+    return canonical_smiles(smi)
 
 
 # ---------------------------------------------------------------------------
@@ -405,10 +407,13 @@ def rebuild_bond_reverse_indexes(
 
 def _template_inventory_maps(atom_inventory_smiles):
     """Keep simulated atom inventories separate from registered feed labels."""
-    inventories = {
-        _canon_smiles(label): _canon_smiles(inventory)
-        for label, inventory in (atom_inventory_smiles or {}).items()
-    }
+    inventories: dict[str, str] = {}
+    for label, inventory in (atom_inventory_smiles or {}).items():
+        key = _canon_smiles(label)
+        value = canonical_atom_inventory_smiles(inventory)
+        if key in inventories and inventories[key] != value:
+            raise SmilesError(f"Conflicting atom inventories for species label {key!r}")
+        inventories[key] = value
     aliases: dict[str, str] = {}
     for label, inventory in inventories.items():
         aliases.setdefault(inventory, label)
@@ -462,6 +467,8 @@ def derive_dissociation_templates(
                 include_ring_bonds = include_ring_bonds,
                 strip_dummies      = True,
             )
+        except SmilesError:
+            raise
         except Exception as exc:
             _log.warning(
                 "derive_dissociation_templates: get_all_fragments(%r) failed: %s",
@@ -476,6 +483,9 @@ def derive_dissociation_templates(
             smi_b = aliases.get(smi_b, smi_b)
             # Canonicalise unordered (smi_a, smi_b)
             ordered = tuple(sorted((smi_a, smi_b)))
+            elements = (p.element_a, p.element_b)
+            if smi_b < smi_a:
+                elements = elements[::-1]
             key = (ordered[0], ordered[1], big)
             if key in seen:
                 continue
@@ -485,8 +495,8 @@ def derive_dissociation_templates(
                 smiles_b  = ordered[1],
                 smiles_c  = big,
                 bond_type = p.bond_type,
-                element_a = p.element_a,
-                element_b = p.element_b,
+                element_a = elements[0],
+                element_b = elements[1],
                 source    = "dissociation",
             ))
 
@@ -566,6 +576,8 @@ def derive_coupling_templates(
                     inventories.get(smi_a, smi_a),
                     inventories.get(smi_b, smi_b),
                 )
+            except SmilesError:
+                raise
             except Exception as exc:
                 _log.warning(
                     "derive_coupling_templates: combine_fragments(%r, %r) failed: %s",
@@ -576,6 +588,9 @@ def derive_coupling_templates(
                 big = _canon_smiles(sp.smiles)
                 big = aliases.get(big, big)
                 ordered = tuple(sorted((smi_a, smi_b)))
+                elements = (sp.element_a, sp.element_b)
+                if smi_b < smi_a:
+                    elements = elements[::-1]
                 key = (ordered[0], ordered[1], big)
                 if key in seen:
                     continue
@@ -585,8 +600,8 @@ def derive_coupling_templates(
                     smiles_b  = ordered[1],
                     smiles_c  = big,
                     bond_type = sp.bond_type,
-                    element_a = sp.element_a,
-                    element_b = sp.element_b,
+                    element_a = elements[0],
+                    element_b = elements[1],
                     source    = "coupling",
                 ))
 

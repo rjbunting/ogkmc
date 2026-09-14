@@ -7,6 +7,7 @@ import math
 
 import numpy as np
 
+from autokmc.species.smiles import smiles_to_dirname
 from autokmc.io.summary import ReactionSummary, make_run_meta
 from autokmc.io.schemas import SUMMARY_ARTIFACT_TYPE, SUMMARY_SCHEMA_VERSION
 
@@ -28,7 +29,7 @@ def test_summary_aggregates_per_type(make_reaction):
 
     ads = next(b for b in out["by_reaction_type"] if b["kind"] == "adsorption")
     assert ads["count"] == 2
-    assert ads["reaction_dir"] == "reactions/adsorption/(C-)#(O+)/iso0_lat0"
+    assert ads["reaction_dir"] == f"reactions/adsorption/{smiles_to_dirname('[C-]#[O+]')}/iso0_lat0"
     assert ads["direction"] == "adsorption"
     assert ads["rate_energy_basis"] == "unknown"
     assert ads["first_step"] == 1

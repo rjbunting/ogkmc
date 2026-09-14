@@ -14,6 +14,7 @@ from ase.calculators.singlepoint import SinglePointCalculator
 from ase.constraints import FixAtoms
 from ase.io import read as ase_read, write as ase_write
 
+from autokmc.species.smiles import smiles_to_dirname
 from autokmc.io.persistence import (
     EventLogCommit,
     ReactionWriter,
@@ -124,7 +125,7 @@ def test_reaction_writer_creates_per_lateral_class_folder(
     )
     w.close()
 
-    folder = tmp_path / "reactions" / "adsorption" / "(C-)#(O+)" / "iso0_lat0"
+    folder = tmp_path / "reactions" / "adsorption" / smiles_to_dirname("[C-]#[O+]") / "iso0_lat0"
     assert folder.is_dir()
     assert (folder / "occupied.extxyz").is_file()
     assert (folder / "unoccupied.extxyz").is_file()
@@ -154,7 +155,7 @@ def test_reaction_writer_creates_per_lateral_class_folder(
         definitions,
         require_definition=True,
     )
-    assert resolved["reaction_dir"] == "reactions/adsorption/(C-)#(O+)/iso0_lat0"
+    assert resolved["reaction_dir"] == f"reactions/adsorption/{smiles_to_dirname('[C-]#[O+]')}/iso0_lat0"
     assert "ΔE" in resolved["description"]
     definition = definitions[payload["reaction_id"]]
     assert definition["schema_version"] == REACTION_INDEX_SCHEMA_VERSION
@@ -534,7 +535,7 @@ def test_reaction_writer_reuses_folder_across_events(
     assert w.n_unique_reactions == 1
     assert w.n_written == 2
 
-    folder = tmp_path / "reactions" / "adsorption" / "(C-)#(O+)" / "iso0_lat0"
+    folder = tmp_path / "reactions" / "adsorption" / smiles_to_dirname("[C-]#[O+]") / "iso0_lat0"
     rxn_meta = json.loads((folder / "reaction.json").read_text())
     assert rxn_meta["stats"]["count"] == 2
     assert rxn_meta["stats"]["first_step"] == 1
@@ -609,7 +610,7 @@ def test_reaction_writer_batches_reaction_json_until_sync(
         tau_s=1e-6,
         reaction=stub_reaction,
     )
-    folder = tmp_path / "reactions" / "adsorption" / "(C-)#(O+)" / "iso0_lat0"
+    folder = tmp_path / "reactions" / "adsorption" / smiles_to_dirname("[C-]#[O+]") / "iso0_lat0"
 
     before = json.loads((folder / "reaction.json").read_text())
     assert before["stats"]["count"] == 0
@@ -689,7 +690,7 @@ def test_event_recovery_is_shared_without_reparsing_jsonl(
     ]
     assert recovered.recovery.summary.n == 1
     [(key, folder_state)] = recovered.recovery.reaction_states.items()
-    assert key == ("adsorption", "(C-)#(O+)", 0, 0)
+    assert key == ("adsorption", smiles_to_dirname("[C-]#[O+]"), 0, 0)
     assert folder_state.count == 1
     assert folder_state.rate_energy_bases == {"electronic"}
 
@@ -831,7 +832,7 @@ def test_checkpoint_reconciliation_truncates_crash_tail_and_repairs_stats(
 
     resumed = ReactionWriter(tmp_path, append=True, run_id="run-a")
     resumed.close()
-    folder = tmp_path / "reactions" / "adsorption" / "(C-)#(O+)" / "iso0_lat0"
+    folder = tmp_path / "reactions" / "adsorption" / smiles_to_dirname("[C-]#[O+]") / "iso0_lat0"
     metadata = json.loads((folder / "reaction.json").read_text())
     assert metadata["stats"] == {"count": 1, "first_step": 1, "last_step": 1}
     assert metadata["last_event"]["step"] == 1
@@ -1030,7 +1031,7 @@ def test_reaction_writer_append_restores_counts_and_run_id(
     rows = [json.loads(line) for line in (tmp_path / "events.jsonl").read_text().splitlines()]
     assert [row["step"] for row in rows] == [1, 2]
     assert all(row["run_id"] == "run-a" for row in rows)
-    folder = tmp_path / "reactions" / "adsorption" / "(C-)#(O+)" / "iso0_lat0"
+    folder = tmp_path / "reactions" / "adsorption" / smiles_to_dirname("[C-]#[O+]") / "iso0_lat0"
     metadata = json.loads((folder / "reaction.json").read_text())
     assert metadata["stats"] == {"count": 2, "first_step": 1, "last_step": 2}
 
@@ -1061,7 +1062,7 @@ def test_reaction_index_preserves_rate_bases_across_resume_without_refiring(
             tmp_path
             / "reactions"
             / "adsorption"
-            / "(C-)#(O+)"
+            / smiles_to_dirname("[C-]#[O+]")
             / "iso0_lat0"
             / "reaction.json"
         ).read_text()
@@ -1076,7 +1077,7 @@ def test_reaction_writer_warns_when_no_atoms(tmp_path, stub_reaction):
     w.record(step=1, time_s=1e-6, tau_s=1e-6, reaction=stub_reaction)
     w.close()
 
-    folder = tmp_path / "reactions" / "adsorption" / "(C-)#(O+)" / "iso0_lat0"
+    folder = tmp_path / "reactions" / "adsorption" / smiles_to_dirname("[C-]#[O+]") / "iso0_lat0"
     assert (folder / "reaction.json").is_file()
     assert not (folder / "occupied.extxyz").exists()
     assert not (folder / "unoccupied.extxyz").exists()
@@ -1099,10 +1100,10 @@ def test_reaction_writer_keeps_species_folders_separate(tmp_path, make_reaction)
     w.close()
 
     assert (
-        tmp_path / "reactions" / "adsorption" / "(C-)#(O+)" / "iso0_lat0"
+        tmp_path / "reactions" / "adsorption" / smiles_to_dirname("[C-]#[O+]") / "iso0_lat0"
     ).is_dir()
     assert (
-        tmp_path / "reactions" / "adsorption" / "(O)" / "iso0_lat0"
+        tmp_path / "reactions" / "adsorption" / smiles_to_dirname("[O]") / "iso0_lat0"
     ).is_dir()
     assert w.n_unique_reactions == 2
 
@@ -1119,7 +1120,7 @@ def test_reaction_writer_persists_gas_free_energy(tmp_path, stub_reaction):
     )
     w.close()
 
-    folder = tmp_path / "reactions" / "adsorption" / "(C-)#(O+)" / "iso0_lat0"
+    folder = tmp_path / "reactions" / "adsorption" / smiles_to_dirname("[C-]#[O+]") / "iso0_lat0"
     rxn_meta = json.loads((folder / "reaction.json").read_text())
     assert rxn_meta["free_energies_ev"]["g_gas"] == -13.5
 
@@ -1157,7 +1158,7 @@ def test_reaction_writer_records_adsorption_free_energy_event_fields(
     resolved = resolve_event_definition(payload, definitions, require_definition=True)
     assert "ΔG" in resolved["description"]
 
-    folder = tmp_path / "reactions" / "adsorption" / "(C-)#(O+)" / "iso0_lat0"
+    folder = tmp_path / "reactions" / "adsorption" / smiles_to_dirname("[C-]#[O+]") / "iso0_lat0"
     rxn_meta = json.loads((folder / "reaction.json").read_text())
     vib = rxn_meta["vibrations"]["occupied"]
     assert set(vib) == {"real_ev", "imag_ev", "zpe_ev", "entropy_ev_per_k"}
@@ -1202,7 +1203,7 @@ def test_reaction_writer_records_diffusion_direction(tmp_path):
     resolved = resolve_event_definition(payload, definitions, require_definition=True)
     assert "dir=b_to_a" in resolved["description"]
 
-    folder = tmp_path / "reactions" / "diffusion" / "(O)" / "diff_iso3_lat4"
+    folder = tmp_path / "reactions" / "diffusion" / smiles_to_dirname("[O]") / "diff_iso3_lat4"
     rxn_meta = json.loads((folder / "reaction.json").read_text())
     assert "dir=b_to_a" in rxn_meta["description"]
     assert rxn_meta["last_event"]["direction"] == "b_to_a"
@@ -1282,7 +1283,7 @@ def test_invalid_diffusion_record_tolerates_missing_energies(tmp_path):
         tmp_path
         / "diagnostics"
         / "invalid_diffusion"
-        / "(O)"
+        / smiles_to_dirname("[O]")
         / "diff_iso1_lat2"
     )
     payload = json.loads((folder / "reaction.json").read_text())
@@ -1320,7 +1321,7 @@ def test_invalid_diffusion_record_tolerates_missing_energies(tmp_path):
     definition = definitions[payload["reaction_id"]]
     assert definition["valid"] is False
     assert definition["folder"] == (
-        "diagnostics/invalid_diffusion/(O)/diff_iso1_lat2"
+        f"diagnostics/invalid_diffusion/{smiles_to_dirname('[O]')}/diff_iso1_lat2"
     )
 
 
@@ -1352,7 +1353,7 @@ def test_invalid_adsorption_record_writes_last_known_endpoint(tmp_path):
         tmp_path
         / "diagnostics"
         / "invalid_adsorption"
-        / "(H)"
+        / smiles_to_dirname("[H]")
         / "ads_iso2_lat3"
     )
     assert (folder / "occupied_initial.extxyz").is_file()

@@ -65,6 +65,9 @@ def test_smiles_to_atoms_fallback_embedding_is_deterministic_and_checked(monkeyp
     monkeypatch.setitem(sys.modules, "rdkit", rdkit)
     monkeypatch.setitem(sys.modules, "rdkit.Chem", chem)
     monkeypatch.setitem(sys.modules, "rdkit.Chem.AllChem", all_chem)
+    monkeypatch.setattr(
+        "autokmc.species.reactant._molecule_from_smiles", lambda *_a, **_k: FakeMol(),
+    )
 
     with pytest.raises(ValueError, match="random fallback embedder failed"):
         _smiles_to_atoms("[C]", random_seed=12345)
@@ -75,15 +78,16 @@ def test_smiles_to_atoms_fallback_embedding_is_deterministic_and_checked(monkeyp
 
 
 def test_dummy_stripping_preserves_radical_style_for_reactant_cleanup():
-    assert _strip_dummy_atoms_from_smiles("[CH3]*") == "[CH3]"
-    assert _strip_dummy_atoms_from_smiles("*[OH]") == "[OH]"
+    assert _strip_dummy_atoms_from_smiles("[CH3]*") == "[H][C]([H])[H]"
+    assert _strip_dummy_atoms_from_smiles("*[OH]") == "[H][O]"
 
 
 def test_bond_smiles_canonicalization_preserves_explicit_atom_inventory():
     assert canonical_atom_inventory_smiles("[OH]") == "[H][O]"
     assert canonical_atom_inventory_smiles("[H][O]") == "[H][O]"
     assert canonical_atom_inventory_smiles("[H]O[O]") == "[H]O[O]"
-    assert canonical_atom_inventory_smiles("[O]O") == "[O]O"
+    assert canonical_atom_inventory_smiles("[O]O") == "[O][O]"
+    assert canonical_atom_inventory_smiles("[O]O", add_hydrogens=True) == "[H]O[O]"
 
 
 def test_h_plus_o2_coupling_preserves_hydrogen_through_bond_templates():
@@ -143,7 +147,7 @@ def test_species_package_exports_public_api():
     assert callable(species.build_reactant)
     assert callable(species.get_all_fragments)
     assert callable(species.combine_fragments)
-    assert species.smiles_to_dirname("[C]/[O]") == "(C)_(O)"
+    assert species.smiles_to_dirname("[C]/[O]").startswith("(C)_(O)-")
 
 
 def test_methane_anchor_atoms_exclude_buried_carbon():
@@ -245,7 +249,7 @@ def test_gas_cache_dir_uses_safe_smiles_label(monkeypatch, tmp_path):
         vib_cache_root=str(tmp_path),
     )
 
-    assert captured["cache_dir"].endswith("gas_(C)_(O)")
+    assert captured["cache_dir"].endswith(f"gas_{smiles_to_dirname('[C]/[O]')}")
     assert reactant.thermo_meta["symmetry_number_source"] == "inferred"
     assert reactant.thermo_meta["point_group"] == "C_inf_v"
     assert reactant.thermo_meta["symmetry_tolerance"] == pytest.approx(0.3)

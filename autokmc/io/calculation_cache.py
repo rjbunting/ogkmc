@@ -63,7 +63,7 @@ _GRAPH_FILENAME = "reaction_graph.json"
 _INDEX_FILENAME = "index.sqlite3"
 _DATABASE_MANIFEST_FILENAME = "database_manifest.json"
 _GEOMETRY_FINGERPRINT_SCHEMA = "autokmc-local-geometry-v2"
-_SCIENTIFIC_INPUT_FINGERPRINT_SCHEMA = "autokmc-scientific-input-v2"
+_SCIENTIFIC_INPUT_FINGERPRINT_SCHEMA = "autokmc-scientific-input-v3"
 _INPUT_FRAME_FINGERPRINT_SCHEMA = "autokmc-input-coordinate-frame-v2"
 
 # These values identify an enumeration in one AutoKMC run, not a scientific
@@ -844,7 +844,9 @@ def _scientific_input_payload(
         if value in (None, ""):
             value = inputs.get(key)
         if value not in (None, ""):
-            semantics[key] = value
+            from autokmc.species.smiles import canonical_smiles
+
+            semantics[key] = canonical_smiles(value)
     return {
         "schema": _SCIENTIFIC_INPUT_FINGERPRINT_SCHEMA,
         "semantics": semantics,
@@ -1006,13 +1008,16 @@ def calculation_cache_key(
     inputs: Mapping[str, Any],
 ) -> str:
     """Hash the exact calculation request for fast same-run lookup."""
+    from autokmc.species.smiles import SMILES_IDENTITY_VERSION
+
     return _hash_json(
         {
             "schema": REACTION_DATABASE_SCHEMA,
+            "smiles_identity_version": SMILES_IDENTITY_VERSION,
             "kind": str(kind),
-            "identity": identity,
+            "identity": _normalise_smiles_fields(identity),
             "parameters": parameters,
-            "inputs": inputs,
+            "inputs": _normalise_smiles_fields(inputs),
         }
     )
 
@@ -1066,6 +1071,22 @@ def make_calculation_record(
     }
 
 
+def _normalise_smiles_fields(value: Any) -> Any:
+    """Normalize only declared chemical labels, preserving all other inputs."""
+    from autokmc.species.smiles import canonical_smiles
+
+    if isinstance(value, Mapping):
+        return {
+            key: canonical_smiles(item)
+            if key in _SEMANTIC_INPUT_FIELDS and isinstance(item, str)
+            else _normalise_smiles_fields(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_normalise_smiles_fields(item) for item in value]
+    return value
+
+
 def _operation_key(operation: Mapping[str, Any]) -> str:
     # Run-local class numbers and prose labels cannot be portable lookup keys.
     semantic_keys = ("reactant_smiles", "smiles_a", "smiles_b", "smiles_c")
@@ -1080,7 +1101,12 @@ def _operation_key(operation: Mapping[str, Any]) -> str:
             for key, value in operation.items()
             if key not in {"iso_class", "lateral_class", "label", "reaction"}
         }
-    return _hash_json(semantic)
+    from autokmc.species.smiles import SMILES_IDENTITY_VERSION
+
+    return _hash_json({
+        "smiles_identity_version": SMILES_IDENTITY_VERSION,
+        "semantics": _normalise_smiles_fields(semantic),
+    })
 
 
 def _record_id(cache_key: str, created_utc: str) -> str:
