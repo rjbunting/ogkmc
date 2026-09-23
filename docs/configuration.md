@@ -329,8 +329,8 @@ Numerical NEB non-convergence is likewise not a chemical stability result.
 AutoKMC preserves the last-known band, leaves the lateral class undecided, and
 omits only that reaction from the current rate-index sweep. Other valid
 reactions remain available, so one exhausted optimizer cannot prevent the KMC
-loop from starting. The undecided class is retried when its member is later
-recomputed, and its failed structures are written as retryable diagnostics.
+loop from starting. The failure reason suppresses automatic retries, including
+after checkpoint resume, and the failed structures remain available as diagnostics.
 Endpoint or transition-state topology failures remain chemically invalid and
 are excluded as before. If an optional bare-band warm start does not converge,
 the target lateral NEB instead falls back to its configured interpolation while
@@ -487,6 +487,15 @@ bonds cause `ReactantConnectivityError`; the diagnostic reports atom-index
 pairs and the applied `constants.neighbor_list_multiplier`. Atom counts,
 elements, and isotope masses must also agree. `relax_in_gas: false` skips ASE
 optimization but retains this validation of the generated structure.
+
+If gas-phase relaxation changes connectivity, `ReactantGasUnstableError`
+(a `ReactantConnectivityError` subclass) identifies a chemically unstable
+species. Initial leaf discovery and runtime expansion exclude that species
+and every template requiring it, record `unstable_gas` in the bond registry,
+and continue without retrying it, including after checkpoint resume.
+Explicitly configured feed species still fail validation instead of silently
+changing the requested feed. Unrelaxed geometry errors, atom-identity errors,
+and calculator/backend failures are not classified as gas instability.
 
 Feed reactants define which desorbing gas species are excluded from the strict
 post-processing product definition. Species auto-built from bond templates

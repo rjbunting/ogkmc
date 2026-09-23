@@ -554,6 +554,10 @@ def _lateral_node_order(G: nx.Graph, lateral_class, excluded) -> list[int]:
     seeds = {
         int(node) for node, data in graph.nodes(data=True)
         if data.get("type") == "adsorbate" and node not in excluded
+        # The class graph may describe another symmetry-equivalent member.
+        # Its endpoint IDs then differ from the current excluded IDs, but
+        # those endpoints must never become third-party spectators.
+        and not data.get("endpoint_role")
     } if graph is not None else set()
     return sorted(_expand_to_full_placement(G, seeds) - set(excluded))
 
@@ -1185,6 +1189,7 @@ def check_site_stability(
         and free_energy_temperature_k is not None
     )
     cache_parameters = {
+        "spectator_selection_policy": "exclude_representative_endpoints_v2",
         "fmax": float(fmax),
         "max_steps": int(max_steps),
         "optimizer": str(optimizer).strip().lower(),

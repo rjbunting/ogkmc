@@ -256,8 +256,11 @@ class SpeciesNetworkBuilder:
         reactant_by_smiles: dict,
         sites_by_smiles: dict[str, list],
     ) -> None:
+        from autokmc.kmc.expansion import (
+            filter_unavailable_templates, initialise_bond_registry, record_unstable_gas_species,
+        )
         from autokmc.sites.adsorbate import find_adsorbate_sites
-        from autokmc.species.reactant import build_reactant
+        from autokmc.species.reactant import build_reactant, ReactantGasUnstableError
 
         leaves: list[str] = []
         for template in templates:
@@ -283,29 +286,36 @@ class SpeciesNetworkBuilder:
             )
 
         site_kwargs = configured_adsorbate_site_kwargs(self.cfg)
+        unavailable: set[str] = set()
         for canonical in leaves:
             if self.verbose:
                 print(
                     f"[autokmc]   leaf species: {canonical!r} — building "
                     "Reactant + adsorbate sites…"
                 )
-            leaf = build_reactant(
-                canonical,
-                add_hydrogens=False,
-                calculator=self.calculator_resource,
-                nl_mult=self.cfg.constants.neighbor_list_multiplier,
-                random_seed=self.cfg.kmc.random_seed,
-                free_energy_options=(
-                    self.thermo_runtime.options
-                    if self.cfg.free_energy.enabled
-                    else None
-                ),
-                free_energy_temperature_k=self.cfg.kmc.temperature_k,
-                partial_pressure_bar=0.0,
-                vib_cache_root=self.thermo_runtime.vibration_cache_root,
-                optimizer=self.cfg.optimization.optimizer,
-                optimizer_kwargs=self.cfg.optimization.optimizer_kwargs,
-            )
+            try:
+                leaf = build_reactant(
+                    canonical,
+                    add_hydrogens=False,
+                    calculator=self.calculator_resource,
+                    nl_mult=self.cfg.constants.neighbor_list_multiplier,
+                    random_seed=self.cfg.kmc.random_seed,
+                    free_energy_options=(
+                        self.thermo_runtime.options
+                        if self.cfg.free_energy.enabled
+                        else None
+                    ),
+                    free_energy_temperature_k=self.cfg.kmc.temperature_k,
+                    partial_pressure_bar=0.0,
+                    vib_cache_root=self.thermo_runtime.vibration_cache_root,
+                    optimizer=self.cfg.optimization.optimizer,
+                    optimizer_kwargs=self.cfg.optimization.optimizer_kwargs,
+                )
+            except ReactantGasUnstableError as exc:
+                reg = initialise_bond_registry(self.graph, reactants=[])
+                record_unstable_gas_species(reg, canonical, exc)
+                unavailable.add(canonical)
+                continue
             reactants.append(leaf)
             reactant_by_smiles[canonical] = leaf
             leaf_sites = find_adsorbate_sites(
@@ -325,6 +335,9 @@ class SpeciesNetworkBuilder:
                     f"[autokmc]   leaf species {canonical!r}: {n_iso} stable "
                     f"adsorbate iso-class(es), {n_members} member placement(s)"
                 )
+        if unavailable:
+            reg = initialise_bond_registry(self.graph, reactants=[])
+            templates[:] = filter_unavailable_templates(reg, templates, unavailable)
 
 
 __all__ = ["SpeciesNetworkBuilder", "derive_configured_bond_templates"]

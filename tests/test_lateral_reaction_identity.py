@@ -89,6 +89,46 @@ def _diffusion_system(nitrogen_sites=(6, 7)):
     return graph, diffusion
 
 
+@pytest.mark.parametrize("kind", ["diffusion", "bond"])
+def test_reused_bare_class_does_not_add_representative_endpoints_as_spectators(kind):
+    from autokmc.sites.bond import BondReactionSite, BondReactionTemplate
+    from autokmc.sites.stability.bond import get_bond_bare_lateral, _build_bond_atoms
+    from autokmc.sites.stability.diffusion import (
+        get_diffusion_bare_lateral, _build_diffusion_atoms,
+    )
+
+    graph, diffusion = _diffusion_system()
+    graph.graph.update(cell=np.eye(3) * 30, pbc=np.ones(3, dtype=bool))
+    for index, (_, data) in enumerate(graph.nodes(data=True)):
+        data["position"] = np.array([index, 0, 0], dtype=float)
+    if kind == "diffusion":
+        site = diffusion
+        classify = get_diffusion_bare_lateral
+    else:
+        site = BondReactionSite(
+            template=BondReactionTemplate("[C]", "[C]", "[C][C]"), iso_class=0,
+            members=[(*member, None, 0) for member in diffusion.members],
+            member_node_ids=[(*nodes, []) for nodes in diffusion.member_node_ids],
+            gas_product=True,
+        )
+        classify = get_bond_bare_lateral
+    representative = classify(graph, site, 0, n_shells=1)
+    reused = classify(graph, site, 1, n_shells=1)
+    assert reused is representative
+    if kind == "diffusion":
+        atoms, n_slab, n_lat, *_ = _build_diffusion_atoms(
+            graph, reused, [14], [15], endpoint_position="a",
+        )
+        n_reacting = 1
+    else:
+        atoms, n_slab, n_lat, *_ = _build_bond_atoms(
+            graph, reused, [14], [15], [], endpoint="ab",
+        )
+        n_reacting = 2
+    assert n_lat == 0
+    assert len(atoms) == n_slab + n_reacting
+
+
 @pytest.mark.parametrize("use_free_energy", [False, True])
 @pytest.mark.parametrize("nitrogen_sites", [(6, 7), (3, 7)])
 def test_diffusion_rates_preserve_endpoint_orientation(

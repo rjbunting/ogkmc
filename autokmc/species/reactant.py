@@ -92,9 +92,12 @@ class ReactantDefinitionError(ValueError):
 class ReactantConnectivityError(RuntimeError):
     """The generated gas structure does not represent the requested molecule.
 
-    This is a geometry/calculator failure, not a permanently invalid SMILES.
-    Runtime species expansion therefore retains its normal retry behavior.
+    Unrelaxed geometry or atom-identity errors remain explicit failures.
     """
+
+
+class ReactantGasUnstableError(ReactantConnectivityError):
+    """Gas relaxation changed connectivity; exclude this species from discovery."""
 
 
 @dataclass
@@ -185,6 +188,7 @@ def _molecule_from_smiles(smiles: str, *, add_hydrogens: bool):
 
 def _validate_reactant_graph(
     graph: nx.Graph, smiles: str, *, add_hydrogens: bool, nl_mult: float,
+    relaxed: bool = False,
 ) -> None:
     """Require the produced graph to match the intended indexed bond graph.
 
@@ -219,7 +223,8 @@ def _validate_reactant_graph(
     missing = sorted(expected_bonds - actual_bonds)
     extra = sorted(actual_bonds - expected_bonds)
     if missing or extra:
-        raise ReactantConnectivityError(
+        error_type = ReactantGasUnstableError if relaxed else ReactantConnectivityError
+        raise error_type(
             f"Gas structure for {smiles!r} does not match its requested connectivity "
             f"(nl_mult={nl_mult:g}): missing bonds {missing!r}; extra bonds {extra!r}. "
             "Bond pairs use zero-based indices in the constructed molecule. "
@@ -573,6 +578,9 @@ def build_reactant(
 
     Raises
     ------
+    ReactantGasUnstableError
+        Gas-phase relaxation changed the requested bond connectivity. Network
+        discovery excludes this species and templates requiring it.
     ReactantConnectivityError
         The final geometry's graph differs from the requested atom and bond
         inventory. Validation also runs when ASE relaxation is disabled or no
@@ -662,6 +670,7 @@ def build_reactant(
     graph = build_graph(atoms, nl_mult=nl_mult)
     _validate_reactant_graph(
         graph, smiles, add_hydrogens=add_hydrogens, nl_mult=nl_mult,
+        relaxed=calculator is not None and relax,
     )
 
     reactant = Reactant(

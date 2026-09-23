@@ -93,6 +93,7 @@ from autokmc.sites.identity import SiteId, site_identifier
 from autokmc.species.reactant import (
     Reactant,
     ReactantDefinitionError,
+    ReactantGasUnstableError,
     build_reactant,
 )
 from autokmc.io.calculators import CalculatorConfigError
@@ -162,6 +163,50 @@ def _failure_record(reg: dict, smi: str, stage: str) -> dict:
     return by_species.setdefault(stage, {"attempts": 0})
 
 
+def record_unstable_gas_species(
+    reg: dict, smi: str, error: ReactantGasUnstableError, *, attempts: int = 1,
+) -> None:
+    """Persist a chemical exclusion shared by initial and runtime discovery."""
+    _failure_record(reg, smi, "build_reactant").update(
+        attempts=attempts, status="unstable_gas",
+        error_type=type(error).__name__, error=str(error),
+    )
+    reg["species"][smi] = None
+    reg["adsorbate_sites"][smi] = []
+    _log.warning("Excluding gas-unstable species %r from the reaction network: %s", smi, error)
+
+
+def filter_unavailable_templates(
+    reg: dict, templates: list[BondReactionTemplate], unavailable_species: set[str],
+) -> list[BondReactionTemplate]:
+    """Exclude and record templates requiring rejected species."""
+    viable = []
+    for template in templates:
+        required = {template.smiles_a, template.smiles_b, template.smiles_c}
+        invalid = sorted(required & unavailable_species)
+        if not invalid:
+            viable.append(template)
+            continue
+        unstable = any(
+            reg["expansion_failures"].get(smi, {}).get("build_reactant", {}).get("status")
+            == "unstable_gas" for smi in invalid
+        )
+        diagnostic = {
+            "smiles_a": template.smiles_a,
+            "smiles_b": template.smiles_b,
+            "smiles_c": template.smiles_c,
+            "reason": "unstable_gas_species" if unstable else "permanently_invalid_species",
+            "species": invalid,
+        }
+        if diagnostic not in reg["invalid_templates"]:
+            reg["invalid_templates"].append(diagnostic)
+        _log.warning(
+            "Excluding template %s + %s <-> %s: required species were excluded: %s",
+            template.smiles_a, template.smiles_b, template.smiles_c, invalid,
+        )
+    return viable
+
+
 def _retry_expansion_operation(
     reg: dict,
     smi: str,
@@ -172,8 +217,8 @@ def _retry_expansion_operation(
 ) -> _T:
     """Run an expansion operation with bounded retries and diagnostics.
 
-    Deterministic molecular-definition failures and configuration/dependency
-    errors remain explicit and are not retried.  Other failures are retried
+    Gas instability, molecular-definition failures, and configuration/dependency
+    errors remain explicit and are not retried. Other failures are retried
     because calculator services and filesystem-backed caches can fail
     transiently during a long run.
     """
@@ -188,6 +233,11 @@ def _retry_expansion_operation(
     for local_attempt in range(1, max_attempts + 1):
         try:
             result = operation()
+        except ReactantGasUnstableError as exc:
+            record_unstable_gas_species(
+                reg, smi, exc, attempts=prior_attempts + local_attempt,
+            )
+            raise
         except ReactantDefinitionError as exc:
             record = _failure_record(reg, smi, stage)
             record.update(
@@ -482,8 +532,8 @@ def _ensure_species_known(
 ) -> bool:
     """Build a Reactant + find adsorbate sites for *smi* if not already known.
 
-    Returns ``True`` on success and ``False`` only for a deterministic,
-    permanently invalid molecular definition.  Runtime failures are retried
+    Returns ``True`` on success and ``False`` for an invalid molecular
+    definition or gas-unstable species. Runtime failures are retried
     and then raised as :class:`SpeciesExpansionError`.
     """
     if smi in reg["species"]:
@@ -495,7 +545,7 @@ def _ensure_species_known(
                 .get("build_reactant", {})
                 .get("status")
             )
-            if status == "permanent_invalid":
+            if status in {"permanent_invalid", "unstable_gas"}:
                 return False
             # Legacy checkpoints used ``None`` for every failure, including
             # transient backend errors.  Retry those records instead of
@@ -538,6 +588,8 @@ def _ensure_species_known(
                     optimizer_kwargs=optimizer_kwargs,
                 ),
             )
+        except ReactantGasUnstableError:
+            return False
         except ReactantDefinitionError as exc:
             _log.error(
                 "Runtime expansion rejected species %r permanently: %s",
@@ -921,7 +973,7 @@ def expand_bond_sites_for_new_species(
     # First, build the new reactant and its surface sites.
     built_ok = ensure_species_known(cs)
     if not built_ok:
-        # Only deterministic molecular-definition failures reach this path.
+        # Invalid definitions and chemically unstable gases reach this path.
         # They are permanently classified in ``expansion_failures`` and can
         # safely be excluded without hiding a transient backend problem.
         reg["expanded_species"].add(cs)
@@ -1030,35 +1082,7 @@ def expand_bond_sites_for_new_species(
                     unavailable_species.add(smi)
 
     if unavailable_species:
-        viable_templates: list[BondReactionTemplate] = []
-        for template in new_tpls:
-            required = {
-                template.smiles_a,
-                template.smiles_b,
-                template.smiles_c,
-            }
-            invalid = sorted(required & unavailable_species)
-            if not invalid:
-                viable_templates.append(template)
-                continue
-            diagnostic = {
-                "smiles_a": template.smiles_a,
-                "smiles_b": template.smiles_b,
-                "smiles_c": template.smiles_c,
-                "reason": "permanently_invalid_species",
-                "species": invalid,
-            }
-            if diagnostic not in reg["invalid_templates"]:
-                reg["invalid_templates"].append(diagnostic)
-            _log.error(
-                "Runtime template %s + %s <-> %s is unavailable because "
-                "species definitions are permanently invalid: %s",
-                template.smiles_a,
-                template.smiles_b,
-                template.smiles_c,
-                invalid,
-            )
-        new_tpls = viable_templates
+        new_tpls = filter_unavailable_templates(reg, new_tpls, unavailable_species)
 
     if find_diffusion:
         _ensure_species_diffusion(

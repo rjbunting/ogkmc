@@ -1333,6 +1333,7 @@ def check_diffusion_stability(
         and free_energy_temperature_k is not None
     )
     cache_parameters = {
+        "spectator_selection_policy": "exclude_representative_endpoints_v2",
         "fmax": float(fmax),
         "max_steps": int(max_steps),
         "optimizer": str(optimizer).strip().lower(),

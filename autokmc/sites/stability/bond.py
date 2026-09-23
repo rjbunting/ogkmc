@@ -2595,6 +2595,7 @@ def check_bond_site_stability(
         and free_energy_temperature_k is not None
     )
     cache_parameters = {
+        "spectator_selection_policy": "exclude_representative_endpoints_v2",
         "ts_energy_policy": "accept_endpoint_like_with_kmc_floor_v1",
         "fmax": float(fmax),
         "max_steps": int(max_steps),

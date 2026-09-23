@@ -374,6 +374,39 @@ def test_network_builder_keeps_stability_before_triple_pruning(
     assert graph.graph["bond_reaction_sites"] == [second]
 
 
+def test_initial_network_excludes_gas_unstable_leaves(tmp_path, monkeypatch):
+    from autokmc.species.reactant import build_reactant, ReactantGasUnstableError
+    from autokmc.sites.bond import BondReactionTemplate
+    graph = nx.Graph()
+    reactants = [build_reactant(smiles, relax=False) for smiles in ("[H]", "[O]")]
+    valid = BondReactionTemplate("[H]", "[H]", "[H][H]")
+    invalid = BondReactionTemplate("[O]", "[O]", "O=O")
+    attempted = []
+    enumerated = []
+    def build(smiles, **kwargs):
+        attempted.append(smiles)
+        if smiles == "O=O":
+            raise ReactantGasUnstableError("missing bonds [(0, 1)]")
+        return build_reactant(smiles, relax=False)
+    def enumerate_sites(graph, sites, templates, **kwargs):
+        enumerated.extend(templates)
+        return []
+    monkeypatch.setattr("autokmc.species.reactant.build_reactant", build)
+    monkeypatch.setattr("autokmc.sites.adsorbate.find_adsorbate_sites", lambda *_a, **_k: [])
+    monkeypatch.setattr("autokmc.sites.bond.find_bond_sites", enumerate_sites)
+    cfg = RunConfig(bond=BondCfg(enabled=True))
+    network = _builder(
+        cfg, tmp_path, graph, template_builder=lambda *_a: [invalid, valid],
+    ).prepare(reactants, [])
+    assert enumerated == [valid]
+    assert attempted == ["O=O", "[H][H]"]
+    assert {r.smiles for r in network.reactants} == {"[H]", "[O]", "[H][H]"}
+    registry = graph.graph["bond_registry"]
+    assert registry["species"]["O=O"] is None
+    assert registry["expansion_failures"]["O=O"]["build_reactant"]["status"] == "unstable_gas"
+    assert registry["invalid_templates"][0]["reason"] == "unstable_gas_species"
+
+
 def test_network_builder_restores_checkpoint_without_discovery(tmp_path):
     graph = nx.Graph()
     state = SimpleNamespace(

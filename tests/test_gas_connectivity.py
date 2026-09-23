@@ -1,6 +1,7 @@
 """A force-converged gas reference must still represent its requested molecule."""
 
 from types import SimpleNamespace
+import pickle
 
 from ase import Atoms
 from ase.calculators.calculator import Calculator, all_changes
@@ -9,7 +10,7 @@ import numpy as np
 import pytest
 
 from autokmc.kmc.expansion import SpeciesExpansionError, expand_bond_sites_for_new_species
-from autokmc.species import ReactantConnectivityError, build_reactant
+from autokmc.species import ReactantConnectivityError, ReactantGasUnstableError, build_reactant
 
 
 class TargetMinimum(Calculator):
@@ -58,6 +59,7 @@ def test_real_relaxation_rejects_changed_chemistry_before_thermochemistry(
     assert f"missing bonds {missing}" in str(caught.value)
     assert f"extra bonds {extra}" in str(caught.value)
     assert smiles in str(caught.value)
+    assert isinstance(caught.value, ReactantGasUnstableError)
 
 
 @pytest.mark.parametrize("smiles", ["O=O", "[C-]#[O+]", "O", "[O]", "[2H][H]"])
@@ -92,8 +94,9 @@ def test_incorrect_generated_geometry_is_rejected_without_ase_relaxation(monkeyp
         "autokmc.species.reactant._optimise",
         lambda *_a, **_k: pytest.fail("ASE relaxation should be disabled"),
     )
-    with pytest.raises(ReactantConnectivityError, match="missing bonds"):
+    with pytest.raises(ReactantConnectivityError, match="missing bonds") as caught:
         build_reactant("O=O", relax=False, calculator=TargetMinimum() if with_calculator else None)
+    assert not isinstance(caught.value, ReactantGasUnstableError)
 
 
 @pytest.mark.parametrize("wrong,smiles,match", [
@@ -112,19 +115,70 @@ def test_configured_cutoff_is_used_without_silently_replacing_the_produced_graph
         build_reactant("O=O", nl_mult=0.1, relax=False)
 
 
-def test_runtime_expansion_does_not_register_or_permanently_discard_wrong_gas(monkeypatch):
+def test_runtime_expansion_excludes_gas_unstable_species_across_restart(monkeypatch):
     graph = nx.Graph()
     monkeypatch.setattr(
         "autokmc.kmc.expansion.find_adsorbate_sites",
         lambda *_a, **_k: pytest.fail("invalid gas reached site enumeration"),
     )
-    with pytest.raises(SpeciesExpansionError, match="failed after 3 attempts") as caught:
-        expand_bond_sites_for_new_species(
-            graph, "O=O", calculator=TargetMinimum([[6, 6, 6], [10, 6, 6]]),
-            include_dissociation=False, include_coupling=False,
-        )
-    assert isinstance(caught.value.__cause__, ReactantConnectivityError)
+    assert expand_bond_sites_for_new_species(
+        graph, "O=O", calculator=TargetMinimum([[6, 6, 6], [10, 6, 6]]),
+        include_dissociation=False, include_coupling=False,
+    ) == []
+    registry = graph.graph["bond_registry"]
+    assert registry["species"]["O=O"] is None
+    assert registry["adsorbate_sites"]["O=O"] == []
+    assert "O=O" in registry["expanded_species"]
+    record = registry["expansion_failures"]["O=O"]["build_reactant"]
+    assert record["status"] == "unstable_gas"
+    assert record["attempts"] == 1
+    restored = pickle.loads(pickle.dumps(graph))
+    monkeypatch.setattr(
+        "autokmc.kmc.expansion.build_reactant",
+        lambda *_a, **_k: pytest.fail("gas-unstable species was rebuilt"),
+    )
+    assert expand_bond_sites_for_new_species(restored, "O=O", calculator=None) == []
+
+
+def test_unrelaxed_geometry_failure_is_not_permanently_classified(monkeypatch):
+    graph = nx.Graph()
+    def fail(*_args, **_kwargs):
+        raise ReactantConnectivityError("invalid generated geometry")
+    monkeypatch.setattr("autokmc.kmc.expansion.build_reactant", fail)
+    with pytest.raises(SpeciesExpansionError):
+        expand_bond_sites_for_new_species(graph, "O=O", calculator=None)
     registry = graph.graph["bond_registry"]
     assert "O=O" not in registry["species"]
-    assert "O=O" not in registry["expanded_species"]
-    assert registry["expansion_failures"]["O=O"]["build_reactant"]["status"] == "retry_exhausted"
+    assert registry["expansion_failures"]["O=O"]["build_reactant"]["attempts"] == 3
+
+
+def test_runtime_leaf_rejection_filters_only_affected_templates(monkeypatch):
+    from autokmc.kmc import expansion
+    from autokmc.sites.bond import BondReactionTemplate
+    graph = nx.Graph()
+    valid = BondReactionTemplate("[H]", "[H]", "[H][H]")
+    invalid = BondReactionTemplate("[H]O[O]", "O=O", "[H]OOO[O]")
+    builds = []
+    enumerated = []
+    def build(smiles, **kwargs):
+        builds.append(smiles)
+        if smiles == invalid.smiles_c:
+            raise ReactantGasUnstableError("missing bonds [(2, 3)]")
+        return build_reactant(smiles, add_hydrogens=False, relax=False)
+    monkeypatch.setattr(expansion, "build_reactant", build)
+    monkeypatch.setattr(expansion, "find_adsorbate_sites", lambda *_a, **_k: [])
+    monkeypatch.setattr(expansion, "derive_dissociation_templates", lambda *_a, **_k: [invalid, valid])
+    def enumerate_sites(graph, sites, templates, **kwargs):
+        enumerated.extend(templates)
+        return []
+    monkeypatch.setattr(expansion, "find_bond_sites", enumerate_sites)
+    assert expand_bond_sites_for_new_species(
+        graph, "[H]O[O]", calculator=None, include_coupling=False,
+    ) == []
+    assert enumerated == [valid]
+    assert builds.count(invalid.smiles_c) == 1
+    registry = graph.graph["bond_registry"]
+    assert registry["species"][invalid.smiles_c] is None
+    assert registry["invalid_templates"][0]["reason"] == "unstable_gas_species"
+    assert invalid.smiles_c not in {key[2] for key in registry["templates"]}
+    assert "[H]O[O]" in registry["expanded_species"]
