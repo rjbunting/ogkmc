@@ -55,29 +55,6 @@ python -m pip install -e ".[ml]"
 Production configs may also require calculator-specific packages, model files,
 GPU drivers, or login tokens. OGKMC does not bundle those external models.
 
-## Upgrading from AutoKMC
-
-The repository, Python distribution, import namespace, and command are now
-`ogkmc`. Remove the previous installation and reinstall from this checkout:
-
-```bash
-python -m pip uninstall autokmc
-python -m pip install -e ".[cli,test]"
-```
-
-Update Python imports, shell scripts, and calculator factory paths from
-`autokmc` to `ogkmc`. For example, the UMA helper is now
-`ogkmc.io.fairchem.get_predict_unit_on_device`. No legacy command or import
-alias is installed. The default output directory is now `ogkmc_run`.
-
-Use a fresh output directory and calculation cache after upgrading. Checkpoints
-contain Python module paths and a source fingerprint; existing AutoKMC
-checkpoints cannot be resumed under OGKMC. Persisted artifact identifiers,
-EXTXYZ metadata, and database fingerprints also use the new namespace. Keep
-the matching AutoKMC installation to resume or process old runs; this rename
-does not migrate previously written data. Configuration sections and scientific
-settings are unchanged.
-
 ## Command Line
 
 After installation, the main commands are:
