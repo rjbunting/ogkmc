@@ -5,11 +5,11 @@ from __future__ import annotations
 import networkx as nx
 import numpy as np
 
-import autokmc.sites.bond as bond_module
-from autokmc.sites.adsorbate import AdsorbateSite
-from autokmc.sites.bond import BondReactionTemplate, find_bond_sites
-from autokmc.sites.identity import site_identifier
-from autokmc.sites.stability.bond import check_bond_site_lateral
+import ogkmc.sites.bond as bond_module
+from ogkmc.sites.adsorbate import AdsorbateSite
+from ogkmc.sites.bond import BondReactionTemplate, find_bond_sites
+from ogkmc.sites.identity import site_identifier
+from ogkmc.sites.stability.bond import check_bond_site_lateral
 
 
 _LEGACY_PATH_IDENTIFIERS = [

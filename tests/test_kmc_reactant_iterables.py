@@ -5,12 +5,12 @@ import numpy as np
 import pytest
 from ase import Atoms
 
-from autokmc.kmc.engine import run_kmc, run_kmc_steps
-from autokmc.kmc.models import KMCRunRequest, KMCSettings, KMCSystem
-from autokmc.kmc.restart import reactants_for_checkpoint
-from autokmc.sites.adsorbate import AdsorbateSite
-from autokmc.sites.stability.adsorption import check_adsorbate_site_lateral
-from autokmc.species.reactant import Reactant
+from ogkmc.kmc.engine import run_kmc, run_kmc_steps
+from ogkmc.kmc.models import KMCRunRequest, KMCSettings, KMCSystem
+from ogkmc.kmc.restart import reactants_for_checkpoint
+from ogkmc.sites.adsorbate import AdsorbateSite
+from ogkmc.sites.stability.adsorption import check_adsorbate_site_lateral
+from ogkmc.species.reactant import Reactant
 
 
 def _run_feed(pressure, container, entrypoint="legacy"):

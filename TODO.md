@@ -1,4 +1,4 @@
-# AutoKMC Roadmap
+# OGKMC Roadmap
 
 This file tracks unresolved scientific or architectural work. Implemented
 behavior is documented under [`docs/`](docs/index.md).

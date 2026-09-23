@@ -10,8 +10,8 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
-import autokmc.io.calculation_cache as calculation_cache
-from autokmc.io.calculators import (
+import ogkmc.io.calculation_cache as calculation_cache
+from ogkmc.io.calculators import (
     CalculatorCfg,
     CalculatorConfigError,
     CalculatorPool,
@@ -20,7 +20,7 @@ from autokmc.io.calculators import (
     calculator_batch_context,
     invalidate_calculator_identity,
 )
-from autokmc.io.calculation_cache import calculator_identity
+from ogkmc.io.calculation_cache import calculator_identity
 
 
 class _OpaqueCalculatorWithToDict:
@@ -316,7 +316,7 @@ def test_build_fairchem_predictors_on_distinct_cuda_devices(monkeypatch):
             factory="fairchem.core.FAIRChemCalculator",
             factory_kwargs={
                 "predict_unit": {
-                    "factory": "autokmc.io.fairchem.get_predict_unit_on_device",
+                    "factory": "ogkmc.io.fairchem.get_predict_unit_on_device",
                     "factory_kwargs": {
                         "name_or_path": "uma-s-1p2",
                         "device": "cuda",
@@ -542,8 +542,8 @@ def test_unversioned_opaque_fallback_is_local_even_with_todict(monkeypatch):
         "factory": "unversioned_backend:create",
         "factory_kwargs": {},
     }
-    first._autokmc_calculator_config_identity = declaration
-    second._autokmc_calculator_config_identity = declaration
+    first._ogkmc_calculator_config_identity = declaration
+    second._ogkmc_calculator_config_identity = declaration
 
     first_identity = calculator_identity(first)
     second_identity = calculator_identity(second)

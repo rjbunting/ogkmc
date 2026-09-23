@@ -5,21 +5,21 @@ import numpy as np
 import pytest
 from ase import Atoms
 
-from autokmc.sites import bond as bond_module
-from autokmc.sites.adsorbate import AdsorbateSite
-from autokmc.sites.bond import BondReactionSite, BondReactionTemplate
-from autokmc.sites.diffusion import DiffusionSite, find_diffusion_sites
-from autokmc.sites.stability.bond import check_bond_site_lateral
-from autokmc.sites.stability.adsorption import (
+from ogkmc.sites import bond as bond_module
+from ogkmc.sites.adsorbate import AdsorbateSite
+from ogkmc.sites.bond import BondReactionSite, BondReactionTemplate
+from ogkmc.sites.diffusion import DiffusionSite, find_diffusion_sites
+from ogkmc.sites.stability.bond import check_bond_site_lateral
+from ogkmc.sites.stability.adsorption import (
     _build_stability_atoms, check_adsorbate_site_lateral,
 )
-from autokmc.reactions.adsorption import get_applicable_reaction_for_member
-from autokmc.reactions.rates import KB_EV
-from autokmc.sites.stability.diffusion import (
+from ogkmc.reactions.adsorption import get_applicable_reaction_for_member
+from ogkmc.reactions.rates import KB_EV
+from ogkmc.sites.stability.diffusion import (
     _diffusion_lateral_node_match,
     check_diffusion_site_lateral,
 )
-from autokmc.sites.stability.intermediate_pruning import (
+from ogkmc.sites.stability.intermediate_pruning import (
     _expected_graph,
     _observed_graph,
     _same_endpoint,
@@ -257,7 +257,7 @@ def test_adsorption_rates_use_energies_of_complete_current_molecules(monkeypatch
         lateral.energy_unoccupied = 0.0
         lateral.stable = True
 
-    monkeypatch.setattr("autokmc.reactions.adsorption.check_site_stability", controlled_endpoints)
+    monkeypatch.setattr("ogkmc.reactions.adsorption.check_site_stability", controlled_endpoints)
     for node in one:
         graph.nodes[node]["occupied"] = True
     original = get_applicable_reaction_for_member(

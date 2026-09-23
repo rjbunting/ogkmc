@@ -8,22 +8,22 @@ import networkx as nx
 import numpy as np
 import pytest
 
-from autokmc.io.reaction_graph import (
+from ogkmc.io.reaction_graph import (
     normalise_reaction_graph,
     reaction_graph_from_payload,
     reaction_graph_payload,
     reaction_graphs_isomorphic,
 )
-from autokmc.io.checkpoint import make_checkpoint_state, save_checkpoint
-from autokmc.io.config import CheckpointCfg, FreeEnergyCfg, OutputCfg, RunConfig
-from autokmc.reactions.adsorption import get_applicable_reaction_for_member
-from autokmc.reactions.diffusion import get_applicable_diffusion_for_member
-from autokmc.reactions.rates import EA_MIN, H_EV_S, KB_EV
-from autokmc.sites.adsorbate import AdsorbateSite
-from autokmc.sites.diffusion import DiffusionSite
-from autokmc.sites.stability.adsorption import check_adsorbate_site_lateral
-from autokmc.sites.stability.diffusion import check_diffusion_site_lateral
-from autokmc.workflow.runtime import resolve_run_identity
+from ogkmc.io.checkpoint import make_checkpoint_state, save_checkpoint
+from ogkmc.io.config import CheckpointCfg, FreeEnergyCfg, OutputCfg, RunConfig
+from ogkmc.reactions.adsorption import get_applicable_reaction_for_member
+from ogkmc.reactions.diffusion import get_applicable_diffusion_for_member
+from ogkmc.reactions.rates import EA_MIN, H_EV_S, KB_EV
+from ogkmc.sites.adsorbate import AdsorbateSite
+from ogkmc.sites.diffusion import DiffusionSite
+from ogkmc.sites.stability.adsorption import check_adsorbate_site_lateral
+from ogkmc.sites.stability.diffusion import check_diffusion_site_lateral
+from ogkmc.workflow.runtime import resolve_run_identity
 
 
 TEMPERATURE = 500.0
@@ -91,9 +91,9 @@ def _diffusion_system(nitrogen_sites=(6, 7)):
 
 @pytest.mark.parametrize("kind", ["diffusion", "bond"])
 def test_reused_bare_class_does_not_add_representative_endpoints_as_spectators(kind):
-    from autokmc.sites.bond import BondReactionSite, BondReactionTemplate
-    from autokmc.sites.stability.bond import get_bond_bare_lateral, _build_bond_atoms
-    from autokmc.sites.stability.diffusion import (
+    from ogkmc.sites.bond import BondReactionSite, BondReactionTemplate
+    from ogkmc.sites.stability.bond import get_bond_bare_lateral, _build_bond_atoms
+    from ogkmc.sites.stability.diffusion import (
         get_diffusion_bare_lateral, _build_diffusion_atoms,
     )
 
@@ -157,7 +157,7 @@ def test_diffusion_rates_preserve_endpoint_orientation(
         return lateral.energy_a, lateral.energy_b, lateral.energy_ts
 
     monkeypatch.setattr(
-        "autokmc.reactions.diffusion.check_diffusion_stability", exact_neb,
+        "ogkmc.reactions.diffusion.check_diffusion_stability", exact_neb,
     )
     forward = [
         get_applicable_diffusion_for_member(
@@ -222,7 +222,7 @@ def test_desorption_rates_distinguish_target_from_spectators(
         return lateral.energy_occupied, lateral.energy_unoccupied
 
     monkeypatch.setattr(
-        "autokmc.reactions.adsorption.check_site_stability", exact_endpoints,
+        "ogkmc.reactions.adsorption.check_site_stability", exact_endpoints,
     )
     kwargs = {"gas_g": {"[H]": 0.0}} if use_free_energy else {}
     reactions = [
@@ -322,7 +322,7 @@ def test_legacy_checkpoint_classes_without_reaction_roles_are_not_reused(
 
     if kind == "adsorption":
         monkeypatch.setattr(
-            "autokmc.reactions.adsorption.check_site_stability", checked_energies,
+            "ogkmc.reactions.adsorption.check_site_stability", checked_energies,
         )
         reaction = get_applicable_reaction_for_member(
             graph, site, 0, None, {"[H]": 0.0},
@@ -331,7 +331,7 @@ def test_legacy_checkpoint_classes_without_reaction_roles_are_not_reused(
         assert reaction.delta_e == pytest.approx(1.0)
     else:
         monkeypatch.setattr(
-            "autokmc.reactions.diffusion.check_diffusion_stability", checked_energies,
+            "ogkmc.reactions.diffusion.check_diffusion_stability", checked_energies,
         )
         reaction = get_applicable_diffusion_for_member(
             graph, site, 0, None, temperature=TEMPERATURE, lateral_shells=3,

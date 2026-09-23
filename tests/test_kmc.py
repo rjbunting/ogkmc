@@ -9,14 +9,14 @@ import networkx as nx
 import numpy as np
 import pytest
 
-from autokmc.kmc.engine import (
+from ogkmc.kmc.engine import (
     _capture_rng_state,
     _final_occupancy_by_species,
     _reactants_for_checkpoint,
     _restore_rng_state,
 )
-from autokmc.kmc.execute import execute_reaction
-from autokmc.kmc.expansion import (
+from ogkmc.kmc.execute import execute_reaction
+from ogkmc.kmc.expansion import (
     SpeciesExpansionError,
     _append_bond_reverse_indexes,
     _append_diffusion_reverse_indexes,
@@ -25,10 +25,10 @@ from autokmc.kmc.expansion import (
     expand_bond_sites_for_new_species,
     initialise_bond_registry,
 )
-from autokmc.kmc.sampling import _RateSegmentTree
-from autokmc.reactions.bond import _bond_energetics_cached, is_bond_applicable
-from autokmc.sites.bond import BondReactionLateral
-from autokmc.species.reactant import Reactant, ReactantDefinitionError
+from ogkmc.kmc.sampling import _RateSegmentTree
+from ogkmc.reactions.bond import _bond_energetics_cached, is_bond_applicable
+from ogkmc.sites.bond import BondReactionLateral
+from ogkmc.species.reactant import Reactant, ReactantDefinitionError
 from ase import Atoms
 
 
@@ -473,7 +473,7 @@ def test_rate_segment_tree_supports_linear_build_and_batched_updates():
 
 
 def test_kmc_package_exports_public_api():
-    import autokmc.kmc as kmc
+    import ogkmc.kmc as kmc
 
     assert kmc.execute_reaction is execute_reaction
     assert callable(kmc.run_kmc_steps)
@@ -493,7 +493,7 @@ def test_expand_bond_sites_after_event_rejects_unknown_direction():
 
 
 def test_bond_expansion_defers_triple_prune_until_after_stability(monkeypatch):
-    from autokmc.kmc import expansion
+    from ogkmc.kmc import expansion
 
     G = nx.Graph()
     initial_site = SimpleNamespace(member_node_ids=[[1]])
@@ -585,7 +585,7 @@ def test_bond_expansion_defers_triple_prune_until_after_stability(monkeypatch):
 
 
 def test_runtime_bond_expansion_honours_disabled_reaction_families(monkeypatch):
-    from autokmc.kmc import expansion
+    from ogkmc.kmc import expansion
 
     G = nx.Graph()
     initialise_bond_registry(
@@ -610,7 +610,7 @@ def test_runtime_bond_expansion_honours_disabled_reaction_families(monkeypatch):
 
 
 def test_runtime_bond_expansion_does_not_build_disabled_leaf_species(monkeypatch):
-    from autokmc.kmc import expansion
+    from ogkmc.kmc import expansion
 
     G = nx.Graph()
     site = SimpleNamespace(member_node_ids=[[1]])
@@ -652,7 +652,7 @@ def test_runtime_bond_expansion_does_not_build_disabled_leaf_species(monkeypatch
 
 
 def test_runtime_species_build_retries_transient_failures(monkeypatch):
-    from autokmc.kmc import expansion
+    from ogkmc.kmc import expansion
 
     G = nx.Graph()
     attempts = 0
@@ -697,7 +697,7 @@ def test_runtime_species_build_retries_transient_failures(monkeypatch):
 
 
 def test_runtime_species_build_exhaustion_is_explicit_and_retryable(monkeypatch):
-    from autokmc.kmc import expansion
+    from ogkmc.kmc import expansion
 
     G = nx.Graph()
     attempts = 0
@@ -728,7 +728,7 @@ def test_runtime_species_build_exhaustion_is_explicit_and_retryable(monkeypatch)
 
 
 def test_invalid_runtime_species_is_permanently_classified(monkeypatch):
-    from autokmc.kmc import expansion
+    from ogkmc.kmc import expansion
 
     G = nx.Graph()
     attempts = 0
@@ -760,7 +760,7 @@ def test_invalid_runtime_species_is_permanently_classified(monkeypatch):
 def test_runtime_site_enumeration_can_recover_without_rebuilding_species(
     monkeypatch,
 ):
-    from autokmc.kmc import expansion
+    from ogkmc.kmc import expansion
 
     G = nx.Graph()
     reactant = SimpleNamespace(smiles="C")
@@ -817,7 +817,7 @@ def test_runtime_site_enumeration_can_recover_without_rebuilding_species(
 def test_runtime_bond_enumeration_failure_restores_existing_network(
     monkeypatch,
 ):
-    from autokmc.kmc import expansion
+    from ogkmc.kmc import expansion
 
     G = nx.Graph()
     adsorbate_site = SimpleNamespace(member_node_ids=[[1]])

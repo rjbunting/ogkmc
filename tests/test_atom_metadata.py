@@ -10,23 +10,23 @@ import networkx as nx
 import numpy as np
 import pytest
 
-from autokmc.core.atom_metadata import apply_atom_metadata, atom_metadata, atom_metadata_key
-from autokmc.core.graph import build_graph
-from autokmc.io.atoms import atoms_from_graph
-from autokmc.io.reaction_graph import (
+from ogkmc.core.atom_metadata import apply_atom_metadata, atom_metadata, atom_metadata_key
+from ogkmc.core.graph import build_graph
+from ogkmc.io.atoms import atoms_from_graph
+from ogkmc.io.reaction_graph import (
     reaction_graph_from_payload, reaction_graph_payload, reaction_graphs_isomorphic,
 )
-from autokmc.sites.adsorbate import (
+from ogkmc.sites.adsorbate import (
     AdsorbateSite, _build_pruning_atoms, _materialise_adsorbate_nodes,
 )
-from autokmc.sites.bond import _build_ab_pruning_atoms
-from autokmc.sites.stability.adsorption import _build_stability_atoms, check_adsorbate_site_lateral
-from autokmc.sites.stability.bond import (
+from ogkmc.sites.bond import _build_ab_pruning_atoms
+from ogkmc.sites.stability.adsorption import _build_stability_atoms, check_adsorbate_site_lateral
+from ogkmc.sites.stability.bond import (
     _align_gas_product_to_target, _build_bond_atoms, _gas_product_neb_endpoint,
     _select_c_to_ab_mapping,
 )
-from autokmc.sites.stability.diffusion import _build_diffusion_atoms
-from autokmc.species.reactant import build_reactant
+from ogkmc.sites.stability.diffusion import _build_diffusion_atoms
+from ogkmc.species.reactant import build_reactant
 
 
 def _system():

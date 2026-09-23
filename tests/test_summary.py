@@ -7,9 +7,9 @@ import math
 
 import numpy as np
 
-from autokmc.species.smiles import smiles_to_dirname
-from autokmc.io.summary import ReactionSummary, make_run_meta
-from autokmc.io.schemas import SUMMARY_ARTIFACT_TYPE, SUMMARY_SCHEMA_VERSION
+from ogkmc.species.smiles import smiles_to_dirname
+from ogkmc.io.summary import ReactionSummary, make_run_meta
+from ogkmc.io.schemas import SUMMARY_ARTIFACT_TYPE, SUMMARY_SCHEMA_VERSION
 
 
 def test_summary_aggregates_per_type(make_reaction):

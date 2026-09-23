@@ -1,7 +1,7 @@
-# autokmc - H2 oxidation on Pd(111) with VASP PBE at the Gamma point
+# ogkmc - H2 oxidation on Pd(111) with VASP PBE at the Gamma point
 # Run from the repository root with:
 #   VASP_PP_PATH=/Users/bunting4/Programs/vasppps \
-#     autokmc run example/h2_oxidation_pd111_dft.yaml
+#     ogkmc run example/h2_oxidation_pd111_dft.yaml
 schema_version: "1"
 
 output:
@@ -78,7 +78,7 @@ calculator:
     sigma: 0.05
     kpts: [1, 1, 1]
     gamma: true
-    # AutoKMC reuses this file-backed calculator for chemically different
+    # OGKMC reuses this file-backed calculator for chemically different
     # systems. Do not seed a new system from the previous system's files.
     istart: 0
     icharg: 2

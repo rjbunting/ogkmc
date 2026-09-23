@@ -7,8 +7,8 @@ from ase import Atoms
 from ase.calculators.calculator import Calculator, all_changes
 from ase.constraints import FixAtoms
 
-from autokmc.core.graph import build_graph
-from autokmc.sites.adsorbate import (
+from ogkmc.core.graph import build_graph
+from ogkmc.sites.adsorbate import (
     AdsorbateSite,
     _RigidAdsorbateOptimizable,
     _adsorbate_edges_from_graph,
@@ -18,7 +18,7 @@ from autokmc.sites.adsorbate import (
     _optimise_rigid_adsorbate_with_potential,
     optimise_adsorbate_site_positions,
 )
-from autokmc.structure import optimise_structure
+from ogkmc.structure import optimise_structure
 
 
 class _CartesianHarmonic(Calculator):

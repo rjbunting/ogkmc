@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from autokmc.structure import normalise_surface_energies
+from ogkmc.structure import normalise_surface_energies
 
 
 def test_normalise_surface_energies_accepts_yaml_string_keys():

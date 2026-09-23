@@ -1,6 +1,6 @@
-# AutoKMC
+# OGKMC — Online Graph Kinetic Monte Carlo
 
-AutoKMC prepares and runs surface kinetic Monte Carlo simulations from one
+OGKMC prepares and runs surface kinetic Monte Carlo simulations from one
 configuration file. It first builds a slab or nanoparticle, or loads a catalyst
 from any format supported by ASE. It then generates reactants, surface sites,
 and adsorption, desorption, diffusion, bond-forming, and bond-breaking channels.
@@ -11,9 +11,9 @@ Every calculation uses an ASE-compatible calculator. The same workflow can
 therefore use a simple local calculator for a smoke test or a machine-learning
 potential for a production study.
 
-## What AutoKMC Does
+## What OGKMC Does
 
-AutoKMC can:
+OGKMC can:
 
 - Build periodic slabs or nanoparticles, or load an existing atomic structure.
 - Build gas-phase reactants from SMILES strings.
@@ -53,33 +53,58 @@ python -m pip install -e ".[ml]"
 ```
 
 Production configs may also require calculator-specific packages, model files,
-GPU drivers, or login tokens. AutoKMC does not bundle those external models.
+GPU drivers, or login tokens. OGKMC does not bundle those external models.
+
+## Upgrading from AutoKMC
+
+The repository, Python distribution, import namespace, and command are now
+`ogkmc`. Remove the previous installation and reinstall from this checkout:
+
+```bash
+python -m pip uninstall autokmc
+python -m pip install -e ".[cli,test]"
+```
+
+Update Python imports, shell scripts, and calculator factory paths from
+`autokmc` to `ogkmc`. For example, the UMA helper is now
+`ogkmc.io.fairchem.get_predict_unit_on_device`. No legacy command or import
+alias is installed. The default output directory is now `ogkmc_run`.
+
+Use a fresh output directory and calculation cache after upgrading. Checkpoints
+contain Python module paths and a source fingerprint; existing AutoKMC
+checkpoints cannot be resumed under OGKMC. Persisted artifact identifiers,
+EXTXYZ metadata, and database fingerprints also use the new namespace. Keep
+the matching AutoKMC installation to resume or process old runs; this rename
+does not migrate previously written data. Configuration sections and scientific
+settings are unchanged.
 
 ## Command Line
 
 After installation, the main commands are:
 
 ```bash
-autokmc validate-config path/to/config.yaml
-autokmc preflight path/to/config.yaml
-autokmc doctor path/to/config.yaml
-autokmc run path/to/config.yaml
-autokmc analyze RUN_DIR
-autokmc report RUN_DIR
-autokmc rebuild-index CALCULATION_CACHE_DIR
+ogkmc validate-config path/to/config.yaml
+ogkmc preflight path/to/config.yaml
+ogkmc doctor path/to/config.yaml
+ogkmc run path/to/config.yaml
+ogkmc analyze RUN_DIR
+ogkmc report RUN_DIR
+ogkmc rebuild-index CALCULATION_CACHE_DIR
 ```
 
 Without installing the console entry point, use:
 
 ```bash
-python -m autokmc.cli validate-config path/to/config.yaml
-python -m autokmc.cli preflight path/to/config.yaml
-python -m autokmc.cli doctor path/to/config.yaml
-python -m autokmc.cli run path/to/config.yaml
-python -m autokmc.cli analyze RUN_DIR
-python -m autokmc.cli report RUN_DIR
-python -m autokmc.cli rebuild-index CALCULATION_CACHE_DIR
+python -m ogkmc.cli validate-config path/to/config.yaml
+python -m ogkmc.cli preflight path/to/config.yaml
+python -m ogkmc.cli doctor path/to/config.yaml
+python -m ogkmc.cli run path/to/config.yaml
+python -m ogkmc.cli analyze RUN_DIR
+python -m ogkmc.cli report RUN_DIR
+python -m ogkmc.cli rebuild-index CALCULATION_CACHE_DIR
 ```
+
+`python -m ogkmc ...` also runs the same command line.
 
 First, `validate-config` checks types, ranges, reactant SMILES, bond types, the
 calculator declaration, worker/device consistency, and managed output names.
@@ -94,7 +119,7 @@ chemistry.
 Expected user/configuration failures are printed without a Python traceback
 and return a stable nonzero status. Put the global `--debug` option before the
 subcommand to re-enable tracebacks, for example
-`autokmc --debug preflight CONFIG.yaml`.
+`ogkmc --debug preflight CONFIG.yaml`.
 
 ## First Run
 
@@ -172,9 +197,9 @@ kmc:
 Then run:
 
 ```bash
-autokmc validate-config quickstart.yaml
-autokmc preflight quickstart.yaml --check-calculator
-autokmc run quickstart.yaml
+ogkmc validate-config quickstart.yaml
+ogkmc preflight quickstart.yaml --check-calculator
+ogkmc run quickstart.yaml
 ```
 
 To use an existing catalyst instead, replace the `structure` section with:
@@ -193,7 +218,7 @@ not the shell's working directory. `format` is optional when ASE can infer it
 from the filename, and `index: -1` selects the last frame. Use
 `frozen_indices` when selected catalyst atoms must remain fixed. File-backed
 catalysts are not rebuilt or relaxed. A periodic slab may use a skew cell and
-may be arbitrarily rotated: AutoKMC rigidly rotates its detected surface normal
+may be arbitrarily rotated: OGKMC rigidly rotates its detected surface normal
 to Cartesian +z before site generation, without changing cell metrics or
 interatomic geometry. The applied frame transform is recorded in the run
 manifest. Provide the intended cell and periodic-boundary metadata for surface
@@ -222,7 +247,7 @@ and manuscript post-processing.
 
 ## Configuration Overview
 
-AutoKMC configs are YAML or TOML files. The main sections are:
+OGKMC configs are YAML or TOML files. The main sections are:
 
 - `output`: output directory, filenames, trajectory cadence, reaction database,
   ISAAC export, and log level.
@@ -259,7 +284,7 @@ calculator:
   factory: fairchem.core.FAIRChemCalculator
   factory_kwargs:
     predict_unit:
-      factory: autokmc.io.fairchem.get_predict_unit_on_device
+      factory: ogkmc.io.fairchem.get_predict_unit_on_device
       factory_kwargs:
         name_or_path: uma-s-1p2
         device: cuda
@@ -274,7 +299,7 @@ calculator:
 or NEB tasks when the calculator and hardware can support parallel work. Each
 NEB leases exactly one calculator for its complete ordinary and climbing-image
 lifecycle; calculator copies are never divided across images in one band.
-The UMA example above creates one predictor per GPU so AutoKMC can run four
+The UMA example above creates one predictor per GPU so OGKMC can run four
 independent calculator tasks concurrently. FAIR-Chem's single-worker predictor
 accepts `device: cuda`; `get_predict_unit_on_device` selects each configured
 ordinal during construction and verifies that the predictor retained it.
@@ -303,7 +328,7 @@ diffusion:
   persist_neb_path: true
 ```
 
-For each new diffusion lateral class, AutoKMC first relaxes both endpoints. It
+For each new diffusion lateral class, OGKMC first relaxes both endpoints. It
 then optimizes an ordinary NEB band and, when `climb` is enabled, always refines
 the same band with a climbing image. Raw barrier height does not bypass this
 optimization. The rate calculation separately applies its 0.1 eV floor through
@@ -312,7 +337,7 @@ consistency. These calculations are often among the most expensive parts of a
 run.
 
 If an ordinary NEB takes 100 optimizer steps without finding a lower
-interior-image electronic energy, AutoKMC inspects that band's energy profile.
+interior-image electronic energy, OGKMC inspects that band's energy profile.
 It selects only the two nearest minima bracketing the highest-energy image,
 optimizes any selected interior states, and reruns the standard NEB workflow
 for that one segment. Already-optimized original endpoints are reused. It
@@ -323,7 +348,7 @@ stored.
 
 When `image_spacing` (or bond `neb_image_spacing`) is set, it also guards the
 optimized geometry. By default, no unfrozen atom may move more than three times
-that distance between adjacent images. If a step violates this limit, AutoKMC
+that distance between adjacent images. If a step violates this limit, OGKMC
 restores the lowest-force valid band and immediately checks its electronic
 energy profile for minima, without waiting for 100 stagnant steps. If a usable
 bracket exists, it runs the one permitted highest-peak segment refinement;
@@ -333,7 +358,7 @@ optimizer inside the existing step budget. FIRE restarts with halved `dt` and
 `optimization.neb_geometry_guard_multiplier` to change the limit without
 changing the image density.
 
-With lateral interactions enabled, AutoKMC automatically uses the optimized
+With lateral interactions enabled, OGKMC automatically uses the optimized
 no-neighbour path as the initial band for a diffusion class containing a
 neighbouring adsorbate. If that bare path has not been calculated yet, the bare
 calculation runs first. The complete lateral band is still reoptimized, and a
@@ -378,7 +403,7 @@ paired before interpolation. Every unchanged bond within A and B must connect
 the same atom indices in C; this prevents same-element atoms from exchanging
 identities merely to shorten the path. The default `auto` mode tries several
 connectivity-preserving mappings and then keeps the path with the smallest
-displacement. With a non-null image spacing, AutoKMC uses the largest MIC-aware
+displacement. With a non-null image spacing, OGKMC uses the largest MIC-aware
 displacement between corresponding atoms to choose the interior-image count.
 If the spacing is `null`, it uses the configured fixed `n_images` or
 `neb_n_images` value. `hungarian`, `greedy`, and `reactant_index` choose the
@@ -472,11 +497,11 @@ Important files:
 - `isaac_records.json`: optional ISAAC AI-ready scientific record bundle.
 - `checkpoint.pkl`: restart state when checkpointing is enabled.
 
-Before a fresh run starts, AutoKMC checks for managed output artifacts. If any
+Before a fresh run starts, OGKMC checks for managed output artifacts. If any
 already exist, the run stops instead of mixing or overwriting event logs,
 manifests, summaries, checkpoints, reaction folders, or diagnostics. Choose a
 new `output.dir`, or set `checkpoint.resume_from` to continue the same run.
-During execution, AutoKMC also holds a filesystem lock on `output.dir` so a
+During execution, OGKMC also holds a filesystem lock on `output.dir` so a
 second process cannot write there concurrently.
 
 Reaction folders live under `reactions/`:
@@ -546,19 +571,19 @@ KMC graph does not store product lineage.
 Analyze a completed run with:
 
 ```bash
-autokmc analyze runs/h2_oxidation_pd111_uma
+ogkmc analyze runs/h2_oxidation_pd111_uma
 # Optional stationary-state window:
-autokmc analyze RUN_DIR --start-time 1.0e-4 --end-time 5.0e-4 --blocks 20
+ogkmc analyze RUN_DIR --start-time 1.0e-4 --end-time 5.0e-4 --blocks 20
 # If output.run_manifest_filename was customized:
-autokmc analyze RUN_DIR --manifest custom_manifest.json
+ogkmc analyze RUN_DIR --manifest custom_manifest.json
 ```
 
 Generate a readable report after the run with:
 
 ```bash
-autokmc report RUN_DIR
-autokmc report RUN_DIR --blocks 20 --output-dir RUN_DIR/analysis
-autokmc report RUN_DIR --no-refresh-analysis
+ogkmc report RUN_DIR
+ogkmc report RUN_DIR --blocks 20 --output-dir RUN_DIR/analysis
+ogkmc report RUN_DIR --no-refresh-analysis
 ```
 
 The report command writes `report.md` and a self-contained `report.html`.
@@ -596,7 +621,7 @@ rerun.
 ## Reaction Database
 
 Optimization and NEB calculations are usually the slowest part of a run.
-AutoKMC writes graph-searchable reaction records by default:
+OGKMC writes graph-searchable reaction records by default:
 
 ```text
 calculation_cache/
@@ -625,7 +650,7 @@ Each record contains:
 - method and optimizer/NEB settings used to establish compatibility,
 - an optional multi-frame `neb_path.extxyz` when the path was retained.
 
-On a later run, AutoKMC first checks the exact calculation key. If that misses,
+On a later run, OGKMC first checks the exact calculation key. If that misses,
 it searches the SQLite index for the same reaction, settings, calculator, and
 graph fingerprint. It then verifies full labelled graph isomorphism, normalized
 scientific inputs, the calculator/model digest, and every asset checksum before
@@ -641,18 +666,18 @@ content rather than their local path. Run-local node ids, `iso_class`, and
 elements, bond roles, topology, and all other inputs are retained.
 
 Relaxed structures and NEB paths remain in their original coordinate frame.
-AutoKMC therefore reuses these assets only when the query has the same input
+OGKMC therefore reuses these assets only when the query has the same input
 coordinates, cell, periodic images, and atom order. It rehashes model files and
 directory-valued artifacts for every identity calculation. If an asset is
-missing, unreadable, modified, or scientifically incompatible, AutoKMC rejects
+missing, unreadable, modified, or scientifically incompatible, OGKMC rejects
 the hit and recomputes the calculation.
 
-If `index.sqlite3` is missing or corrupt, AutoKMC rebuilds it from verified
+If `index.sqlite3` is missing or corrupt, OGKMC rebuilds it from verified
 ISAAC record folders. You can also do this explicitly with
-`autokmc rebuild-index CALCULATION_CACHE_DIR`.
+`ogkmc rebuild-index CALCULATION_CACHE_DIR`.
 
 The loaded primitive energies and structures repopulate the lateral class.
-AutoKMC still computes the rate for the current KMC conditions, so temperature-
+OGKMC still computes the rate for the current KMC conditions, so temperature-
 and pressure-dependent rates are not frozen into the database.
 
 Configure the reaction database with:
@@ -695,14 +720,14 @@ Use checkpoints to resume a stopped simulation. Use the reaction database to
 avoid repeating expensive optimization and NEB calculations. They solve
 different problems and are useful together.
 
-Resume into the same `output.dir`. AutoKMC first verifies that the structure,
+Resume into the same `output.dir`. OGKMC first verifies that the structure,
 calculator, feed, thermochemistry, and reaction-channel configuration have not
 changed. It compares resolvable calculator files and directories by content and
-also checks the AutoKMC source digest and calculator-package versions. Only the
+also checks the OGKMC source digest and calculator-package versions. Only the
 additional step count, logging controls, and checkpoint lifecycle settings may
 change.
 
-Next, AutoKMC reconciles the persisted outputs. It removes an uncommitted
+Next, OGKMC reconciles the persisted outputs. It removes an uncommitted
 `events.jsonl` tail and atomically removes `kmc.extxyz` frames beyond the
 checkpoint step. Missing, non-integer, or non-monotonic `kmc_step` metadata in
 the committed trajectory prefix stops the restart without changing the file.
@@ -710,7 +735,7 @@ Reaction folders record their immutable discovery step, so folders discovered
 after the checkpoint move to `uncommitted_reactions/` instead of remaining in
 the active network.
 
-Finally, AutoKMC restores the reaction-folder counters and RNG stream, rebuilds
+Finally, OGKMC restores the reaction-folder counters and RNG stream, rebuilds
 the cumulative summary from the event log, appends to `events.jsonl` and
 `kmc.extxyz`, and adds a continuation segment to the existing run manifest. See
 [Outputs, Restart, and Offline Analysis](docs/outputs-and-analysis.md#checkpoint-continuation).
@@ -723,8 +748,8 @@ the cumulative summary from the event log, appends to `events.jsonl` and
 4. Enable diffusion with a small number of KMC steps.
 5. Enable bond reactions and keep `persist_neb_path: true` while debugging.
 6. Turn on free-energy corrections once the network looks reasonable.
-7. Run `autokmc preflight CONFIG.yaml` before committing an expensive job.
-8. Run `autokmc analyze RUN_DIR` and `autokmc report RUN_DIR` for product
+7. Run `ogkmc preflight CONFIG.yaml` before committing an expensive job.
+8. Run `ogkmc analyze RUN_DIR` and `ogkmc report RUN_DIR` for product
    rates, mechanisms, convergence, coverage, and performance summaries.
 9. Keep `calculation_cache/` with the run artifacts so results can be reused
    and audited later.
@@ -735,32 +760,32 @@ Run tests with:
 
 ```bash
 python -m pip install -e ".[cli,test,dev]"
-python -m compileall -q autokmc
-ruff check autokmc tests
+python -m compileall -q ogkmc
+ruff check ogkmc tests
 mypy --follow-imports=skip \
-  autokmc/io/_files.py autokmc/io/config.py autokmc/io/checkpoint.py \
-  autokmc/io/calculation_cache.py autokmc/io/calculators.py \
-  autokmc/io/config_validation.py \
-  autokmc/io/event_log.py autokmc/io/persistence.py \
-  autokmc/io/reaction_graph.py autokmc/io/resume_contract.py \
-  autokmc/io/trajectory.py \
-  autokmc/analysis/products.py autokmc/core/graph_state.py \
-  autokmc/sites/identity.py autokmc/kmc autokmc/workflow \
-  autokmc/utils/telemetry.py
-pytest --cov=autokmc --cov-report=term-missing --cov-fail-under=50
+  ogkmc/io/_files.py ogkmc/io/config.py ogkmc/io/checkpoint.py \
+  ogkmc/io/calculation_cache.py ogkmc/io/calculators.py \
+  ogkmc/io/config_validation.py \
+  ogkmc/io/event_log.py ogkmc/io/persistence.py \
+  ogkmc/io/reaction_graph.py ogkmc/io/resume_contract.py \
+  ogkmc/io/trajectory.py \
+  ogkmc/analysis/products.py ogkmc/core/graph_state.py \
+  ogkmc/sites/identity.py ogkmc/kmc ogkmc/workflow \
+  ogkmc/utils/telemetry.py
+pytest --cov=ogkmc --cov-report=term-missing --cov-fail-under=50
 ```
 
 Useful package areas:
 
-- `autokmc/structure`: slab and nanoparticle builders.
-- `autokmc/species`: SMILES parsing and reactant construction.
-- `autokmc/sites`: adsorption, diffusion, bond-site, and stability logic.
-- `autokmc/reactions`: reaction objects and rate calculations.
-- `autokmc/kmc`: KMC state, sampling, execution, and on-the-fly expansion.
-- `autokmc/io`: config loading, calculator construction, event persistence,
+- `ogkmc/structure`: slab and nanoparticle builders.
+- `ogkmc/species`: SMILES parsing and reactant construction.
+- `ogkmc/sites`: adsorption, diffusion, bond-site, and stability logic.
+- `ogkmc/reactions`: reaction objects and rate calculations.
+- `ogkmc/kmc`: KMC state, sampling, execution, and on-the-fly expansion.
+- `ogkmc/io`: config loading, calculator construction, event persistence,
   reaction database, and ISAAC export.
-- `autokmc/analysis`: offline product-rate and mechanism reconstruction.
-- `autokmc/thermo`: gas and adsorbate thermochemistry helpers.
+- `ogkmc/analysis`: offline product-rate and mechanism reconstruction.
+- `ogkmc/thermo`: gas and adsorbate thermochemistry helpers.
 
 ## Troubleshooting
 
@@ -770,12 +795,12 @@ Useful package areas:
 - If a NEB path is poor, try `interpolation: idpp`, `atom_matching: auto`, and a
   larger `matching_trials`.
 - If FIRE prints the same NEB energy and force for many steps with
-  `downhill_check: true`, its rollback logic is collapsing `dt`. AutoKMC
+  `downhill_check: true`, its rollback logic is collapsing `dt`. OGKMC
   automatically disables the check and restores the initial timestep after
   five rollback halvings for ordinary NEB; CI-FIRE disables it immediately.
   See [FIRE downhill recovery for NEB](docs/configuration.md#fire-downhill-recovery-for-neb).
 - A NEB that exhausts its optimizer steps is not evidence that the reaction is
-  chemically impossible. AutoKMC preserves the failed band, keeps its lateral
+  chemically impossible. OGKMC preserves the failed band, keeps its lateral
   class retryable, and omits only that candidate from the current rate-index
   sweep so other valid KMC events can still run. Inspect or retry the saved
   path; do not replace a missing barrier with a fabricated value.

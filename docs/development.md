@@ -18,27 +18,27 @@ runtimes separately.
 After installing the environment, run the local equivalents of CI:
 
 ```bash
-python -m compileall -q autokmc
-ruff check autokmc tests
+python -m compileall -q ogkmc
+ruff check ogkmc tests
 mypy --follow-imports=skip \
-  autokmc/io/_files.py \
-  autokmc/io/config.py \
-  autokmc/io/checkpoint.py \
-  autokmc/io/calculation_cache.py \
-  autokmc/io/calculators.py \
-  autokmc/io/config_validation.py \
-  autokmc/io/event_log.py \
-  autokmc/io/persistence.py \
-  autokmc/io/reaction_graph.py \
-  autokmc/io/resume_contract.py \
-  autokmc/io/trajectory.py \
-  autokmc/analysis/products.py \
-  autokmc/core/graph_state.py \
-  autokmc/sites/identity.py \
-  autokmc/kmc \
-  autokmc/workflow \
-  autokmc/utils/telemetry.py
-pytest --cov=autokmc --cov-report=term-missing --cov-fail-under=50
+  ogkmc/io/_files.py \
+  ogkmc/io/config.py \
+  ogkmc/io/checkpoint.py \
+  ogkmc/io/calculation_cache.py \
+  ogkmc/io/calculators.py \
+  ogkmc/io/config_validation.py \
+  ogkmc/io/event_log.py \
+  ogkmc/io/persistence.py \
+  ogkmc/io/reaction_graph.py \
+  ogkmc/io/resume_contract.py \
+  ogkmc/io/trajectory.py \
+  ogkmc/analysis/products.py \
+  ogkmc/core/graph_state.py \
+  ogkmc/sites/identity.py \
+  ogkmc/kmc \
+  ogkmc/workflow \
+  ogkmc/utils/telemetry.py
+pytest --cov=ogkmc --cov-report=term-missing --cov-fail-under=50
 ```
 
 CI runs these checks on Python 3.10, 3.11, 3.12, and 3.13. Scientific
@@ -50,17 +50,17 @@ analysis.
 
 | Package | Responsibility |
 | --- | --- |
-| `autokmc/structure` | Slab/nanoparticle construction, surface tagging, and relaxation. |
-| `autokmc/species` | SMILES handling, molecular structures, and bond chemistry. |
-| `autokmc/sites` | Adsorption, diffusion, bond sites, lateral classes, and stability. |
-| `autokmc/reactions` | Applicability, electronic/free energetics, and rates. |
-| `autokmc/workflow` | Config-to-runtime preparation stages, network assembly, and run lifecycle. |
-| `autokmc/kmc/models.py` | Typed `KMCRunRequest`, `KMCRunResult`, canonical resume state, channel options, and callback boundaries. |
-| `autokmc/sites/identity.py` | Stable site/member handles used by indexes, restart, and dynamic deduplication. |
-| `autokmc/kmc` | Typed session, rate index, sampling, state mutation, network expansion, and checkpoints. |
-| `autokmc/io` | Config, calculators, events, structures, manifests, ISAAC records, and database lookup. |
-| `autokmc/analysis` | Offline product-rate and mechanism reconstruction. |
-| `autokmc/thermo` | Ideal-gas and harmonic thermochemistry. |
+| `ogkmc/structure` | Slab/nanoparticle construction, surface tagging, and relaxation. |
+| `ogkmc/species` | SMILES handling, molecular structures, and bond chemistry. |
+| `ogkmc/sites` | Adsorption, diffusion, bond sites, lateral classes, and stability. |
+| `ogkmc/reactions` | Applicability, electronic/free energetics, and rates. |
+| `ogkmc/workflow` | Config-to-runtime preparation stages, network assembly, and run lifecycle. |
+| `ogkmc/kmc/models.py` | Typed `KMCRunRequest`, `KMCRunResult`, canonical resume state, channel options, and callback boundaries. |
+| `ogkmc/sites/identity.py` | Stable site/member handles used by indexes, restart, and dynamic deduplication. |
+| `ogkmc/kmc` | Typed session, rate index, sampling, state mutation, network expansion, and checkpoints. |
+| `ogkmc/io` | Config, calculators, events, structures, manifests, ISAAC records, and database lookup. |
+| `ogkmc/analysis` | Offline product-rate and mechanism reconstruction. |
+| `ogkmc/thermo` | Ideal-gas and harmonic thermochemistry. |
 
 ## Schema conventions
 
@@ -74,7 +74,7 @@ There are independent versioned contracts:
 - trajectory-metadata schema version 1,
 - run-manifest schema version 3,
 - checkpoint schema version 4,
-- AutoKMC reaction-database schema v2,
+- OGKMC reaction-database schema v2,
 - ISAAC record version 1.05.
 
 Bump only the contract that actually changes. Readers should explicitly
@@ -119,8 +119,8 @@ write non-standard JSON `NaN`/`Infinity` values.
 ## Adding a config option
 
 1. Add it to the appropriate dataclass.
-2. Add strict type/range/enum validation in `autokmc/io/config_validation.py`.
-3. Resolve it in the relevant `autokmc/workflow` stage and pass it to the
+2. Add strict type/range/enum validation in `ogkmc/io/config_validation.py`.
+3. Resolve it in the relevant `ogkmc/workflow` stage and pass it to the
    consuming scientific function.
 4. Include it in cache compatibility parameters if it can change a computed
    structure or energy.

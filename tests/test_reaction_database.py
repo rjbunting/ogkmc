@@ -14,8 +14,8 @@ import pytest
 from ase import Atoms
 from ase.calculators.singlepoint import SinglePointCalculator
 
-import autokmc.io.calculation_cache as calculation_cache
-from autokmc.io.calculation_cache import (
+import ogkmc.io.calculation_cache as calculation_cache
+from ogkmc.io.calculation_cache import (
     apply_cached_states,
     calculation_cache_key,
     calculator_identity,
@@ -27,7 +27,7 @@ from autokmc.io.calculation_cache import (
     write_calculation_record,
     write_isaac_export,
 )
-from autokmc.io.reaction_graph import normalise_reaction_graph
+from ogkmc.io.reaction_graph import normalise_reaction_graph
 
 
 def _graph(*, offset: int = 0, iso_class: int = 3, element: str = "Pt") -> nx.Graph:
@@ -135,7 +135,7 @@ def test_writes_isaac_record_extxyz_assets_and_sqlite_index(tmp_path):
     assert all(len(asset["sha256"]) == 64 for asset in isaac["assets"])
     assert not any("atoms" in descriptor for descriptor in isaac["descriptors"]["outputs"][0]["descriptors"])
     assert "positions_A" not in json.dumps(isaac)
-    configuration = isaac["system"]["configuration"]["autokmc"]
+    configuration = isaac["system"]["configuration"]["ogkmc"]
     assert configuration["scientific_input_hash"]
     assert configuration["input_frame_hash"]
 
@@ -708,7 +708,7 @@ def test_record_without_new_portable_identity_remains_exact_key_only(tmp_path):
     root = tmp_path / "reaction_db"
     key, operation, parameters, record_path = _adsorption_record(root)
     isaac = json.loads(record_path.read_text())
-    configuration = isaac["system"]["configuration"]["autokmc"]
+    configuration = isaac["system"]["configuration"]["ogkmc"]
     configuration.pop("scientific_input_hash")
     configuration.pop("input_frame_hash")
     record_path.write_text(json.dumps(isaac), encoding="utf-8")
@@ -1003,7 +1003,7 @@ def test_legacy_sqlite_index_is_migrated_and_metadata_backfilled(
     )
     key, operation, parameters, record_path = _adsorption_record(root)
     isaac = json.loads(record_path.read_text())
-    configuration = isaac["system"]["configuration"]["autokmc"]
+    configuration = isaac["system"]["configuration"]["ogkmc"]
     calculation_cache.close_calculation_cache_connections(root)
     index = root / "index.sqlite3"
     index.unlink()
@@ -1078,7 +1078,7 @@ def test_database_and_isaac_record_link_to_run_id(tmp_path):
     isaac = json.loads(record_path.read_text())
     assert manifest["current_run_id"] == "run-abc"
     assert manifest["run_ids"] == ["run-abc"]
-    assert isaac["system"]["configuration"]["autokmc"]["run_id"] == "run-abc"
+    assert isaac["system"]["configuration"]["ogkmc"]["run_id"] == "run-abc"
 
 
 def test_official_isaac_schema_rejects_invalid_enum(tmp_path):

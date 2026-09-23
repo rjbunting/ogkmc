@@ -19,8 +19,8 @@ flowchart TD
     G -. "reuse/write" .-> K
 ```
 
-`autokmc/cli/pipeline.py` coordinates the workflow. The implementation is split
-across `autokmc/workflow`. First, `stages.py` prepares the calculator, structure,
+`ogkmc/cli/pipeline.py` coordinates the workflow. The implementation is split
+across `ogkmc/workflow`. First, `stages.py` prepares the calculator, structure,
 graph, reactants, and adsorption sites. Next, `network.py` constructs the
 optional diffusion and bond network, while `runtime.py` resolves the cache,
 channel, restart, and output collaborators. Finally, `simulation.py` launches
@@ -31,7 +31,7 @@ KMC and finalizes the run. The complete sequence is:
    frame from any ASE-readable catalyst file without rebuilding or relaxing
    it. The supplied production examples use built platinum structures.
 3. Classify surface atoms and build the atom-connectivity graph.
-4. Build gas-phase reactants from SMILES. With `relax_in_gas: false`, AutoKMC
+4. Build gas-phase reactants from SMILES. With `relax_in_gas: false`, OGKMC
    skips geometry relaxation but still requires a finite single-point energy.
    The final molecular graph must match the requested atom and bond inventory.
 5. Enumerate adsorption placements and optionally prune unstable classes.
@@ -43,7 +43,7 @@ KMC and finalizes the run. The complete sequence is:
 
 The internal KMC boundary accepts one `KMCRunRequest` and returns one
 `KMCRunResult`. Configured workflows construct the typed `KMCSession` directly.
-The public `autokmc.kmc.engine.run_kmc_steps` signature remains as a
+The public `ogkmc.kmc.engine.run_kmc_steps` signature remains as a
 compatibility adapter. Separate KMC modules handle session initialization,
 local recomputation, dynamic network expansion, outputs, checkpoints, and the
 canonical RNG restart state. Each result also carries run-scoped counters,
@@ -89,14 +89,14 @@ Each adsorption, diffusion, and bond site has a persisted `site_id`, and
 `(site_id, member_index)` identifies one concrete member. These stable in-run
 handles survive checkpoint copying and allow dynamic discovery to recognize a
 reconstructed site without using a Python object address. When the network
-expands, AutoKMC appends only new leaves to the reaction-rate index and retains
+expands, OGKMC appends only new leaves to the reaction-rate index and retains
 the existing reaction objects and rates. The segment tree expands only when it
 runs out of capacity.
 
 Site membership becomes immutable when a site enters the reaction index. A new
 network discovery therefore adds a complete site instead of appending members
 to an indexed site. Common graph metadata is accessed through
-`autokmc/core/graph_state.py`, while the underlying NetworkX dictionaries remain
+`ogkmc/core/graph_state.py`, while the underlying NetworkX dictionaries remain
 inspectable for notebooks and checkpoint compatibility. Site-model cache
 attributes are declared for static checking and materialized only when needed.
 Keeping them out of dataclass serialization preserves older checkpoints and the
@@ -142,17 +142,17 @@ neighbors, so removing different molecules cannot reuse one removal energy.
 
 ### Diffusion
 
-Diffusion connects two placements of the same species. AutoKMC first relaxes
+Diffusion connects two placements of the same species. OGKMC first relaxes
 state A and state B. It then optimizes an ordinary NEB band to obtain the
 transition-state energy. CI-NEB refines that transition only when both raw
-ordinary directional barriers are at least 0.1 eV. Finally, AutoKMC derives the
+ordinary directional barriers are at least 0.1 eV. Finally, OGKMC derives the
 forward and reverse rates from one effective transition-state level, preserving
 energy consistency when it applies the minimum barrier floor.
 Lateral graph matching preserves the ordered A/B endpoint roles of cached
 energies; each matched member still supports both firing directions.
 
 If the ordinary band goes 100 optimizer steps without lowering its least
-energetic interior image, AutoKMC inspects the electronic-energy profile for
+energetic interior image, OGKMC inspects the electronic-energy profile for
 intermediate minima. It brackets the band's highest-energy image with the
 nearest minimum on each side, optimizes the selected interior state or states
 (already-optimized original endpoints are reused), and runs a fresh standard
@@ -178,7 +178,7 @@ the channel uses its configured interpolation.
 
 ### Bond changes
 
-Bond templates represent reversible `A + B <=> C` chemistry. AutoKMC can build
+Bond templates represent reversible `A + B <=> C` chemistry. OGKMC can build
 unlisted leaf species implied by the templates at zero gas pressure and can
 expand the network when a new surface species first appears. Calculator-based
 stability pruning runs before the one-representative-per-adsorption-triple

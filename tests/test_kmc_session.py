@@ -7,11 +7,11 @@ import numpy as np
 import pytest
 from ase.io import read as ase_read
 
-from autokmc.io.event_log import EventHistory
-from autokmc.io.trajectory import TrajectoryWriter
-from autokmc.kmc.index import _ReactionIndex
-from autokmc.kmc.initialization import initialise_runtime, normalise_channels
-from autokmc.kmc.models import (
+from ogkmc.io.event_log import EventHistory
+from ogkmc.io.trajectory import TrajectoryWriter
+from ogkmc.kmc.index import _ReactionIndex
+from ogkmc.kmc.initialization import initialise_runtime, normalise_channels
+from ogkmc.kmc.models import (
     KMCChannels,
     KMCFunctions,
     KMCObservers,
@@ -22,8 +22,8 @@ from autokmc.kmc.models import (
     KMCSystem,
     KMCThermochemistry,
 )
-from autokmc.kmc.outputs import KMCOutputManager
-from autokmc.kmc.session import KMCSession
+from ogkmc.kmc.outputs import KMCOutputManager
+from ogkmc.kmc.session import KMCSession
 
 
 def test_channel_normalisation_copies_inputs_and_resolves_cache_root():
@@ -317,7 +317,7 @@ def test_initialisation_failure_flushes_completed_reactions_before_reraising(
         expand_bond_network=lambda *_args, **_kwargs: None,
     )
 
-    with caplog.at_level("INFO", logger="autokmc.kmc.session"):
+    with caplog.at_level("INFO", logger="ogkmc.kmc.session"):
         with pytest.raises(RuntimeError, match="later initialization failure"):
             KMCSession(request=request, functions=functions).run()
 

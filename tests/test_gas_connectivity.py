@@ -9,8 +9,8 @@ import networkx as nx
 import numpy as np
 import pytest
 
-from autokmc.kmc.expansion import SpeciesExpansionError, expand_bond_sites_for_new_species
-from autokmc.species import ReactantConnectivityError, ReactantGasUnstableError, build_reactant
+from ogkmc.kmc.expansion import SpeciesExpansionError, expand_bond_sites_for_new_species
+from ogkmc.species import ReactantConnectivityError, ReactantGasUnstableError, build_reactant
 
 
 class TargetMinimum(Calculator):
@@ -47,7 +47,7 @@ def test_real_relaxation_rejects_changed_chemistry_before_thermochemistry(
 ):
     calculator = TargetMinimum(target)
     monkeypatch.setattr(
-        "autokmc.thermo.free_energy.compute_gas_thermo",
+        "ogkmc.thermo.free_energy.compute_gas_thermo",
         lambda *_args, **_kwargs: pytest.fail("invalid gas reached thermochemistry"),
     )
     with pytest.raises(ReactantConnectivityError) as caught:
@@ -89,9 +89,9 @@ def test_validation_uses_the_materialized_hydrogen_inventory(smiles, add_hydroge
 @pytest.mark.parametrize("with_calculator", [False, True])
 def test_incorrect_generated_geometry_is_rejected_without_ase_relaxation(monkeypatch, with_calculator):
     wrong = Atoms("O2", positions=[[6, 6, 6], [10, 6, 6]], cell=[20, 20, 20])
-    monkeypatch.setattr("autokmc.species.reactant._smiles_to_atoms", lambda *_a, **_k: wrong.copy())
+    monkeypatch.setattr("ogkmc.species.reactant._smiles_to_atoms", lambda *_a, **_k: wrong.copy())
     monkeypatch.setattr(
-        "autokmc.species.reactant._optimise",
+        "ogkmc.species.reactant._optimise",
         lambda *_a, **_k: pytest.fail("ASE relaxation should be disabled"),
     )
     with pytest.raises(ReactantConnectivityError, match="missing bonds") as caught:
@@ -105,7 +105,7 @@ def test_incorrect_generated_geometry_is_rejected_without_ase_relaxation(monkeyp
     (Atoms("H2", positions=[[0, 0, 0], [0, 0, 0.75]]), "[2H][2H]", "changed atom"),
 ])
 def test_atom_count_element_and_isotope_identity_are_validated(monkeypatch, wrong, smiles, match):
-    monkeypatch.setattr("autokmc.species.reactant._smiles_to_atoms", lambda *_a, **_k: wrong.copy())
+    monkeypatch.setattr("ogkmc.species.reactant._smiles_to_atoms", lambda *_a, **_k: wrong.copy())
     with pytest.raises(ReactantConnectivityError, match=match):
         build_reactant(smiles, relax=False)
 
@@ -118,7 +118,7 @@ def test_configured_cutoff_is_used_without_silently_replacing_the_produced_graph
 def test_runtime_expansion_excludes_gas_unstable_species_across_restart(monkeypatch):
     graph = nx.Graph()
     monkeypatch.setattr(
-        "autokmc.kmc.expansion.find_adsorbate_sites",
+        "ogkmc.kmc.expansion.find_adsorbate_sites",
         lambda *_a, **_k: pytest.fail("invalid gas reached site enumeration"),
     )
     assert expand_bond_sites_for_new_species(
@@ -134,7 +134,7 @@ def test_runtime_expansion_excludes_gas_unstable_species_across_restart(monkeypa
     assert record["attempts"] == 1
     restored = pickle.loads(pickle.dumps(graph))
     monkeypatch.setattr(
-        "autokmc.kmc.expansion.build_reactant",
+        "ogkmc.kmc.expansion.build_reactant",
         lambda *_a, **_k: pytest.fail("gas-unstable species was rebuilt"),
     )
     assert expand_bond_sites_for_new_species(restored, "O=O", calculator=None) == []
@@ -144,7 +144,7 @@ def test_unrelaxed_geometry_failure_is_not_permanently_classified(monkeypatch):
     graph = nx.Graph()
     def fail(*_args, **_kwargs):
         raise ReactantConnectivityError("invalid generated geometry")
-    monkeypatch.setattr("autokmc.kmc.expansion.build_reactant", fail)
+    monkeypatch.setattr("ogkmc.kmc.expansion.build_reactant", fail)
     with pytest.raises(SpeciesExpansionError):
         expand_bond_sites_for_new_species(graph, "O=O", calculator=None)
     registry = graph.graph["bond_registry"]
@@ -153,8 +153,8 @@ def test_unrelaxed_geometry_failure_is_not_permanently_classified(monkeypatch):
 
 
 def test_runtime_leaf_rejection_filters_only_affected_templates(monkeypatch):
-    from autokmc.kmc import expansion
-    from autokmc.sites.bond import BondReactionTemplate
+    from ogkmc.kmc import expansion
+    from ogkmc.sites.bond import BondReactionTemplate
     graph = nx.Graph()
     valid = BondReactionTemplate("[H]", "[H]", "[H][H]")
     invalid = BondReactionTemplate("[H]O[O]", "O=O", "[H]OOO[O]")

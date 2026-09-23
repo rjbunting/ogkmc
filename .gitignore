@@ -11,7 +11,7 @@ htmlcov/
 .idea/
 .manuscript/
 
-/autokmc/dev/debug/
+/ogkmc/dev/debug/
 *.egg-info/
 build/
 dist/

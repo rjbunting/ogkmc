@@ -6,8 +6,8 @@ import json
 
 import pytest
 
-from autokmc.analysis.run_report import generate_run_report
-from autokmc.io.schemas import (
+from ogkmc.analysis.run_report import generate_run_report
+from ogkmc.io.schemas import (
     EVENT_ARTIFACT_TYPE,
     EVENT_SCHEMA_VERSION,
     REACTION_INDEX_ARTIFACT_TYPE,
@@ -110,7 +110,7 @@ def test_generate_run_report_combines_coverage_flux_products_and_performance(
         }
 
     monkeypatch.setattr(
-        "autokmc.analysis.run_report.analyze_run",
+        "ogkmc.analysis.run_report.analyze_run",
         fake_analyze,
     )
 
@@ -130,7 +130,7 @@ def test_generate_run_report_combines_coverage_flux_products_and_performance(
     assert "Directional event fluxes" in markdown
     assert "Cumulative products" in markdown
     assert "Performance bottlenecks" in markdown
-    assert "<title>AutoKMC run report</title>" in html
+    assert "<title>OGKMC run report</title>" in html
     assert "[OH]" in html
 
 

@@ -19,14 +19,14 @@ from ase.build import add_adsorbate, fcc111
 from ase.calculators.emt import EMT
 from ase.constraints import FixAtoms
 
-from autokmc.io.calculators import CalculatorPool
-from autokmc.sites.stability.band_eval import (
+from ogkmc.io.calculators import CalculatorPool
+from ogkmc.sites.stability.band_eval import (
     BandEvaluationError,
     BandImageCalculator,
     CallableBandEvaluator,
     resolve_band_evaluator,
 )
-from autokmc.sites.stability.neb import (
+from ogkmc.sites.stability.neb import (
     DEFAULT_NEB_BAND_EVAL,
     normalize_band_eval,
     run_neb,
@@ -298,6 +298,6 @@ def test_normalize_and_default_mode():
 
 
 def test_config_accepts_and_validates_band_eval():
-    from autokmc.io.config import OptimizationCfg
+    from ogkmc.io.config import OptimizationCfg
 
     assert OptimizationCfg().neb_band_eval == "images"

@@ -11,19 +11,19 @@ from ase.build import fcc111
 from ase.calculators.calculator import Calculator, all_changes
 from ase.io import read as ase_read
 
-from autokmc.core.graph import build_graph
-from autokmc.io.calculators import CalculatorConfigError
-from autokmc.kmc.expansion import (
+from ogkmc.core.graph import build_graph
+from ogkmc.io.calculators import CalculatorConfigError
+from ogkmc.kmc.expansion import (
     SpeciesExpansionError, expand_bond_sites_for_new_species, initialise_bond_registry,
 )
-from autokmc.sites.adsorbate import (
+from ogkmc.sites.adsorbate import (
     AdsorbateSite, find_adsorbate_sites, rebuild_adsorbate_reverse_indexes,
 )
-from autokmc.sites.bond import (
+from ogkmc.sites.bond import (
     BondReactionSite, BondReactionTemplate, prune_unstable_bond_sites,
 )
-from autokmc.species.reactant import build_reactant
-from autokmc.structure import StructureOptimisationError
+from ogkmc.species.reactant import build_reactant
+from ogkmc.structure import StructureOptimisationError
 
 
 class ControlledCalculator(Calculator):

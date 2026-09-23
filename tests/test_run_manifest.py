@@ -8,8 +8,8 @@ from types import SimpleNamespace
 
 import networkx as nx
 
-from autokmc import __version__
-from autokmc.io.run_manifest import (
+from ogkmc import __version__
+from ogkmc.io.run_manifest import (
     begin_run_manifest,
     build_artifact_inventory,
     discover_quarantine_locations,
@@ -18,7 +18,7 @@ from autokmc.io.run_manifest import (
     start_run_manifest,
     update_run_manifest,
 )
-from autokmc.io.schemas import EVENT_SCHEMA_VERSION
+from ogkmc.io.schemas import EVENT_SCHEMA_VERSION
 
 
 def _graph_and_site():

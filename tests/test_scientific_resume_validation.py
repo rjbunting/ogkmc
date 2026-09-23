@@ -5,17 +5,17 @@ from types import SimpleNamespace
 import networkx as nx
 import pytest
 
-import autokmc.io.resume_contract as resume_contract_module
-from autokmc.io.checkpoint import make_checkpoint_state, save_checkpoint
-from autokmc.io.config import (
+import ogkmc.io.resume_contract as resume_contract_module
+from ogkmc.io.checkpoint import make_checkpoint_state, save_checkpoint
+from ogkmc.io.config import (
     BondCfg,
     CheckpointCfg,
     FreeEnergyCfg,
     OutputCfg,
     RunConfig,
 )
-from autokmc.io.resume_contract import make_resume_contract
-from autokmc.workflow.runtime import resolve_run_identity
+from ogkmc.io.resume_contract import make_resume_contract
+from ogkmc.workflow.runtime import resolve_run_identity
 
 
 def _write_checkpoint(tmp_path, cfg, *, contract=None, bond_sites=None):
@@ -75,7 +75,7 @@ def test_modern_checkpoint_rejects_changed_thermochemistry_source(tmp_path, monk
     init.write_text("")
     thermo_source = package / "free_energy.py"
     thermo_source.write_text("SURFACE_VIBRATION_SUBSYSTEM = 'reactive_atoms_v0'\n")
-    monkeypatch.setattr(resume_contract_module.autokmc_package, "__file__", str(init))
+    monkeypatch.setattr(resume_contract_module.ogkmc_package, "__file__", str(init))
     cfg = RunConfig(
         output=OutputCfg(dir=str(tmp_path / "run")),
         free_energy=FreeEnergyCfg(enabled=True),
@@ -83,7 +83,7 @@ def test_modern_checkpoint_rejects_changed_thermochemistry_source(tmp_path, monk
     events = _write_checkpoint(tmp_path, cfg, contract=make_resume_contract(cfg))
     original = events.read_bytes()
     thermo_source.write_text("SURFACE_VIBRATION_SUBSYSTEM = 'all_adsorbates_v1'\n")
-    with pytest.raises(ValueError, match=r"_software\.autokmc_source_sha256"):
+    with pytest.raises(ValueError, match=r"_software\.ogkmc_source_sha256"):
         resolve_run_identity(cfg)
     assert events.read_bytes() == original
 

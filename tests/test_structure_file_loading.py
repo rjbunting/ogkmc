@@ -13,17 +13,17 @@ from ase.calculators.singlepoint import SinglePointCalculator
 from ase.constraints import FixAtoms, FixBondLength
 from ase.io import write
 
-from autokmc.structure.loading import (
+from ogkmc.structure.loading import (
     load_structure_file,
     resolve_frozen_indices,
 )
-from autokmc.io.config import RunConfig, StructureCfg
-from autokmc.workflow.models import (
+from ogkmc.io.config import RunConfig, StructureCfg
+from ogkmc.workflow.models import (
     PreparedCalculator,
     PreparedStructure,
     RunIdentity,
 )
-from autokmc.workflow.stages import prepare_material_graph, prepare_structure
+from ogkmc.workflow.stages import prepare_material_graph, prepare_structure
 
 
 def test_extxyz_frame_loading_is_config_relative_and_records_source(tmp_path):
@@ -107,8 +107,8 @@ def test_file_workflow_bypasses_builders_and_structure_calculator(
     tmp_path,
     monkeypatch,
 ):
-    import autokmc.structure as structure_module
-    import autokmc.workflow.stages as stages_module
+    import ogkmc.structure as structure_module
+    import ogkmc.workflow.stages as stages_module
 
     structure_path = tmp_path / "input.extxyz"
     write(
@@ -229,7 +229,7 @@ def test_loader_rejects_invalid_ase_results(
     loaded,
     message,
 ):
-    import autokmc.structure.loading as loading_module
+    import ogkmc.structure.loading as loading_module
 
     structure_path = tmp_path / "input.xyz"
     structure_path.write_text("placeholder\n", encoding="utf-8")

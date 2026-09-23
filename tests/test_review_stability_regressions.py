@@ -11,15 +11,15 @@ from ase.build import molecule
 from ase.calculators.calculator import Calculator, all_changes
 from ase.calculators.singlepoint import SinglePointCalculator
 
-from autokmc.io.calculators import CalculatorPool
-from autokmc.sites.adsorbate import AdsorbateSiteLateral
-from autokmc.sites.stability.adsorption import check_site_stability
-from autokmc.sites.stability.diffusion import NEBNotConvergedError
-from autokmc.sites.stability.intermediate_pruning import (
+from ogkmc.io.calculators import CalculatorPool
+from ogkmc.sites.adsorbate import AdsorbateSiteLateral
+from ogkmc.sites.stability.adsorption import check_site_stability
+from ogkmc.sites.stability.diffusion import NEBNotConvergedError
+from ogkmc.sites.stability.intermediate_pruning import (
     CompositeDirectEventDetected,
     retain_refinement_and_maybe_suppress,
 )
-from autokmc.thermo import free_energy
+from ogkmc.thermo import free_energy
 
 
 class Harmonic(Calculator):
@@ -138,7 +138,7 @@ def test_fully_frozen_unoccupied_slab_is_a_valid_stability_endpoint():
 
 
 def test_composite_direct_event_control_exception_survives_neb_boundary(monkeypatch):
-    from autokmc.sites.stability import neb as nebmod
+    from ogkmc.sites.stability import neb as nebmod
 
     class Converged:
         def __init__(self, atoms, logfile=None):

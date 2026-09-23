@@ -6,17 +6,17 @@ from types import SimpleNamespace
 
 import networkx as nx
 
-from autokmc.core.constants import LATERAL_SHELLS_DEFAULT
-from autokmc.kmc import engine as engine_module
-from autokmc.kmc.initialization import initialise_runtime
-from autokmc.kmc.models import (
+from ogkmc.core.constants import LATERAL_SHELLS_DEFAULT
+from ogkmc.kmc import engine as engine_module
+from ogkmc.kmc.initialization import initialise_runtime
+from ogkmc.kmc.models import (
     KMCChannels,
     KMCResumeState,
     KMCSettings,
     KMCSystem,
     KMCThermochemistry,
 )
-from autokmc.reactions import adsorption, bond, diffusion
+from ogkmc.reactions import adsorption, bond, diffusion
 
 
 def test_kmc_settings_use_configured_lateral_shells_for_refresh_radius():

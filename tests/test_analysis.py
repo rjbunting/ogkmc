@@ -7,9 +7,9 @@ import json
 
 import pytest
 
-from autokmc.analysis.products import AnalysisError, analyze_run
-from autokmc.cli.main import main as cli_main
-from autokmc.core.constants import PERSISTENCE_SCHEMA_VERSION
+from ogkmc.analysis.products import AnalysisError, analyze_run
+from ogkmc.cli.main import main as cli_main
+from ogkmc.core.constants import PERSISTENCE_SCHEMA_VERSION
 
 
 def _surface(species: str, placement: str) -> dict:

@@ -12,17 +12,17 @@ from ase import Atoms
 from ase.calculators.singlepoint import SinglePointCalculator
 from ase.io import read
 
-from autokmc.io.checkpoint import load_checkpoint, make_checkpoint_state, save_checkpoint
-from autokmc.io.persistence import ReactionWriter
-from autokmc.io.reaction_index import load_reaction_index
-from autokmc.io.run_manifest import discover_quarantine_locations
-from autokmc.kmc.index import _ReactionIndex
-from autokmc.kmc.models import (
+from ogkmc.io.checkpoint import load_checkpoint, make_checkpoint_state, save_checkpoint
+from ogkmc.io.persistence import ReactionWriter
+from ogkmc.io.reaction_index import load_reaction_index
+from ogkmc.io.run_manifest import discover_quarantine_locations
+from ogkmc.kmc.index import _ReactionIndex
+from ogkmc.kmc.models import (
     KMCChannels, KMCFunctions, KMCObservers, KMCRunRequest, KMCRuntime,
     KMCSettings, KMCSystem,
 )
-from autokmc.kmc.outputs import KMCOutputManager
-from autokmc.kmc.session import KMCSession
+from ogkmc.kmc.outputs import KMCOutputManager
+from ogkmc.kmc.session import KMCSession
 
 
 def _bare_site(kind):
@@ -182,7 +182,7 @@ def test_initial_sweep_failure_flushes_both_bare_channels(tmp_path, monkeypatch)
     def fail(*_args, **_kwargs):
         raise RuntimeError("initial sweep failed")
 
-    monkeypatch.setattr("autokmc.kmc.session.initialise_runtime", fail)
+    monkeypatch.setattr("ogkmc.kmc.session.initialise_runtime", fail)
     with pytest.raises(RuntimeError, match="initial sweep failed"):
         session.run()
     writer.close()

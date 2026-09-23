@@ -6,12 +6,12 @@ import pytest
 from ase.io import read as ase_read
 from ase.io import write as ase_write
 
-import autokmc.io.trajectory as trajectory_module
-from autokmc.io.schemas import (
+import ogkmc.io.trajectory as trajectory_module
+from ogkmc.io.schemas import (
     TRAJECTORY_ARTIFACT_TYPE,
     TRAJECTORY_METADATA_SCHEMA_VERSION,
 )
-from autokmc.io.trajectory import TrajectoryWriter
+from ogkmc.io.trajectory import TrajectoryWriter
 
 
 def test_trajectory_writer_respects_dump_every(tmp_path, tiny_atoms):

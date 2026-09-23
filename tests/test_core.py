@@ -6,8 +6,8 @@ import networkx as nx
 import numpy as np
 import pytest
 
-from autokmc.core.graph import build_graph
-from autokmc.core.graph_state import (
+from ogkmc.core.graph import build_graph
+from ogkmc.core.graph_state import (
     get_adsorbate_sites,
     get_bond_reaction_sites,
     get_bond_registry,

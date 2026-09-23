@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from autokmc.io import _files
+from ogkmc.io import _files
 
 
 def test_atomic_output_syncs_file_before_replace_and_directory_after(

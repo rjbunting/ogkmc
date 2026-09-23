@@ -10,8 +10,8 @@ import numpy as np
 from rdkit import Chem
 from scipy.spatial.transform import Rotation
 
-from autokmc.core.graph import build_graph
-from autokmc.sites.adsorbate import (
+from ogkmc.core.graph import build_graph
+from ogkmc.sites.adsorbate import (
     find_adsorbate_sites,
     _geometry_connectivity_mismatch,
     _full_adsorbate_positions,
@@ -19,10 +19,10 @@ from autokmc.sites.adsorbate import (
     optimise_adsorbate_site_positions,
     prune_unstable_adsorbate_sites,
 )
-from autokmc.species.bond_chemistry import combine_fragments, get_all_fragments
-from autokmc.species.reactant import build_reactant
-from autokmc.structure.builders import _apply_composition
-from autokmc.structure.surface import find_surface_atoms
+from ogkmc.species.bond_chemistry import combine_fragments, get_all_fragments
+from ogkmc.species.reactant import build_reactant
+from ogkmc.structure.builders import _apply_composition
+from ogkmc.structure.surface import find_surface_atoms
 
 
 def test_alloy_substitution_preserves_complete_element_symbols():
@@ -159,7 +159,7 @@ def test_explicit_bracket_hydrogens_and_requested_implicit_hydrogens():
 
 def test_bottom_gas_product_endpoint_lifts_away_from_slab():
     from types import SimpleNamespace
-    from autokmc.sites.stability.bond import _gas_product_neb_endpoint
+    from ogkmc.sites.stability.bond import _gas_product_neb_endpoint
 
     atoms_ab = Atoms(
         "CuHH",

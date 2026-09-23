@@ -8,9 +8,9 @@ from types import ModuleType, SimpleNamespace
 import pytest
 from ase import Atoms
 
-from autokmc.species.bond_chemistry import _strip_dummy_atoms_from_smiles
-from autokmc.species.reactant import _smiles_to_atoms, find_anchor_atoms
-from autokmc.species.smiles import (
+from ogkmc.species.bond_chemistry import _strip_dummy_atoms_from_smiles
+from ogkmc.species.reactant import _smiles_to_atoms, find_anchor_atoms
+from ogkmc.species.smiles import (
     canonical_atom_inventory_smiles,
     smiles_to_dirname,
 )
@@ -66,7 +66,7 @@ def test_smiles_to_atoms_fallback_embedding_is_deterministic_and_checked(monkeyp
     monkeypatch.setitem(sys.modules, "rdkit.Chem", chem)
     monkeypatch.setitem(sys.modules, "rdkit.Chem.AllChem", all_chem)
     monkeypatch.setattr(
-        "autokmc.species.reactant._molecule_from_smiles", lambda *_a, **_k: FakeMol(),
+        "ogkmc.species.reactant._molecule_from_smiles", lambda *_a, **_k: FakeMol(),
     )
 
     with pytest.raises(ValueError, match="random fallback embedder failed"):
@@ -91,11 +91,11 @@ def test_bond_smiles_canonicalization_preserves_explicit_atom_inventory():
 
 
 def test_h_plus_o2_coupling_preserves_hydrogen_through_bond_templates():
-    from autokmc.sites.bond import (
+    from ogkmc.sites.bond import (
         derive_coupling_templates,
         derive_dissociation_templates,
     )
-    from autokmc.species.reactant import build_reactant
+    from ogkmc.species.reactant import build_reactant
 
     templates = derive_coupling_templates(
         ["[H]", "O=O"],
@@ -140,7 +140,7 @@ def test_h_plus_o2_coupling_preserves_hydrogen_through_bond_templates():
 
 
 def test_species_package_exports_public_api():
-    import autokmc.species as species
+    import ogkmc.species as species
 
     assert species.Reactant.__name__ == "Reactant"
     assert issubclass(species.ReactantConnectivityError, RuntimeError)
@@ -180,7 +180,7 @@ def test_methyl_anchor_atoms_prefer_carbon_over_hydrogen():
 
 
 def test_io_uses_shared_smiles_dirname_helper():
-    from autokmc.io import persistence, summary
+    from ogkmc.io import persistence, summary
 
     label = "[C]/[O]↔[C]\\[O]"
     assert persistence._smiles_to_dirname(label) == smiles_to_dirname(label)
@@ -191,7 +191,7 @@ def test_rdkit_isolated_h_warning_is_suppressed(capfd):
     pytest.importorskip("rdkit")
     from rdkit import Chem
 
-    from autokmc.utils.rdkit_logging import silence_rdkit_warnings
+    from ogkmc.utils.rdkit_logging import silence_rdkit_warnings
 
     silence_rdkit_warnings()
     for _ in range(3):
@@ -202,7 +202,7 @@ def test_rdkit_isolated_h_warning_is_suppressed(capfd):
 
 
 def test_gas_cache_dir_uses_safe_smiles_label(monkeypatch, tmp_path):
-    import autokmc.species.reactant as reactant_mod
+    import ogkmc.species.reactant as reactant_mod
 
     atoms = reactant_mod._smiles_to_atoms("[C]/[O]")
 
@@ -237,7 +237,7 @@ def test_gas_cache_dir_uses_safe_smiles_label(monkeypatch, tmp_path):
     monkeypatch.setattr(reactant_mod, "_optimise", fake_optimise)
     monkeypatch.setattr(atoms, "get_potential_energy", lambda: 1.0)
     monkeypatch.setattr(
-        "autokmc.thermo.free_energy.compute_gas_thermo",
+        "ogkmc.thermo.free_energy.compute_gas_thermo",
         fake_compute_gas_thermo,
     )
 
@@ -256,7 +256,7 @@ def test_gas_cache_dir_uses_safe_smiles_label(monkeypatch, tmp_path):
 
 
 def test_relax_false_still_computes_single_point_energy(monkeypatch):
-    import autokmc.species.reactant as reactant_mod
+    import ogkmc.species.reactant as reactant_mod
 
     atoms = reactant_mod._smiles_to_atoms("[O]")
     atoms.arrays["surface"] = [2]
@@ -290,7 +290,7 @@ def test_relax_false_still_computes_single_point_energy(monkeypatch):
 
 
 def test_vasp_gas_evaluation_temporarily_enables_full_pbc(monkeypatch):
-    import autokmc.species.reactant as reactant_mod
+    import ogkmc.species.reactant as reactant_mod
     from ase.calculators.vasp import Vasp
 
     atoms = reactant_mod._smiles_to_atoms("[O]")
@@ -323,7 +323,7 @@ def test_vasp_gas_evaluation_temporarily_enables_full_pbc(monkeypatch):
 
 
 def test_configured_spin_seeds_total_magnetic_moment(monkeypatch):
-    import autokmc.species.reactant as reactant_mod
+    import ogkmc.species.reactant as reactant_mod
 
     atoms = reactant_mod._smiles_to_atoms("O=O", add_hydrogens=False)
 

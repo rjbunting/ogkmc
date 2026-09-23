@@ -9,20 +9,20 @@ from ase.calculators.emt import EMT
 import numpy as np
 import pytest
 
-from autokmc.core.graph import build_graph
-from autokmc.io.calculators import CalculatorConfigError
-from autokmc.io.config import load_config
-from autokmc.sites.adsorbate import (
+from ogkmc.core.graph import build_graph
+from ogkmc.io.calculators import CalculatorConfigError
+from ogkmc.io.config import load_config
+from ogkmc.sites.adsorbate import (
     _geometry_connectivity_mismatch,
     _geometry_connectivity_mismatch_for_cliques,
     find_adsorbate_sites,
     optimise_adsorbate_site_positions,
 )
-from autokmc.species.reactant import build_reactant
-from autokmc.structure import find_surface_atoms
-from autokmc.structure.builders import _apply_composition
-from autokmc.structure.slab import build_surface
-from autokmc.workflow.stages import configured_adsorbate_site_kwargs
+from ogkmc.species.reactant import build_reactant
+from ogkmc.structure import find_surface_atoms
+from ogkmc.structure.builders import _apply_composition
+from ogkmc.structure.slab import build_surface
+from ogkmc.workflow.stages import configured_adsorbate_site_kwargs
 
 
 def _build_example_surface(filename: str):
@@ -70,7 +70,7 @@ def test_apply_composition_uses_exact_constrained_largest_remainder_counts():
 
 
 def test_surface_builder_requires_an_explicit_calculator(monkeypatch):
-    import autokmc.structure.slab as slab_module
+    import ogkmc.structure.slab as slab_module
 
     monkeypatch.setattr(slab_module, "_PMG_AVAILABLE", True)
 
@@ -110,7 +110,7 @@ def test_surface_examples_build_expected_four_layer_slabs(filename, repeat):
 @pytest.mark.parametrize("facet", ["100", "111"])
 @pytest.mark.parametrize("shear", [-2, -1, 1])
 def test_surface_tiling_uses_shortest_in_plane_basis(monkeypatch, facet, shear):
-    import autokmc.structure.slab as slab_module
+    import ogkmc.structure.slab as slab_module
 
     builder = fcc100 if facet == "100" else fcc111
     reference = builder("Pd", size=(1, 1, 4), a=3.89, vacuum=12.0, periodic=True)
@@ -263,7 +263,7 @@ def test_skew_pd111_o_sites_are_local_and_connectivity_consistent():
 
 
 def test_nanoparticle_helpers_require_an_explicit_calculator(monkeypatch):
-    import autokmc.structure.nanoparticle as nanoparticle_module
+    import ogkmc.structure.nanoparticle as nanoparticle_module
 
     monkeypatch.setattr(nanoparticle_module, "_WULFF_AVAILABLE", True)
 
@@ -274,7 +274,7 @@ def test_nanoparticle_helpers_require_an_explicit_calculator(monkeypatch):
 
 
 def test_optimisation_requires_an_explicit_or_attached_calculator():
-    from autokmc.structure.optimization import optimise_bulk, optimise_structure
+    from ogkmc.structure.optimization import optimise_bulk, optimise_structure
 
     with pytest.raises(CalculatorConfigError, match="explicit calculator"):
         optimise_bulk("Cu", calculator=None)

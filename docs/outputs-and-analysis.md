@@ -21,23 +21,23 @@ RUN_DIR/
     invalid_diffusion/
     invalid_bond/
     bare_neb/
-  analysis/                      # after `autokmc analyze`
+  analysis/                      # after `ogkmc analyze`
 ```
 
-AutoKMC writes complete JSON documents by atomic replacement and rejects
+OGKMC writes complete JSON documents by atomic replacement and rejects
 nonfinite numeric output. It treats `events.jsonl` differently because that file
 is append-only. Event rows may remain in the process buffer between checkpoints.
-Before publishing a checkpoint, AutoKMC flushes and syncs those rows and records
+Before publishing a checkpoint, OGKMC flushes and syncs those rows and records
 the exact committed byte offset. It flushes and syncs them again when the writer
 closes.
 
-Before a fresh run starts, AutoKMC checks `output.dir` for managed artifacts. If
+Before a fresh run starts, OGKMC checks `output.dir` for managed artifacts. If
 it finds an existing event log, manifest, summary, trajectory, checkpoint,
 reaction tree, cache, analysis, or diagnostics tree, it stops instead of
 truncating or mixing the earlier run. Use a new output directory for a new
 trajectory, or use checkpoint resume to continue the existing trajectory.
-AutoKMC also holds one filesystem lock for the complete run so another process
-cannot write the same directory. `autokmc preflight CONFIG` checks both
+OGKMC also holds one filesystem lock for the complete run so another process
+cannot write the same directory. `ogkmc preflight CONFIG` checks both
 conditions without creating configured outputs.
 
 ## `run_manifest.json`
@@ -151,8 +151,8 @@ behind these values.
 All structure outputs write a complete value for every declared per-atom
 column. Missing string metadata (for example, a slab's `bulk_wyckoff` label
 on an adsorbate) appears as `_`. Strings containing whitespace or quotes use
-percent-escaped tokens. The `autokmc_extxyz_string_arrays` comment metadata
-retains original values and types; AutoKMC restores them when loading structures
+percent-escaped tokens. The `ogkmc_extxyz_string_arrays` comment metadata
+retains original values and types; OGKMC restores them when loading structures
 or cached results. Standard EXTXYZ readers can open the files directly.
 
 An accepted bond NEB image with endpoint-like or below-endpoint energy has a
@@ -161,7 +161,7 @@ and the minimum KMC barrier while `valid` remains `true`. The raw transition
 energy and barriers remain available alongside the effective energies and KMC
 barriers; these reactions are stored in the normal reaction tree.
 
-For a gas-product bond reaction, AutoKMC stores the thermodynamic C state as two
+For a gas-product bond reaction, OGKMC stores the thermodynamic C state as two
 independent calculation inputs. `state_c_gas_reference.extxyz` contains the
 relaxed surface and lateral environment without a molecule in the vacuum.
 `gas_molecule.extxyz` contains only the optimized gas molecule. Their energies
@@ -237,11 +237,11 @@ known sites and reactants, occupancy, reaction counts, frozen indices, RNG
 state, scientific-config fingerprint, and exact committed `events.jsonl` count
 and byte offset, plus the durable trajectory byte offset when trajectory output
 is enabled. Routine checkpoints leave the compatibility `history` field
-empty because AutoKMC reconstructs committed history from `events.jsonl`
+empty because OGKMC reconstructs committed history from `events.jsonl`
 instead of copying it into every snapshot. A standalone API run keeps history
 only when it has a checkpoint writer but no event writer.
 
-Before writing a checkpoint, AutoKMC removes calculator objects and large
+Before writing a checkpoint, OGKMC removes calculator objects and large
 reconstructible graph caches. On resume, it rebuilds the calculators from the
 current configuration and rebuilds `surface_apsp`, surface-shell BFS data, and
 geometry lookup arrays only when they are needed.
@@ -265,7 +265,7 @@ Continuation semantics are cumulative:
   predates run UUIDs, its validated rows are atomically assigned the continuing
   run UUID so the next exact checkpoint can be resumed again. If the original
   legacy event log is missing but the checkpoint still contains public KMC
-  history, AutoKMC first writes a canonical cumulative prefix marked
+  history, OGKMC first writes a canonical cumulative prefix marked
   `legacy_history_recovered`; this prevents a later compact checkpoint from
   losing the earlier public history. These synthetic rows preserve the fields
   present in the historic KMC tuple, but cannot recreate transition lineage or
@@ -295,7 +295,7 @@ integer `kmc_step`. New checkpoints record the exact durable trajectory byte
 boundary, so even a torn atom-count or metadata line in the next append can be
 discarded. Older checkpoints discard incomplete tails only when the available
 frame metadata establishes that they are uncommitted. The committed prefix must be strictly increasing, and a
-committed frame cannot appear after a crash-tail frame. AutoKMC rejects those
+committed frame cannot appear after a crash-tail frame. OGKMC rejects those
 ambiguous or malformed histories without modifying the original file. A
 missing or empty trajectory remains valid for legacy runs that did not persist
 trajectory frames. A trajectory shorter than a recorded committed byte boundary
@@ -306,7 +306,7 @@ allowlist is limited to `kmc.n_steps`, `kmc.log_every`, `output.log_level`, and
 the `checkpoint.enabled`, `checkpoint.path`, `checkpoint.every_n_steps`, and
 `checkpoint.resume_from` lifecycle fields. The fingerprint content-hashes
 resolvable calculator artifacts, including directory-valued inputs, and records
-the AutoKMC source digest, AutoKMC version, and installed calculator-package
+the OGKMC source digest, OGKMC version, and installed calculator-package
 versions. Legacy checkpoints without this fingerprint remain readable and use
 conservative step-based event reconciliation. Their trajectory is still
 reconciled from the checkpoint step. Legacy checkpoint history is retained for
@@ -321,9 +321,9 @@ different purpose: it reuses scientific calculations across trajectories.
 Run analysis after KMC:
 
 ```bash
-autokmc analyze RUN_DIR
-autokmc analyze RUN_DIR --start-time 1e-4 --end-time 5e-4 --blocks 20
-autokmc analyze RUN_DIR --manifest custom_manifest.json
+ogkmc analyze RUN_DIR
+ogkmc analyze RUN_DIR --start-time 1e-4 --end-time 5e-4 --blocks 20
+ogkmc analyze RUN_DIR --manifest custom_manifest.json
 ```
 
 Strict mode is the default. `--allow-incomplete` retains unknown lineage roots
@@ -380,9 +380,9 @@ analysis/
 ## Human-readable run report
 
 ```bash
-autokmc report RUN_DIR
-autokmc report RUN_DIR --blocks 20 --output-dir RUN_DIR/analysis
-autokmc report RUN_DIR --no-refresh-analysis
+ogkmc report RUN_DIR
+ogkmc report RUN_DIR --blocks 20 --output-dir RUN_DIR/analysis
+ogkmc report RUN_DIR --no-refresh-analysis
 ```
 
 The report combines run status and termination reason, coverage, directional

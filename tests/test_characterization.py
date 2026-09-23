@@ -10,10 +10,10 @@ import numpy as np
 import pytest
 from ase import Atoms
 
-from autokmc.analysis.products import analyze_run
-from autokmc.cli.pipeline import run_from_config
-from autokmc.io.calculators import CalculatorCfg
-from autokmc.io.config import (
+from ogkmc.analysis.products import analyze_run
+from ogkmc.cli.pipeline import run_from_config
+from ogkmc.io.calculators import CalculatorCfg
+from ogkmc.io.config import (
     AdsorptionCfg,
     ConstantsCfg,
     FreeEnergyCfg,
@@ -23,21 +23,21 @@ from autokmc.io.config import (
     RunConfig,
     StructureCfg,
 )
-from autokmc.io.persistence import ReactionWriter
-from autokmc.io.reaction_index import (
+from ogkmc.io.persistence import ReactionWriter
+from ogkmc.io.reaction_index import (
     load_reaction_index,
     resolve_event_definition,
 )
-from autokmc.io.run_manifest import (
+from ogkmc.io.run_manifest import (
     RUN_MANIFEST_SCHEMA_VERSION,
     finish_run_manifest,
     start_run_manifest,
 )
-from autokmc.io.schemas import EVENT_SCHEMA_VERSION
-from autokmc.kmc.engine import run_kmc_steps
-from autokmc.reactions.adsorption import AdsorptionReaction
-from autokmc.sites.adsorbate import AdsorbateSite, AdsorbateSiteLateral
-from autokmc.species.reactant import Reactant
+from ogkmc.io.schemas import EVENT_SCHEMA_VERSION
+from ogkmc.kmc.engine import run_kmc_steps
+from ogkmc.reactions.adsorption import AdsorptionReaction
+from ogkmc.sites.adsorbate import AdsorbateSite, AdsorbateSiteLateral
+from ogkmc.species.reactant import Reactant
 
 
 def _single_site_system(*, occupied: bool = False):
@@ -97,7 +97,7 @@ def _single_site_system(*, occupied: bool = False):
 
 def _install_deterministic_adsorption_kernel(monkeypatch):
     """Replace expensive discovery while retaining the real KMC loop/index/mutation."""
-    import autokmc.kmc.engine as engine
+    import ogkmc.kmc.engine as engine
 
     def current_reaction(graph, site):
         occupied = bool(graph.nodes[site.member_node_ids[0][0]]["occupied"])
@@ -226,12 +226,12 @@ def test_fresh_run_from_config_orchestrates_all_nonoptional_stages(
     tmp_path,
     monkeypatch,
 ):
-    import autokmc.core.graph as graph_module
-    import autokmc.cli.pipeline as pipeline_module
-    import autokmc.kmc.engine as engine_module
-    import autokmc.sites.adsorbate as adsorbate_module
-    import autokmc.species.reactant as reactant_module
-    import autokmc.structure as structure_module
+    import ogkmc.core.graph as graph_module
+    import ogkmc.cli.pipeline as pipeline_module
+    import ogkmc.kmc.engine as engine_module
+    import ogkmc.sites.adsorbate as adsorbate_module
+    import ogkmc.species.reactant as reactant_module
+    import ogkmc.structure as structure_module
 
     calls = []
     built_graph = nx.Graph()

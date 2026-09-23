@@ -1,4 +1,4 @@
-"""Smoke tests for the autokmc CLI parser and config validation."""
+"""Smoke tests for the ogkmc CLI parser and config validation."""
 
 from __future__ import annotations
 
@@ -10,15 +10,15 @@ from ase import Atoms
 import networkx as nx
 import pytest
 
-from autokmc.cli.main import main as cli_main
-from autokmc.cli.pipeline import (
+from ogkmc.cli.main import main as cli_main
+from ogkmc.cli.pipeline import (
     _derive_configured_bond_templates,
     _resolved_partial_pressure_bar,
     run_from_config,
 )
-from autokmc.io.calculators import CalculatorCfg, CalculatorPool
-from autokmc.io.checkpoint import make_checkpoint_state, save_checkpoint
-from autokmc.io.config import (
+from ogkmc.io.calculators import CalculatorCfg, CalculatorPool
+from ogkmc.io.checkpoint import make_checkpoint_state, save_checkpoint
+from ogkmc.io.config import (
     BondCfg,
     CheckpointCfg,
     FreeEnergyCfg,
@@ -27,8 +27,8 @@ from autokmc.io.config import (
     ReactantCfg,
     RunConfig,
 )
-from autokmc.io.resume_contract import make_resume_contract
-from autokmc.species.reactant import Reactant
+from ogkmc.io.resume_contract import make_resume_contract
+from ogkmc.species.reactant import Reactant
 
 
 YAML_OK = """\
@@ -65,11 +65,11 @@ def test_cli_version(capsys):
     with pytest.raises(SystemExit) as exc:
         cli_main(["--version"])
     assert exc.value.code == 0
-    assert "autokmc" in capsys.readouterr().out
+    assert "ogkmc" in capsys.readouterr().out
 
 
 def test_cli_package_exports_public_entrypoints():
-    import autokmc.cli as cli
+    import ogkmc.cli as cli
 
     assert cli.main is cli_main
     assert callable(cli.run_from_config)
@@ -81,7 +81,7 @@ def test_cli_no_args_errors():
 
 
 def test_bond_template_derivation_preserves_per_reactant_hydrogen_policy(monkeypatch):
-    from autokmc.reactions import templates as template_module
+    from ogkmc.reactions import templates as template_module
 
     calls = []
 
@@ -156,13 +156,13 @@ def test_resume_skips_fresh_structure_and_site_enumeration(tmp_path, monkeypatch
     def unexpected(*args, **kwargs):
         raise AssertionError("fresh-run setup was called while resuming")
 
-    import autokmc.structure as structure_module
-    import autokmc.core.graph as graph_module
-    import autokmc.species.reactant as reactant_module
-    import autokmc.sites.adsorbate as adsorbate_module
-    import autokmc.sites.diffusion as diffusion_module
-    import autokmc.sites.bond as bond_module
-    import autokmc.kmc.engine as engine_module
+    import ogkmc.structure as structure_module
+    import ogkmc.core.graph as graph_module
+    import ogkmc.species.reactant as reactant_module
+    import ogkmc.sites.adsorbate as adsorbate_module
+    import ogkmc.sites.diffusion as diffusion_module
+    import ogkmc.sites.bond as bond_module
+    import ogkmc.kmc.engine as engine_module
 
     for module, name in (
         (structure_module, "build_surface"),
@@ -209,7 +209,7 @@ def test_calculator_pool_is_shutdown_when_pre_kmc_stage_fails(
     tmp_path,
     monkeypatch,
 ):
-    import autokmc.cli.pipeline as pipeline_module
+    import ogkmc.cli.pipeline as pipeline_module
 
     resource = CalculatorPool([object()])
     shutdown_calls = []
@@ -250,8 +250,8 @@ def test_calculator_shutdown_error_does_not_flip_complete_manifest(
     monkeypatch,
     caplog,
 ):
-    import autokmc.cli.pipeline as pipeline_module
-    from autokmc.io.run_manifest import finish_run_manifest
+    import ogkmc.cli.pipeline as pipeline_module
+    from ogkmc.io.run_manifest import finish_run_manifest
 
     resource = CalculatorPool([object()])
 

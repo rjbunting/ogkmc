@@ -10,14 +10,14 @@ from ase.constraints import FixAtoms
 from ase.io import read as ase_read
 from ase.io.extxyz import key_val_str_to_dict
 
-from autokmc.core.atom_metadata import apply_atom_metadata
-from autokmc.io.extxyz import (
+from ogkmc.core.atom_metadata import apply_atom_metadata
+from ogkmc.io.extxyz import (
     STRING_ARRAYS_KEY, prepare_extxyz_atoms, read_atoms, write_extxyz,
 )
-from autokmc.io.persistence import _atomic_extxyz as write_reaction_atoms
-from autokmc.io.calculation_cache import _atomic_extxyz as write_cache_atoms
-from autokmc.io.trajectory import TrajectoryWriter
-from autokmc.structure.loading import load_structure_file
+from ogkmc.io.persistence import _atomic_extxyz as write_reaction_atoms
+from ogkmc.io.calculation_cache import _atomic_extxyz as write_cache_atoms
+from ogkmc.io.trajectory import TrajectoryWriter
+from ogkmc.structure.loading import load_structure_file
 
 
 def _slab_with_adsorbates():

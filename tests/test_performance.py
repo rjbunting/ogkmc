@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from autokmc.io.performance import (
+from ogkmc.io.performance import (
     PERFORMANCE_DIAGNOSTICS_SCHEMA_VERSION,
     build_performance_summary,
     write_performance_diagnostics,

@@ -19,27 +19,27 @@ jobs:
           cache: pip
       - run: python -m pip install --upgrade pip
       - run: python -m pip install -e ".[cli,test,dev]"
-      - run: python -m compileall -q autokmc
-      - run: ruff check autokmc tests
+      - run: python -m compileall -q ogkmc
+      - run: ruff check ogkmc tests
       - name: Type-check persistence and typed runtime boundaries
         if: matrix.python-version == '3.10'
         run: >-
           mypy --follow-imports=skip
-          autokmc/io/_files.py
-          autokmc/io/config.py
-          autokmc/io/checkpoint.py
-          autokmc/io/calculation_cache.py
-          autokmc/io/calculators.py
-          autokmc/io/config_validation.py
-          autokmc/io/event_log.py
-          autokmc/io/persistence.py
-          autokmc/io/reaction_graph.py
-          autokmc/io/resume_contract.py
-          autokmc/io/trajectory.py
-          autokmc/analysis/products.py
-          autokmc/core/graph_state.py
-          autokmc/sites/identity.py
-          autokmc/kmc
-          autokmc/workflow
-          autokmc/utils/telemetry.py
-      - run: pytest --cov=autokmc --cov-report=term-missing --cov-report=xml --cov-fail-under=50
+          ogkmc/io/_files.py
+          ogkmc/io/config.py
+          ogkmc/io/checkpoint.py
+          ogkmc/io/calculation_cache.py
+          ogkmc/io/calculators.py
+          ogkmc/io/config_validation.py
+          ogkmc/io/event_log.py
+          ogkmc/io/persistence.py
+          ogkmc/io/reaction_graph.py
+          ogkmc/io/resume_contract.py
+          ogkmc/io/trajectory.py
+          ogkmc/analysis/products.py
+          ogkmc/core/graph_state.py
+          ogkmc/sites/identity.py
+          ogkmc/kmc
+          ogkmc/workflow
+          ogkmc/utils/telemetry.py
+      - run: pytest --cov=ogkmc --cov-report=term-missing --cov-report=xml --cov-fail-under=50

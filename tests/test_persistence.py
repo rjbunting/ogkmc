@@ -1,4 +1,4 @@
-"""Tests for autokmc.io.persistence — ReactionWriter + atoms_from_graph."""
+"""Tests for ogkmc.io.persistence — ReactionWriter + atoms_from_graph."""
 
 from __future__ import annotations
 
@@ -14,26 +14,26 @@ from ase.calculators.singlepoint import SinglePointCalculator
 from ase.constraints import FixAtoms
 from ase.io import read as ase_read, write as ase_write
 
-from autokmc.species.smiles import smiles_to_dirname
-from autokmc.io.persistence import (
+from ogkmc.species.smiles import smiles_to_dirname
+from ogkmc.io.persistence import (
     EventLogCommit,
     ReactionWriter,
     reconcile_event_log,
 )
-from autokmc.io.reaction_index import (
+from ogkmc.io.reaction_index import (
     load_reaction_index,
     resolve_event_definition,
 )
-from autokmc.io.schemas import (
+from ogkmc.io.schemas import (
     EVENT_ARTIFACT_TYPE,
     EVENT_SCHEMA_VERSION,
     REACTION_DOCUMENT_SCHEMA_VERSION,
     REACTION_INDEX_SCHEMA_VERSION,
 )
-from autokmc.io.event_log import EventHistory
-from autokmc.io.atoms import atoms_from_graph, copy_atoms_with_results
-from autokmc.io import persistence as persistence_module
-from autokmc.utils.telemetry import RuntimeTelemetry, telemetry_context
+from ogkmc.io.event_log import EventHistory
+from ogkmc.io.atoms import atoms_from_graph, copy_atoms_with_results
+from ogkmc.io import persistence as persistence_module
+from ogkmc.utils.telemetry import RuntimeTelemetry, telemetry_context
 
 
 def test_atoms_from_graph_includes_only_occupied_adsorbates(tmp_path, synth_graph):
@@ -54,7 +54,7 @@ def test_atoms_from_graph_includes_only_occupied_adsorbates(tmp_path, synth_grap
     assert atoms.arrays["reactant_smiles"].tolist()[-1] == "[C-]#[O+]"
     assert atoms.arrays["site_iso_class"].tolist()[-1] == "2"
     assert atoms.arrays["site_member_index"].tolist()[-1] == "1"
-    assert atoms.info["autokmc_graph_schema"] == "test-graph-v1"
+    assert atoms.info["ogkmc_graph_schema"] == "test-graph-v1"
     assert atoms.info["run_id"] == "run-123"
     assert isinstance(atoms.constraints[0], FixAtoms)
     assert atoms.constraints[0].get_indices().tolist() == [0]

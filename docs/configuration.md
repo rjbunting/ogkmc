@@ -1,6 +1,6 @@
 # Configuration Reference
 
-AutoKMC reads YAML (`.yaml` or `.yml`) and TOML (`.toml`) configuration files.
+OGKMC reads YAML (`.yaml` or `.yml`) and TOML (`.toml`) configuration files.
 Every file begins with the top-level `schema_version`, which is currently
 `"1"`. The loader rejects unknown keys, coercible string booleans, nonfinite
 values, invalid enums, and out-of-range values.
@@ -15,8 +15,8 @@ are rejected rather than silently ignored.
 Always validate before launching an expensive run:
 
 ```bash
-autokmc validate-config CONFIG.yaml
-autokmc preflight CONFIG.yaml
+ogkmc validate-config CONFIG.yaml
+ogkmc preflight CONFIG.yaml
 ```
 
 First, `validate-config` rejects empty feeds, invalid or duplicate canonical
@@ -41,7 +41,7 @@ calculator, thermochemistry, and convergence settings explicitly.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `dir` | `autokmc_run` | Run directory. |
+| `dir` | `ogkmc_run` | Run directory. |
 | `reactions_filename` | `events.jsonl` | Append-only event log name. |
 | `summary_filename` | `summary.json` | Cumulative summary name. |
 | `run_manifest_filename` | `run_manifest.json` | Reproducibility manifest name. |
@@ -57,7 +57,7 @@ calculator, thermochemistry, and convergence settings explicitly.
 ## `constants`
 
 This section contains scientific and algorithmic values shared by several
-stages. AutoKMC first resolves these values and then records them in the run
+stages. OGKMC first resolves these values and then records them in the run
 manifest. Controls used by only one channel, such as NEB image counts and force
 thresholds, remain in that channel's section.
 
@@ -156,10 +156,10 @@ pruning, adsorption stability, and NEB endpoint relaxation. Valid values are
 `lbfgs`, `bfgs`, `fire`, and `mdmin`.
 
 `optimizer_kwargs` is a YAML mapping forwarded to the selected ASE
-optimizer constructor for every ordinary relaxation. AutoKMC supplies the
+optimizer constructor for every ordinary relaxation. OGKMC supplies the
 object being optimized and the logfile, so `atoms` and `logfile` cannot be
 overridden. All other constructor keywords supported by the installed ASE
-version are accepted and checked by `autokmc validate-config`.
+version are accepted and checked by `ogkmc validate-config`.
 
 `neb_optimizer` controls the ordinary diffusion and bond-reaction NEB band.
 Valid values are `bfgs`, `fire`, and `mdmin`. `lbfgs` is intentionally excluded
@@ -167,7 +167,7 @@ because ASE does not recommend it for NEB. Defaults preserve the previous
 behavior: `lbfgs` for ordinary relaxations and `bfgs` for NEB.
 
 `neb_optimizer_kwargs` provides the same constructor-keyword interface for the
-ordinary NEB optimizer. AutoKMC first optimizes the ordinary band and, whenever
+ordinary NEB optimizer. OGKMC first optimizes the ordinary band and, whenever
 the channel's climbing-image option is enabled, refines it with CI-NEB regardless
 of the raw barrier height. CI-NEB uses `neb_climb_optimizer`; `null` reuses
 `neb_optimizer`.
@@ -186,7 +186,7 @@ number of images. It must be finite and greater than zero, and it is included
 in calculation-cache identities.
 
 The `neb_intermediate_*` controls define a deliberately narrow stalled-path
-refinement. During the ordinary stage, AutoKMC tracks the lowest
+refinement. During the ordinary stage, OGKMC tracks the lowest
 interior-image electronic energy. After 100 consecutive optimizer steps
 without a decrease of at least `neb_intermediate_energy_tolerance`, it finds
 the highest-energy interior image and the nearest local minimum on each side.
@@ -196,13 +196,13 @@ endpoints also count as bounding minima.
 
 Every successfully converged ordinary or CI-NEB stage also receives a final
 energy-profile inspection, without waiting for the stagnation threshold. If a
-usable minimum bracket remains, AutoKMC shortens and reruns that segment before
+usable minimum bracket remains, OGKMC shortens and reruns that segment before
 advancing from ordinary NEB to CI-NEB or returning a final result. This catches
 bands that converge in fewer than 100 steps as well as profiles reshaped by the
 climbing-image stage.
 
 A distance-guard rollback is a second, immediate trigger for the same check:
-AutoKMC first restores the whole valid band with the lowest maximum NEB force
+OGKMC first restores the whole valid band with the lowest maximum NEB force
 in the current optimizer stage, then evaluates that restored band's electronic
 energy profile. It does not inspect the rejected stretched geometry or merely
 the most recent valid frame. This check runs during either ordinary or CI-NEB
@@ -212,7 +212,7 @@ ordinary/CI-NEB calculation with the normal per-stage budget. Otherwise, the
 existing reduced-step rollback resumes within the remaining budget, or reports
 non-convergence when that budget is exhausted.
 
-If the two bounding states include at least one interior minimum, AutoKMC
+If the two bounding states include at least one interior minimum, OGKMC
 optimizes the selected interior state or states with the ordinary `optimizer`
 and runs the standard ordinary/CI-NEB workflow between that pair. A replacement
 band is checked by the same stagnation and rollback rules and may be shortened
@@ -303,21 +303,21 @@ coordinates, zeros the FIRE velocity, and multiplies `dt` by `fdec`; the
 visible symptom is many identical energy and `fmax` lines while `dt` approaches
 zero.
 
-AutoKMC treats `downhill_check: true` for ordinary FIRE NEB as a temporary
+OGKMC treats `downhill_check: true` for ordinary FIRE NEB as a temporary
 preconditioner:
 
 1. FIRE begins with downhill checking enabled and retains ASE's normal rollback
    behavior.
-2. AutoKMC watches the rollback callback and the live FIRE timestep.
-3. After five rollback halvings, AutoKMC disables downhill checking, restores
+2. OGKMC watches the rollback callback and the live FIRE timestep.
+3. After five rollback halvings, OGKMC disables downhill checking, restores
    the stage's initial `dt`, and continues with the velocity reset performed by
    FIRE. The change is internal; no second optimizer or YAML setting is needed.
 4. A warning containing `disabling it and restoring dt=` records the switch.
 
-If FIRE is selected for CI-NEB, AutoKMC disables downhill checking immediately
+If FIRE is selected for CI-NEB, OGKMC disables downhill checking immediately
 because the climbing image is intentionally driven uphill. A separate MDMin
 climbing stage is the conservative configuration shown above. When
-`downhill_check` is already `false`, AutoKMC does not install the recovery
+`downhill_check` is already `false`, OGKMC does not install the recovery
 behavior.
 
 This recovery prevents a zero-timestep loop; it does not prove that a band is
@@ -326,7 +326,7 @@ continuity, overlaps, endpoint integrity, topology, energies, and forces before
 accepting a barrier or transition state.
 
 Numerical NEB non-convergence is likewise not a chemical stability result.
-AutoKMC preserves the last-known band, leaves the lateral class undecided, and
+OGKMC preserves the last-known band, leaves the lateral class undecided, and
 omits only that reaction from the current rate-index sweep. Other valid
 reactions remain available, so one exhausted optimizer cannot prevent the KMC
 loop from starting. The failure reason suppresses automatic retries, including
@@ -344,7 +344,7 @@ keywords such as `restart` and `trajectory` are also forwarded, but a single
 global path is reused by many relaxations and can collide in concurrent runs;
 omit those keywords unless the path lifecycle is managed externally.
 
-`neb_band_eval` controls how AutoKMC evaluates the band during each optimizer
+`neb_band_eval` controls how OGKMC evaluates the band during each optimizer
 step. The default `images` mode sends one image at a time through the calculator
 leased by that NEB. The `batched` mode sends the whole band through one stacked
 model call when the calculator supports it. This allows a single-GPU MLIP to
@@ -364,7 +364,7 @@ checkpoints) are batched automatically. Any other calculator is batched if it
 exposes an `evaluate_band(images)` method returning one `(energy, forces)` pair
 per image; otherwise the run falls back to `images`. To add a new model, either
 give its calculator an `evaluate_band` method (the `CallableBandEvaluator` path)
-or add a small evaluator class in `autokmc/sites/stability/band_eval.py` next to
+or add a small evaluator class in `ogkmc/sites/stability/band_eval.py` next to
 `FairChemBandEvaluator`. The evaluator returns *raw* model forces per image;
 `FixAtoms` and all NEB projections are applied afterward by the unchanged ASE
 path, so a new backend only has to answer "energy and forces for these
@@ -422,7 +422,7 @@ structure:
   frozen_indices: [0, 1, 2, 3]
 ```
 
-AutoKMC does not rebuild or relax a file-backed catalyst. It first loads the
+OGKMC does not rebuild or relax a file-backed catalyst. It first loads the
 selected frame and detaches any serialized calculator. For a periodic slab, it
 then detects the two connected lattice directions and, when necessary, applies
 one rigid rotation that aligns the surface normal with Cartesian +z. This
@@ -438,7 +438,7 @@ portable frozen mask used by chemistry, KMC, checkpoints, and trajectory
 output. Omit the field to combine `atoms.info["frozen_indices"]` with ASE
 `FixAtoms` constraints from the selected frame. Other constraint types do not
 mark atoms as fully frozen. Set `frozen_indices: []` to discard imported frozen
-metadata. During preflight, AutoKMC resolves the source path, parses the frame,
+metadata. During preflight, OGKMC resolves the source path, parses the frame,
 and reports the resolved path, frame index, atom count, and frozen count before
 it checks the calculator.
 
@@ -475,7 +475,7 @@ names, or CXSMILES extensions. Atom-map numbers do not distinguish species;
 isotopes and stereochemistry do. Duplicate feeds are rejected by both their
 normalized labels and their materialized atom inventories.
 
-The CO spellings `[C]=O` and `[C-]#[O+]` both use AutoKMC's neutral `[C]=O`
+The CO spellings `[C]=O` and `[C-]#[O+]` both use OGKMC's neutral `[C]=O`
 bond-chemistry convention. When `bond.enabled: true`, other formally charged
 species are rejected because the enumerator uses a charge-free radical model.
 This restriction also applies to the direct fragmentation and coupling APIs.
@@ -518,7 +518,7 @@ calculator:
   factory: fairchem.core.FAIRChemCalculator
   factory_kwargs:
     predict_unit:
-      factory: autokmc.io.fairchem.get_predict_unit_on_device
+      factory: ogkmc.io.fairchem.get_predict_unit_on_device
       factory_kwargs:
         name_or_path: uma-s-1p2
         device: cuda
@@ -542,17 +542,17 @@ calculator:
 
 These settings define two levels of concurrency. First, `copies` creates
 independent calculator objects, and `max_workers` limits the number of
-concurrent AutoKMC tasks. Separate NEBs may run concurrently, but each NEB keeps
+concurrent OGKMC tasks. Separate NEBs may run concurrently, but each NEB keeps
 one calculator for its complete lifecycle and does not distribute its images
 across the pool. Second, calculator-specific factory arguments control
 parallelism inside one calculator.
 
-For FAIR-Chem UMA, configure one AutoKMC copy per GPU and pass each ordinal to
+For FAIR-Chem UMA, configure one OGKMC copy per GPU and pass each ordinal to
 the nested `get_predict_unit_on_device` factory. The helper selects that ordinal
 while constructing the `device: cuda` predictor and verifies the resolved
 device. It requires one FAIR-Chem worker so each calculator remains on one
 device. FAIR-Chem's own `workers` option distributes one predictor calculation
-internally and should not be combined with per-GPU AutoKMC copies.
+internally and should not be combined with per-GPU OGKMC copies.
 
 Every configuration must set exactly one of `calculator.import_path` or
 `calculator.factory`. Omitting both is a validation error. EMT is used only
@@ -566,7 +566,7 @@ factory specs inside calculator arguments.
 
 Local files and directories nested anywhere in `kwargs` or `factory_kwargs`
 are identified by their contents for cache and resume compatibility. Remote
-model names cannot be inspected, so AutoKMC retains those aliases literally.
+model names cannot be inspected, so OGKMC retains those aliases literally.
 Use an immutable model revision, commit, or digest rather than a mutable alias
 such as `latest`; otherwise a remote artifact could change without the local
 cache or resume contract being able to detect it.
@@ -619,7 +619,7 @@ when changing a finite cap to `null` (`None` in Python) for uncapped enumeration
 | `persist_neb_path` | `false` | Save both image sequences for successful runs; failed NEBs retain their initial and last-known bands automatically. |
 
 Dynamic image selection begins after both endpoints are relaxed and their atoms
-are paired. AutoKMC first finds `d_max`, the largest minimum-image displacement
+are paired. OGKMC first finds `d_max`, the largest minimum-image displacement
 between corresponding atoms. It then calculates
 `ceil(d_max / image_spacing) - 1`, clips the result to
 `min_images`/`max_images`, and adds the two endpoint frames. Set
@@ -630,7 +630,7 @@ same sequence through `neb_image_spacing`, `neb_min_images`, `neb_max_images`,
 and `neb_n_images`.
 
 Dynamic spacing also supplies a geometric guard during both the ordinary and
-climbing-image stages. After every optimizer step, AutoKMC measures the
+climbing-image stages. After every optimizer step, OGKMC measures the
 MIC-aware displacement of every unfrozen atom between adjacent images. If any
 displacement exceeds `optimization.neb_geometry_guard_multiplier` times the
 configured spacing, the step is rejected and
@@ -674,7 +674,7 @@ halves `dt`; BFGS, which has no timestep, halves `maxstep`. Set the spacing to
 | `matching_trials` | `8` | Maximum connectivity-preserving mapping trials used to minimize endpoint displacement. |
 | `persist_neb_path` | `false` | Save both bond NEB paths for successful runs; failed NEBs retain them automatically. |
 
-For a gas-fed bond dissociation such as H2(g) to 2H*, AutoKMC does not
+For a gas-fed bond dissociation such as H2(g) to 2H*, OGKMC does not
 interpolate directly from a distant gas molecule to the dissociated adsorbates.
 It first aligns the intact molecule above the reacting site and lowers it to
 `gas_precursor_distance`. It then fixes the slab and lateral adsorbates and
@@ -686,7 +686,7 @@ surface and gas-phase energies. The separate precursor energy is stored as
 When lateral interactions are enabled, diffusion and bond channels
 automatically retain the optimized no-neighbour NEB band as an internal
 warm-start asset. Before evaluating a lateral class with a neighbouring
-adsorbate, AutoKMC runs the corresponding bare calculation if no compatible
+adsorbate, OGKMC runs the corresponding bare calculation if no compatible
 band exists, projects that band into the new endpoint layout, and reoptimizes
 all images. If the bare calculation fails or its band is incompatible, the
 channel uses its configured interpolation. This behavior is automatic and
@@ -750,7 +750,7 @@ thermochemistry recalculation.
 
 Free-energy work can dominate runtime. The supplied platinum GPU examples
 disable it intentionally for network-debug runs and can be switched on for
-production thermochemistry. For multi-atom gas species, AutoKMC records the
+production thermochemistry. For multi-atom gas species, OGKMC records the
 inferred rotational symmetry number, point group, tolerance, and inference
 source in the reactant thermochemistry metadata and run manifest. Rotational
 symmetry counts only operations that preserve isotope masses: HD has symmetry
@@ -777,14 +777,14 @@ free-energy corrections.
 | `every_n_steps` | `1` | Checkpoint cadence. |
 | `resume_from` | `null` | Checkpoint to continue. |
 
-Before resume, AutoKMC verifies the checkpoint's scientific configuration and
+Before resume, OGKMC verifies the checkpoint's scientific configuration and
 source fingerprint. A legacy checkpoint without that fingerprint cannot resume
 with free energies or a bond network: its vibrational acceptance and existing
 template atom inventories cannot be verified. Such runs require a fresh output
 directory with `checkpoint.resume_from` unset. This does not repair old results
 or templates in place.
 
-For a compatible resume, AutoKMC reconciles the event and trajectory files to the
+For a compatible resume, OGKMC reconciles the event and trajectory files to the
 checkpoint. It atomically removes uncommitted trajectory bytes, including an
 interrupted final append, and rejects malformed or non-monotonic committed
 `kmc_step` metadata. It then

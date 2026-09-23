@@ -1,5 +1,5 @@
-# autokmc - H2 oxidation on Pd(100) with FAIR-Chem UMA on 4 GPUs
-# Run with:    autokmc run example/h2_oxidation_pd100_uma.yaml
+# ogkmc - H2 oxidation on Pd(100) with FAIR-Chem UMA on 4 GPUs
+# Run with:    ogkmc run example/h2_oxidation_pd100_uma.yaml
 schema_version: "1"
 
 output:
@@ -67,7 +67,7 @@ calculator:
   factory: fairchem.core.FAIRChemCalculator
   factory_kwargs:
     predict_unit:
-      factory: autokmc.io.fairchem.get_predict_unit_on_device
+      factory: ogkmc.io.fairchem.get_predict_unit_on_device
       factory_kwargs:
         name_or_path: uma-s-1p2
         device: cuda

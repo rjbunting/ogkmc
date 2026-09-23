@@ -1,6 +1,10 @@
-# AutoKMC Documentation
+# OGKMC Documentation
 
-AutoKMC constructs graph-based surface kinetic Monte Carlo models from atomic
+OGKMC stands for **Online Graph Kinetic Monte Carlo**. For an existing
+installation, see [upgrading from AutoKMC](../README.md#upgrading-from-autokmc)
+before using saved runs with the renamed package.
+
+OGKMC constructs graph-based surface kinetic Monte Carlo models from atomic
 structures and SMILES reactants. It first builds the catalyst, reactants, and
 surface sites. It then enumerates adsorption, desorption, diffusion, bond
 formation, and bond dissociation and calculates their required energetics.
@@ -31,17 +35,17 @@ run. Then use these production-style surface examples:
 ## Command summary
 
 ```bash
-autokmc validate-config CONFIG.yaml
-autokmc preflight CONFIG.yaml
-autokmc doctor [CONFIG.yaml]
-autokmc run CONFIG.yaml
-autokmc analyze RUN_DIR
-autokmc report RUN_DIR
-autokmc rebuild-index CALCULATION_CACHE_DIR
+ogkmc validate-config CONFIG.yaml
+ogkmc preflight CONFIG.yaml
+ogkmc doctor [CONFIG.yaml]
+ogkmc run CONFIG.yaml
+ogkmc analyze RUN_DIR
+ogkmc report RUN_DIR
+ogkmc rebuild-index CALCULATION_CACHE_DIR
 ```
 
-Use `autokmc COMMAND --help` for the current command-line arguments. Running
-`python -m autokmc.cli ...` is equivalent to using the installed `autokmc`
+Use `ogkmc COMMAND --help` for the current command-line arguments. Running
+`python -m ogkmc.cli ...` is equivalent to using the installed `ogkmc`
 command. First use `preflight` for read-only run-safety and calculator-import
 checks. Add `--check-calculator` to require a finite energy/force probe. Use
 `doctor` to report runtime and package readiness without running chemistry.
@@ -50,7 +54,7 @@ command to show a traceback.
 
 ## Reproducibility model
 
-AutoKMC separates three kinds of state, and each has a different purpose:
+OGKMC separates three kinds of state, and each has a different purpose:
 
 1. The run directory records what the KMC trajectory actually did.
 2. The checkpoint records the live simulation state needed to continue that
@@ -59,5 +63,5 @@ AutoKMC separates three kinds of state, and each has a different purpose:
    checksum-verified structures.
 
 The live KMC state does not maintain product identity, product rates, or
-mechanisms. After the run, AutoKMC reconstructs them from `run_manifest.json`
+mechanisms. After the run, OGKMC reconstructs them from `run_manifest.json`
 and the append-only `events.jsonl` log.

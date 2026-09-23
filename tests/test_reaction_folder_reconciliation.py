@@ -5,12 +5,12 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
-from autokmc.species.smiles import smiles_to_dirname
-from autokmc.io.config import OutputCfg, RunConfig
-from autokmc.io.persistence import ReactionWriter, reconcile_event_log
-from autokmc.io.reaction_index import load_reaction_index
-from autokmc.workflow import runtime as runtime_module
-from autokmc.workflow.models import RunIdentity
+from ogkmc.species.smiles import smiles_to_dirname
+from ogkmc.io.config import OutputCfg, RunConfig
+from ogkmc.io.persistence import ReactionWriter, reconcile_event_log
+from ogkmc.io.reaction_index import load_reaction_index
+from ogkmc.workflow import runtime as runtime_module
+from ogkmc.workflow.models import RunIdentity
 
 
 def _reaction_metadata_path(root, *, lateral_class: int):

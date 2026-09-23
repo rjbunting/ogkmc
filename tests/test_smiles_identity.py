@@ -6,16 +6,16 @@ import networkx as nx
 import pytest
 from rdkit import Chem
 
-from autokmc.io.config import BondCfg, ReactantCfg, RunConfig
-from autokmc.io.config_validation import validate_config
-from autokmc.kmc.expansion import initialise_bond_registry, bond_species_known
-from autokmc.kmc.restart import reactants_for_checkpoint
-from autokmc.sites.bond import derive_bond_templates, derive_coupling_templates
-from autokmc.species.bond_chemistry import (
+from ogkmc.io.config import BondCfg, ReactantCfg, RunConfig
+from ogkmc.io.config_validation import validate_config
+from ogkmc.kmc.expansion import initialise_bond_registry, bond_species_known
+from ogkmc.kmc.restart import reactants_for_checkpoint
+from ogkmc.sites.bond import derive_bond_templates, derive_coupling_templates
+from ogkmc.species.bond_chemistry import (
     combine_fragments, get_all_fragments, _strip_dummy_atoms_from_smiles,
 )
-from autokmc.species.reactant import build_reactant, ReactantDefinitionError
-from autokmc.species.smiles import (
+from ogkmc.species.reactant import build_reactant, ReactantDefinitionError
+from ogkmc.species.smiles import (
     canonical_smiles, canonical_atom_inventory_smiles, molecule_from_smiles,
     molecule_from_reactant, reactant_atom_inventory_smiles, SmilesError,
     smiles_to_dirname,
@@ -246,7 +246,7 @@ def test_known_species_lookup_uses_full_feed_inventory():
 
 
 def test_cache_identity_normalizes_aliases_without_erasing_hydrogens():
-    from autokmc.io.calculation_cache import calculation_cache_key, _operation_key
+    from ogkmc.io.calculation_cache import calculation_cache_key, _operation_key
 
     def key(smiles):
         return calculation_cache_key(
@@ -266,7 +266,7 @@ def test_cache_identity_normalizes_aliases_without_erasing_hydrogens():
 
 def test_stereoisomers_keep_separate_reaction_documents(tmp_path, make_reaction):
     import json
-    from autokmc.io.persistence import ReactionWriter
+    from ogkmc.io.persistence import ReactionWriter
 
     writer = ReactionWriter(tmp_path)
     first = make_reaction(smiles="F/C=C/F")
@@ -285,7 +285,7 @@ def test_stereoisomers_keep_separate_reaction_documents(tmp_path, make_reaction)
 
 def test_append_preserves_legacy_folder_and_committed_event_counts(tmp_path, make_reaction):
     import json
-    from autokmc.io.persistence import ReactionWriter
+    from ogkmc.io.persistence import ReactionWriter
 
     reaction = make_reaction(smiles="[O]")
     writer = ReactionWriter(tmp_path, run_id="legacy-smiles")

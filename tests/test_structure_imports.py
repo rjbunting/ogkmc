@@ -9,28 +9,28 @@ from ase import Atoms
 import numpy as np
 import pytest
 
-from autokmc.utils.logging import get_logger
+from ogkmc.utils.logging import get_logger
 
 
 def test_stability_neb_imports_real_module_exports():
-    from autokmc.sites.stability.neb import NEBNotConvergedError, _make_neb_band
+    from ogkmc.sites.stability.neb import NEBNotConvergedError, _make_neb_band
 
     assert issubclass(NEBNotConvergedError, Exception)
     assert callable(_make_neb_band)
 
 
-def test_logger_uses_autokmc_root():
-    logger = get_logger("autokmc.io.persistence")
-    assert logger.name == "autokmc.io.persistence"
+def test_logger_uses_ogkmc_root():
+    logger = get_logger("ogkmc.io.persistence")
+    assert logger.name == "ogkmc.io.persistence"
 
     logger = get_logger("custom")
-    assert logger.name == "autokmc.custom"
-    assert logging.getLogger("autokmc").handlers
+    assert logger.name == "ogkmc.custom"
+    assert logging.getLogger("ogkmc").handlers
 
 
 def test_neb_verbose_logging_uses_stdout():
-    from autokmc.sites.stability.bond import _neb_optimizer_logfile as bond_logfile
-    from autokmc.sites.stability.diffusion import (
+    from ogkmc.sites.stability.bond import _neb_optimizer_logfile as bond_logfile
+    from ogkmc.sites.stability.diffusion import (
         _neb_optimizer_logfile as diffusion_logfile,
     )
 
@@ -41,8 +41,8 @@ def test_neb_verbose_logging_uses_stdout():
 
 
 def test_structure_optimisation_error_retains_last_geometry(monkeypatch):
-    from autokmc.structure import StructureOptimisationError
-    from autokmc.structure import optimization as optimization_module
+    from ogkmc.structure import StructureOptimisationError
+    from ogkmc.structure import optimization as optimization_module
 
     class FailingOptimizer:
         def __init__(self, atoms, *, logfile):
@@ -79,7 +79,7 @@ def test_structure_optimisation_error_retains_last_geometry(monkeypatch):
 
 
 def test_structure_fire_forwards_constructor_kwargs(monkeypatch):
-    from autokmc.structure import optimization as optimization_module
+    from ogkmc.structure import optimization as optimization_module
 
     captured = []
 

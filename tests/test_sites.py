@@ -12,8 +12,8 @@ from ase import Atoms
 from ase.calculators.singlepoint import SinglePointCalculator
 from ase.io import read as ase_read
 
-from autokmc.species.smiles import smiles_to_dirname
-from autokmc.sites.anchors import (
+from ogkmc.species.smiles import smiles_to_dirname
+from ogkmc.sites.anchors import (
     _build_ego_graph,
     _enumerate_cliques,
     _get_cell,
@@ -21,7 +21,7 @@ from autokmc.sites.anchors import (
     _outward_height_for_clique,
     _reserve_node_ids,
 )
-from autokmc.sites.adsorbate import (
+from ogkmc.sites.adsorbate import (
     AdsorbateSite,
     AdsorbateSiteLateral,
     _adsorbate_pose_is_outward,
@@ -39,7 +39,7 @@ from autokmc.sites.adsorbate import (
     rebuild_adsorbate_reverse_indexes,
     push_member_positions_to_graph,
 )
-from autokmc.sites.bond import (
+from ogkmc.sites.bond import (
     BondReactionSite,
     BondReactionTemplate,
     find_bond_sites,
@@ -47,24 +47,24 @@ from autokmc.sites.bond import (
     _triple_node_match,
     rebuild_bond_reverse_indexes,
 )
-from autokmc.sites.diffusion import (
+from ogkmc.sites.diffusion import (
     find_diffusion_sites,
     _pair_node_match,
     rebuild_diffusion_reverse_indexes,
 )
-from autokmc.sites.stability.adsorption import check_adsorbate_site_lateral
-from autokmc.sites.stability.adsorption import check_site_stability
-from autokmc.sites.stability.bond import _select_c_to_ab_mapping
-from autokmc.sites.stability.bond import _bond_lateral_node_match
-from autokmc.sites.stability.diffusion import (
+from ogkmc.sites.stability.adsorption import check_adsorbate_site_lateral
+from ogkmc.sites.stability.adsorption import check_site_stability
+from ogkmc.sites.stability.bond import _select_c_to_ab_mapping
+from ogkmc.sites.stability.bond import _bond_lateral_node_match
+from ogkmc.sites.stability.diffusion import (
     check_diffusion_site_lateral,
     _diffusion_lateral_node_match,
 )
-from autokmc.species.reactant import build_reactant
+from ogkmc.species.reactant import build_reactant
 
 
 def test_sites_package_exports_public_api():
-    import autokmc.sites as sites
+    import ogkmc.sites as sites
 
     assert sites.AnchorSite.__name__ == "AnchorSite"
     assert sites.AdsorbateSite is AdsorbateSite
@@ -85,7 +85,7 @@ def test_node_id_allocator_uses_persistent_monotonic_cursor():
 
     assert first == [100, 101, 102]
     assert second == [103, 104]
-    assert graph.graph["_autokmc_next_node_id"] == 105
+    assert graph.graph["_ogkmc_next_node_id"] == 105
 
 
 def test_configured_clique_cap_skips_unbounded_maximal_clique_scan(monkeypatch):
@@ -101,7 +101,7 @@ def test_configured_clique_cap_skips_unbounded_maximal_clique_scan(monkeypatch):
         )
     co_bond = nx.complete_graph(4)
 
-    import autokmc.sites.anchors as anchor_module
+    import ogkmc.sites.anchors as anchor_module
 
     monkeypatch.setattr(
         anchor_module,
@@ -146,7 +146,7 @@ def test_adsorbate_enumeration_applies_anchor_cap_to_dense_surface(monkeypatch):
     graph.add_edges_from(nx.complete_graph(5).edges)
     co_bond = nx.complete_graph(5)
 
-    import autokmc.sites.anchors as anchor_module
+    import ogkmc.sites.anchors as anchor_module
 
     monkeypatch.setattr(
         anchor_module,
@@ -476,9 +476,9 @@ def test_decorated_propagation_fails_closed_for_nonisomorphic_members():
 def test_reflected_o3_propagation_accepts_unequal_terminal_bonds():
     """A relaxed planar O3 must survive a reflected, end-swapping site map."""
     from ase.build import fcc111
-    from autokmc.core.graph import build_graph
-    from autokmc.sites.adsorbate import _geometry_connectivity_mismatch_for_cliques
-    from autokmc.species.reactant import Reactant
+    from ogkmc.core.graph import build_graph
+    from ogkmc.sites.adsorbate import _geometry_connectivity_mismatch_for_cliques
+    from ogkmc.species.reactant import Reactant
 
     slab = fcc111("Pd", size=(5, 5, 4), a=3.89, vacuum=8.0)
     slab.arrays["surface"] = np.where(slab.get_tags() == 1, 1, 0)
@@ -528,7 +528,7 @@ def test_reflected_o3_propagation_accepts_unequal_terminal_bonds():
 def test_adsorbate_runtime_geometry_parameters_reach_each_algorithm_stage(
     monkeypatch,
 ):
-    import autokmc.sites.adsorbate as adsorbate_module
+    import ogkmc.sites.adsorbate as adsorbate_module
 
     graph = nx.Graph()
     graph.graph["cell"] = np.eye(3) * 20.0
@@ -632,7 +632,7 @@ def test_adsorbate_runtime_geometry_parameters_reach_each_algorithm_stage(
 
 
 def test_stability_package_exports_public_api():
-    import autokmc.sites.stability as stability
+    import ogkmc.sites.stability as stability
 
     assert issubclass(stability.SiteStabilityError, Exception)
     assert issubclass(stability.NEBNotConvergedError, Exception)
@@ -815,7 +815,7 @@ def test_geometry_refinement_uses_periodic_clique_centroid(monkeypatch):
         )
 
     monkeypatch.setattr(
-        "autokmc.sites.adsorbate._geometry_connectivity_mismatch",
+        "ogkmc.sites.adsorbate._geometry_connectivity_mismatch",
         fake_mismatch,
     )
     monkeypatch.setattr("scipy.optimize.minimize", fake_minimize)
@@ -1747,11 +1747,11 @@ def test_adsorbate_pruning_reads_energy_before_detaching_calculator(monkeypatch)
         return opt
 
     monkeypatch.setattr(
-        "autokmc.structure.optimise_structure",
+        "ogkmc.structure.optimise_structure",
         fake_optimise_structure,
     )
     monkeypatch.setattr(
-        "autokmc.sites.adsorbate._optimise_rigid_adsorbate_with_potential",
+        "ogkmc.sites.adsorbate._optimise_rigid_adsorbate_with_potential",
         fake_rigid_optimisation,
     )
 
@@ -1808,11 +1808,11 @@ def test_adsorbate_pruning_persists_mlip_rejected_structures(
         return optimized
 
     monkeypatch.setattr(
-        "autokmc.structure.optimise_structure",
+        "ogkmc.structure.optimise_structure",
         fake_optimise_structure,
     )
     monkeypatch.setattr(
-        "autokmc.sites.adsorbate._optimise_rigid_adsorbate_with_potential",
+        "ogkmc.sites.adsorbate._optimise_rigid_adsorbate_with_potential",
         lambda atoms, *_args, **_kwargs: (atoms.copy(), 0.0, 0),
     )
 
@@ -1849,7 +1849,7 @@ def test_adsorbate_pruning_persists_last_geometry_when_optimizer_raises(
     tmp_path,
     monkeypatch,
 ):
-    from autokmc.structure import StructureOptimisationError
+    from ogkmc.structure import StructureOptimisationError
 
     graph = nx.Graph()
     graph.graph["cell"] = np.eye(3) * 10.0
@@ -1888,11 +1888,11 @@ def test_adsorbate_pruning_persists_last_geometry_when_optimizer_raises(
         )
 
     monkeypatch.setattr(
-        "autokmc.structure.optimise_structure",
+        "ogkmc.structure.optimise_structure",
         fail_optimise_structure,
     )
     monkeypatch.setattr(
-        "autokmc.sites.adsorbate._optimise_rigid_adsorbate_with_potential",
+        "ogkmc.sites.adsorbate._optimise_rigid_adsorbate_with_potential",
         lambda atoms, *_args, **_kwargs: (atoms.copy(), 0.0, 0),
     )
 
@@ -1923,7 +1923,7 @@ def test_adsorbate_pruning_reports_rigid_stage_nonconvergence(
     tmp_path,
     monkeypatch,
 ):
-    from autokmc.structure import StructureOptimisationError
+    from ogkmc.structure import StructureOptimisationError
 
     graph = nx.Graph()
     graph.graph["cell"] = np.eye(3) * 10.0
@@ -1962,11 +1962,11 @@ def test_adsorbate_pruning_reports_rigid_stage_nonconvergence(
         )
 
     monkeypatch.setattr(
-        "autokmc.sites.adsorbate._optimise_rigid_adsorbate_with_potential",
+        "ogkmc.sites.adsorbate._optimise_rigid_adsorbate_with_potential",
         fail_rigid,
     )
     monkeypatch.setattr(
-        "autokmc.structure.optimise_structure",
+        "ogkmc.structure.optimise_structure",
         lambda *_args, **_kwargs: pytest.fail(
             "full relaxation must not run after rigid nonconvergence"
         ),
@@ -2056,11 +2056,11 @@ def test_adsorbate_pruning_projects_relaxed_adsorbate_back_to_graph_frame(monkey
         return opt
 
     monkeypatch.setattr(
-        "autokmc.structure.optimise_structure",
+        "ogkmc.structure.optimise_structure",
         fake_optimise_structure,
     )
     monkeypatch.setattr(
-        "autokmc.sites.adsorbate._optimise_rigid_adsorbate_with_potential",
+        "ogkmc.sites.adsorbate._optimise_rigid_adsorbate_with_potential",
         lambda atoms, *_args, **_kwargs: (atoms.copy(), 0.0, 0),
     )
 
@@ -2287,7 +2287,7 @@ def test_adsorption_lateral_structures_use_full_calculator_pbc(monkeypatch):
         return opt
 
     monkeypatch.setattr(
-        "autokmc.structure.optimise_structure",
+        "ogkmc.structure.optimise_structure",
         fake_optimise_structure,
     )
 

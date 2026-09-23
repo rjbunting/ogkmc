@@ -5,10 +5,10 @@ from itertools import combinations
 import networkx as nx
 import numpy as np
 
-from autokmc.sites.adsorbate import (
+from ogkmc.sites.adsorbate import (
     _inequivalent_anchor_subsets, _orbit_id_of, find_adsorbate_sites,
 )
-from autokmc.species.reactant import build_reactant
+from ogkmc.species.reactant import build_reactant
 
 
 def test_benzene_adjacent_meta_and_opposite_pairs_remain_distinct():

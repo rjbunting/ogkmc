@@ -6,25 +6,25 @@ import networkx as nx
 import numpy as np
 import pytest
 
-from autokmc.core.graph_state import (
+from ogkmc.core.graph_state import (
     DIFFUSION_CLIQUE_TO_MEMBERS,
     DIFFUSION_SURFACE_NODE_TO_MEMBERS,
     get_bond_registry,
     get_diffusion_sites,
 )
-from autokmc.kmc import expansion
-from autokmc.kmc.engine import default_kmc_functions
-from autokmc.kmc.execute import execute_reaction
-from autokmc.kmc.index import _ReactionIndex
-from autokmc.kmc.models import (
+from ogkmc.kmc import expansion
+from ogkmc.kmc.engine import default_kmc_functions
+from ogkmc.kmc.execute import execute_reaction
+from ogkmc.kmc.index import _ReactionIndex
+from ogkmc.kmc.models import (
     BondGrowthOptions, KMCChannels, KMCRuntime, KMCSettings, KMCSystem,
     KMCThermochemistry,
 )
-from autokmc.kmc.network import DynamicNetworkExpander
-from autokmc.sites.adsorbate import AdsorbateSite
-from autokmc.sites.bond import derive_dissociation_templates
-from autokmc.sites.diffusion import find_diffusion_sites
-from autokmc.sites.identity import site_identifier
+from ogkmc.kmc.network import DynamicNetworkExpander
+from ogkmc.sites.adsorbate import AdsorbateSite
+from ogkmc.sites.bond import derive_dissociation_templates
+from ogkmc.sites.diffusion import find_diffusion_sites
+from ogkmc.sites.identity import site_identifier
 
 
 def _surface(size=3):
@@ -205,7 +205,7 @@ def test_expanded_product_hops_become_selectable_kmc_events(
         return 0.0, 0.0, 0.5
 
     monkeypatch.setattr(
-        "autokmc.reactions.diffusion.check_diffusion_stability", controlled_neb,
+        "ogkmc.reactions.diffusion.check_diffusion_stability", controlled_neb,
     )
     channels = KMCChannels(bond_growth_options=BondGrowthOptions(
         find_diffusion=True, include_coupling=False, diffusion_max_hops=1,
@@ -243,10 +243,10 @@ def test_expanded_product_hops_become_selectable_kmc_events(
 def test_startup_discovers_hops_after_materializing_bond_fragments(
     monkeypatch, tmp_path, enabled,
 ):
-    from autokmc.io.config import BondCfg, DiffusionCfg, ReactantCfg, RunConfig
-    from autokmc.species.reactant import build_reactant
-    from autokmc.workflow.models import RunIdentity, ThermoRuntime
-    from autokmc.workflow.network import SpeciesNetworkBuilder
+    from ogkmc.io.config import BondCfg, DiffusionCfg, ReactantCfg, RunConfig
+    from ogkmc.species.reactant import build_reactant
+    from ogkmc.workflow.models import RunIdentity, ThermoRuntime
+    from ogkmc.workflow.network import SpeciesNetworkBuilder
 
     graph = _surface()
     feed = build_reactant("O=O", add_hydrogens=False)
@@ -256,12 +256,12 @@ def test_startup_discovers_hops_after_materializing_bond_fragments(
         diffusion=DiffusionCfg(enabled=enabled, max_hops=1, prune_by_adsorption_pair=False),
     )
     monkeypatch.setattr(
-        "autokmc.sites.adsorbate.find_adsorbate_sites",
+        "ogkmc.sites.adsorbate.find_adsorbate_sites",
         lambda graph, reactant, **kwargs: [_placements(graph, occupied=())],
     )
     # Bond geometry is irrelevant to whether the real O fragment builder's
     # materialized placements are included in the subsequent diffusion search.
-    monkeypatch.setattr("autokmc.sites.bond.find_bond_sites", lambda *a, **kw: [])
+    monkeypatch.setattr("ogkmc.sites.bond.find_bond_sites", lambda *a, **kw: [])
     builder = SpeciesNetworkBuilder(
         cfg=cfg, identity=RunIdentity(
             output_dir=tmp_path, manifest_path=tmp_path / "run_manifest.json",

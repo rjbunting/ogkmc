@@ -9,11 +9,11 @@ import networkx as nx
 import numpy as np
 import pytest
 
-import autokmc.kmc.initialization as initialization_module
-import autokmc.kmc.session as session_module
-from autokmc.kmc.engine import run_kmc
-from autokmc.kmc.index import _ReactionIndex
-from autokmc.kmc.models import (
+import ogkmc.kmc.initialization as initialization_module
+import ogkmc.kmc.session as session_module
+from ogkmc.kmc.engine import run_kmc
+from ogkmc.kmc.index import _ReactionIndex
+from ogkmc.kmc.models import (
     KMCChannels,
     KMCFunctions,
     KMCObservers,
@@ -23,14 +23,14 @@ from autokmc.kmc.models import (
     KMCSettings,
     KMCSystem,
 )
-from autokmc.kmc.outputs import KMCOutputManager
-from autokmc.sites.adsorbate import AdsorbateSite
-from autokmc.sites.identity import (
+from ogkmc.kmc.outputs import KMCOutputManager
+from ogkmc.sites.adsorbate import AdsorbateSite
+from ogkmc.sites.identity import (
     member_identifier,
     member_signature,
     site_identifier,
 )
-from autokmc.workflow.models import KMCResumeState as WorkflowResumeState
+from ogkmc.workflow.models import KMCResumeState as WorkflowResumeState
 
 
 def _site(*, iso_class: int, member_nodes: list[list[int]]) -> AdsorbateSite:
@@ -62,7 +62,7 @@ def test_site_and_member_identifiers_survive_reconstruction_and_copy():
 
 
 def test_member_identifiers_are_materialised_once_per_site(monkeypatch):
-    import autokmc.sites.identity as identity_module
+    import ogkmc.sites.identity as identity_module
 
     site = _site(iso_class=3, member_nodes=[[10], [11]])
     expected = member_identifier(site, 1)

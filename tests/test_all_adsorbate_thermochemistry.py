@@ -9,15 +9,15 @@ from ase.calculators.calculator import Calculator, all_changes
 from ase.units import kB
 from ase.vibrations.data import VibrationsData
 
-from autokmc.core.graph import build_graph
-from autokmc.reactions.adsorption import _energetics_cached
-from autokmc.sites.adsorbate import AdsorbateSite, AdsorbateSiteLateral
-from autokmc.sites.bond import BondReactionLateral
-from autokmc.sites.diffusion import DiffusionLateral
-from autokmc.sites.stability import adsorption as adsorption_stability
-from autokmc.sites.stability.bond import _apply_bond_thermochemistry
-from autokmc.sites.stability.diffusion import _apply_diffusion_thermochemistry
-from autokmc.thermo import free_energy
+from ogkmc.core.graph import build_graph
+from ogkmc.reactions.adsorption import _energetics_cached
+from ogkmc.sites.adsorbate import AdsorbateSite, AdsorbateSiteLateral
+from ogkmc.sites.bond import BondReactionLateral
+from ogkmc.sites.diffusion import DiffusionLateral
+from ogkmc.sites.stability import adsorption as adsorption_stability
+from ogkmc.sites.stability.bond import _apply_bond_thermochemistry
+from ogkmc.sites.stability.diffusion import _apply_diffusion_thermochemistry
+from ogkmc.thermo import free_energy
 
 
 def _harmonic_free_energy(atoms, hessian, temperature=300.):
@@ -252,8 +252,8 @@ def test_legacy_cache_reuses_electronics_but_recomputes_local_free_energy(
     def no_new_relaxation(*_args, **_kwargs):
         raise AssertionError("electronic cache should remain reusable")
 
-    import autokmc.structure
-    monkeypatch.setattr(autokmc.structure, "optimise_structure", no_new_relaxation)
+    import ogkmc.structure
+    monkeypatch.setattr(ogkmc.structure, "optimise_structure", no_new_relaxation)
     new = AdsorbateSiteLateral(0, ego_graph=graph.copy())
     adsorption_stability.check_site_stability(graph, site, 0, new, calculator, **kwargs)
     assert new.stable is True

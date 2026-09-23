@@ -1,4 +1,4 @@
-# Complete AutoKMC configuration reference
+# Complete OGKMC configuration reference
 #
 # This file contains every supported configuration key and is valid as written.
 # It uses a generated Cu(111) surface and ASE's EMT calculator so validation
@@ -12,9 +12,9 @@
 # structure mode and one calculator construction style.
 #
 # Validate before running:
-#   autokmc validate-config example/all_options.yaml
-#   autokmc preflight example/all_options.yaml
-#   autokmc preflight example/all_options.yaml --check-calculator
+#   ogkmc validate-config example/all_options.yaml
+#   ogkmc preflight example/all_options.yaml
+#   ogkmc preflight example/all_options.yaml --check-calculator
 #
 # YAML booleans must be true or false. Unknown or misspelled keys are rejected.
 
@@ -111,7 +111,7 @@ optimization:
   optimizer: lbfgs
 
   # Keyword arguments forwarded to the selected ASE optimizer for every
-  # ordinary relaxation. AutoKMC supplies the Atoms object and logfile.
+  # ordinary relaxation. OGKMC supplies the Atoms object and logfile.
   # FIRE example: {dt: 0.01, dtmax: 0.05, maxstep: 0.05,
   #                downhill_check: true}
   optimizer_kwargs: {}
@@ -124,7 +124,7 @@ optimization:
   # ordinary-band stage.
   # BFGS example: {maxstep: 0.05, alpha: 70.0}
   # For FIRE, downhill_check may precondition the ordinary band. If repeated
-  # rollbacks collapse dt, AutoKMC disables the check and restores the initial
+  # rollbacks collapse dt, OGKMC disables the check and restores the initial
   # dt automatically. CI-FIRE always disables downhill checking immediately.
   neb_optimizer_kwargs: {}
 
@@ -152,7 +152,7 @@ optimization:
 
   # If the lowest interior-image electronic energy does not improve by at
   # least this tolerance for this many ordinary NEB optimizer steps, inspect
-  # the band for intermediate minima. AutoKMC optimizes only the nearest
+  # the band for intermediate minima. OGKMC optimizes only the nearest
   # minima bracketing the band's highest image, then runs the standard NEB
   # workflow between that pair. Other path segments are not refined.
   # A distance rollback immediately checks the lowest-force valid checkpoint
@@ -239,7 +239,7 @@ structure:
 
   # FILE-ONLY OPTIONS (commented because kind is surface)
   #
-  # Relative paths are resolved from this YAML file's directory. AutoKMC uses
+  # Relative paths are resolved from this YAML file's directory. OGKMC uses
   # the selected frame exactly as supplied: it is neither rebuilt nor relaxed.
   # The file should contain appropriate cell and periodic-boundary metadata.
   # path: ./structures/catalyst.extxyz
@@ -390,7 +390,7 @@ calculator:
   # factory: fairchem.core.FAIRChemCalculator
   # factory_kwargs:
   #   predict_unit:
-  #     factory: autokmc.io.fairchem.get_predict_unit_on_device
+  #     factory: ogkmc.io.fairchem.get_predict_unit_on_device
   #     factory_kwargs:
   #       name_or_path: uma-s-1p2
   #       device: cuda

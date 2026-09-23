@@ -4,11 +4,11 @@ import networkx as nx
 import pytest
 from rdkit import Chem
 
-from autokmc.kmc import expansion
-from autokmc.sites.bond import derive_bond_templates, derive_dissociation_templates
-from autokmc.species.bond_chemistry import combine_fragments, get_all_fragments
-from autokmc.species.reactant import build_reactant
-from autokmc.species.smiles import canonical_atom_inventory_smiles
+from ogkmc.kmc import expansion
+from ogkmc.sites.bond import derive_bond_templates, derive_dissociation_templates
+from ogkmc.species.bond_chemistry import combine_fragments, get_all_fragments
+from ogkmc.species.reactant import build_reactant
+from ogkmc.species.smiles import canonical_atom_inventory_smiles
 
 
 @pytest.mark.parametrize("strip_dummies", [False, True])

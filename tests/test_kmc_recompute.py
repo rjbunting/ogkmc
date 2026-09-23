@@ -6,8 +6,8 @@ from types import SimpleNamespace
 
 import networkx as nx
 
-from autokmc.io.calculators import CalculatorPool
-from autokmc.kmc import recompute as recompute_module
+from ogkmc.io.calculators import CalculatorPool
+from ogkmc.kmc import recompute as recompute_module
 
 
 def _settings() -> dict:

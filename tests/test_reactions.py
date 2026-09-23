@@ -8,17 +8,17 @@ import networkx as nx
 import pytest
 from ase import Atoms
 
-from autokmc.reactions import AdsorptionReaction, BondReaction, DiffusionReaction
-import autokmc.reactions.bond as bond_module
-import autokmc.reactions.diffusion as diffusion_module
-from autokmc.reactions.adsorption import fast_reaction_for_member
-from autokmc.reactions.adsorption import _energetics_cached
-from autokmc.reactions.bond import _bond_energetics_cached, is_bond_applicable
-from autokmc.reactions.diffusion import (
+from ogkmc.reactions import AdsorptionReaction, BondReaction, DiffusionReaction
+import ogkmc.reactions.bond as bond_module
+import ogkmc.reactions.diffusion as diffusion_module
+from ogkmc.reactions.adsorption import fast_reaction_for_member
+from ogkmc.reactions.adsorption import _energetics_cached
+from ogkmc.reactions.bond import _bond_energetics_cached, is_bond_applicable
+from ogkmc.reactions.diffusion import (
     _diffusion_energetics_cached,
     is_diffusion_applicable,
 )
-from autokmc.sites.bond import BondReactionLateral
+from ogkmc.sites.bond import BondReactionLateral
 
 
 def _site(smiles: str, iso: int, node_id: int, clique: frozenset[int]):

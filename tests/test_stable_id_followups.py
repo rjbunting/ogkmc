@@ -11,10 +11,10 @@ import networkx as nx
 import numpy as np
 import pytest
 
-from autokmc.io.config import FreeEnergyCfg, KMCCfg, OutputCfg, RunConfig
-from autokmc.kmc.index import _ReactionIndex
-from autokmc.kmc.initialization import normalise_channels
-from autokmc.kmc.models import (
+from ogkmc.io.config import FreeEnergyCfg, KMCCfg, OutputCfg, RunConfig
+from ogkmc.kmc.index import _ReactionIndex
+from ogkmc.kmc.initialization import normalise_channels
+from ogkmc.kmc.models import (
     BondGrowthOptions,
     KMCChannels,
     KMCFunctions,
@@ -24,13 +24,13 @@ from autokmc.kmc.models import (
     KMCSystem,
     KMCThermochemistry,
 )
-from autokmc.kmc.network import DynamicNetworkExpander, ExpansionChanges
-from autokmc.sites.adsorbate import AdsorbateSite
-from autokmc.sites.bond import BondReactionSite, BondReactionTemplate
-from autokmc.sites.diffusion import DiffusionSite
-from autokmc.sites.identity import member_identifier, site_identifier
-from autokmc.utils.telemetry import RuntimeTelemetry, telemetry_context
-from autokmc.workflow.models import (
+from ogkmc.kmc.network import DynamicNetworkExpander, ExpansionChanges
+from ogkmc.sites.adsorbate import AdsorbateSite
+from ogkmc.sites.bond import BondReactionSite, BondReactionTemplate
+from ogkmc.sites.diffusion import DiffusionSite
+from ogkmc.sites.identity import member_identifier, site_identifier
+from ogkmc.utils.telemetry import RuntimeTelemetry, telemetry_context
+from ogkmc.workflow.models import (
     ChannelRuntimeOptions,
     OutputSinks,
     PreparedNetwork,
@@ -38,7 +38,7 @@ from autokmc.workflow.models import (
     SimulationContext,
     ThermoRuntime,
 )
-from autokmc.workflow.simulation import execute_kmc_stage
+from ogkmc.workflow.simulation import execute_kmc_stage
 
 
 def _site(*, iso_class: int, member_nodes: list[list[int]]) -> AdsorbateSite:
@@ -345,8 +345,8 @@ def test_configured_workflow_calls_public_typed_run_boundary(
     monkeypatch,
     isaac_export_enabled,
 ):
-    import autokmc.kmc.engine as engine_module
-    import autokmc.workflow.simulation as simulation_module
+    import ogkmc.kmc.engine as engine_module
+    import ogkmc.workflow.simulation as simulation_module
 
     calls = []
     exports = []
@@ -471,7 +471,7 @@ def test_stage7_failure_persists_available_invalid_and_quarantine_metadata(
     tmp_path,
     monkeypatch,
 ):
-    import autokmc.kmc.engine as engine_module
+    import ogkmc.kmc.engine as engine_module
 
     def fail_run(_request):
         raise RuntimeError("stage 7 failed")
@@ -544,7 +544,7 @@ def test_stage7_enrichment_failure_uses_rich_failure_finalization(
     tmp_path,
     monkeypatch,
 ):
-    import autokmc.workflow.simulation as simulation_module
+    import ogkmc.workflow.simulation as simulation_module
 
     def fail_enrichment(*_args, **_kwargs):
         raise RuntimeError("manifest enrichment failed")

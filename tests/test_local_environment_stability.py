@@ -6,11 +6,11 @@ import networkx as nx
 import numpy as np
 import pytest
 
-from autokmc.sites.stability import adsorption, bond, diffusion
-from autokmc.reactions import adsorption as adsorption_reactions
-from autokmc.reactions import bond as bond_reactions
-from autokmc.reactions import diffusion as diffusion_reactions
-from autokmc.thermo.free_energy import FreeEnergyOptions
+from ogkmc.sites.stability import adsorption, bond, diffusion
+from ogkmc.reactions import adsorption as adsorption_reactions
+from ogkmc.reactions import bond as bond_reactions
+from ogkmc.reactions import diffusion as diffusion_reactions
+from ogkmc.thermo.free_energy import FreeEnergyOptions
 
 
 class _BuiltState(Exception):
@@ -286,7 +286,7 @@ def test_cached_spectator_is_validated_before_free_energy_reuse(family, match, m
         initial_name = "state_ab_initial"
         thermo_name = "_apply_bond_thermochemistry"
         if family == "gas_bond":
-            from autokmc.species.reactant import build_reactant
+            from ogkmc.species.reactant import build_reactant
             parent.gas_product = True
             parent.gas_reactant = build_reactant("[H][H]", add_hydrogens=False)
             parent.gas_reactant.energy = 0.0
@@ -347,8 +347,8 @@ def test_cached_spectator_is_validated_before_free_energy_reuse(family, match, m
     monkeypatch.setattr(module, "_check_intended_coordination_stable", guard)
     monkeypatch.setattr(module, thermo_name, unwanted_thermo)
     if family == "adsorption":
-        import autokmc.structure
-        monkeypatch.setattr(autokmc.structure, "optimise_structure", fresh)
+        import ogkmc.structure
+        monkeypatch.setattr(ogkmc.structure, "optimise_structure", fresh)
     else:
         monkeypatch.setattr(module, "_relax_endpoint" if family == "diffusion" else "_relax_bond_endpoint", fresh)
     with pytest.raises(_BuiltState):

@@ -3,28 +3,28 @@ import numpy as np
 import pytest
 from ase.build import fcc111
 
-from autokmc.core.pbc import (
+from ogkmc.core.pbc import (
     minimum_image_vectors,
     periodic_image_offsets,
     unwrap_positions_about_reference,
     wrap_positions_into_cell,
 )
-from autokmc.core.graph import build_graph
-from autokmc.io.atoms import atoms_from_graph
-from autokmc.sites.adsorbate import (
+from ogkmc.core.graph import build_graph
+from ogkmc.io.atoms import atoms_from_graph
+from ogkmc.sites.adsorbate import (
     _build_anchor_spatial_index,
     _mic_distance,
     _source_indices_within_radius,
     find_adsorbate_sites,
 )
-from autokmc.sites.anchors import (
+from ogkmc.sites.anchors import (
     _build_co_bond_graph,
     _circular_centroid,
     _periodic_clique_is_contractible,
     find_anchor_sites,
 )
-from autokmc.species.reactant import build_reactant
-from autokmc.structure import find_surface_atoms, find_surface_atoms_raycasting
+from ogkmc.species.reactant import build_reactant
+from ogkmc.structure import find_surface_atoms, find_surface_atoms_raycasting
 
 
 def _skew_cell():

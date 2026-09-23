@@ -7,15 +7,15 @@ from types import SimpleNamespace
 import networkx as nx
 import pytest
 
-from autokmc.io.config import BondCfg, ReactantCfg, RunConfig
-from autokmc.kmc import expansion
-from autokmc.sites.bond import derive_bond_templates, derive_coupling_templates
-from autokmc.species.reactant import build_reactant
-from autokmc.species.smiles import (
+from ogkmc.io.config import BondCfg, ReactantCfg, RunConfig
+from ogkmc.kmc import expansion
+from ogkmc.sites.bond import derive_bond_templates, derive_coupling_templates
+from ogkmc.species.reactant import build_reactant
+from ogkmc.species.smiles import (
     canonical_atom_inventory_smiles,
     reactant_atom_inventory_smiles,
 )
-from autokmc.workflow.network import (
+from ogkmc.workflow.network import (
     SpeciesNetworkBuilder,
     derive_configured_bond_templates,
 )
@@ -95,7 +95,7 @@ def test_coupling_reuses_known_feed_product_label():
 
 
 def test_initial_network_materializes_correct_products_and_preserves_feed(tmp_path, monkeypatch):
-    from autokmc.sites import adsorbate, bond
+    from ogkmc.sites import adsorbate, bond
 
     configs, reactants = _feed()
     feed = reactants[0]

@@ -7,14 +7,14 @@ import pytest
 from ase import Atoms, units
 from ase.calculators.calculator import Calculator, all_changes
 
-from autokmc.core.graph import build_graph
-from autokmc.sites.adsorbate import AdsorbateSite, AdsorbateSiteLateral
-from autokmc.sites.bond import BondReactionLateral
-from autokmc.sites.diffusion import DiffusionLateral
-from autokmc.sites.stability.adsorption import check_site_stability
-from autokmc.sites.stability.bond import _apply_bond_thermochemistry
-from autokmc.sites.stability.diffusion import _apply_diffusion_thermochemistry
-from autokmc.thermo import free_energy
+from ogkmc.core.graph import build_graph
+from ogkmc.sites.adsorbate import AdsorbateSite, AdsorbateSiteLateral
+from ogkmc.sites.bond import BondReactionLateral
+from ogkmc.sites.diffusion import DiffusionLateral
+from ogkmc.sites.stability.adsorption import check_site_stability
+from ogkmc.sites.stability.bond import _apply_bond_thermochemistry
+from ogkmc.sites.stability.diffusion import _apply_diffusion_thermochemistry
+from ogkmc.thermo import free_energy
 
 class QuadraticCalculator(Calculator):
     implemented_properties = ["energy", "forces"]
@@ -190,8 +190,8 @@ def test_adsorption_spectrum_survives_cache_roundtrip(tmp_path, monkeypatch):
     def no_new_relaxation(*_args, **_kwargs):
         raise AssertionError('expected reusable electronic states')
 
-    import autokmc.structure
-    monkeypatch.setattr(autokmc.structure, 'optimise_structure', no_new_relaxation)
+    import ogkmc.structure
+    monkeypatch.setattr(ogkmc.structure, 'optimise_structure', no_new_relaxation)
     second = AdsorbateSiteLateral(0, ego_graph=graph.subgraph([0, 1]).copy())
     check_site_stability(graph, site, 0, second, calculator, **kwargs)
     assert second.stable is True

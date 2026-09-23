@@ -6,19 +6,19 @@ import networkx as nx
 import numpy as np
 import pytest
 
-from autokmc.kmc import recompute as recompute_module
-from autokmc.kmc.index import _ReactionIndex
-from autokmc.reactions.adsorption import get_applicable_reaction_for_member
-from autokmc.reactions.bond import get_applicable_bond_reaction_for_member
-from autokmc.reactions.diffusion import get_applicable_diffusion_for_member
-from autokmc.reactions.rates import KB_EV
-from autokmc.sites.adsorbate import AdsorbateSite
-from autokmc.sites.bond import BondReactionSite, BondReactionTemplate
-from autokmc.sites.diffusion import DiffusionSite
-from autokmc.sites.stability.adsorption import check_adsorbate_site_lateral
-from autokmc.sites.stability.bond import check_bond_site_lateral
-from autokmc.sites.stability.diffusion import check_diffusion_site_lateral
-from autokmc.thermo.free_energy import FreeEnergyOptions
+from ogkmc.kmc import recompute as recompute_module
+from ogkmc.kmc.index import _ReactionIndex
+from ogkmc.reactions.adsorption import get_applicable_reaction_for_member
+from ogkmc.reactions.bond import get_applicable_bond_reaction_for_member
+from ogkmc.reactions.diffusion import get_applicable_diffusion_for_member
+from ogkmc.reactions.rates import KB_EV
+from ogkmc.sites.adsorbate import AdsorbateSite
+from ogkmc.sites.bond import BondReactionSite, BondReactionTemplate
+from ogkmc.sites.diffusion import DiffusionSite
+from ogkmc.sites.stability.adsorption import check_adsorbate_site_lateral
+from ogkmc.sites.stability.bond import check_bond_site_lateral
+from ogkmc.sites.stability.diffusion import check_diffusion_site_lateral
+from ogkmc.thermo.free_energy import FreeEnergyOptions
 
 
 def _system():
@@ -183,7 +183,7 @@ def test_disabled_lateral_interactions_reuse_bare_free_energy_after_occupancy_ch
             setattr(lateral, key, value)
         lateral.stable = True
 
-    monkeypatch.setattr(f"autokmc.reactions.{kind}.{stability}", evaluate)
+    monkeypatch.setattr(f"ogkmc.reactions.{kind}.{stability}", evaluate)
     args = ({"[H]": 0.0},) if kind == "adsorption" else ()
     kwargs = dict(
         temperature=500.0, lateral_shells=20, lateral_interactions=False,
@@ -221,7 +221,7 @@ def test_only_local_occupancy_changes_free_energy_and_live_rate(
         lateral.g_unoccupied = 0.0
         lateral.stable = True
 
-    monkeypatch.setattr("autokmc.reactions.adsorption.check_site_stability", exact_endpoints)
+    monkeypatch.setattr("ogkmc.reactions.adsorption.check_site_stability", exact_endpoints)
     initial = get_applicable_reaction_for_member(
         graph, site, 0, None, {"[H]": 0.0}, temperature=500.0,
         gas_g={"[H]": 0.0}, free_energy_options=FreeEnergyOptions(enabled=True),

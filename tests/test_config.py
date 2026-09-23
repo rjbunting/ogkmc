@@ -1,4 +1,4 @@
-"""Tests for autokmc.io.config — load + dynamic calculator instantiation."""
+"""Tests for ogkmc.io.config — load + dynamic calculator instantiation."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from autokmc.io.config import (
+from ogkmc.io.config import (
     AdsorptionCfg,
     ConstantsCfg,
     OptimizationCfg,
@@ -17,7 +17,7 @@ from autokmc.io.config import (
     ConfigError,
     load_config,
 )
-from autokmc.io.calculators import (
+from ogkmc.io.calculators import (
     CalculatorCfg,
     CalculatorConfigError,
     CalculatorPool,
@@ -176,7 +176,7 @@ calculator:
         ),
         (
             "neb_optimizer: fire\n  neb_optimizer_kwargs: {logfile: fire.log}",
-            "cannot override AutoKMC-managed argument.*logfile",
+            "cannot override OGKMC-managed argument.*logfile",
         ),
         (
             "neb_optimizer: fire\n  neb_optimizer_kwargs: 0.01",
@@ -241,7 +241,7 @@ calculator:
     ],
 )
 def test_accepts_installed_ase_regular_optimizer_controls(optimizer, kwargs):
-    from autokmc.utils.optimizers import normalize_optimizer_kwargs
+    from ogkmc.utils.optimizers import normalize_optimizer_kwargs
 
     assert normalize_optimizer_kwargs(optimizer, kwargs) == kwargs
 
@@ -255,7 +255,7 @@ def test_accepts_installed_ase_regular_optimizer_controls(optimizer, kwargs):
     ],
 )
 def test_accepts_installed_ase_neb_optimizer_controls(optimizer, kwargs):
-    from autokmc.utils.optimizers import (
+    from ogkmc.utils.optimizers import (
         NEB_OPTIMIZERS,
         normalize_optimizer_kwargs,
     )
@@ -354,14 +354,14 @@ def test_standoff_default_reaches_configuration_and_public_entry_points(tmp_path
     pytest.importorskip("yaml")
     from inspect import signature
 
-    from autokmc.core.constants import STANDOFF_FACTOR
-    from autokmc.kmc.expansion import expand_bond_sites_for_new_species
-    from autokmc.kmc.models import BondGrowthOptions
-    from autokmc.sites.adsorbate import (
+    from ogkmc.core.constants import STANDOFF_FACTOR
+    from ogkmc.kmc.expansion import expand_bond_sites_for_new_species
+    from ogkmc.kmc.models import BondGrowthOptions
+    from ogkmc.sites.adsorbate import (
         find_adsorbate_sites,
         optimise_adsorbate_site_positions,
     )
-    from autokmc.workflow.stages import configured_adsorbate_site_kwargs
+    from ogkmc.workflow.stages import configured_adsorbate_site_kwargs
 
     cfg = load_config(_write(tmp_path, YAML_OK))
 
@@ -381,7 +381,7 @@ def test_standoff_default_reaches_configuration_and_public_entry_points(tmp_path
 @pytest.mark.parametrize("standoff", [0.0, 0.85])
 def test_explicit_standoff_override_is_preserved(tmp_path, standoff):
     pytest.importorskip("yaml")
-    from autokmc.workflow.stages import configured_adsorbate_site_kwargs
+    from ogkmc.workflow.stages import configured_adsorbate_site_kwargs
 
     cfg = load_config(_write(
         tmp_path,
@@ -512,7 +512,7 @@ def test_h2_oxidation_pd_uma_examples_have_expected_size_and_are_batched(
     assert cfg.calculator.factory == "fairchem.core.FAIRChemCalculator"
     predictor = cfg.calculator.factory_kwargs["predict_unit"]
     assert predictor["factory"] == (
-        "autokmc.io.fairchem.get_predict_unit_on_device"
+        "ogkmc.io.fairchem.get_predict_unit_on_device"
     )
     assert predictor["factory_kwargs"] == {
         "name_or_path": "uma-s-1p2",

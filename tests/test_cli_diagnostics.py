@@ -12,14 +12,14 @@ import sys
 import networkx as nx
 import pytest
 
-from autokmc.cli.diagnostics import (
+from ogkmc.cli.diagnostics import (
     PreflightError,
     doctor_report,
     preflight_config,
 )
-from autokmc.io.calculators import CalculatorCfg
-from autokmc.io.checkpoint import make_checkpoint_state, save_checkpoint
-from autokmc.io.config import (
+from ogkmc.io.calculators import CalculatorCfg
+from ogkmc.io.checkpoint import make_checkpoint_state, save_checkpoint
+from ogkmc.io.config import (
     CheckpointCfg,
     FreeEnergyCfg,
     KMCCfg,
@@ -28,9 +28,9 @@ from autokmc.io.config import (
     RunConfig,
     StructureCfg,
 )
-from autokmc.io.resume_contract import make_resume_contract
-from autokmc.kmc.models import KMCSettings
-from autokmc.workflow.runtime import (
+from ogkmc.io.resume_contract import make_resume_contract
+from ogkmc.kmc.models import KMCSettings
+from ogkmc.workflow.runtime import (
     OutputCollisionError,
     RunLockError,
     active_run_lock_owner,
@@ -86,7 +86,7 @@ def test_preflight_reports_file_backed_structure(
     from ase import Atoms
     from ase.io import write
 
-    from autokmc.cli.main import _print_preflight
+    from ogkmc.cli.main import _print_preflight
 
     config_dir = tmp_path / "config"
     structure_path = config_dir / "structures" / "catalyst.extxyz"
@@ -175,7 +175,7 @@ def test_file_structure_calculator_probe_uses_loaded_composition(
     cfg = _valid_config(tmp_path / "new-run")
     cfg.structure = StructureCfg(kind="file", path=structure_path.name)
     monkeypatch.setattr(
-        "autokmc.io.calculators.build_calculator",
+        "ogkmc.io.calculators.build_calculator",
         lambda _cfg: RecordingCalculator(),
     )
 
@@ -228,7 +228,7 @@ def test_preflight_rejects_invalid_file_backed_structure_before_calculator(
         index=frame_index,
     )
     monkeypatch.setattr(
-        "autokmc.cli.diagnostics._resolve_calculator_target",
+        "ogkmc.cli.diagnostics._resolve_calculator_target",
         lambda *_args, **_kwargs: pytest.fail(
             "calculator should not be resolved for an invalid structure"
         ),
@@ -286,7 +286,7 @@ def test_preflight_rejects_unwritable_custom_checkpoint_destination(tmp_path):
 
 
 def test_calculator_probe_uses_an_element_from_alloy_formulas():
-    from autokmc.cli.diagnostics import _probe_symbol
+    from ogkmc.cli.diagnostics import _probe_symbol
 
     assert _probe_symbol("Pt3Ni") == "Pt"
     assert _probe_symbol({"Ni": 0.5, "Pt": 0.5}) == "Ni"
@@ -346,7 +346,7 @@ def test_run_from_config_holds_lock_around_complete_pipeline(
     tmp_path,
     monkeypatch,
 ):
-    import autokmc.cli.pipeline as pipeline_module
+    import ogkmc.cli.pipeline as pipeline_module
 
     output_dir = tmp_path / "run"
     cfg = _valid_config(output_dir)
@@ -372,7 +372,7 @@ def test_fresh_run_collision_refuses_before_pipeline_mutation(
     tmp_path,
     monkeypatch,
 ):
-    import autokmc.cli.pipeline as pipeline_module
+    import ogkmc.cli.pipeline as pipeline_module
 
     cfg = _valid_config(tmp_path / "run")
     output_dir = Path(cfg.output.dir)
@@ -395,12 +395,12 @@ def test_cli_expected_errors_are_concise_and_debug_reraises(
     tmp_path,
     capsys,
 ):
-    from autokmc.cli.main import main
+    from ogkmc.cli.main import main
 
     missing = tmp_path / "missing.yaml"
     assert main(["validate-config", str(missing)]) == 2
     captured = capsys.readouterr()
-    assert "autokmc: error:" in captured.err
+    assert "ogkmc: error:" in captured.err
     assert "Traceback" not in captured.err
 
     with pytest.raises(FileNotFoundError):
@@ -412,9 +412,9 @@ def test_cli_treats_exhausted_species_expansion_as_expected_error(
     monkeypatch,
     capsys,
 ):
-    from autokmc.kmc.expansion import SpeciesExpansionError
+    from ogkmc.kmc.expansion import SpeciesExpansionError
 
-    main_module = importlib.import_module("autokmc.cli.main")
+    main_module = importlib.import_module("ogkmc.cli.main")
     monkeypatch.setattr(
         main_module,
         "load_config",
@@ -440,7 +440,7 @@ def test_cli_report_forwards_options_and_prints_both_outputs(
     monkeypatch,
     capsys,
 ):
-    main_module = importlib.import_module("autokmc.cli.main")
+    main_module = importlib.import_module("ogkmc.cli.main")
 
     calls = {}
 
@@ -517,7 +517,7 @@ def guarded_import(name, globals=None, locals=None, fromlist=(), level=0):
 
 builtins.__import__ = guarded_import
 
-from autokmc.cli.main import main
+from ogkmc.cli.main import main
 
 doctor_rc = main(["doctor"])
 analysis_rc = main(["analyze", "missing-run"])
@@ -531,14 +531,14 @@ print(f"doctor_rc={doctor_rc} analysis_rc={analysis_rc}")
         text=True,
     )
 
-    assert "AutoKMC doctor:" in completed.stdout
+    assert "OGKMC doctor:" in completed.stdout
     assert "analysis_rc=2" in completed.stdout
     assert "blocked scientific import" in completed.stderr
     assert "Traceback" not in completed.stderr
 
 
 def test_default_progress_is_periodic_and_info_is_not_detail_verbose():
-    from autokmc.cli.pipeline import _progress_enabled, _verbose_enabled
+    from ogkmc.cli.pipeline import _progress_enabled, _verbose_enabled
 
     assert KMCCfg().log_every == 100
     assert KMCSettings(temperature=500.0, n_steps=1).log_every == 100

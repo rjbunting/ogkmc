@@ -8,9 +8,9 @@ import threading
 import networkx as nx
 import pytest
 
-from autokmc.io.calculators import CalculatorPool
-from autokmc.kmc.network import DynamicNetworkExpander
-from autokmc.utils.telemetry import (
+from ogkmc.io.calculators import CalculatorPool
+from ogkmc.kmc.network import DynamicNetworkExpander
+from ogkmc.utils.telemetry import (
     RuntimeTelemetry,
     current_telemetry,
     increment,
@@ -24,7 +24,7 @@ from autokmc.utils.telemetry import (
 def test_telemetry_context_collects_and_isolates_metrics(monkeypatch):
     collector = RuntimeTelemetry()
     ticks = iter((10.0, 10.25))
-    monkeypatch.setattr("autokmc.utils.telemetry.perf_counter", lambda: next(ticks))
+    monkeypatch.setattr("ogkmc.utils.telemetry.perf_counter", lambda: next(ticks))
 
     increment("outside")
     with telemetry_context(collector):
@@ -55,7 +55,7 @@ def test_instrument_counts_failures():
 
 
 def test_calculation_cache_reports_lookup_miss(tmp_path):
-    from autokmc.io.calculation_cache import load_calculation_record
+    from ogkmc.io.calculation_cache import load_calculation_record
 
     collector = RuntimeTelemetry()
     with telemetry_context(collector):
@@ -70,17 +70,17 @@ def test_calculation_cache_reports_lookup_miss(tmp_path):
     ("module_name", "worker_name", "compute_name"),
     [
         (
-            "autokmc.reactions.adsorption",
+            "ogkmc.reactions.adsorption",
             "get_applicable_reactions",
             "compute_all_reactions",
         ),
         (
-            "autokmc.reactions.diffusion",
+            "ogkmc.reactions.diffusion",
             "get_applicable_diffusions",
             "compute_all_diffusions",
         ),
         (
-            "autokmc.reactions.bond",
+            "ogkmc.reactions.bond",
             "get_applicable_bond_reactions",
             "compute_all_bond_reactions",
         ),
@@ -142,8 +142,8 @@ def test_configured_pipeline_installs_telemetry_before_preparation(
     tmp_path,
     monkeypatch,
 ):
-    import autokmc.cli.pipeline as pipeline_module
-    from autokmc.io.config import OutputCfg, RunConfig
+    import ogkmc.cli.pipeline as pipeline_module
+    from ogkmc.io.config import OutputCfg, RunConfig
 
     def fake_pipeline(cfg, *, config_path, telemetry):
         assert isinstance(cfg, RunConfig)

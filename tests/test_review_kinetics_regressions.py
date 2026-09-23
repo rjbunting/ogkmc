@@ -7,13 +7,13 @@ import networkx as nx
 import numpy as np
 import pytest
 
-from autokmc.kmc.engine import run_kmc_steps
-from autokmc.kmc.restart import capture_rng_state, normalise_rng
-from autokmc.kmc.sampling import sample_tau
-from autokmc.reactions.adsorption import get_applicable_reaction_for_member
-from autokmc.reactions.bond import _bond_energetics_cached
-from autokmc.sites.adsorbate import AdsorbateSite
-from autokmc.sites.stability.adsorption import check_adsorbate_site_lateral
+from ogkmc.kmc.engine import run_kmc_steps
+from ogkmc.kmc.restart import capture_rng_state, normalise_rng
+from ogkmc.kmc.sampling import sample_tau
+from ogkmc.reactions.adsorption import get_applicable_reaction_for_member
+from ogkmc.reactions.bond import _bond_energetics_cached
+from ogkmc.sites.adsorbate import AdsorbateSite
+from ogkmc.sites.stability.adsorption import check_adsorbate_site_lateral
 
 
 def cached_surface():

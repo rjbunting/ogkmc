@@ -9,19 +9,19 @@ import numpy as np
 import pytest
 from ase import Atoms
 
-from autokmc.io.persistence import ReactionWriter
-from autokmc.kmc.index import _ReactionIndex
-from autokmc.reactions.diffusion import (
+from ogkmc.io.persistence import ReactionWriter
+from ogkmc.kmc.index import _ReactionIndex
+from ogkmc.reactions.diffusion import (
     DiffusionReaction,
     _reclassify_persisted_diffusion_intermediate,
 )
-from autokmc.sites.adsorbate import AdsorbateSite
-from autokmc.sites.bond import (
+from ogkmc.sites.adsorbate import AdsorbateSite
+from ogkmc.sites.bond import (
     BondReactionSite,
     BondReactionTemplate,
 )
-from autokmc.sites.diffusion import DiffusionLateral, DiffusionSite
-from autokmc.sites.stability.intermediate_pruning import (
+from ogkmc.sites.diffusion import DiffusionLateral, DiffusionSite
+from ogkmc.sites.stability.intermediate_pruning import (
     CompositeDirectEventDetected,
     classify_bond_intermediate,
     classify_diffusion_intermediate,

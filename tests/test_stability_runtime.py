@@ -13,21 +13,21 @@ import networkx as nx
 import numpy as np
 import pytest
 
-from autokmc.io.calculators import CalculatorConfigError, CalculatorPool
-from autokmc.io.calculation_cache import scientific_input_fingerprint
-from autokmc.sites.stability import adsorption as adsorption_module
-from autokmc.sites.stability import bond as bond_module
-from autokmc.sites.stability import diffusion as diffusion_module
-from autokmc.sites.stability import neb as neb_module
-from autokmc.sites.stability.bond import (
+from ogkmc.io.calculators import CalculatorConfigError, CalculatorPool
+from ogkmc.io.calculation_cache import scientific_input_fingerprint
+from ogkmc.sites.stability import adsorption as adsorption_module
+from ogkmc.sites.stability import bond as bond_module
+from ogkmc.sites.stability import diffusion as diffusion_module
+from ogkmc.sites.stability import neb as neb_module
+from ogkmc.sites.stability.bond import (
     BondTransitionStateInvalidError,
     _check_bond_ts_validity,
 )
-from autokmc.sites.stability.diffusion import (
+from ogkmc.sites.stability.diffusion import (
     TransitionStateInvalidError,
     _check_ts_validity,
 )
-from autokmc.utils.telemetry import RuntimeTelemetry, telemetry_context
+from ogkmc.utils.telemetry import RuntimeTelemetry, telemetry_context
 
 
 def _image(energy: float) -> Atoms:
@@ -1550,7 +1550,7 @@ def test_run_neb_can_capture_path_without_public_persistence(monkeypatch):
 
 
 def test_diffusion_endpoint_failure_retains_last_geometry(monkeypatch):
-    from autokmc.structure import StructureOptimisationError
+    from ogkmc.structure import StructureOptimisationError
 
     def fail_optimisation(atoms, **_kwargs):
         failed = atoms.copy()
@@ -1563,7 +1563,7 @@ def test_diffusion_endpoint_failure_retains_last_geometry(monkeypatch):
         )
 
     monkeypatch.setattr(
-        "autokmc.structure.optimise_structure",
+        "ogkmc.structure.optimise_structure",
         fail_optimisation,
     )
     with pytest.raises(diffusion_module.EndpointStabilityError) as caught:
@@ -1591,7 +1591,7 @@ def test_diffusion_endpoint_failure_retains_last_geometry(monkeypatch):
 
 
 def test_bond_endpoint_failure_retains_last_geometry(monkeypatch):
-    from autokmc.structure import StructureOptimisationError
+    from ogkmc.structure import StructureOptimisationError
 
     def fail_optimisation(atoms, **_kwargs):
         failed = atoms.copy()
@@ -1604,7 +1604,7 @@ def test_bond_endpoint_failure_retains_last_geometry(monkeypatch):
         )
 
     monkeypatch.setattr(
-        "autokmc.structure.optimise_structure",
+        "ogkmc.structure.optimise_structure",
         fail_optimisation,
     )
     with pytest.raises(bond_module.BondEndpointStabilityError) as caught:
@@ -2246,7 +2246,7 @@ def test_gas_precursor_seed_is_lowered_to_requested_surface_distance():
 def test_gas_precursor_relaxation_fixes_environment_and_keeps_molecule(
     monkeypatch,
 ):
-    import autokmc.structure as structure_module
+    import ogkmc.structure as structure_module
 
     seed = Atoms(
         "CuH2",
@@ -2373,12 +2373,12 @@ def test_endpoint_like_bond_is_admitted_persisted_and_cached(
 ):
     import json
 
-    from autokmc.io.persistence import ReactionWriter
-    from autokmc.reactions.bond import (
+    from ogkmc.io.persistence import ReactionWriter
+    from ogkmc.reactions.bond import (
         _bond_energetics_cached, get_applicable_bond_reaction_for_member,
     )
-    import autokmc.reactions.bond as reaction_module
-    from autokmc.sites.bond import BondReactionLateral
+    import ogkmc.reactions.bond as reaction_module
+    from ogkmc.sites.bond import BondReactionLateral
 
     e_ab, e_c = -438.9345, -438.7345
     if higher_endpoint == "AB":
@@ -2609,7 +2609,7 @@ def _electronic_record(states):
 
 
 def test_calculation_database_is_write_only_by_default(monkeypatch):
-    import autokmc.structure as structure_module
+    import ogkmc.structure as structure_module
 
     graph = nx.Graph()
     graph.add_node(1)
@@ -2692,7 +2692,7 @@ def test_calculation_database_is_write_only_by_default(monkeypatch):
 def test_adsorption_thermochemistry_reuses_cached_electronic_states(
     monkeypatch,
 ):
-    import autokmc.thermo.free_energy as free_energy_module
+    import ogkmc.thermo.free_energy as free_energy_module
 
     graph = nx.Graph()
     graph.add_node(1)
@@ -2774,7 +2774,7 @@ def test_adsorption_thermochemistry_reuses_cached_electronic_states(
 def test_adsorption_thermochemistry_failure_keeps_cached_state_retryable(
     monkeypatch,
 ):
-    import autokmc.thermo.free_energy as free_energy_module
+    import ogkmc.thermo.free_energy as free_energy_module
 
     graph = nx.Graph()
     graph.add_node(1)
@@ -2847,7 +2847,7 @@ def test_adsorption_thermochemistry_failure_keeps_cached_state_retryable(
 def test_diffusion_thermochemistry_reuses_cached_endpoints_and_neb(
     monkeypatch, capture_neb_path,
 ):
-    import autokmc.thermo.free_energy as free_energy_module
+    import ogkmc.thermo.free_energy as free_energy_module
 
     graph = nx.Graph()
     graph.add_nodes_from((1, 2))
@@ -2954,7 +2954,7 @@ def test_diffusion_thermochemistry_reuses_cached_endpoints_and_neb(
 def test_diffusion_thermochemistry_failure_keeps_cached_state_retryable(
     monkeypatch,
 ):
-    import autokmc.thermo.free_energy as free_energy_module
+    import ogkmc.thermo.free_energy as free_energy_module
 
     graph = nx.Graph()
     graph.add_nodes_from((1, 2))
@@ -3036,7 +3036,7 @@ def test_diffusion_thermochemistry_failure_keeps_cached_state_retryable(
 def test_bond_thermochemistry_reuses_cached_endpoints_and_neb(
     monkeypatch, capture_neb_path,
 ):
-    import autokmc.thermo.free_energy as free_energy_module
+    import ogkmc.thermo.free_energy as free_energy_module
 
     graph = nx.Graph()
     graph.add_nodes_from((1, 2, 3))
@@ -3165,7 +3165,7 @@ def test_bond_thermochemistry_reuses_cached_endpoints_and_neb(
 def test_bond_thermochemistry_failure_keeps_cached_state_retryable(
     monkeypatch,
 ):
-    import autokmc.thermo.free_energy as free_energy_module
+    import ogkmc.thermo.free_energy as free_energy_module
 
     graph = nx.Graph()
     graph.add_nodes_from((1, 2, 3))

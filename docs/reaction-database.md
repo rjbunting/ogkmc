@@ -1,7 +1,7 @@
 # ISAAC Reaction Database
 
 The reaction database reuses expensive endpoint, vibrational, and NEB
-calculations. AutoKMC writes each calculation to a record folder, which remains
+calculations. OGKMC writes each calculation to a record folder, which remains
 the source of truth. It then uses SQLite as a rebuildable search index.
 
 ## Layout
@@ -30,7 +30,7 @@ its creation time plus deterministic entropy from the calculation key.
 ## ISAAC record
 
 `isaac_record.json` is validated against the vendored official ISAAC v1.05
-JSON schema before it becomes visible. AutoKMC records are computation evidence
+JSON schema before it becomes visible. OGKMC records are computation evidence
 records containing:
 
 - material identity derived from the catalyst graph,
@@ -38,14 +38,14 @@ records containing:
 - operation and compatibility parameters,
 - endpoint energies and optional thermochemistry,
 - activation barriers for diffusion and bond processes,
-- AutoKMC/database schema identifiers,
+- OGKMC/database schema identifiers,
 - run UUID when the record was produced during a configured run,
 - assets with URI, media type, role, and SHA-256.
 
 See the upstream
 [ISAAC AI-ready scientific record wiki](https://github.com/ISAAC-DOE/isaac-ai-ready-record/wiki)
-for the general record format. AutoKMC vendors the schema used at runtime under
-`autokmc/schema/` so validation does not depend on network access.
+for the general record format. OGKMC vendors the schema used at runtime under
+`ogkmc/schema/` so validation does not depend on network access.
 
 Structures are not embedded as large JSON coordinate arrays. Required
 structures are external `.extxyz` assets, which makes the geometries directly
@@ -57,14 +57,14 @@ corresponding `calculation_cache/records/` tree with the export.
 
 ## Lookup sequence
 
-AutoKMC uses two lookup paths:
+OGKMC uses two lookup paths:
 
 1. Exact calculation-key lookup.
 2. Fallback lookup using reaction kind, operation identity, parameter hash,
    a Weisfeiler-Lehman graph fingerprint, a normalized scientific-input
    fingerprint, and an explicit calculator/model digest.
 
-For a fallback candidate, AutoKMC first checks full labelled graph isomorphism.
+For a fallback candidate, OGKMC first checks full labelled graph isomorphism.
 It then validates the ISAAC document, resolves every asset within the record
 directory, verifies every SHA-256, checks the required state set, and reads the
 `.extxyz` structures. A candidate is reusable only after every check succeeds.
@@ -79,7 +79,7 @@ state. Model checkpoint files and directory-valued model artifacts are
 identified recursively by SHA-256 content rather than a machine-local path;
 identical copied artifacts match and modified artifacts do not.
 
-To build the scientific-input fingerprint, AutoKMC first replaces each `Atoms`
+To build the scientific-input fingerprint, OGKMC first replaces each `Atoms`
 input with its invariant geometry description. It then retains every other
 input recursively. A change to a scalar gas energy, charge, spin declaration,
 or similar input therefore causes a miss. Only an explicit allowlist of
@@ -93,9 +93,9 @@ from the current reactant and used only when the live KMC rate is evaluated.
 
 Invariant geometry shows that two requests describe the same local shape, but
 it does not define how to move stored outputs into a new coordinate frame.
-AutoKMC therefore requires an exact input-frame fingerprint before reusing an
+OGKMC therefore requires an exact input-frame fingerprint before reusing an
 endpoint structure or NEB path. If a query is translated, rotated, wrapped, or
-atom-permuted, AutoKMC recomputes the calculation instead of returning
+atom-permuted, OGKMC recomputes the calculation instead of returning
 structures in the wrong frame.
 
 Calculator/optimizer/NEB/free-energy settings participate in compatibility.
@@ -116,7 +116,7 @@ and installed distribution versions for top-level and nested calculator entry
 points participate in the cache identity. An opaque calculator whose entry
 point cannot be versioned remains process-local rather than matching an
 unverifiable result across runs. Remote model aliases remain literal because
-AutoKMC cannot inspect their contents; production configurations should pin an
+OGKMC cannot inspect their contents; production configurations should pin an
 immutable revision or digest, not a mutable alias.
 
 ## Matcher compatibility
@@ -134,14 +134,14 @@ labels.
 
 ## Index recovery
 
-If `index.sqlite3` is absent or unreadable, AutoKMC scans the record folders. It
+If `index.sqlite3` is absent or unreadable, OGKMC scans the record folders. It
 first verifies each schema and asset, keeps only valid records, and then builds
 a new index. Invalid or tampered records are skipped.
 
 Manual recovery uses:
 
 ```bash
-autokmc rebuild-index RUN_DIR/calculation_cache
+ogkmc rebuild-index RUN_DIR/calculation_cache
 ```
 
 The rebuilt SQLite file is constructed separately and atomically replaces the

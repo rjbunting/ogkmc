@@ -10,11 +10,11 @@ from types import SimpleNamespace
 import networkx as nx
 import pytest
 
-import autokmc.io.resume_contract as resume_contract_module
-from autokmc.io.checkpoint import make_checkpoint_state, save_checkpoint
-from autokmc.io.event_log import EventHistory, EventLogCommit, EventLogRecovery
-from autokmc.io.calculators import CalculatorCfg, CalculatorConfigError
-from autokmc.io.config import (
+import ogkmc.io.resume_contract as resume_contract_module
+from ogkmc.io.checkpoint import make_checkpoint_state, save_checkpoint
+from ogkmc.io.event_log import EventHistory, EventLogCommit, EventLogRecovery
+from ogkmc.io.calculators import CalculatorCfg, CalculatorConfigError
+from ogkmc.io.config import (
     AdsorptionCfg,
     BondCfg,
     CheckpointCfg,
@@ -27,14 +27,14 @@ from autokmc.io.config import (
     RunConfig,
     StructureCfg,
 )
-from autokmc.io.resume_contract import (
+from ogkmc.io.resume_contract import (
     make_resume_contract,
     scientific_config_payload,
     verify_resume_contract,
 )
-from autokmc.workflow.models import RunIdentity, ThermoRuntime
-from autokmc.workflow.network import SpeciesNetworkBuilder
-from autokmc.workflow.runtime import (
+from ogkmc.workflow.models import RunIdentity, ThermoRuntime
+from ogkmc.workflow.network import SpeciesNetworkBuilder
+from ogkmc.workflow.runtime import (
     create_output_sinks,
     resolve_channel_runtime,
     resolve_kmc_resume,
@@ -65,7 +65,7 @@ def _builder(cfg, tmp_path: Path, graph: nx.Graph, **overrides):
 
 
 def test_prepare_calculator_rejects_a_missing_construction_path():
-    from autokmc.workflow.stages import prepare_calculator
+    from ogkmc.workflow.stages import prepare_calculator
 
     with pytest.raises(
         CalculatorConfigError,
@@ -236,7 +236,7 @@ def test_channel_runtime_neb_modes_are_isolated():
 
 
 def test_network_builder_flattens_diffusion_channels(tmp_path, monkeypatch):
-    import autokmc.sites.diffusion as diffusion_module
+    import ogkmc.sites.diffusion as diffusion_module
 
     graph = nx.Graph()
     sites = [SimpleNamespace(reactant="[O]")]
@@ -275,9 +275,9 @@ def test_network_builder_keeps_stability_before_triple_pruning(
     tmp_path,
     monkeypatch,
 ):
-    import autokmc.kmc.expansion as expansion_module
-    import autokmc.sites.bond as bond_module
-    import autokmc.workflow.network as network_module
+    import ogkmc.kmc.expansion as expansion_module
+    import ogkmc.sites.bond as bond_module
+    import ogkmc.workflow.network as network_module
 
     graph = nx.Graph()
     reactants = [
@@ -375,8 +375,8 @@ def test_network_builder_keeps_stability_before_triple_pruning(
 
 
 def test_initial_network_excludes_gas_unstable_leaves(tmp_path, monkeypatch):
-    from autokmc.species.reactant import build_reactant, ReactantGasUnstableError
-    from autokmc.sites.bond import BondReactionTemplate
+    from ogkmc.species.reactant import build_reactant, ReactantGasUnstableError
+    from ogkmc.sites.bond import BondReactionTemplate
     graph = nx.Graph()
     reactants = [build_reactant(smiles, relax=False) for smiles in ("[H]", "[O]")]
     valid = BondReactionTemplate("[H]", "[H]", "[H][H]")
@@ -391,9 +391,9 @@ def test_initial_network_excludes_gas_unstable_leaves(tmp_path, monkeypatch):
     def enumerate_sites(graph, sites, templates, **kwargs):
         enumerated.extend(templates)
         return []
-    monkeypatch.setattr("autokmc.species.reactant.build_reactant", build)
-    monkeypatch.setattr("autokmc.sites.adsorbate.find_adsorbate_sites", lambda *_a, **_k: [])
-    monkeypatch.setattr("autokmc.sites.bond.find_bond_sites", enumerate_sites)
+    monkeypatch.setattr("ogkmc.species.reactant.build_reactant", build)
+    monkeypatch.setattr("ogkmc.sites.adsorbate.find_adsorbate_sites", lambda *_a, **_k: [])
+    monkeypatch.setattr("ogkmc.sites.bond.find_bond_sites", enumerate_sites)
     cfg = RunConfig(bond=BondCfg(enabled=True))
     network = _builder(
         cfg, tmp_path, graph, template_builder=lambda *_a: [invalid, valid],
@@ -443,7 +443,7 @@ def test_output_factory_closes_reaction_writer_on_partial_failure(
     tmp_path,
     monkeypatch,
 ):
-    import autokmc.workflow.runtime as runtime_module
+    import ogkmc.workflow.runtime as runtime_module
 
     created = SimpleNamespace(reactions=None)
 
@@ -477,7 +477,7 @@ def test_output_factory_passes_checkpoint_step_to_trajectory_resume(
     tmp_path,
     monkeypatch,
 ):
-    import autokmc.workflow.runtime as runtime_module
+    import ogkmc.workflow.runtime as runtime_module
 
     captured = {}
 

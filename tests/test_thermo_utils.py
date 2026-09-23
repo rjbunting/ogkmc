@@ -13,17 +13,17 @@ import numpy as np
 import pytest
 from ase import Atoms
 
-import autokmc.thermo.free_energy as free_energy
-from autokmc.io.calculators import CalculatorPool, calculator_batch_context
+import ogkmc.thermo.free_energy as free_energy
+from ogkmc.io.calculators import CalculatorPool, calculator_batch_context
 
 
 def test_thermo_and_utils_package_exports():
-    from autokmc import thermo, utils
+    from ogkmc import thermo, utils
 
     assert thermo.FreeEnergyOptions is free_energy.FreeEnergyOptions
     assert thermo.compute_gas_thermo is free_energy.compute_gas_thermo
     assert thermo.compute_harmonic_thermo is free_energy.compute_harmonic_thermo
-    assert utils.get_logger("") is logging.getLogger("autokmc")
+    assert utils.get_logger("") is logging.getLogger("ogkmc")
 
 
 def test_split_real_imag_ev_treats_negative_real_modes_as_imaginary():
@@ -176,9 +176,9 @@ def test_default_harmonic_cache_uses_temporary_directory(monkeypatch):
     )
 
     assert result["enabled"] is True
-    assert seen["cache_dir"].name.startswith("autokmc_vib_")
+    assert seen["cache_dir"].name.startswith("ogkmc_vib_")
     assert not seen["cache_dir"].exists()
-    assert Path("_autokmc_vib_cache") != seen["cache_dir"]
+    assert Path("_ogkmc_vib_cache") != seen["cache_dir"]
 
 
 def test_gas_thermo_forces_nonperiodic_vibration_snapshot(monkeypatch):

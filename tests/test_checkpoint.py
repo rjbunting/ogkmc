@@ -10,13 +10,13 @@ from ase import Atoms
 from ase.calculators.emt import EMT
 from ase.calculators.singlepoint import SinglePointCalculator
 
-from autokmc.io.checkpoint import (
+from ogkmc.io.checkpoint import (
     CHECKPOINT_SCHEMA_VERSION,
     load_checkpoint,
     make_checkpoint_state,
     save_checkpoint,
 )
-from autokmc.utils.telemetry import RuntimeTelemetry, telemetry_context
+from ogkmc.utils.telemetry import RuntimeTelemetry, telemetry_context
 
 
 class HashableDict(dict):

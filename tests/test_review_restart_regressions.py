@@ -7,11 +7,11 @@ from ase import Atoms
 import networkx as nx
 import pytest
 
-from autokmc.cli.pipeline import run_from_config
-from autokmc.io.checkpoint import make_checkpoint_state, save_checkpoint
-from autokmc.io.config import RunConfig
-from autokmc.io.run_manifest import begin_run_manifest, finish_run_manifest
-from autokmc.io.trajectory import TrajectoryWriter, reconcile_trajectory
+from ogkmc.cli.pipeline import run_from_config
+from ogkmc.io.checkpoint import make_checkpoint_state, save_checkpoint
+from ogkmc.io.config import RunConfig
+from ogkmc.io.run_manifest import begin_run_manifest, finish_run_manifest
+from ogkmc.io.trajectory import TrajectoryWriter, reconcile_trajectory
 
 
 def test_resume_discards_incomplete_uncommitted_trajectory_frame(tmp_path):
