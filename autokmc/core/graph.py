@@ -52,7 +52,8 @@ from ase import Atoms
 from ase.data import covalent_radii as ASE_COVALENT_RADII
 from ase.neighborlist import NeighborList, natural_cutoffs
 
-from autokmc.core.constants import NL_MULT_DEFAULT
+from autokmc.core.constants import NEIGHBORLIST_SKIN, NL_MULT_DEFAULT
+from autokmc.core.atom_metadata import atom_metadata
 from autokmc.core.pbc import graph_pbc_for_atoms
 from autokmc.utils.logging import get_logger
 
@@ -120,15 +121,20 @@ def build_graph(
         )
 
     declared_pbc = np.asarray(atoms.get_pbc(), dtype=bool)
-    # Neighbor-list construction needs the material cell to be fully periodic,
-    # but callers must not see their Atoms object mutated as a side effect.
+    # First, make a private periodic copy for the neighbor list. This keeps the
+    # caller's Atoms object unchanged.
     atoms = atoms.copy()
     atoms.arrays["surface"] = np.asarray(surface_mask).copy()
     graph_pbc = graph_pbc_for_atoms(atoms)
     atoms.set_pbc(graph_pbc)
 
     cutoffs = natural_cutoffs(atoms, mult=nl_mult)
-    nl = NeighborList(cutoffs, self_interaction=False, bothways=True)
+    nl = NeighborList(
+        cutoffs,
+        skin=NEIGHBORLIST_SKIN,
+        self_interaction=False,
+        bothways=True,
+    )
     nl.update(atoms)
 
     G = nx.Graph()
@@ -140,6 +146,13 @@ def build_graph(
     positions      = atoms.get_positions()
     symbols        = atoms.get_chemical_symbols()
     atomic_numbers = atoms.get_atomic_numbers()
+    material = np.asarray(surface_mask) != 2
+    if material.any():
+        G.graph["slab_z_bounds"] = (
+            float(positions[material, 2].min()), float(positions[material, 2].max()),
+        )
+    if "_autokmc_surface_side" in atoms.info:
+        G.graph["surface_side"] = atoms.info["_autokmc_surface_side"]
 
     for i in range(len(atoms)):
         G.add_node(
@@ -149,16 +162,16 @@ def build_graph(
             index           = i,
             type            = _TYPE_MAP.get(int(surface_mask[i]), "bulk"),
             covalent_radius = float(ASE_COVALENT_RADII[atomic_numbers[i]]),
+            atom_arrays     = atom_metadata(atoms, i),
         )
 
-    # Track per-axis whether *any* bond crosses an image. This is diagnostic
-    # connectivity metadata; material graph structures keep full PBC when
-    # they have a real cell, while adsorbate-only reactants stay non-periodic.
+    # Next, record whether a bond crosses each periodic boundary. Material
+    # graphs keep full PBC when they have a cell, while isolated reactants
+    # remain non-periodic.
     pbc_effective = np.zeros(3, dtype=bool)
 
-    # Walk the bothways=True neighbour list and add each bond once (i<j),
-    # recording the integer cell offset of the partner atom and the MIC
-    # bond distance so downstream code can avoid re-deriving them.
+    # The neighbor list contains both directions. Add each bond once, and
+    # store its cell offset and minimum-image distance for later use.
     for i in range(len(atoms)):
         neighbours, offsets = nl.get_neighbors(i)
         for jj, off in zip(map(int, neighbours), offsets):
@@ -167,7 +180,8 @@ def build_graph(
                 pbc_effective |= (off != 0)
             if jj <= i:
                 continue
-            # Cartesian displacement of the partner image relative to atom i.
+            # This is the Cartesian displacement from atom i to the selected
+            # periodic image of its neighbor.
             dv = positions[jj] + off @ cell_arr - positions[i]
             d = float(np.linalg.norm(dv))
             G.add_edge(i, jj,
@@ -176,10 +190,9 @@ def build_graph(
 
     G.graph["connectivity_pbc"] = pbc_effective
 
-    # Warn if the caller's original PBC declaration hid cross-image bonds.
-    # Material structures with a real cell are stored with full PBC, but this
-    # still catches too-small vacuum gaps or cells in inputs that arrived with
-    # a partially/non-periodic PBC setting.
+    # After the bonds are built, warn when the original PBC declaration hid a
+    # cross-image bond. This identifies small cells, small vacuum gaps, and
+    # partially periodic inputs.
     if not np.array_equal(declared_pbc, pbc_effective):
         unexpected = (~declared_pbc) & pbc_effective
         if unexpected.any():
@@ -193,9 +206,8 @@ def build_graph(
                 stacklevel=2,
             )
 
-    # Re-use any hull computed by find_surface_atoms (nanoparticle path) so
-    # downstream code need not rebuild it.  Stored as the (n_facets, 4)
-    # equations array on the graph directly.
+    # Finally, copy any nanoparticle hull calculated during surface detection.
+    # Storing the facet equations on the graph avoids rebuilding the hull.
     hull_eq = atoms.info.get("_hull_equations")
     if hull_eq is not None:
         G.graph["hull_equations"] = np.asarray(hull_eq, dtype=float)

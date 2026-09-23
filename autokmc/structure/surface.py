@@ -34,7 +34,7 @@ from autokmc.core.constants import (
     RAYCAST_COVERAGE_THRESHOLD,
     RAYCAST_N_DISC_SAMPLE,
 )
-from autokmc.core.pbc import set_full_pbc_if_cell
+from autokmc.core.pbc import minimum_image_vectors, set_full_pbc_if_cell
 
 _log = logging.getLogger(__name__)
 
@@ -110,6 +110,79 @@ def has_pbc_connectivity(atoms: Atoms,
     return bool(_pbc_connectivity_axes(atoms, nl_mult=nl_mult).any())
 
 
+def _surface_frame(
+    cell: np.ndarray,
+    pbc_axes: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return orthonormal in-plane vectors and an oriented slab normal."""
+    cell_arr = np.asarray(cell, dtype=float)
+    connected = list(np.flatnonzero(np.asarray(pbc_axes, dtype=bool)))
+    if len(connected) >= 2:
+        first, second = connected[:2]
+    else:
+        # Preserve the historical a/b surface convention for malformed,
+        # one-dimensional, or directly-called ray-casting inputs.
+        first, second = 0, 1
+
+    # Copy before normalising: ``np.asarray(cell[first])`` is a view and an
+    # in-place division would silently rescale the caller's lattice vector.
+    tangent_a = np.array(cell_arr[first], dtype=float, copy=True)
+    tangent_a_norm = float(np.linalg.norm(tangent_a))
+    normal = np.cross(tangent_a, np.asarray(cell_arr[second], dtype=float))
+    normal_norm = float(np.linalg.norm(normal))
+    if tangent_a_norm <= 1.0e-12 or normal_norm <= 1.0e-12:
+        raise ValueError("surface cell vectors must span a non-zero plane")
+    tangent_a /= tangent_a_norm
+    normal /= normal_norm
+
+    remaining = [axis for axis in range(3) if axis not in (first, second)]
+    if remaining:
+        if float(np.dot(normal, cell_arr[remaining[0]])) < 0.0:
+            normal = -normal
+    elif normal[2] < 0.0:
+        normal = -normal
+    tangent_b = np.cross(normal, tangent_a)
+    tangent_b /= float(np.linalg.norm(tangent_b))
+    return tangent_a, tangent_b, normal
+
+
+def align_periodic_slab_frame(
+    atoms: Atoms,
+    pbc_axes: np.ndarray,
+    *,
+    atol: float = 1.0e-10,
+) -> dict[str, object]:
+    """Rigidly align a detected slab normal with Cartesian +z in place.
+
+    Unlike slab construction, this does not rebuild or orthogonalise the cell;
+    it applies the same rigid Cartesian rotation to the supplied lattice and
+    atom positions.  The transformation therefore keeps file-backed catalyst
+    geometry and cell metrics unchanged while satisfying downstream
+    adsorption and gas-endpoint +z conventions.
+    """
+    cell = np.asarray(atoms.get_cell(), dtype=float)
+    tangent_a, tangent_b, normal = _surface_frame(cell, pbc_axes)
+    rotated = not np.allclose(normal, [0.0, 0.0, 1.0], rtol=0.0, atol=atol)
+    if rotated:
+        rotation = np.column_stack((tangent_a, tangent_b, normal))
+        atoms.set_positions(
+            np.asarray(atoms.get_positions()) @ rotation,
+            apply_constraint=False,
+        )
+        atoms.set_cell(cell @ rotation, scale_atoms=False)
+
+    metadata: dict[str, object] = {
+        "aligned_to_z": True,
+        "rotation_applied": bool(rotated),
+        "periodic_connectivity_axes": [
+            int(axis) for axis in np.flatnonzero(np.asarray(pbc_axes, dtype=bool))
+        ],
+        "original_surface_normal": [float(value) for value in normal],
+    }
+    atoms.info["_autokmc_surface_frame"] = metadata
+    return metadata
+
+
 # ---------------------------------------------------------------------------
 # Unified dispatcher
 # ---------------------------------------------------------------------------
@@ -178,7 +251,7 @@ def find_surface_atoms(
                    int(surface_mask.sum()), len(atoms))
         return result
 
-    # ── nanoparticle (convex hull) ────────────────────────────────────────
+    # A nanoparticle uses convex-hull surface classification.
     raw = find_surface_atoms_convexhull(
         atoms,
         hull_tol_factor=hull_tol_factor,
@@ -230,11 +303,10 @@ def find_surface_atoms_raycasting(
     set_full_pbc_if_cell(atoms)
     pos      = atoms.get_positions()          # (N, 3)
     cell     = np.array(atoms.get_cell())     # (3, 3)
-    cell_inv = np.linalg.inv(cell)            # full 3×3 inverse: handles
-    #                                          # tilted slab cells correctly.
     if pbc_axes is None:
         pbc_axes = _pbc_connectivity_axes(atoms)
     pbc_axes = np.asarray(pbc_axes, dtype=bool)
+    tangent_a, tangent_b, normal = _surface_frame(cell, pbc_axes)
     N        = len(atoms)
 
     # Per-atom capture radius from covalent radii
@@ -248,21 +320,17 @@ def find_surface_atoms_raycasting(
     unit_pts = unit_pts[(unit_pts ** 2).sum(axis=1) <= 1.0]        # (K, 2) in disc
     K = len(unit_pts)
 
-    # Rays placed in the xy plane around each atom.  We embed them in 3-D
-    # at z=0 so the full 3×3 inverse can wrap them correctly even when the
-    # cell has off-diagonal terms (e.g. a non-orthogonalised slab cell).
-    rays_xy3 = np.zeros((N, K, 3), dtype=float)
-    rays_xy3[..., 0] = (pos[:, np.newaxis, 0]
-                        + surf_radii[:, np.newaxis] * unit_pts[np.newaxis, :, 0])
-    rays_xy3[..., 1] = (pos[:, np.newaxis, 1]
-                        + surf_radii[:, np.newaxis] * unit_pts[np.newaxis, :, 1])
-    rays_xy3 = rays_xy3.reshape(-1, 3)                              # (N*K, 3)
+    offsets = (
+        unit_pts[:, 0, np.newaxis] * tangent_a[np.newaxis, :]
+        + unit_pts[:, 1, np.newaxis] * tangent_b[np.newaxis, :]
+    )
+    rays = (
+        pos[:, np.newaxis, :]
+        + surf_radii[:, np.newaxis, np.newaxis] * offsets[np.newaxis, :, :]
+    ).reshape(-1, 3)
+    heights = pos @ normal
 
-    rays_frac3 = rays_xy3 @ cell_inv                                # (N*K, 3)
-    atom_frac3 = pos @ cell_inv                                     # (N, 3)
-    z_vals     = pos[:, 2]
-
-    n_rays = len(rays_xy3)
+    n_rays = len(rays)
     _CHUNK = 4096
 
     wins_top = np.zeros(N, dtype=np.int32)
@@ -270,30 +338,29 @@ def find_surface_atoms_raycasting(
 
     for start in range(0, n_rays, _CHUNK):
         sl         = slice(start, start + _CHUNK)
-        chunk_frac = rays_frac3[sl]                                 # (C, 3)
+        chunk = rays[sl]
+        displacement = minimum_image_vectors(
+            pos[np.newaxis, :, :] - chunk[:, np.newaxis, :],
+            cell,
+            pbc_axes,
+        )
+        normal_component = np.einsum("cni,i->cn", displacement, normal)
+        tangent_displacement = (
+            displacement - normal_component[:, :, np.newaxis] * normal
+        )
+        in_plane_distance = np.linalg.norm(tangent_displacement, axis=2)
 
-        # MIC wrap only along axes that are actually periodic.  Wrapping a
-        # non-periodic slab-normal component corrupts xy distances when the
-        # cell has an off-diagonal c vector.
-        dfrac3 = atom_frac3[np.newaxis, :, :] - chunk_frac[:, np.newaxis, :]
-        for ax in range(3):
-            if pbc_axes[ax]:
-                dfrac3[..., ax] -= np.round(dfrac3[..., ax])
-        d_cart = dfrac3 @ cell                                      # (C, N, 3)
-        dxy    = d_cart[..., :2]                                    # (C, N, 2)
-        xy_dist = np.sqrt((dxy ** 2).sum(axis=2))                   # (C, N)
-
-        within  = xy_dist <= surf_radii[np.newaxis, :]             # (C, N)
+        within  = in_plane_distance <= surf_radii[np.newaxis, :]   # (C, N)
         has_any = within.any(axis=1)                               # (C,)
         valid   = np.where(has_any)[0]                             # indices into chunk
 
         if which in ("top", "both") and valid.size:
-            z_top    = np.where(within[valid], z_vals[np.newaxis, :], -np.inf)
+            z_top    = np.where(within[valid], heights[np.newaxis, :], -np.inf)
             best_top = np.argmax(z_top, axis=1)                    # (valid,)
             np.add.at(wins_top, best_top, 1)
 
         if which in ("bottom", "both") and valid.size:
-            z_bot    = np.where(within[valid], z_vals[np.newaxis, :], np.inf)
+            z_bot    = np.where(within[valid], heights[np.newaxis, :], np.inf)
             best_bot = np.argmin(z_bot, axis=1)                    # (valid,)
             np.add.at(wins_bot, best_bot, 1)
 
@@ -306,6 +373,7 @@ def find_surface_atoms_raycasting(
     else:  # "both"
         surface_mask = (wins_top >= threshold_count) | (wins_bot >= threshold_count)
 
+    atoms.info["_autokmc_surface_side"] = which
     surface_indices = np.where(surface_mask)[0].astype(int)
     return surface_mask, surface_indices
 

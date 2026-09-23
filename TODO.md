@@ -55,3 +55,9 @@ Must look into parallelisation and the calculators too.
 
 ## Stiffness
 Need to develop algorithm to prevent sampling of fast steps.
+
+## TS pruning
+Check the pruning to make sure it is functioning as intended
+
+## Process workflow
+Need to make sure that a transition state is found. Initial and final states are good, just making the TS search consistent is the next big step.

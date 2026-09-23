@@ -11,51 +11,78 @@ The schema is intentionally flat and dataclass-backed so that tab-completion
 in IDEs surfaces every knob.  Missing fields fall back to defaults from
 :mod:`autokmc.core.constants`.
 
-A reference example lives at ``example/co_oxidation_pt111_uma_4gpu.yaml``.
+A reference example lives at ``example/h2_oxidation_pd111_uma.yaml``.
 """
 
 from __future__ import annotations
 
 import sys
-import math
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
 from autokmc.core.constants import (
-    CONFIG_SCHEMA_VERSION,
-    DEFAULT_OUTPUT_DIR,
-    REACTIONS_FILENAME,
-    SUMMARY_FILENAME,
-    RUN_MANIFEST_FILENAME,
-    TRAJECTORY_FILENAME,
-    CALCULATION_CACHE_DIR,
-    ISAAC_EXPORT_FILENAME,
-    TRAJ_DUMP_EVERY,
-    PRUNE_FMAX,
-    PRUNE_MAX_STEPS,
-    RANDOM_SEED,
-    DIFFUSION_MAX_HOPS,
-    DIFFUSION_PRUNE_BY_ADS_PAIR,
-    NEB_FMAX,
-    NEB_MAX_STEPS,
-    NEB_N_IMAGES,
-    NEB_CLIMB,
-    NEB_SPRING_K,
-    NEB_INTERPOLATION,
-    N_SHELLS_DEFAULT,
+    BOND_ATOM_MATCHING,
+    BOND_GAS_LIFT_HEIGHT,
+    BOND_GAS_PRECURSOR_DISTANCE,
+    BOND_GAS_PRECURSOR_RELAX,
+    BOND_MATCHING_TRIALS,
     BOND_MAX_HOPS,
+    BOND_NEB_INTERPOLATION,
     BOND_PAIR_N_SHELLS,
     BOND_PRUNE_BY_TRIPLE,
     BOND_PRUNE_WITH_CALCULATOR,
-    BOND_NEB_INTERPOLATION,
-    BOND_ATOM_MATCHING,
-    BOND_MATCHING_TRIALS,
-    BOND_GAS_LIFT_HEIGHT,
+    BOND_TOLERANCE,
+    CALCULATION_CACHE_DIR,
+    CO_FACTOR,
+    CONFIG_SCHEMA_VERSION,
+    CONTACT_FACTOR,
+    DEFAULT_OUTPUT_DIR,
+    DIFFUSION_MAX_HOPS,
+    DIFFUSION_PRUNE_BY_ADS_PAIR,
+    HULL_TOL,
+    ISAAC_EXPORT_FILENAME,
+    KABSCH_MAX_MAPPINGS,
+    LATERAL_SHELLS_DEFAULT,
     MAX_PAIR_SHELLS,
+    NEB_BAND_EVAL,
+    NEB_FMAX,
+    NEB_CLIMB,
+    NEB_IMAGE_SPACING,
+    NEB_INTERMEDIATE_ENERGY_TOLERANCE,
+    NEB_INTERMEDIATE_MAX_REFINEMENTS,
+    NEB_INTERMEDIATE_MINIMUM_PROMINENCE,
+    NEB_INTERMEDIATE_STAGNATION_STEPS,
+    NEB_INTERPOLATION,
+    NEB_MAX_ADJACENT_IMAGE_SPACING_MULTIPLIER,
+    NEB_MAX_IMAGES,
+    NEB_METHOD,
+    NEB_MAX_STEPS,
+    NEB_MIN_IMAGES,
+    NEB_N_IMAGES,
+    NEB_SPRING_K,
+    NL_MULT_DEFAULT,
+    NN_DISTANCE,
+    N_ADSORBATE_RESTARTS,
+    N_SHELLS_DEFAULT,
+    OPT_FACTOR,
+    PRUNE_FMAX,
+    PRUNE_MAX_STEPS,
+    RANDOM_SEED,
+    RAYCAST_COVERAGE_THRESHOLD,
+    RAYCAST_N_DISC_SAMPLE,
+    REACTIONS_FILENAME,
+    REPULSION_WEIGHT,
+    RUN_MANIFEST_FILENAME,
+    SITE_REPULSION_CUTOFF,
+    STANDOFF_FACTOR,
+    SUMMARY_FILENAME,
+    TRAJECTORY_FILENAME,
+    TRAJ_DUMP_EVERY,
 )
-from autokmc.reactions.rates import DEFAULT_TRANSMISSION_COEFFICIENT
 from autokmc.io.calculators import CalculatorCfg
+from autokmc.reactions.rates import DEFAULT_TRANSMISSION_COEFFICIENT
+from autokmc.utils.optimizers import DEFAULT_NEB_OPTIMIZER, DEFAULT_OPTIMIZER
 
 
 # ---------------------------------------------------------------------------
@@ -70,15 +97,84 @@ class OutputCfg:
     run_manifest_filename: str = RUN_MANIFEST_FILENAME
     trajectory_filename:   str = TRAJECTORY_FILENAME
     calculation_cache_enabled:   bool = True
+    calculation_cache_lookup_enabled: bool = False
     calculation_cache_dir:       str = CALCULATION_CACHE_DIR
+    isaac_export_enabled:        bool = False
     isaac_export_filename:       str = ISAAC_EXPORT_FILENAME
     trajectory_dump_every: int = TRAJ_DUMP_EVERY
     log_level: str = "INFO"
 
 
 @dataclass
+class ConstantsCfg:
+    """Shared scientific and algorithmic controls.
+
+    These defaults live in :mod:`autokmc.core.constants`; exposing them here
+    makes each run's effective values explicit, validated, and reproducible.
+    Channel-specific convergence and sampling controls remain in their
+    corresponding configuration sections.
+    """
+
+    neighbor_list_multiplier: float = NL_MULT_DEFAULT
+    co_bond_factor: float = CO_FACTOR
+    anchor_bond_factor: float = OPT_FACTOR
+    anchor_repulsion_weight: float = REPULSION_WEIGHT
+    site_repulsion_cutoff: float | None = SITE_REPULSION_CUTOFF
+    adsorbate_contact_factor: float = CONTACT_FACTOR
+    adsorbate_standoff_factor: float = STANDOFF_FACTOR
+    adsorbate_rotational_restarts: int = N_ADSORBATE_RESTARTS
+    typical_neighbor_distance: float = NN_DISTANCE
+    adsorbate_bond_tolerance: float = BOND_TOLERANCE
+    anchor_hull_tolerance: float = HULL_TOL
+    raycast_coverage_threshold: float = RAYCAST_COVERAGE_THRESHOLD
+    raycast_disc_samples: int = RAYCAST_N_DISC_SAMPLE
+    kabsch_max_mappings: int = KABSCH_MAX_MAPPINGS
+    lateral_shells: int = LATERAL_SHELLS_DEFAULT
+
+
+@dataclass
+class OptimizationCfg:
+    """ASE optimizer choices used by calculator-backed relaxations."""
+
+    optimizer: str = DEFAULT_OPTIMIZER
+    optimizer_kwargs: dict[str, Any] = field(default_factory=dict)
+    neb_optimizer: str = DEFAULT_NEB_OPTIMIZER
+    neb_optimizer_kwargs: dict[str, Any] = field(default_factory=dict)
+    neb_climb_optimizer: str | None = None
+    neb_climb_optimizer_kwargs: dict[str, Any] | None = None
+    #: ASE NEB force/tangent formulation (``improvedtangent``, ``aseneb``,
+    #: ``eb``, ``spline``, or ``string``).
+    neb_method: str = NEB_METHOD
+    #: NEB band evaluation mode: ``"images"`` (per-image calculator calls)
+    #: or ``"batched"`` (whole band in one stacked model forward per
+    #: optimizer step, when the calculator supports it).
+    neb_band_eval: str = NEB_BAND_EVAL
+    #: Maximum adjacent-image displacement as a multiple of the configured
+    #: diffusion/bond image spacing before the band is restored and restarted.
+    neb_geometry_guard_multiplier: float = (
+        NEB_MAX_ADJACENT_IMAGE_SPACING_MULTIPLIER
+    )
+    #: Inspect a stalled ordinary band for intermediate minima after this many
+    #: steps without a lower interior-image electronic energy.
+    neb_intermediate_stagnation_steps: int = NEB_INTERMEDIATE_STAGNATION_STEPS
+    #: Maximum number of successive minima-based replacement NEBs.
+    neb_intermediate_max_refinements: int = NEB_INTERMEDIATE_MAX_REFINEMENTS
+    #: Electronic-energy decrease (eV) required to reset the stagnation count.
+    neb_intermediate_energy_tolerance: float = NEB_INTERMEDIATE_ENERGY_TOLERANCE
+    #: Required local-minimum prominence (eV) on both neighboring images.
+    neb_intermediate_minimum_prominence: float = (
+        NEB_INTERMEDIATE_MINIMUM_PROMINENCE
+    )
+
+
+@dataclass
 class StructureCfg:
-    kind: str = "surface"   # "surface" or "nanoparticle"
+    kind: str = "surface"   # "surface", "nanoparticle", or "file"
+    # File-backed structure knobs (used when kind == "file"):
+    path: str | None = None
+    format: str | None = None
+    index: int = -1
+    frozen_indices: list[int] | None = None
     composition: Any = "Cu"
     crystal_structure: str = "fcc"
     miller_index: tuple = (1, 1, 1)
@@ -88,10 +184,16 @@ class StructureCfg:
     goal_x: float = 12.0
     goal_y: float = 12.0
     n_freeze_layers: int = 2
+    #: Which slab face ray casting should classify: top, bottom, or both.
+    surface_side: str = "top"
+    #: Scale applied to covalent-radius discs during slab ray casting.
+    surface_radius_factor: float = 1.0
+    #: Scale applied to covalent radii when classifying nanoparticle hull atoms.
+    nanoparticle_hull_tolerance_factor: float = 0.5
     #: Force convergence criterion (eV/Å) for the slab/nanoparticle
-    #: LBFGS optimisation.  Default 0.05 eV/Å.
+    #: calculator-backed optimisation.  Default 0.05 eV/Å.
     fmax: float = 0.05
-    #: Maximum number of LBFGS steps for the slab/nanoparticle
+    #: Maximum number of optimizer steps for the slab/nanoparticle
     #: optimisation.  Default 1000.
     max_steps: int = 1000
     # Nanoparticle-only knobs (used when kind == "nanoparticle"):
@@ -110,7 +212,12 @@ class ReactantCfg:
     smiles: str
     add_hydrogens: bool = True
     relax_in_gas:  bool = True
-    # ── Gas feed and thermochemistry ──────────────────────────────
+    #: Force convergence threshold (eV/Å) for the optional gas-phase
+    #: calculator relaxation.
+    fmax: float = 0.05
+    #: Maximum optimizer steps for the optional gas-phase relaxation.
+    max_steps: int = 500
+    # These options describe the gas feed and thermochemistry.
     #: Partial pressure of the gas-phase reactant in bar.  Multiplies the
     #: adsorption rate so that ΔG / barriers stay at the 1-bar reference.
     #: This applies whether or not free-energy corrections are enabled.
@@ -129,10 +236,29 @@ class ReactantCfg:
 
 
 @dataclass
-class AdsorbateSitesCfg:
+class AdsorptionCfg:
+    """Adsorption-site discovery and runtime endpoint controls."""
+
     prune_stable_only: bool = True
-    fmax:              float = PRUNE_FMAX
-    max_steps:         int   = PRUNE_MAX_STEPS
+    prune_fmax:        float = PRUNE_FMAX
+    prune_max_steps:   int   = PRUNE_MAX_STEPS
+    #: Force convergence threshold for occupied/unoccupied lateral-class
+    #: endpoint relaxations used to construct adsorption/desorption rates.
+    endpoint_fmax:      float = 0.05
+    #: Maximum optimizer steps for each adsorption endpoint relaxation.
+    endpoint_max_steps: int = 200
+    #: Hard cap on surface anchor-clique size.  Four covers atop, bridge,
+    #: three-fold, and four-fold coordination while preventing combinatorial
+    #: growth on unusually dense graphs.  Explicit ``null`` restores legacy
+    #: unbounded enumeration.
+    anchor_k_max:      int | None = 4
+    #: Local graph depth for anchor-site isomorphism.  ``None`` selects it
+    #: automatically from the molecular reach.
+    n_shells_anchor:   int | None = None
+    #: Local graph depth for multi-anchor placement isomorphism.
+    pair_n_shells:     int = N_SHELLS_DEFAULT
+    #: Maximum surface-graph path length retained for multi-anchor placements.
+    max_pair_shells:   int = MAX_PAIR_SHELLS
 
 
 @dataclass
@@ -140,10 +266,9 @@ class KMCCfg:
     temperature_k: float = 500.0
     n_steps: int = 1000
     transmission_coefficient: float = DEFAULT_TRANSMISSION_COEFFICIENT
-    fmax: float = 0.05
-    max_steps: int = 200
-    log_every: int = 1
+    log_every: int = 100
     random_seed: int = RANDOM_SEED
+    #: Include neighbors within lateral_shells in electronic and free-energy calculations.
     lateral_interactions: bool = True
 
 
@@ -163,7 +288,14 @@ class DiffusionCfg:
     prune_by_adsorption_pair:  bool   = DIFFUSION_PRUNE_BY_ADS_PAIR
     fmax:             float  = NEB_FMAX
     max_steps:        int    = NEB_MAX_STEPS
+    #: Fixed interior-image count used when ``image_spacing`` is null.
     n_images:         int    = NEB_N_IMAGES
+    #: Target maximum corresponding-atom displacement per initial frame.
+    #: A positive value enables dynamic image selection; ``None`` uses
+    #: ``n_images`` exactly.
+    image_spacing:    float | None = NEB_IMAGE_SPACING
+    min_images:       int    = NEB_MIN_IMAGES
+    max_images:       int    = NEB_MAX_IMAGES
     climb:            bool   = NEB_CLIMB
     spring_k:         float  = NEB_SPRING_K
     interpolation:    str    = NEB_INTERPOLATION
@@ -201,7 +333,6 @@ class BondCfg:
     """
     enabled:                bool = False
     bond_max_hops:          int  = BOND_MAX_HOPS
-    surface_apsp_cutoff:    int  = MAX_PAIR_SHELLS
     bond_types:             tuple = ("SINGLE", "DOUBLE", "TRIPLE")
     include_ring_bonds:     bool = False
     include_homo_coupling:  bool = True
@@ -209,12 +340,18 @@ class BondCfg:
     include_coupling:       bool = True
     deduplicate_iso:        bool = True
     gas_lift_height:        float = BOND_GAS_LIFT_HEIGHT
+    #: For gas products, relax the intact molecule above the surface before
+    #: starting the bond-breaking/forming NEB.  The surface and lateral
+    #: environment are fixed during this molecular precursor relaxation.
+    gas_precursor_relax:    bool = BOND_GAS_PRECURSOR_RELAX
+    #: Initial minimum molecule-to-slab separation for that relaxation.
+    gas_precursor_distance: float = BOND_GAS_PRECURSOR_DISTANCE
     # When True, every leaf species (fragment / coupling product) implied
     # by the templates that is *not* already in ``reactants`` is built and
     # has its adsorbate sites enumerated automatically.  When False, the
     # CLI raises if any template references a species without sites.
     auto_build_leaf_species: bool = True
-    # ── Pruning ────────────────────────────────────────────────────────────
+    # These options control bond-site pruning.
     #: BFS depth for the triple ego-graph used by Stage-2 iso-class pruning.
     pair_n_shells:           int  = BOND_PAIR_N_SHELLS
     #: Stage 2 — keep only the smallest-ego BondReactionSite per
@@ -223,17 +360,22 @@ class BondCfg:
     prune_by_triple:         bool = BOND_PRUNE_BY_TRIPLE
     #: Stage 1 — drop iso-classes whose A+B endpoint is bond-changing-
     #: unstable under a calculator relaxation (i.e. the reaction is not
-    #: physically viable).  Disabled automatically when no calculator is
-    #: configured.
+    #: physically viable.
     prune_with_calculator:   bool = BOND_PRUNE_WITH_CALCULATOR
     #: Force convergence threshold for the Stage-1 endpoint relaxation.
     prune_fmax:              float = PRUNE_FMAX
-    #: Maximum LBFGS steps for the Stage-1 endpoint relaxation.
+    #: Maximum optimizer steps for the Stage-1 endpoint relaxation.
     prune_max_steps:         int  = PRUNE_MAX_STEPS
-    # ── NEB knobs (consumed by ``check_bond_site_stability`` via the KMC loop)
+    # These NEB options are passed to ``check_bond_site_stability`` by KMC.
     neb_fmax:                float = NEB_FMAX
     neb_max_steps:           int   = NEB_MAX_STEPS
+    #: Fixed interior-image count used when ``neb_image_spacing`` is null.
     neb_n_images:            int   = NEB_N_IMAGES
+    #: Dynamic image density and safety bounds.  Counts refer to interior
+    #: images; total frames are the resolved count plus two endpoints.
+    neb_image_spacing:       float | None = NEB_IMAGE_SPACING
+    neb_min_images:          int   = NEB_MIN_IMAGES
+    neb_max_images:          int   = NEB_MAX_IMAGES
     neb_climb:               bool  = NEB_CLIMB
     neb_spring_k:            float = NEB_SPRING_K
     neb_interpolation:       str   = BOND_NEB_INTERPOLATION
@@ -295,10 +437,12 @@ class CheckpointCfg:
 class RunConfig:
     schema_version: str = CONFIG_SCHEMA_VERSION
     output:           OutputCfg          = field(default_factory=OutputCfg)
+    constants:        ConstantsCfg       = field(default_factory=ConstantsCfg)
+    optimization:     OptimizationCfg    = field(default_factory=OptimizationCfg)
     structure:        StructureCfg       = field(default_factory=StructureCfg)
     reactants:        list[ReactantCfg]  = field(default_factory=list)
     calculator:       CalculatorCfg      = field(default_factory=CalculatorCfg)
-    adsorbate_sites:  AdsorbateSitesCfg  = field(default_factory=AdsorbateSitesCfg)
+    adsorption:       AdsorptionCfg      = field(default_factory=AdsorptionCfg)
     kmc:              KMCCfg             = field(default_factory=KMCCfg)
     diffusion:        DiffusionCfg       = field(default_factory=DiffusionCfg)
     bond:             BondCfg            = field(default_factory=BondCfg)
@@ -331,9 +475,11 @@ def _coerce(cls, value: Any, *, path: str = ""):
     nested_map: dict[str, dict[str, type]] = {
         "RunConfig": {
             "output":          OutputCfg,
+            "constants":       ConstantsCfg,
+            "optimization":    OptimizationCfg,
             "structure":       StructureCfg,
             "calculator":      CalculatorCfg,
-            "adsorbate_sites": AdsorbateSitesCfg,
+            "adsorption":      AdsorptionCfg,
             "kmc":             KMCCfg,
             "diffusion":       DiffusionCfg,
             "bond":            BondCfg,
@@ -363,16 +509,37 @@ def _coerce(cls, value: Any, *, path: str = ""):
             )
         elif f.name == "reactants":
             if not isinstance(v, list):
-                raise ConfigError(f"{path}.reactants must be a list")
+                prefix = f"{path}." if path else ""
+                raise ConfigError(f"{prefix}reactants must be a list")
+            prefix = f"{path}." if path else ""
             kwargs[f.name] = [_coerce(ReactantCfg, item,
-                                      path=f"{path}.reactants[{i}]")
+                                      path=f"{prefix}reactants[{i}]")
                               for i, item in enumerate(v)]
         elif f.name == "miller_index":
-            kwargs[f.name] = tuple(int(x) for x in v)
+            if not isinstance(v, (list, tuple)):
+                raise ConfigError("structure.miller_index must be a list or tuple")
+            kwargs[f.name] = tuple(v)
         elif f.name == "bond_types":
-            kwargs[f.name] = tuple(str(x) for x in v)
+            if not isinstance(v, (list, tuple)):
+                raise ConfigError("bond.bond_types must be a list or tuple")
+            kwargs[f.name] = tuple(v)
         elif f.name == "surface_energy_facets":
-            kwargs[f.name] = tuple(tuple(int(i) for i in facet) for facet in v)
+            if not isinstance(v, (list, tuple)):
+                raise ConfigError(
+                    "structure.surface_energy_facets must be a list or tuple"
+                )
+            try:
+                kwargs[f.name] = tuple(tuple(facet) for facet in v)
+            except TypeError as exc:
+                raise ConfigError(
+                    "structure.surface_energy_facets entries must be lists or tuples"
+                ) from exc
+        elif f.name == "frozen_indices":
+            if v is not None and not isinstance(v, (list, tuple)):
+                raise ConfigError(
+                    "structure.frozen_indices must be a list, tuple, or null"
+                )
+            kwargs[f.name] = None if v is None else list(v)
         else:
             kwargs[f.name] = v
     return cls(**kwargs)
@@ -386,152 +553,11 @@ def _from_dict(d: dict[str, Any]) -> RunConfig:
     return cfg
 
 
-def _require_bool(value: Any, path: str) -> None:
-    if type(value) is not bool:
-        raise ConfigError(f"{path} must be a boolean, got {value!r}")
-
-
-def _require_int(value: Any, path: str, *, minimum: int | None = None) -> None:
-    if type(value) is not int:
-        raise ConfigError(f"{path} must be an integer, got {value!r}")
-    if minimum is not None and value < minimum:
-        raise ConfigError(f"{path} must be >= {minimum}, got {value!r}")
-
-
-def _require_number(value: Any, path: str, *, minimum: float | None = None,
-                    strictly_positive: bool = False) -> None:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ConfigError(f"{path} must be numeric, got {value!r}")
-    number = float(value)
-    if not math.isfinite(number):
-        raise ConfigError(f"{path} must be finite, got {value!r}")
-    if strictly_positive and number <= 0.0:
-        raise ConfigError(f"{path} must be > 0, got {value!r}")
-    if minimum is not None and number < minimum:
-        raise ConfigError(f"{path} must be >= {minimum}, got {value!r}")
-
-
 def _validate_config(cfg: RunConfig) -> None:
-    """Apply strict type, enum, and physical range validation."""
-    from autokmc.species.smiles import canonical_smiles
+    """Apply strict validation while retaining the historical helper."""
+    from autokmc.io.config_validation import validate_config
 
-    _require_bool(cfg.output.calculation_cache_enabled, "output.calculation_cache_enabled")
-    _require_int(cfg.output.trajectory_dump_every, "output.trajectory_dump_every", minimum=0)
-    if str(cfg.output.log_level).upper() not in {"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"}:
-        raise ConfigError(f"output.log_level is invalid: {cfg.output.log_level!r}")
-
-    if cfg.structure.kind not in {"surface", "nanoparticle"}:
-        raise ConfigError("structure.kind must be 'surface' or 'nanoparticle'")
-    if len(cfg.structure.miller_index) != 3:
-        raise ConfigError("structure.miller_index must contain exactly three integers")
-    for index, value in enumerate(cfg.structure.miller_index):
-        _require_int(value, f"structure.miller_index[{index}]")
-    for name in ("min_slab_size", "min_vacuum_size", "goal_x", "goal_y", "fmax"):
-        _require_number(getattr(cfg.structure, name), f"structure.{name}", strictly_positive=True)
-    for name, minimum in (("n_freeze_layers", 0), ("max_steps", 1),
-                          ("surface_energy_layers", 1)):
-        _require_int(getattr(cfg.structure, name), f"structure.{name}", minimum=minimum)
-    if cfg.structure.n_atoms is not None:
-        _require_int(cfg.structure.n_atoms, "structure.n_atoms", minimum=1)
-
-    seen_reactants: dict[str, int] = {}
-    for index, reactant in enumerate(cfg.reactants):
-        prefix = f"reactants[{index}]"
-        if not isinstance(reactant.smiles, str) or not reactant.smiles.strip():
-            raise ConfigError(f"{prefix}.smiles must be a non-empty string")
-        _require_bool(reactant.add_hydrogens, f"{prefix}.add_hydrogens")
-        _require_bool(reactant.relax_in_gas, f"{prefix}.relax_in_gas")
-        if reactant.partial_pressure_bar is not None:
-            _require_number(reactant.partial_pressure_bar, f"{prefix}.partial_pressure_bar", minimum=0.0)
-        if reactant.symmetry_number is not None:
-            _require_int(reactant.symmetry_number, f"{prefix}.symmetry_number", minimum=1)
-        if reactant.spin is not None:
-            _require_number(reactant.spin, f"{prefix}.spin", minimum=0.0)
-        if reactant.geometry not in {None, "auto", "linear", "nonlinear", "monatomic"}:
-            raise ConfigError(f"{prefix}.geometry has unsupported value {reactant.geometry!r}")
-        canonical = canonical_smiles(reactant.smiles)
-        if canonical in seen_reactants:
-            first = seen_reactants[canonical]
-            raise ConfigError(
-                f"{prefix}.smiles duplicates reactants[{first}].smiles after "
-                f"canonicalisation ({canonical!r}); combine their feed settings "
-                "into one reactant entry"
-            )
-        seen_reactants[canonical] = index
-
-    _require_bool(cfg.adsorbate_sites.prune_stable_only, "adsorbate_sites.prune_stable_only")
-    _require_number(cfg.adsorbate_sites.fmax, "adsorbate_sites.fmax", strictly_positive=True)
-    _require_int(cfg.adsorbate_sites.max_steps, "adsorbate_sites.max_steps", minimum=1)
-
-    _require_number(cfg.kmc.temperature_k, "kmc.temperature_k", strictly_positive=True)
-    _require_int(cfg.kmc.n_steps, "kmc.n_steps", minimum=0)
-    _require_number(cfg.kmc.transmission_coefficient, "kmc.transmission_coefficient", minimum=0.0)
-    _require_number(cfg.kmc.fmax, "kmc.fmax", strictly_positive=True)
-    _require_int(cfg.kmc.max_steps, "kmc.max_steps", minimum=1)
-    _require_int(cfg.kmc.log_every, "kmc.log_every", minimum=0)
-    _require_int(cfg.kmc.random_seed, "kmc.random_seed")
-    _require_bool(cfg.kmc.lateral_interactions, "kmc.lateral_interactions")
-
-    for name in (
-        "enabled", "prune_by_adsorption_pair", "climb", "persist_neb_path",
-    ):
-        _require_bool(getattr(cfg.diffusion, name), f"diffusion.{name}")
-    for name in (
-        "enabled", "include_ring_bonds", "include_homo_coupling",
-        "include_dissociation", "include_coupling", "deduplicate_iso",
-        "auto_build_leaf_species", "prune_by_triple", "prune_with_calculator",
-        "neb_climb", "persist_neb_path",
-    ):
-        _require_bool(getattr(cfg.bond, name), f"bond.{name}")
-    for name, minimum in (("max_hops", 0), ("n_shells_pair", 0),
-                          ("max_steps", 1), ("n_images", 1)):
-        _require_int(getattr(cfg.diffusion, name), f"diffusion.{name}", minimum=minimum)
-    for name in ("fmax", "spring_k"):
-        _require_number(getattr(cfg.diffusion, name), f"diffusion.{name}", strictly_positive=True)
-    if cfg.diffusion.interpolation not in {"linear", "idpp"}:
-        raise ConfigError("diffusion.interpolation must be 'linear' or 'idpp'")
-
-    for name, minimum in (
-        ("bond_max_hops", 0), ("surface_apsp_cutoff", 0), ("pair_n_shells", 0),
-        ("prune_max_steps", 1), ("neb_max_steps", 1), ("neb_n_images", 1),
-        ("matching_trials", 0),
-    ):
-        _require_int(getattr(cfg.bond, name), f"bond.{name}", minimum=minimum)
-    for name in ("gas_lift_height", "prune_fmax", "neb_fmax", "neb_spring_k"):
-        _require_number(getattr(cfg.bond, name), f"bond.{name}", strictly_positive=True)
-    if cfg.bond.neb_interpolation not in {"linear", "idpp"}:
-        raise ConfigError("bond.neb_interpolation must be 'linear' or 'idpp'")
-    if cfg.bond.atom_matching not in {"auto", "greedy", "hungarian", "reactant_index"}:
-        raise ConfigError(f"bond.atom_matching is unsupported: {cfg.bond.atom_matching!r}")
-
-    _require_bool(cfg.free_energy.enabled, "free_energy.enabled")
-    _require_number(cfg.free_energy.pressure_bar, "free_energy.pressure_bar", minimum=0.0)
-    _require_number(cfg.free_energy.vibration_displacement, "free_energy.vibration_displacement", strictly_positive=True)
-    _require_int(cfg.free_energy.vibration_nfree, "free_energy.vibration_nfree")
-    if cfg.free_energy.vibration_nfree not in {2, 4}:
-        raise ConfigError("free_energy.vibration_nfree must be 2 or 4")
-    _require_bool(cfg.free_energy.include_ts_vibrations, "free_energy.include_ts_vibrations")
-    _require_number(cfg.free_energy.min_frequency_ev, "free_energy.min_frequency_ev", minimum=0.0)
-    _require_number(
-        cfg.free_energy.symmetry_tolerance,
-        "free_energy.symmetry_tolerance",
-        strictly_positive=True,
-    )
-    _require_number(cfg.free_energy.default_spin, "free_energy.default_spin", minimum=0.0)
-    if cfg.free_energy.default_geometry not in {"auto", "linear", "nonlinear", "monatomic"}:
-        raise ConfigError("free_energy.default_geometry is unsupported")
-
-    _require_bool(cfg.checkpoint.enabled, "checkpoint.enabled")
-    _require_int(cfg.checkpoint.every_n_steps, "checkpoint.every_n_steps", minimum=1)
-    for name in ("path", "resume_from"):
-        value = getattr(cfg.checkpoint, name)
-        if value is not None and (not isinstance(value, str) or not value.strip()):
-            raise ConfigError(f"checkpoint.{name} must be a non-empty path string")
-
-    _require_int(cfg.calculator.copies, "calculator.copies", minimum=1)
-    if cfg.calculator.max_workers is not None:
-        _require_int(cfg.calculator.max_workers, "calculator.max_workers", minimum=1)
-
+    validate_config(cfg, error_type=ConfigError)
 
 # ---------------------------------------------------------------------------
 # File I/O
@@ -584,4 +610,9 @@ def load_config(path: str | Path) -> RunConfig:
             f"config schema_version={cfg.schema_version!r} does not match "
             f"expected {CONFIG_SCHEMA_VERSION!r}"
         )
+    if cfg.structure.path is not None:
+        structure_path = Path(cfg.structure.path).expanduser()
+        if not structure_path.is_absolute():
+            structure_path = p.resolve().parent / structure_path
+        cfg.structure.path = str(structure_path.resolve())
     return cfg

@@ -8,6 +8,8 @@ __pycache__/
 .coverage
 htmlcov/
 .DS_Store
+.idea/
+.manuscript/
 
 /autokmc/dev/debug/
 *.egg-info/
@@ -17,3 +19,5 @@ dist/
 /runs/
 /out/
 /dev/
+/devlocal/
+/manuscript/

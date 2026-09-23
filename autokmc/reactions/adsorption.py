@@ -49,14 +49,19 @@ Public API
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Any, Iterable
 
 import numpy as np
 import networkx as nx
 
-from autokmc.io.calculators import CalculatorPool
+from autokmc.io.calculators import (
+    CalculatorPool,
+    calculator_batch_active,
+    calculator_batch_context,
+)
+from autokmc.core.constants import LATERAL_SHELLS_DEFAULT
 from autokmc.sites.adsorbate import AdsorbateSite, AdsorbateSiteLateral
 from autokmc.sites.stability.adsorption import (
     check_adsorbate_site_lateral,
@@ -70,6 +75,7 @@ from autokmc.reactions.rates import (
     _eyring_prefactor,
 )
 from autokmc.utils.logging import get_logger
+from autokmc.utils.optimizers import DEFAULT_OPTIMIZER
 
 _log = get_logger(__name__)
 
@@ -230,7 +236,7 @@ def is_clique_blocked(
                 return True
         return False
 
-    # ── Legacy fallback: full graph scan (only hit if reverse index not built)
+    # If the reverse index is unavailable, scan the full graph.
     member_cliques_set: set[frozenset] = set()
     for nid in node_ids:
         if nid not in G:
@@ -292,14 +298,14 @@ def _energetics_cached(
         round(float(transmission_coefficient),   9),
         round(float(e_gas),                      9),
         round(float(g_gas) if use_g else 0.0,    9),
-        round(float(pressure_bar),               9),
+        float(pressure_bar),
         bool(occupied),
         bool(use_g),
     )
     cache: dict | None = getattr(lc, "_rate_cache", None)
     if cache is None:
         cache = {}
-        lc._rate_cache = cache  # type: ignore[attr-defined]
+        lc._rate_cache = cache
     hit = cache.get(key)
     if hit is not None:
         return hit
@@ -380,6 +386,155 @@ def _energetics(
 # Public API
 # ---------------------------------------------------------------------------
 
+def _replace_cached_member_reaction(
+    site: AdsorbateSite,
+    member_index: int,
+    reaction: AdsorptionReaction | None,
+) -> None:
+    """Keep the compatibility per-site reaction list member-consistent."""
+    reactions = [
+        candidate
+        for candidate in (getattr(site, "applicable_reactions", None) or [])
+        if int(candidate.member_index) != int(member_index)
+    ]
+    if reaction is not None:
+        reactions.append(reaction)
+    reactions.sort(key=lambda candidate: int(candidate.member_index))
+    site.applicable_reactions = reactions
+
+
+def get_applicable_reaction_for_member(
+    G: nx.Graph,
+    site: AdsorbateSite,
+    member_index: int,
+    calculator,
+    gas_energies: dict[str, float],
+    *,
+    temperature: float,
+    transmission_coefficient: float = DEFAULT_TRANSMISSION_COEFFICIENT,
+    frozen_indices: list[int] | None = None,
+    fmax: float = 0.05,
+    max_steps: int = 200,
+    optimizer: str = DEFAULT_OPTIMIZER,
+    optimizer_kwargs: dict[str, Any] | None = None,
+    verbose: bool = False,
+    lateral_interactions: bool = True,
+    lateral_shells: int = LATERAL_SHELLS_DEFAULT,
+    gas_g: dict[str, float] | None = None,
+    partial_pressures: dict[str, float] | None = None,
+    free_energy_options=None,
+    vib_cache_root: str | None = None,
+    calculation_cache_root: str | None = None,
+    calculation_cache_lookup_enabled: bool = False,
+    update_site_cache: bool = True,
+) -> AdsorptionReaction | None:
+    """Scientifically reclassify and evaluate one concrete site member."""
+    if site.reactant not in gas_energies:
+        raise KeyError(
+            f"No gas-phase energy supplied for reactant SMILES "
+            f"{site.reactant!r}.  Pass it via the ``reactants`` argument."
+        )
+    index = int(member_index)
+    if not hasattr(site, "_member_lc"):
+        site._member_lc = {}
+
+    reaction: AdsorptionReaction | None = None
+    if is_clique_blocked(G, site, index):
+        site._member_lc.pop(index, None)
+        if verbose:
+            print(f"  BLOCKED iso={site.iso_class} m={index}: clique blocked")
+    else:
+        try:
+            lc = check_adsorbate_site_lateral(
+                G,
+                site,
+                index,
+                n_shells=lateral_shells,
+                ignore_lateral=not lateral_interactions,
+            )
+        except (ValueError, IndexError) as exc:
+            site._member_lc.pop(index, None)
+            if verbose:
+                print(
+                    f"  WARNING iso={site.iso_class} m={index}: "
+                    f"lateral check skipped ({exc})"
+                )
+        else:
+            if lc.stable is None:
+                try:
+                    check_site_stability(
+                        G,
+                        site,
+                        index,
+                        lc,
+                        calculator,
+                        frozen_indices=frozen_indices,
+                        fmax=fmax,
+                        max_steps=max_steps,
+                        optimizer=optimizer,
+                        optimizer_kwargs=optimizer_kwargs,
+                        verbose=verbose,
+                        free_energy_options=free_energy_options,
+                        free_energy_temperature_k=float(temperature),
+                        vib_cache_root=vib_cache_root,
+                        calculation_cache_root=calculation_cache_root,
+                        calculation_cache_lookup_enabled=(
+                            calculation_cache_lookup_enabled
+                        ),
+                    )
+                except SiteStabilityError as exc:
+                    lc.stable = False
+                    lc.invalid_reason = f"{type(exc).__name__}: {exc}"
+                    if verbose:
+                        print(
+                            f"  INVALID iso={site.iso_class} m={index} "
+                            f"lat={lc.lateral_class}: "
+                            f"{type(exc).__name__}: {exc}"
+                        )
+
+            if (
+                lc.stable
+                and lc.energy_occupied is not None
+                and lc.energy_unoccupied is not None
+            ):
+                site._member_lc[index] = lc
+                e_gas = float(gas_energies[site.reactant])
+                g_gas_value = (
+                    float(gas_g[site.reactant])
+                    if gas_g is not None and site.reactant in gas_g
+                    else None
+                )
+                pressure_bar = float(
+                    (partial_pressures or {}).get(site.reactant, 1.0)
+                )
+                occupied = _site_is_occupied(G, site, index)
+                kind = "desorption" if occupied else "adsorption"
+                delta_e, barrier, rate = _energetics_cached(
+                    lc,
+                    e_gas,
+                    occupied,
+                    temperature=temperature,
+                    transmission_coefficient=transmission_coefficient,
+                    g_gas=g_gas_value,
+                    pressure_bar=pressure_bar,
+                )
+                reaction = AdsorptionReaction(
+                    kind=kind,
+                    site=site,
+                    member_index=index,
+                    lateral_class=lc,
+                    delta_e=delta_e,
+                    barrier=barrier,
+                    rate=rate,
+                )
+            else:
+                site._member_lc.pop(index, None)
+
+    if update_site_cache:
+        _replace_cached_member_reaction(site, index, reaction)
+    return reaction
+
+
 def get_applicable_reactions(
     G: nx.Graph,
     site: AdsorbateSite,
@@ -391,13 +546,17 @@ def get_applicable_reactions(
     frozen_indices: list[int] | None = None,
     fmax: float = 0.05,
     max_steps: int = 200,
+    optimizer: str = DEFAULT_OPTIMIZER,
+    optimizer_kwargs: dict[str, Any] | None = None,
     verbose: bool = False,
     lateral_interactions: bool = True,
+    lateral_shells: int = LATERAL_SHELLS_DEFAULT,
     gas_g: dict[str, float] | None = None,
     partial_pressures: dict[str, float] | None = None,
     free_energy_options=None,
     vib_cache_root: str | None = None,
     calculation_cache_root: str | None = None,
+    calculation_cache_lookup_enabled: bool = False,
 ) -> list[AdsorptionReaction]:
     """Enumerate all applicable adsorption / desorption events for one site.
 
@@ -407,6 +566,9 @@ def get_applicable_reactions(
         When ``False``, neighbouring occupied adsorbate nodes are ignored
         when building the lateral ego-graph, so every member is always
         classified into the single bare lat0.  Default ``True``.
+    lateral_shells : int
+        Number of surface-neighbour shells included in lateral
+        classification.  Defaults to :data:`LATERAL_SHELLS_DEFAULT`.
     gas_g : dict[str, float] | None
         Optional ``{smiles: G_gas_eV}`` lookup used for ΔG-based rates
         when free-energy mode is enabled.  When omitted, the rate falls
@@ -428,90 +590,40 @@ def get_applicable_reactions(
             f"No gas-phase energy supplied for reactant SMILES "
             f"{site.reactant!r}.  Pass it via the ``reactants`` argument."
         )
-    e_gas = float(gas_energies[site.reactant])
-    g_gas = (
-        float(gas_g[site.reactant])
-        if gas_g is not None and site.reactant in gas_g
-        else None
-    )
-    pressure_bar = float(
-        (partial_pressures or {}).get(site.reactant, 1.0)
-    )
-
-    if not hasattr(site, "_member_lc"):
-        site._member_lc = {}  # type: ignore[attr-defined]
-
     reactions: list[AdsorptionReaction] = []
+    # Publish the live list before the first expensive member calculation.
+    # If a later relaxation/NEB raises, KMC's emergency persistence pass can
+    # still retain every reaction completed earlier in this site sweep.
+    site.applicable_reactions = reactions
 
     for m_idx in range(len(site.member_node_ids)):
-        if is_clique_blocked(G, site, m_idx):
-            if verbose:
-                print(f"  ⛔ iso={site.iso_class} m={m_idx}: clique blocked")
-            continue
-
-        try:
-            lc = check_adsorbate_site_lateral(
-                G, site, m_idx,
-                ignore_lateral=not lateral_interactions,
-            )
-        except (ValueError, IndexError) as exc:
-            if verbose:
-                print(
-                    f"  ⚠  iso={site.iso_class} m={m_idx}: "
-                    f"lateral check skipped ({exc})"
-                )
-            continue
-
-        if lc.stable is None:
-            try:
-                check_site_stability(
-                    G, site, m_idx, lc, calculator,
-                    frozen_indices = frozen_indices,
-                    fmax           = fmax,
-                    max_steps      = max_steps,
-                    verbose        = verbose,
-                    free_energy_options       = free_energy_options,
-                    free_energy_temperature_k = float(temperature),
-                    vib_cache_root            = vib_cache_root,
-                    calculation_cache_root    = calculation_cache_root,
-                )
-            except SiteStabilityError as exc:
-                lc.stable = False
-                if verbose:
-                    print(
-                        f"  ✗  iso={site.iso_class} m={m_idx} "
-                        f"lat={lc.lateral_class}: "
-                        f"{type(exc).__name__}: {exc}"
-                    )
-                continue
-
-        if not lc.stable:
-            continue
-        if lc.energy_occupied is None or lc.energy_unoccupied is None:
-            continue
-
-        site._member_lc[m_idx] = lc  # type: ignore[attr-defined]
-
-        occ = _site_is_occupied(G, site, m_idx)
-        kind = "desorption" if occ else "adsorption"
-        delta_e, barrier, rate = _energetics_cached(
-            lc, e_gas, occ,
-            temperature              = temperature,
-            transmission_coefficient = transmission_coefficient,
-            g_gas                    = g_gas,
-            pressure_bar             = pressure_bar,
+        reaction = get_applicable_reaction_for_member(
+            G,
+            site,
+            m_idx,
+            calculator,
+            gas_energies,
+            temperature=temperature,
+            transmission_coefficient=transmission_coefficient,
+            frozen_indices=frozen_indices,
+            fmax=fmax,
+            max_steps=max_steps,
+            optimizer=optimizer,
+            optimizer_kwargs=optimizer_kwargs,
+            verbose=verbose,
+            lateral_interactions=lateral_interactions,
+            lateral_shells=lateral_shells,
+            gas_g=gas_g,
+            partial_pressures=partial_pressures,
+            free_energy_options=free_energy_options,
+            vib_cache_root=vib_cache_root,
+            calculation_cache_root=calculation_cache_root,
+            calculation_cache_lookup_enabled=calculation_cache_lookup_enabled,
+            update_site_cache=False,
         )
-        reactions.append(AdsorptionReaction(
-            kind          = kind,
-            site          = site,
-            member_index  = m_idx,
-            lateral_class = lc,
-            delta_e       = delta_e,
-            barrier       = barrier,
-            rate          = rate,
-        ))
+        if reaction is not None:
+            reactions.append(reaction)
 
-    site.applicable_reactions = reactions  # type: ignore[attr-defined]
     return reactions
 
 
@@ -526,13 +638,17 @@ def compute_all_reactions(
     frozen_indices: list[int] | None = None,
     fmax: float = 0.05,
     max_steps: int = 200,
+    optimizer: str = DEFAULT_OPTIMIZER,
+    optimizer_kwargs: dict[str, Any] | None = None,
     verbose: bool = False,
     lateral_interactions: bool = True,
+    lateral_shells: int = LATERAL_SHELLS_DEFAULT,
     gas_g: dict[str, float] | None = None,
     partial_pressures: dict[str, float] | None = None,
     free_energy_options=None,
     vib_cache_root: str | None = None,
     calculation_cache_root: str | None = None,
+    calculation_cache_lookup_enabled: bool = False,
 ) -> list[AdsorptionReaction]:
     """Compute applicable reactions for every site and return the flat list."""
     gas_energies = _build_gas_energy_lookup(reactants)
@@ -542,27 +658,38 @@ def compute_all_reactions(
         isinstance(calculator, CalculatorPool)
         and len(calculator) > 1
         and len(adsorbate_sites) > 1
+        and not calculator_batch_active()
     ):
         def _one(site: AdsorbateSite) -> list[AdsorptionReaction]:
-            return get_applicable_reactions(
-                G, site, calculator, gas_energies,
-                temperature              = temperature,
-                transmission_coefficient = transmission_coefficient,
-                frozen_indices           = frozen_indices,
-                fmax                     = fmax,
-                max_steps                = max_steps,
-                verbose                  = verbose,
-                lateral_interactions     = lateral_interactions,
-                gas_g                    = gas_g,
-                partial_pressures        = partial_pressures,
-                free_energy_options      = free_energy_options,
-                vib_cache_root           = vib_cache_root,
-                calculation_cache_root   = calculation_cache_root,
-            )
+            with calculator_batch_context():
+                return get_applicable_reactions(
+                    G, site, calculator, gas_energies,
+                    temperature              = temperature,
+                    transmission_coefficient = transmission_coefficient,
+                    frozen_indices           = frozen_indices,
+                    fmax                     = fmax,
+                    max_steps                = max_steps,
+                    optimizer                = optimizer,
+                    optimizer_kwargs         = optimizer_kwargs,
+                    verbose                  = verbose,
+                    lateral_interactions     = lateral_interactions,
+                    lateral_shells           = lateral_shells,
+                    gas_g                    = gas_g,
+                    partial_pressures        = partial_pressures,
+                    free_energy_options      = free_energy_options,
+                    vib_cache_root           = vib_cache_root,
+                    calculation_cache_root   = calculation_cache_root,
+                    calculation_cache_lookup_enabled = (
+                        calculation_cache_lookup_enabled
+                    ),
+                )
 
-        with ThreadPoolExecutor(max_workers=calculator.max_workers) as ex:
-            for rxns in ex.map(_one, adsorbate_sites):
-                all_reactions.extend(rxns)
+        futures = [
+            calculator.submit(copy_context().run, _one, site)
+            for site in adsorbate_sites
+        ]
+        for reactions in calculator.gather(futures):
+            all_reactions.extend(reactions)
         return all_reactions
 
     for site in adsorbate_sites:
@@ -573,13 +700,17 @@ def compute_all_reactions(
             frozen_indices           = frozen_indices,
             fmax                     = fmax,
             max_steps                = max_steps,
+            optimizer                = optimizer,
+            optimizer_kwargs         = optimizer_kwargs,
             verbose                  = verbose,
             lateral_interactions     = lateral_interactions,
+            lateral_shells           = lateral_shells,
             gas_g                    = gas_g,
             partial_pressures        = partial_pressures,
             free_energy_options      = free_energy_options,
             vib_cache_root           = vib_cache_root,
             calculation_cache_root   = calculation_cache_root,
+            calculation_cache_lookup_enabled = calculation_cache_lookup_enabled,
         )
         all_reactions.extend(rxns)
     return all_reactions

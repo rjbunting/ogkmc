@@ -2,8 +2,33 @@
 
 from __future__ import annotations
 
+from itertools import product
+
 import numpy as np
 from ase.geometry import find_mic
+
+
+def slab_outward_normal(graph, position) -> np.ndarray:
+    """Return the exposed face's normal for a slab aligned with Cartesian z.
+
+    Keep whole-slab bounds in graph metadata so local ego graphs use the same
+    face as the original structure. Hand-built graphs infer those bounds.
+    """
+    side = graph.graph.get("surface_side")
+    if side == "bottom":
+        sign = -1.0
+    elif side == "top":
+        sign = 1.0
+    else:
+        bounds = graph.graph.get("slab_z_bounds")
+        if bounds is None:
+            heights = [
+                float(data["position"][2]) for _, data in graph.nodes(data=True)
+                if data.get("type") in {"bulk", "surface"} and "position" in data
+            ]
+            bounds = (min(heights), max(heights)) if heights else (0.0, 0.0)
+        sign = -1.0 if float(position[2]) < 0.5 * (bounds[0] + bounds[1]) else 1.0
+    return np.array([0.0, 0.0, sign])
 
 
 def has_real_cell(cell) -> bool:
@@ -69,6 +94,79 @@ def minimum_image_distances(vectors, cell, pbc) -> np.ndarray:
     return np.linalg.norm(mic, axis=-1)
 
 
+def periodic_image_offsets(cell, pbc, cutoff: float) -> np.ndarray:
+    """Return a complete integer-image search box for wrapped points.
+
+    The fixed ``{-1, 0, 1}`` image box is not complete for a skew,
+    non-reduced lattice: a short Cartesian vector can require an integer
+    coefficient whose magnitude exceeds one.  If both query and candidate
+    positions are wrapped into the primary cell, their raw fractional
+    difference is smaller than one along every periodic axis.  The reciprocal
+    basis then bounds every image coefficient that can yield a Cartesian
+    vector no longer than *cutoff*.
+
+    The returned box is deliberately conservative by one boundary image.
+    Callers must still apply their exact Cartesian/MIC distance criterion.
+    """
+    radius = float(cutoff)
+    if not np.isfinite(radius) or radius < 0.0:
+        raise ValueError("cutoff must be finite and non-negative")
+
+    cell_arr = np.asarray(cell, dtype=float)
+    pbc_arr = np.asarray(pbc, dtype=bool)
+    if cell_arr.shape != (3, 3) or pbc_arr.shape != (3,):
+        raise ValueError("cell must be 3x3 and pbc must contain three axes")
+    if not pbc_arr.any():
+        return np.zeros((1, 3), dtype=int)
+
+    try:
+        cell_inv = np.linalg.inv(cell_arr)
+    except np.linalg.LinAlgError as exc:
+        raise ValueError("periodic image generation requires a full-rank cell") from exc
+
+    reciprocal_norms = np.linalg.norm(cell_inv, axis=0)
+    ranges = []
+    for axis in range(3):
+        if not pbc_arr[axis]:
+            ranges.append(range(0, 1))
+            continue
+        bound = max(1, int(np.ceil(1.0 + radius * reciprocal_norms[axis])))
+        ranges.append(range(-bound, bound + 1))
+    return np.asarray(list(product(*ranges)), dtype=int)
+
+
+def unwrap_positions_about_reference(
+    positions,
+    cell,
+    pbc,
+    *,
+    reference=None,
+) -> np.ndarray:
+    """Map a compact group of positions into one image near *reference*.
+
+    When *reference* is omitted, the first position is used.  This is intended
+    for molecules, reacting fragments, and other local groups whose physical
+    extent is smaller than the applicable minimum-image range.  It must not be
+    used to unwrap an extended periodic structure.
+    """
+    pos = np.asarray(positions, dtype=float)
+    if pos.size == 0:
+        return pos.copy()
+    if pos.shape[-1] != 3:
+        raise ValueError(
+            "positions must have Cartesian coordinates along the final axis"
+        )
+
+    if reference is None:
+        ref = pos.reshape((-1, 3))[0]
+    else:
+        ref = np.asarray(reference, dtype=float)
+        if ref.shape != (3,):
+            raise ValueError("reference must be one Cartesian position")
+
+    return ref + minimum_image_vectors(pos - ref, cell, pbc)
+
+
 def wrap_positions_into_cell(
     positions,
     cell,
@@ -110,11 +208,14 @@ def wrap_positions_into_cell(
 
 
 __all__ = [
+    "slab_outward_normal",
     "full_pbc_for_cell",
     "graph_pbc_for_atoms",
     "has_real_cell",
     "minimum_image_distances",
     "minimum_image_vectors",
+    "periodic_image_offsets",
     "set_full_pbc_if_cell",
+    "unwrap_positions_about_reference",
     "wrap_positions_into_cell",
 ]

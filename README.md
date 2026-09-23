@@ -1,19 +1,21 @@
 # AutoKMC
 
-AutoKMC builds and runs surface kinetic Monte Carlo simulations from atomic
-structures. It is designed for catalysis workflows where adsorption,
-desorption, diffusion, bond-forming, bond-breaking, thermochemistry, and KMC
-outputs should be generated from one configuration file.
+AutoKMC prepares and runs surface kinetic Monte Carlo simulations from one
+configuration file. It first builds a slab or nanoparticle, or loads a catalyst
+from any format supported by ASE. It then generates reactants, surface sites,
+and adsorption, desorption, diffusion, bond-forming, and bond-breaking channels.
+Finally, it calculates the required energetics, runs KMC, and writes the results
+needed for analysis and restart.
 
-The package uses ASE-compatible calculators, so the same workflow can run with
-simple local calculators for smoke tests or with machine-learning potentials
-for production studies.
+Every calculation uses an ASE-compatible calculator. The same workflow can
+therefore use a simple local calculator for a smoke test or a machine-learning
+potential for a production study.
 
 ## What AutoKMC Does
 
 AutoKMC can:
 
-- Build periodic slabs or nanoparticles.
+- Build periodic slabs or nanoparticles, or load an existing atomic structure.
 - Build gas-phase reactants from SMILES strings.
 - Enumerate possible adsorbate placements.
 - Prune unstable adsorbate and bond-reaction sites using calculator
@@ -59,8 +61,11 @@ After installation, the main commands are:
 
 ```bash
 autokmc validate-config path/to/config.yaml
+autokmc preflight path/to/config.yaml
+autokmc doctor path/to/config.yaml
 autokmc run path/to/config.yaml
 autokmc analyze RUN_DIR
+autokmc report RUN_DIR
 autokmc rebuild-index CALCULATION_CACHE_DIR
 ```
 
@@ -68,13 +73,28 @@ Without installing the console entry point, use:
 
 ```bash
 python -m autokmc.cli validate-config path/to/config.yaml
+python -m autokmc.cli preflight path/to/config.yaml
+python -m autokmc.cli doctor path/to/config.yaml
 python -m autokmc.cli run path/to/config.yaml
 python -m autokmc.cli analyze RUN_DIR
+python -m autokmc.cli report RUN_DIR
 python -m autokmc.cli rebuild-index CALCULATION_CACHE_DIR
 ```
 
-Validation only checks that the configuration can be parsed. It does not run
-the expensive chemistry workflow.
+First, `validate-config` checks types, ranges, reactant SMILES, bond types, the
+calculator declaration, worker/device consistency, and managed output names.
+Next, `preflight` checks output collisions and locks, checkpoint compatibility,
+file-backed catalyst readability, calculator imports, and the effective
+copies/workers/devices without writing configured outputs. Add
+`--check-calculator` to construct the calculator in a temporary directory and
+require a finite probe energy and force array. Use `doctor` to report Python,
+required-package, and optional configuration readiness without running
+chemistry.
+
+Expected user/configuration failures are printed without a Python traceback
+and return a stable nonzero status. Put the global `--debug` option before the
+subcommand to re-enable tracebacks, for example
+`autokmc --debug preflight CONFIG.yaml`.
 
 ## First Run
 
@@ -98,14 +118,22 @@ structure:
   composition: Pt
   crystal_structure: fcc
   miller_index: [1, 1, 1]
+  lattice_constant: 3.92
+  # Four Pt(111) layers, repeated 4x4 in the primitive surface cell.
   min_slab_size: 8.0
   min_vacuum_size: 12.0
+  goal_x: 10.0
+  goal_y: 10.0
+  extra_kwargs:
+    orthogonalise: false
   n_freeze_layers: 2
 
 reactants:
   - smiles: "[C-]#[O+]"
     add_hydrogens: false
     relax_in_gas: true
+    fmax: 0.05
+    max_steps: 500
     partial_pressure_bar: 1.0
     geometry: linear
 
@@ -113,10 +141,13 @@ calculator:
   import_path: ase.calculators.emt.EMT
   kwargs: {}
 
-adsorbate_sites:
+adsorption:
   prune_stable_only: true
-  fmax: 0.05
-  max_steps: 200
+  prune_fmax: 0.05
+  prune_max_steps: 200
+  endpoint_fmax: 0.05
+  endpoint_max_steps: 200
+  anchor_k_max: 4
 
 free_energy:
   enabled: false
@@ -133,7 +164,7 @@ kmc:
   transmission_coefficient: 1.0
   fmax: 0.05
   max_steps: 200
-  log_every: 10
+  log_every: 100
   random_seed: 7
   lateral_interactions: true
 ```
@@ -142,12 +173,38 @@ Then run:
 
 ```bash
 autokmc validate-config quickstart.yaml
+autokmc preflight quickstart.yaml --check-calculator
 autokmc run quickstart.yaml
 ```
 
-The example files in `example/` are larger FAIR-Chem UMA workflows intended as
-production-style starting points. They require the relevant FAIR-Chem
-installation, model access, and GPU environment.
+To use an existing catalyst instead, replace the `structure` section with:
+
+```yaml
+structure:
+  kind: file
+  path: ./structures/my-catalyst.extxyz
+  index: -1
+  # format: extxyz
+  # frozen_indices: [0, 1, 2, 3]
+```
+
+Relative structure paths are resolved from the configuration file's directory,
+not the shell's working directory. `format` is optional when ASE can infer it
+from the filename, and `index: -1` selects the last frame. Use
+`frozen_indices` when selected catalyst atoms must remain fixed. File-backed
+catalysts are not rebuilt or relaxed. A periodic slab may use a skew cell and
+may be arbitrarily rotated: AutoKMC rigidly rotates its detected surface normal
+to Cartesian +z before site generation, without changing cell metrics or
+interatomic geometry. The applied frame transform is recorded in the run
+manifest. Provide the intended cell and periodic-boundary metadata for surface
+classification.
+
+[`example/all_options.yaml`](example/all_options.yaml) is a commented,
+valid-as-written template with every configuration option and commented
+alternatives for competing structure and calculator modes. The other example
+files are larger FAIR-Chem UMA workflows intended as production-style starting
+points. They require the relevant FAIR-Chem installation, model access, and
+GPU environment.
 
 ## Documentation
 
@@ -159,9 +216,9 @@ The focused documentation is under [`docs/`](docs/index.md):
 - [ISAAC reaction database](docs/reaction-database.md)
 - [Development guide](docs/development.md)
 
-The README gives the shortest path to a first run. The documentation pages are
-the reference for complete option tables, persistence contracts, matching
-semantics, and manuscript post-processing.
+Start with this README for installation and a first run. Then use the focused
+pages for complete option tables, persistence contracts, database matching,
+and manuscript post-processing.
 
 ## Configuration Overview
 
@@ -169,11 +226,14 @@ AutoKMC configs are YAML or TOML files. The main sections are:
 
 - `output`: output directory, filenames, trajectory cadence, reaction database,
   ISAAC export, and log level.
+- `constants`: shared geometry, covalent-radius, site-search, isomorphism, and
+  lateral-environment controls.
 - `structure`: slab or nanoparticle construction.
 - `reactants`: gas-phase species, SMILES strings, pressures, and gas
   thermochemistry metadata.
 - `calculator`: ASE calculator construction.
-- `adsorbate_sites`: adsorption-site enumeration and stability pruning.
+- `adsorption`: adsorption-site enumeration, stability pruning, and runtime
+  endpoint relaxations.
 - `diffusion`: optional diffusion hops and CI-NEB settings.
 - `bond`: optional bond-changing templates and CI-NEB settings.
 - `free_energy`: optional vibrational thermochemistry.
@@ -181,6 +241,8 @@ AutoKMC configs are YAML or TOML files. The main sections are:
 - `checkpoint`: optional restart checkpoints.
 
 ### Calculator Configuration
+
+Every run must explicitly configure exactly one of `import_path` or `factory`.
 
 For a directly importable ASE calculator:
 
@@ -194,17 +256,30 @@ For a factory-style calculator:
 
 ```yaml
 calculator:
-  factory: fairchem.core.FAIRChemCalculator.from_model_checkpoint
+  factory: fairchem.core.FAIRChemCalculator
   factory_kwargs:
-    name_or_path: uma-s-1p2
+    predict_unit:
+      factory: autokmc.io.fairchem.get_predict_unit_on_device
+      factory_kwargs:
+        name_or_path: uma-s-1p2
+        device: cuda
     task_name: oc20
-    device: cuda
   copies: 4
+  gpu_devices: [cuda:0, cuda:1, cuda:2, cuda:3]
+  gpu_device_arg: predict_unit.factory_kwargs.device
   max_workers: 4
 ```
 
 `copies` creates a calculator pool. This is useful for independent relaxation
-or NEB tasks when the calculator and hardware can support parallel work.
+or NEB tasks when the calculator and hardware can support parallel work. Each
+NEB leases exactly one calculator for its complete ordinary and climbing-image
+lifecycle; calculator copies are never divided across images in one band.
+The UMA example above creates one predictor per GPU so AutoKMC can run four
+independent calculator tasks concurrently. FAIR-Chem's single-worker predictor
+accepts `device: cuda`; `get_predict_unit_on_device` selects each configured
+ordinal during construction and verifies that the predictor retained it.
+The bundled FAIR-Chem device helper requires `workers: 1`, preserving the
+one-calculator/one-device NEB policy.
 
 ### Diffusion
 
@@ -219,14 +294,50 @@ diffusion:
   fmax: 0.05
   max_steps: 500
   n_images: 8
+  image_spacing: 0.25
+  min_images: 6
+  max_images: 8
   climb: true
-  spring_k: 0.1
+  spring_k: 5.0
   interpolation: idpp
   persist_neb_path: true
 ```
 
-Each new diffusion lateral class can trigger two endpoint relaxations and a
-CI-NEB calculation. These are often among the most expensive parts of a run.
+For each new diffusion lateral class, AutoKMC first relaxes both endpoints. It
+then optimizes an ordinary NEB band and, when `climb` is enabled, always refines
+the same band with a climbing image. Raw barrier height does not bypass this
+optimization. The rate calculation separately applies its 0.1 eV floor through
+one common effective transition-state level, which preserves reversible energy
+consistency. These calculations are often among the most expensive parts of a
+run.
+
+If an ordinary NEB takes 100 optimizer steps without finding a lower
+interior-image electronic energy, AutoKMC inspects that band's energy profile.
+It selects only the two nearest minima bracketing the highest-energy image,
+optimizes any selected interior states, and reruns the standard NEB workflow
+for that one segment. Already-optimized original endpoints are reused. It
+deliberately does not evaluate every adjacent-minimum segment. This is faster
+but more aggressive; the resulting transition state is still referenced to
+the original reaction endpoints when the forward and reverse barriers are
+stored.
+
+When `image_spacing` (or bond `neb_image_spacing`) is set, it also guards the
+optimized geometry. By default, no unfrozen atom may move more than three times
+that distance between adjacent images. If a step violates this limit, AutoKMC
+restores the lowest-force valid band and immediately checks its electronic
+energy profile for minima, without waiting for 100 stagnant steps. If a usable
+bracket exists, it runs the one permitted highest-peak segment refinement;
+this also applies to rollback during CI-NEB. Otherwise, it starts a fresh
+optimizer inside the existing step budget. FIRE restarts with halved `dt` and
+`dtmax`, preventing a stretched band from being retained. Set
+`optimization.neb_geometry_guard_multiplier` to change the limit without
+changing the image density.
+
+With lateral interactions enabled, AutoKMC automatically uses the optimized
+no-neighbour path as the initial band for a diffusion class containing a
+neighbouring adsorbate. If that bare path has not been calculated yet, the bare
+calculation runs first. The complete lateral band is still reoptimized, and a
+failed or incompatible bare path falls back to the configured `interpolation`.
 
 ### Bond-Changing Reactions
 
@@ -251,24 +362,45 @@ bond:
   neb_fmax: 0.05
   neb_max_steps: 500
   neb_n_images: 8
+  neb_image_spacing: 0.25
+  neb_min_images: 6
+  neb_max_images: 8
   neb_climb: true
-  neb_spring_k: 0.1
+  neb_spring_k: 5.0
   neb_interpolation: idpp
   atom_matching: auto
   matching_trials: 8
   persist_neb_path: true
 ```
 
-`atom_matching` controls how atoms in the initial and final bond-reaction
-endpoints are paired before NEB interpolation. The default `auto` tries several
-reasonable same-element mappings and keeps the lowest-displacement path.
-`hungarian` uses global same-element assignment directly. `greedy` and
-`reactant_index` are useful comparison modes.
+`atom_matching` controls how the initial and final bond-reaction atoms are
+paired before interpolation. Every unchanged bond within A and B must connect
+the same atom indices in C; this prevents same-element atoms from exchanging
+identities merely to shorten the path. The default `auto` mode tries several
+connectivity-preserving mappings and then keeps the path with the smallest
+displacement. With a non-null image spacing, AutoKMC uses the largest MIC-aware
+displacement between corresponding atoms to choose the interior-image count.
+If the spacing is `null`, it uses the configured fixed `n_images` or
+`neb_n_images` value. `hungarian`, `greedy`, and `reactant_index` choose the
+geometric seed, but fall back to a connectivity-preserving mapping if that seed
+would change atom-index connectivity.
+
+Bond NEBs use the same automatic bare-first initialization as diffusion NEBs:
+the no-neighbour lateral class is calculated on demand and its optimized band
+seeds classes with neighbouring adsorbates. No additional configuration key is
+required. Bare calculations used only as NEB seeds are saved under
+`diagnostics/bare_neb/{bond,diffusion}/`, including their captured paths and
+calculation status, even when `persist_neb_path` is false.
 
 ### Free Energy
 
-Free-energy corrections use ASE vibrational analysis. They can be expensive,
-so it is often best to turn them on after the reaction network is behaving:
+Free-energy corrections use one coupled ASE vibrational analysis over the
+reacting adsorbate and the occupied neighboring molecules selected by
+`constants.lateral_shells`, with catalyst atoms held fixed during the
+displacements. The complete selected molecules participate, including atoms
+without direct surface bonds. Both endpoints retain the selected neighbors;
+transition states use the same local environment when TS vibrations are enabled.
+These calculations can be expensive:
 
 ```yaml
 free_energy:
@@ -287,6 +419,25 @@ when free-energy corrections are disabled. A reactant-level
 the fixed 1-bar standard state; the resolved partial pressure instead scales
 the adsorption rate as the ideal-gas activity `p / p°`.
 
+The lateral shell range controls endpoint structures, NEB structures, lateral
+classification, and vibrational corrections in both electronic and free-energy
+runs. For diffusion and bond reactions, the range starts from the union of
+all endpoint anchor atoms, so both endpoints share the same selected neighbors.
+Setting `kmc.lateral_interactions: false` omits surrounding occupied molecules;
+free-energy corrections then cover only the reacting adsorbates and gas species.
+Each event refreshes rates whose local environment or applicability can change.
+Old free energies from the whole-surface or reactive-only policies are not
+reused; compatible electronic calculations can supply structures for a new
+local vibrational calculation.
+
+The local lateral interaction range is an intentional approximation that truncates longer-range interactions. It can introduce small
+reaction-energy errors and closed-cycle energy discrepancies. Increase
+`constants.lateral_shells` with `kmc.lateral_interactions: true` until the
+energies converge. In a CO/Cu(111) UMA example, extending one hop to two removed
+a 6.93 meV cycle discrepancy by including all surrounding CO molecules. See
+[lateral interaction range and the measured example](docs/architecture.md#lateral-interaction-range)
+and the [configuration controls](docs/configuration.md#lateral-interaction-range).
+
 Gas-phase rotational symmetry numbers are inferred from the final molecular
 coordinates with pymatgen and recorded with the detected point group in the
 thermochemistry metadata and run manifest. Reactants can still declare
@@ -301,63 +452,125 @@ By default, outputs are written under `output.dir`.
 Important files:
 
 - `events.jsonl`: one JSON record per accepted KMC event.
+- `reactions/index.jsonl`: stable reaction ids and static network definitions
+  referenced by compact event rows.
 - `run_manifest.json`: a run UUID, the exact input text and resolved config,
   feed species, initial state, clock origin, and catalyst normalization
   metadata needed for reproducible analysis.
-- `summary.json`: run metadata, reaction counts, and final occupancy.
+- `summary.json`: run metadata, reaction counts, final occupancy, and a
+  concise run-scoped performance summary under `run.performance`.
+- `diagnostics/performance.json`: versioned raw run telemetry and the matching
+  concise performance summary.
 - `kmc.extxyz`: trajectory snapshots with graph node/species/site identities
-  and a per-atom frozen mask at the configured cadence.
-- `isaac_records.json`: ISAAC AI-ready scientific record bundle.
+  and a per-atom frozen mask at the configured cadence, plus a guaranteed
+  nonduplicate final frame.
+- `diagnostics/invalid_adsorption/`: initial and last-known optimized structures
+  for adsorption candidates pruned by the MLIP.
+- `diagnostics/invalid_diffusion/`: failed diffusion endpoints and NEB bands
+  kept outside the authoritative reaction network.
+- `diagnostics/invalid_bond/`: failed bond-reaction endpoints and NEB bands.
+- `isaac_records.json`: optional ISAAC AI-ready scientific record bundle.
 - `checkpoint.pkl`: restart state when checkpointing is enabled.
+
+Before a fresh run starts, AutoKMC checks for managed output artifacts. If any
+already exist, the run stops instead of mixing or overwriting event logs,
+manifests, summaries, checkpoints, reaction folders, or diagnostics. Choose a
+new `output.dir`, or set `checkpoint.resume_from` to continue the same run.
+During execution, AutoKMC also holds a filesystem lock on `output.dir` so a
+second process cannot write there concurrently.
 
 Reaction folders live under `reactions/`:
 
 ```text
 reactions/
+  index.jsonl
   adsorption/<species>/isoX_latY/
     reaction.json
+    occupied_initial.extxyz
     occupied.extxyz
+    unoccupied_initial.extxyz
     unoccupied.extxyz
   diffusion/<species>/diff_isoX_latY/
     reaction.json
+    state_a_initial.extxyz
     state_a.extxyz
+    state_b_initial.extxyz
     state_b.extxyz
     ts.extxyz
-    neb_path.extxyz
+    neb_refinement_initial.extxyz # when stalled-path refinement is used
+    neb_refinement_final.extxyz   # when stalled-path refinement is used
+    neb_path_initial.extxyz       # when persist_neb_path is true
+    neb_path.extxyz               # when persist_neb_path is true
   bond/<A+B<->C>/bond_isoX_latY/
     reaction.json
+    state_ab_initial.extxyz
     state_ab.extxyz
+    state_c_initial.extxyz
     state_c.extxyz
+    state_c_gas_reference.extxyz # empty surface only, gas products
+    gas_molecule.extxyz          # optimized gas molecule only, gas products
     ts.extxyz
-    neb_path.extxyz
+    neb_refinement_initial.extxyz # when stalled-path refinement is used
+    neb_refinement_final.extxyz   # when stalled-path refinement is used
+    neb_path_initial.extxyz       # when persist_neb_path is true
+    neb_path.extxyz               # when persist_neb_path is true
 ```
 
 `reaction.json` stores the energies, barriers, vibrational data when present,
 calculator metadata, and references to the structures written in that folder.
+The `*_initial.extxyz` endpoint files are the structures before relaxation.
+For gas-product bond reactions, `state_c_gas_reference.extxyz` is the relaxed
+empty surface/lateral environment with no molecule in the vacuum, while
+`gas_molecule.extxyz` is the separately optimized gas molecule. Recomputing
+their independent energies reproduces the additive thermodynamic C state.
+For diffusion and bond reactions, `neb_path_initial.extxyz` is the interpolated
+band before NEB optimization and `neb_path.extxyz` is the optimized band.
+When stalled-path refinement is used, `neb_refinement_initial.extxyz` and
+`neb_refinement_final.extxyz` are the most recently selected optimized
+endpoints; the NEB path files then describe the final replacement highest-peak
+segment.
+Failed diffusion and bond candidates retain both files automatically, even
+when `persist_neb_path` is false, with the latter containing the last-known
+band at the point of failure.
 
 ## Post-Processing Events
 
 Product rates and mechanisms are intentionally calculated after KMC. Event
-schema v2 records the canonical gas/surface inputs and outputs of every fired
-reaction, including stable surface-placement ids. The live KMC graph does not
-store product lineage.
+schema v3 records compact dynamic rows with deterministic `event_id` and
+stable `reaction_id` values, plus the canonical gas/surface inputs and outputs
+of every fired reaction. Static descriptions, templates, reaction folders,
+and gas-product flags live once in `reactions/index.jsonl`; built-in analysis
+resolves them automatically. Expanded schema-v2 logs remain readable. The live
+KMC graph does not store product lineage.
 
 Analyze a completed run with:
 
 ```bash
-autokmc analyze runs/co_oxidation_pt111_uma_4gpu
+autokmc analyze runs/h2_oxidation_pd111_uma
 # Optional stationary-state window:
 autokmc analyze RUN_DIR --start-time 1.0e-4 --end-time 5.0e-4 --blocks 20
 # If output.run_manifest_filename was customized:
 autokmc analyze RUN_DIR --manifest custom_manifest.json
 ```
 
-A product is defined strictly as a species not listed among the feed reactants
-that leaves an occupied surface placement through a desorption event. For each
-product desorption, the analyzer follows the consumed surface placement
-backward through the events that formed it. Diffusion is collapsed, bond
-formation branches into both precursor histories, and immediate reversible
-bond recrossings are removed from the reported chemical mechanism.
+Generate a readable report after the run with:
+
+```bash
+autokmc report RUN_DIR
+autokmc report RUN_DIR --blocks 20 --output-dir RUN_DIR/analysis
+autokmc report RUN_DIR --no-refresh-analysis
+```
+
+The report command writes `report.md` and a self-contained `report.html`.
+By default it refreshes product/mechanism analysis from the event log first;
+`--no-refresh-analysis` reuses persisted analysis files.
+
+A product is a species not listed among the feed reactants that leaves an
+occupied surface placement through desorption. For each product, the analyzer
+first finds the desorption event and then follows the consumed placement
+backward through the events that formed it. Diffusion moves the same lineage and
+is omitted. Bond formation follows both precursor histories. Finally, immediate
+reversible bond recrossings are removed from the reported mechanism.
 
 The observed product rate is the number of product desorptions divided by the
 selected KMC time window. It is not the microscopic `rate_hz` propensity on an
@@ -412,19 +625,27 @@ Each record contains:
 - method and optimizer/NEB settings used to establish compatibility,
 - an optional multi-frame `neb_path.extxyz` when the path was retained.
 
-On a later run, AutoKMC first checks the exact calculation key. It can then
-search the SQLite index for the same reaction, calculator/settings, and graph
-fingerprint. A candidate is accepted only after full labelled graph
-isomorphism and checksum verification. Run-local node ids, `iso_class`, and
-`lateral_class` numbers are not portable graph labels; chemical identity,
-endpoint roles, elements, bond roles, and topology are. A missing, unreadable,
-or modified required asset rejects the hit and the calculation is recomputed.
+On a later run, AutoKMC first checks the exact calculation key. If that misses,
+it searches the SQLite index for the same reaction, settings, calculator, and
+graph fingerprint. It then verifies full labelled graph isomorphism, normalized
+scientific inputs, the calculator/model digest, and every asset checksum before
+accepting a candidate.
 
-Geometry is intentionally not part of fallback graph matching. Two records
-with the same labelled topology may therefore match even when their Cartesian
-coordinates differ. This is a known limitation of the method; the reused
-record's `.extxyz` assets preserve the actual geometry and checksums used for
-the stored calculation.
+The atomic-input fingerprint is invariant to rigid translation, rotation,
+periodic wrapping, and atom order. It still rejects strain and changes to
+initial charges, magnetic moments, tags, custom atom arrays, or the full lattice
+metric. Every other scientific input, including scalar gas energies and charge,
+remains part of the identity. Model checkpoints are identified by SHA-256
+content rather than their local path. Run-local node ids, `iso_class`, and
+`lateral_class` values are excluded, while chemical identity, endpoint roles,
+elements, bond roles, topology, and all other inputs are retained.
+
+Relaxed structures and NEB paths remain in their original coordinate frame.
+AutoKMC therefore reuses these assets only when the query has the same input
+coordinates, cell, periodic images, and atom order. It rehashes model files and
+directory-valued artifacts for every identity calculation. If an asset is
+missing, unreadable, modified, or scientifically incompatible, AutoKMC rejects
+the hit and recomputes the calculation.
 
 If `index.sqlite3` is missing or corrupt, AutoKMC rebuilds it from verified
 ISAAC record folders. You can also do this explicitly with
@@ -439,15 +660,21 @@ Configure the reaction database with:
 ```yaml
 output:
   calculation_cache_enabled: true
+  calculation_cache_lookup_enabled: false
   calculation_cache_dir: calculation_cache
+  isaac_export_enabled: false
   isaac_export_filename: isaac_records.json
 ```
 
-The ISAAC export follows the public
+Set `isaac_export_enabled: true` to write the aggregate export. The calculation
+cache remains enabled independently. Cache lookup is off by default, so new
+database records are written for later ISAAC upload without first checking for
+reusable records. Set `calculation_cache_lookup_enabled: true` to opt into
+reuse. The ISAAC export follows the public
 [ISAAC AI-ready scientific record](https://github.com/ISAAC-DOE/isaac-ai-ready-record)
 v1.05 schema. Numerical quantities are written as ISAAC descriptors and
 structures are external assets rather than embedded JSON. The configured
-`isaac_export_filename` is a JSON array in which every element is one complete
+`isaac_export_filename` names a JSON array in which every element is one complete
 ISAAC record; keep the corresponding `calculation_cache/records/` folders with
 the export so its relative asset URIs remain reproducible.
 
@@ -468,10 +695,24 @@ Use checkpoints to resume a stopped simulation. Use the reaction database to
 avoid repeating expensive optimization and NEB calculations. They solve
 different problems and are useful together.
 
-Resume into the same `output.dir`. AutoKMC appends `events.jsonl` and
-`kmc.extxyz`, restores reaction-folder counters and the RNG stream, rebuilds
-the cumulative summary from the event log, and adds a continuation segment to
-the existing run manifest. See
+Resume into the same `output.dir`. AutoKMC first verifies that the structure,
+calculator, feed, thermochemistry, and reaction-channel configuration have not
+changed. It compares resolvable calculator files and directories by content and
+also checks the AutoKMC source digest and calculator-package versions. Only the
+additional step count, logging controls, and checkpoint lifecycle settings may
+change.
+
+Next, AutoKMC reconciles the persisted outputs. It removes an uncommitted
+`events.jsonl` tail and atomically removes `kmc.extxyz` frames beyond the
+checkpoint step. Missing, non-integer, or non-monotonic `kmc_step` metadata in
+the committed trajectory prefix stops the restart without changing the file.
+Reaction folders record their immutable discovery step, so folders discovered
+after the checkpoint move to `uncommitted_reactions/` instead of remaining in
+the active network.
+
+Finally, AutoKMC restores the reaction-folder counters and RNG stream, rebuilds
+the cumulative summary from the event log, appends to `events.jsonl` and
+`kmc.extxyz`, and adds a continuation segment to the existing run manifest. See
 [Outputs, Restart, and Offline Analysis](docs/outputs-and-analysis.md#checkpoint-continuation).
 
 ## Suggested Workflow
@@ -482,8 +723,10 @@ the existing run manifest. See
 4. Enable diffusion with a small number of KMC steps.
 5. Enable bond reactions and keep `persist_neb_path: true` while debugging.
 6. Turn on free-energy corrections once the network looks reasonable.
-7. Run `autokmc analyze RUN_DIR` for product rates and mechanisms.
-8. Keep `calculation_cache/` with the run artifacts so results can be reused
+7. Run `autokmc preflight CONFIG.yaml` before committing an expensive job.
+8. Run `autokmc analyze RUN_DIR` and `autokmc report RUN_DIR` for product
+   rates, mechanisms, convergence, coverage, and performance summaries.
+9. Keep `calculation_cache/` with the run artifacts so results can be reused
    and audited later.
 
 ## Development
@@ -494,7 +737,16 @@ Run tests with:
 python -m pip install -e ".[cli,test,dev]"
 python -m compileall -q autokmc
 ruff check autokmc tests
-mypy --follow-imports=skip autokmc/io/config.py autokmc/io/checkpoint.py autokmc/analysis/products.py
+mypy --follow-imports=skip \
+  autokmc/io/_files.py autokmc/io/config.py autokmc/io/checkpoint.py \
+  autokmc/io/calculation_cache.py autokmc/io/calculators.py \
+  autokmc/io/config_validation.py \
+  autokmc/io/event_log.py autokmc/io/persistence.py \
+  autokmc/io/reaction_graph.py autokmc/io/resume_contract.py \
+  autokmc/io/trajectory.py \
+  autokmc/analysis/products.py autokmc/core/graph_state.py \
+  autokmc/sites/identity.py autokmc/kmc autokmc/workflow \
+  autokmc/utils/telemetry.py
 pytest --cov=autokmc --cov-report=term-missing --cov-fail-under=50
 ```
 
@@ -517,6 +769,16 @@ Useful package areas:
   or reuse an existing `calculation_cache/`.
 - If a NEB path is poor, try `interpolation: idpp`, `atom_matching: auto`, and a
   larger `matching_trials`.
+- If FIRE prints the same NEB energy and force for many steps with
+  `downhill_check: true`, its rollback logic is collapsing `dt`. AutoKMC
+  automatically disables the check and restores the initial timestep after
+  five rollback halvings for ordinary NEB; CI-FIRE disables it immediately.
+  See [FIRE downhill recovery for NEB](docs/configuration.md#fire-downhill-recovery-for-neb).
+- A NEB that exhausts its optimizer steps is not evidence that the reaction is
+  chemically impossible. AutoKMC preserves the failed band, keeps its lateral
+  class retryable, and omits only that candidate from the current rate-index
+  sweep so other valid KMC events can still run. Inspect or retry the saved
+  path; do not replace a missing barrier with a fabricated value.
 - If no reactions are available, inspect adsorption-site pruning and gas-phase
   reactant energies.
 - If post-processed product rates are zero, inspect `events.jsonl` for a

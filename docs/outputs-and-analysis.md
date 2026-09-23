@@ -9,21 +9,40 @@ RUN_DIR/
   run_manifest.json
   events.jsonl
   summary.json
+  diagnostics/performance.json
   kmc.extxyz
   checkpoint.pkl                 # when enabled
-  isaac_records.json
+  isaac_records.json             # when output.isaac_export_enabled is true
   calculation_cache/
   reactions/
+    index.jsonl
+  diagnostics/
+    invalid_adsorption/
+    invalid_diffusion/
+    invalid_bond/
+    bare_neb/
   analysis/                      # after `autokmc analyze`
 ```
 
-JSON documents are written atomically where replacement is appropriate and
-reject nonfinite numeric output. `events.jsonl` is append-only and flushed
-after each event.
+AutoKMC writes complete JSON documents by atomic replacement and rejects
+nonfinite numeric output. It treats `events.jsonl` differently because that file
+is append-only. Event rows may remain in the process buffer between checkpoints.
+Before publishing a checkpoint, AutoKMC flushes and syncs those rows and records
+the exact committed byte offset. It flushes and syncs them again when the writer
+closes.
+
+Before a fresh run starts, AutoKMC checks `output.dir` for managed artifacts. If
+it finds an existing event log, manifest, summary, trajectory, checkpoint,
+reaction tree, cache, analysis, or diagnostics tree, it stops instead of
+truncating or mixing the earlier run. Use a new output directory for a new
+trajectory, or use checkpoint resume to continue the existing trajectory.
+AutoKMC also holds one filesystem lock for the complete run so another process
+cannot write the same directory. `autokmc preflight CONFIG` checks both
+conditions without creating configured outputs.
 
 ## `run_manifest.json`
 
-Manifest schema version 2 records:
+Manifest schema version 3 records:
 
 - a UUID shared with events, checkpoints, graph trajectory frames, and new
   ISAAC calculations,
@@ -31,68 +50,171 @@ Manifest schema version 2 records:
 - exact config-file text, SHA-256, and resolved configuration,
 - feed species and partial pressures,
 - catalyst kind, composition, atom count, and surface-atom count,
+- for a file-backed catalyst, the resolved source path, selected frame,
+  requested format, file SHA-256 and byte size, chemical formula, and
+  resolved frozen-atom indices and count; periodic slabs also record the
+  detected connectivity axes, original surface normal, and whether a rigid
+  alignment to Cartesian +z was applied,
 - the initial occupied surface state,
-- one segment for each initial or resumed invocation,
-- final step, time, and executed-step count when the run finishes.
+- preparing/running/terminal lifecycle state and the current stage,
+- one fully closed segment for each initial or resumed invocation,
+- explicit termination reason, final durable step, simulated time, and wall
+  time,
+- warnings, invalid-record counts, and quarantine locations,
+- the persisted output map and a typed artifact inventory with size and
+  SHA-256 metadata for files.
 
 The manifest is the normalization and provenance source used by offline
 analysis. Keep it with `events.jsonl`.
 
+## `summary.json`
+
+Summary schema version 3 stores the run UUID, fired-event counts, discovered
+valid and invalid reaction counts, final occupancy, and run metadata.
+Reaction-type rows are separated by direction and rate-energy basis. Their
+`rate_delta_ev` and `rate_barrier_ev` statistics describe the values used to
+calculate rates; separate `electronic_energy` and `free_energy` statistics
+preserve both physical bases when available. `run.performance` is a concise
+operational view: wall time, event throughput, cache hit ratio,
+optimization/NEB counts, output/checkpoint overhead, and top bottlenecks. The
+complete `counters`, `timings_s`, and `gauges` snapshot is retained in the
+versioned `diagnostics/performance.json` artifact.
+
 ## `events.jsonl`
 
-Each event-schema-v2 line represents one fired reaction. Important fields are:
+Each compact event-schema-v3 line represents one fired reaction. Important
+fields are:
 
 | Field | Meaning |
 | --- | --- |
+| `artifact_type`, `schema_version` | Artifact identity and event schema version. |
 | `run_id` | Run UUID. |
+| `event_id` | Deterministic event identity scoped to the run and KMC step. |
+| `reaction_id` | Stable reaction-class identity resolved through `reactions/index.jsonl`. |
 | `step`, `time_s`, `tau_s` | Cumulative KMC step/time and sampled waiting time. |
 | `kind` | `adsorption`, `desorption`, `diffusion`, or `bond`. |
 | `direction` | Diffusion or bond direction when applicable. |
 | `inputs`, `outputs` | Canonical gas/surface state transition. |
-| `placement_id` | Stable identity for a concrete surface state within the run. |
 | `rate_hz` | Microscopic propensity used by KMC. |
 | `rate_energy_basis` | `electronic` or `free_energy`. |
 | `rate_delta_ev`, `rate_barrier_ev` | Energetics actually used for the rate. |
 | `delta_e_ev`, `barrier_ev` | Electronic values when available. |
 | `delta_g_ev`, `barrier_g_ev` | Free-energy values when available. |
-| `reaction_dir` | Relative path to the reaction sidecar folder. |
 
 A surface state includes canonical species, placement id, site/member ids,
 adsorbate node ids, and occupied catalyst cliques. Those transitions are
 sufficient to reconstruct lineage without adding product or mechanism state
-to the live KMC engine.
+to the live KMC engine. Static `description`, `template`, `reaction_dir`, and
+`gas_product` values are stored once in the reaction index instead of being
+repeated on every event. Built-in offline analysis resolves them
+automatically. Expanded schema-v2 events remain readable for compatibility.
 
 ## Reaction folders
 
 ```text
 reactions/
+  index.jsonl
   adsorption/<species>/isoX_latY/
     reaction.json
+    occupied_initial.extxyz
     occupied.extxyz
+    unoccupied_initial.extxyz
     unoccupied.extxyz
   diffusion/<species>/diff_isoX_latY/
     reaction.json
+    state_a_initial.extxyz
     state_a.extxyz
+    state_b_initial.extxyz
     state_b.extxyz
     ts.extxyz
+    neb_path_initial.extxyz      # optional
     neb_path.extxyz              # optional
   bond/<process>/bond_isoX_latY/
     reaction.json
+    state_ab_initial.extxyz
     state_ab.extxyz
+    state_c_initial.extxyz
     state_c.extxyz
+    state_c_gas_reference.extxyz # empty surface only; gas products
+    gas_molecule.extxyz          # optimized gas molecule; gas products
     ts.extxyz
+    neb_path_initial.extxyz      # optional
     neb_path.extxyz              # optional
 ```
 
-`reaction.json` contains discovery metadata, electronic/free energetics,
-vibrational results, KMC barriers, calculator identity, validity, and
-cumulative firing statistics. The `.extxyz` files preserve the structures
-behind those values.
+`reaction.json` records discovery metadata, electronic and free energetics,
+vibrational results, KMC barriers, calculator identity, validity, and cumulative
+firing statistics. Its immutable `discovery_step` records when the reaction
+entered the discovered network. The `.extxyz` files preserve the structures
+behind these values.
+
+All structure outputs write a complete value for every declared per-atom
+column. Missing string metadata (for example, a slab's `bulk_wyckoff` label
+on an adsorbate) appears as `_`. Strings containing whitespace or quotes use
+percent-escaped tokens. The `autokmc_extxyz_string_arrays` comment metadata
+retains original values and types; AutoKMC restores them when loading structures
+or cached results. Standard EXTXYZ readers can open the files directly.
+
+An accepted bond NEB image with endpoint-like or below-endpoint energy has a
+`ts_energy_diagnostic` entry in `reaction.json`. It records the energy condition
+and the minimum KMC barrier while `valid` remains `true`. The raw transition
+energy and barriers remain available alongside the effective energies and KMC
+barriers; these reactions are stored in the normal reaction tree.
+
+For a gas-product bond reaction, AutoKMC stores the thermodynamic C state as two
+independent calculation inputs. `state_c_gas_reference.extxyz` contains the
+relaxed surface and lateral environment without a molecule in the vacuum.
+`gas_molecule.extxyz` contains only the optimized gas molecule. Their energies
+sum to `energies_ev.state_c`, while `state_c.extxyz` contains the molecular
+precursor used as the NEB endpoint.
+
+Files ending in `_initial.extxyz` contain the exact endpoint structures passed
+to relaxation. If an optimization fails, the corresponding non-`_initial` file
+contains the last-known geometry. When `persist_neb_path` is enabled,
+`neb_path_initial.extxyz` contains the band before NEB optimization and
+`neb_path.extxyz` contains the optimized band.
+
+`reactions/index.jsonl` is the versioned network index. Each stable
+`reaction_id` records validity, discovery step, supported directions, firing
+count, observed rate-energy bases, sidecar folder, and a compact static
+definition. Invalid diffusion candidates are excluded from the authoritative
+reaction tree and written under
+`diagnostics/invalid_diffusion/<species>/diff_isoX_latY/`; their invalid index
+entries remain available for discovery accounting and diagnostics.
+Invalid bond candidates are handled analogously under
+`diagnostics/invalid_bond/<process>/bond_isoX_latY/`.
+Failure folders retain every available initial, converged, or last-known
+endpoint and automatically retain both the initial and final NEB bands,
+regardless of the successful-run `persist_neb_path` setting.
+
+Bare (no lateral interactions) calculations used only to initialize bond and
+diffusion NEBs are saved under
+`diagnostics/bare_neb/bond/<process>/bond_isoX_latY/` and
+`diagnostics/bare_neb/diffusion/<species>/diff_isoX_latY/`.
+Each folder contains `diagnostic.json` with calculation status, failure reason
+when applicable, electronic energies, and paths to all available endpoint,
+transition-state, and NEB structures. The captured optimized bare band is saved
+as `neb_path.extxyz` even when `persist_neb_path` is false and calculation-cache
+writing is disabled. These reference calculations do not enter the reaction
+index, event log, or discovered-reaction counts. A bare class that becomes an
+actual applicable reaction is also written through the normal reaction output.
+Bare diagnostics are flushed after reaction sweeps and on handled failures;
+folders from beyond a resumed checkpoint are moved to `uncommitted_reactions/`.
+
+Adsorption candidates rejected during MLIP pruning are written under
+`diagnostics/invalid_adsorption/<species>/ads_isoX/`. Each folder contains
+`initial.extxyz`, `optimized.extxyz` whenever relaxation started, and
+`diagnostic.json` with the rejection reason and relevant force, energy, or
+connectivity details.
 
 ## `kmc.extxyz`
 
 The trajectory contains catalyst atoms and currently occupied adsorbate atoms.
-Each frame stores `kmc_step` and, when available, the run UUID and graph schema.
+Versioned frame metadata stores `kmc_step`, `frame_kind`, and, when available,
+the run UUID, simulated time, causal event ID, graph schema, and continuation
+segment start. A final frame is guaranteed even when the terminal step is not
+on the periodic cadence. If a run fires no events, the existing step-zero frame
+is marked final without adding a duplicate step.
 Per-atom arrays include:
 
 - `graph_node_id`
@@ -110,9 +232,19 @@ mask should be used when reconstructing constraints from the file.
 
 ## Checkpoint continuation
 
-Checkpoints contain the live graph, all currently known sites/reactants,
-occupancy, KMC history, reaction counts, frozen indices, and RNG state.
-Calculator objects are removed and rebuilt from the current config.
+Schema-v4 checkpoints are compact restart snapshots. They store the live graph,
+known sites and reactants, occupancy, reaction counts, frozen indices, RNG
+state, scientific-config fingerprint, and exact committed `events.jsonl` count
+and byte offset, plus the durable trajectory byte offset when trajectory output
+is enabled. Routine checkpoints leave the compatibility `history` field
+empty because AutoKMC reconstructs committed history from `events.jsonl`
+instead of copying it into every snapshot. A standalone API run keeps history
+only when it has a checkpoint writer but no event writer.
+
+Before writing a checkpoint, AutoKMC removes calculator objects and large
+reconstructible graph caches. On resume, it rebuilds the calculators from the
+current configuration and rebuilds `surface_apsp`, surface-shell BFS data, and
+geometry lookup arrays only when they are needed.
 
 To continue the same run, keep `output.dir` unchanged and set `resume_from`:
 
@@ -126,12 +258,60 @@ checkpoint:
 
 Continuation semantics are cumulative:
 
-- `events.jsonl` is appended rather than truncated,
-- `kmc.extxyz` is appended without duplicating the initial frame,
+- `events.jsonl` is reconciled to the checkpoint's committed prefix, removing
+  only a crash tail, and new events are then appended. Retained event steps
+  must be positive, non-boolean JSON integers and consecutive; malformed
+  histories are rejected before the file is changed. When a legacy prefix
+  predates run UUIDs, its validated rows are atomically assigned the continuing
+  run UUID so the next exact checkpoint can be resumed again. If the original
+  legacy event log is missing but the checkpoint still contains public KMC
+  history, AutoKMC first writes a canonical cumulative prefix marked
+  `legacy_history_recovered`; this prevents a later compact checkpoint from
+  losing the earlier public history. These synthetic rows preserve the fields
+  present in the historic KMC tuple, but cannot recreate transition lineage or
+  species labels that the legacy checkpoint never stored; strict offline
+  lineage analysis may therefore still report the missing provenance,
+- reaction folders discovered after the checkpoint are moved recoverably to
+  `uncommitted_reactions/after_checkpoint_step_<N>/`, so their rolled-back
+  scientific state cannot remain authoritative,
+- `kmc.extxyz` is reconciled to its committed byte prefix when recorded,
+  or by `kmc_step` for older checkpoints. Uncommitted appends, including partial
+  frames, are removed by atomic replacement before new frames are appended,
 - reaction counts and first/last steps are restored,
-- `summary.json` is rebuilt from all event rows,
+- cumulative summary and reaction-folder counters are recovered during the
+  same streaming validation pass,
 - the stored RNG state resumes the same random stream,
 - the run manifest adds a continuation segment under the same UUID.
+
+Configured resume does not allocate one Python history tuple per committed
+event. It carries an `events.jsonl`-backed history view and stores only the
+not-yet-synced continuation suffix in memory; that suffix is released whenever
+a checkpoint or final close makes the corresponding rows durable. Python
+callers that explicitly need the historic list can iterate it or call
+`list(result["history"])`; doing so streams the committed prefix on demand.
+
+Trajectory reconciliation requires every committed frame to have a non-negative
+integer `kmc_step`. New checkpoints record the exact durable trajectory byte
+boundary, so even a torn atom-count or metadata line in the next append can be
+discarded. Older checkpoints discard incomplete tails only when the available
+frame metadata establishes that they are uncommitted. The committed prefix must be strictly increasing, and a
+committed frame cannot appear after a crash-tail frame. AutoKMC rejects those
+ambiguous or malformed histories without modifying the original file. A
+missing or empty trajectory remains valid for legacy runs that did not persist
+trajectory frames. A trajectory shorter than a recorded committed byte boundary
+is rejected. Final-frame marking preserves existing checkpoint byte boundaries.
+
+Scientific settings must match the checkpoint. The explicit safe-change
+allowlist is limited to `kmc.n_steps`, `kmc.log_every`, `output.log_level`, and
+the `checkpoint.enabled`, `checkpoint.path`, `checkpoint.every_n_steps`, and
+`checkpoint.resume_from` lifecycle fields. The fingerprint content-hashes
+resolvable calculator artifacts, including directory-valued inputs, and records
+the AutoKMC source digest, AutoKMC version, and installed calculator-package
+versions. Legacy checkpoints without this fingerprint remain readable and use
+conservative step-based event reconciliation. Their trajectory is still
+reconciled from the checkpoint step. Legacy checkpoint history is retained for
+compatibility and, when its original event log is unavailable, is promoted to
+the canonical event prefix before the first continuation checkpoint is written.
 
 A checkpoint restores one KMC trajectory. The reaction database serves a
 different purpose: it reuses scientific calculations across trajectories.
@@ -165,17 +345,25 @@ observed product rate = number of product desorptions / D
 TOF = observed product rate / number of classified surface atoms
 ```
 
+Both analysis bounds must be finite and lie inside the recorded simulation
+interval, from `initial_state.time_s` to `result.final_time_s` in the run
+manifest. The end must be greater than the start. If the final time has not
+been recorded, the latest event bounds the available interval. Requests beyond
+these limits fail before replacing existing analysis outputs; the analyzer
+does not add unobserved time to the rate denominator. A recorded final time
+later than the last event still includes that observed period without events.
+
 The product-rate interval is the exact two-sided 95% Garwood Poisson interval.
 It is not a normal approximation. `rate_blocks.csv` divides the selected window
 into equal-duration blocks for stationarity inspection.
 
 ### Mechanism reconstruction
 
-For each product desorption, the analyzer follows its consumed placement
-backward through formation events. Diffusion relocates the same lineage and is
-omitted from the chemical mechanism. Bond formation joins both precursor
-histories. Immediate reversible bond recrossings cancel before mechanisms are
-fingerprinted and grouped.
+For each product desorption, the analyzer first identifies the consumed
+placement and follows it backward through the formation events. Diffusion moves
+the same lineage and is omitted from the chemical mechanism. Bond formation
+joins both precursor histories. Finally, immediate reversible bond recrossings
+are removed before the mechanisms are fingerprinted and grouped.
 
 Analysis is transactional: all five outputs are staged first, and existing
 analysis files remain unchanged if strict validation or writing fails.
@@ -188,3 +376,17 @@ analysis/
   mechanisms.csv
   rate_blocks.csv
 ```
+
+## Human-readable run report
+
+```bash
+autokmc report RUN_DIR
+autokmc report RUN_DIR --blocks 20 --output-dir RUN_DIR/analysis
+autokmc report RUN_DIR --no-refresh-analysis
+```
+
+The report combines run status and termination reason, coverage, directional
+flux, products, rate convergence, performance bottlenecks, and artifact
+inventory. It writes `report.md` and a self-contained `report.html`. Product
+analysis is refreshed from persisted events by default; use
+`--no-refresh-analysis` to reuse the current analysis artifacts.

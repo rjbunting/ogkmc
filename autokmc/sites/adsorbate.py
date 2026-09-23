@@ -13,8 +13,9 @@ atom rather than a single node.
 Single-atom reactants (``N == 1``) take a degenerate fast path: the lone
 anchor atom is placed at every raw anchor-node position of its element and
 iso-classes are deduplicated by ego-graph isomorphism around the bonded
-clique.  The rigid-body refinement step is skipped (no rotational DOF) and
-ML stability pruning runs as for any other reactant.
+clique.  The calculator-free rotational refinement is skipped, while the
+potential-driven rigid translation and relaxed stability stages run as for
+any other reactant.
 
 Strategy
 --------
@@ -42,9 +43,11 @@ Strategy
    be mutually reachable through ``type=="surface"`` edges; placements whose
    cliques are too far apart (> ``max_pair_shells`` hops) are dropped.
 
-5. **Reduce by isomorphism.**  Group placements by isomorphism of the union-
-   of-cliques ego-subgraph (element-label matched;
-   :func:`~autokmc.sites.anchors._build_ego_graph`).
+5. **Reduce by isomorphism.**  Decorate the union-of-cliques substrate ego-
+   subgraph with the complete reactant graph and every adsorbate--surface
+   coordination edge, then group placements by labeled graph isomorphism.
+   This preserves which surface clique belongs to each adsorbate atom while
+   still folding symmetry-equivalent molecular orientations together.
 
 6. **Auto-grow** ``n_shells_anchor`` if any placement reaches further than the
    iso-class ego could see (up to ``max_shell_retries`` extra passes).
@@ -52,9 +55,14 @@ Strategy
 7. **Materialise** one adsorbate-site node per reactant atom per member on *G*
    (``type="adsorbate"``, ``occupied=False``).
 
-8. **Optional rigid-body refinement.**
+8. **Optional calculator-free rigid-body refinement.**
    :func:`optimise_adsorbate_site_positions` does a calculator-free L-BFGS-B
    refinement of each iso-class representative's 6 rigid-body DOF.
+
+9. **Potential stability pruning.**  With ``prune_stable_only=True``, each
+   representative is first optimized against the configured potential as an
+   exact rigid body on a fixed slab.  Only after that stage converges is the
+   ordinary atom-level relaxation run and its adsorption topology checked.
 
 Storage
 -------
@@ -65,37 +73,51 @@ Public API
 ----------
 * :class:`AdsorbateSite`                    — one iso-class of molecule placements.
 * :func:`find_adsorbate_sites`              — universal N-atom enumerator.
-* :func:`optimise_adsorbate_site_positions` — rigid-body refinement.
+* :func:`optimise_adsorbate_site_positions` — calculator-free rigid refinement.
 * :func:`push_member_positions_to_graph`    — write refined positions back to G.
 """
 
 from __future__ import annotations
 
+from autokmc.core.pbc import slab_outward_normal
+
+import os
 import warnings
 from dataclasses import dataclass, field
-from itertools import combinations, product
-from typing import Any
+from itertools import combinations
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import networkx as nx
 from networkx.algorithms import isomorphism
+from ase.utils.abc import Optimizable
 
 from autokmc.core.pbc import (
     full_pbc_for_cell,
     minimum_image_vectors,
+    periodic_image_offsets,
+    unwrap_positions_about_reference,
     wrap_positions_into_cell,
+)
+from autokmc.core.atom_metadata import (
+    apply_atom_metadata, atom_metadata, atom_metadata_key, physical_node_match,
 )
 from autokmc.io.calculators import CalculatorConfigError, acquire_calculator
 from autokmc.sites.anchors import (
+    ANCHOR_K_MAX_BY_ELEMENT,
     find_anchor_sites,
     _build_ego_graph,
     _effective_pbc,
-    _kabsch_align_ego,
     _get_cell,
     _kabsch,
-    _next_node_id,
+    _reserve_node_ids,
 )
 from autokmc.utils.logging import get_logger
+from autokmc.utils.optimizers import (
+    DEFAULT_OPTIMIZER,
+    REGULAR_OPTIMIZERS,
+    normalize_optimizer_kwargs,
+)
 
 _log = get_logger(__name__)
 
@@ -117,9 +139,13 @@ from autokmc.core.constants import (
     CONTACT_FACTOR,
     STANDOFF_FACTOR,
     N_ADSORBATE_RESTARTS as N_RESTARTS,
+    NEIGHBORLIST_SKIN,
     NL_MULT_DEFAULT,
     PRUNE_FMAX,
     PRUNE_MAX_STEPS,
+    HULL_TOL,
+    KABSCH_MAX_MAPPINGS,
+    MOLECULAR_HANDEDNESS_RMSD_TOLERANCE,
 )
 
 
@@ -184,7 +210,11 @@ class AdsorbateSiteLateral:
     atoms_occupied    : Any          = None
     #: Relaxed ASE :class:`~ase.Atoms` snapshot of the **unoccupied** state.
     atoms_unoccupied  : Any          = None
-    # ── Free-energy / vibrational fields (autokmc.thermo.free_energy) ────────────
+    #: Pre-optimization structures supplied to the occupied/unoccupied
+    #: relaxations. Persisted beside the relaxed structures for diagnostics.
+    atoms_occupied_initial   : Any    = None
+    atoms_unoccupied_initial : Any    = None
+    # The free-energy module populates these vibrational fields.
     #: Gibbs/Helmholtz correction (eV) for the **occupied** state — added
     #: to ``energy_occupied`` to obtain the surface free energy at *T*.
     #: ``None`` when free-energy mode is disabled or vibrations failed.
@@ -206,15 +236,25 @@ class AdsorbateSiteLateral:
     #: Atom indices in ``atoms_occupied`` that were displaced (for audit).
     vib_indices_occupied      : list = field(default_factory=list)
     vib_indices_unoccupied    : list = field(default_factory=list)
+    # Appended after the established init fields for checkpoint/positional
+    # constructor compatibility.
+    invalid_reason            : str | None = None
+    # Runtime indexes/caches used by lateral classification and rate building.
+    # They remain lazily attached so old checkpoints retain their exact state,
+    # but are explicit to type checkers and readers.
+    if TYPE_CHECKING:
+        _fingerprint : tuple = field(init=False, repr=False, compare=False)
+        _rate_cache : dict = field(init=False, repr=False, compare=False)
 
 
 @dataclass
 class AdsorbateSite:
     """One isomorphism class of N-atom molecule placements on a surface.
 
-    The iso-class deduplication uses the n-shell ego-subgraph around the
-    union of bonded surface-atom cliques (built by
-    :func:`~autokmc.sites.anchors._build_ego_graph`).
+    The iso-class deduplication uses a labeled coordination graph containing
+    the n-shell substrate ego-subgraph around the union of bonded cliques,
+    the complete reactant graph, and every adsorbate--surface coordination
+    edge.
 
     Attributes
     ----------
@@ -245,9 +285,12 @@ class AdsorbateSite:
             [G.nodes[n] for n in member_node_ids[k]]
 
     ego_graph : nx.Graph | None
-        The ``n_shells_pair`` ego-subgraph (built around the union of
-        bonded cliques *plus* occupied neighbour chains) that defines this
-        iso-class.
+        The labeled adsorption coordination graph used for iso-class
+        reduction.  Its substrate portion is the ``n_shells_pair`` ego-
+        subgraph around the union of bonded cliques; its adsorbate portion is
+        the complete reactant graph joined to the assigned surface cliques.
+        Live occupied neighbours are deliberately excluded and represented by
+        :class:`AdsorbateSiteLateral`.
     """
 
     reactant        : str
@@ -258,16 +301,42 @@ class AdsorbateSite:
     members         : list[list[frozenset | None]] = field(default_factory=list)
     member_node_ids : list[list[int]]              = field(default_factory=list)
     ego_graph       : Any                          = None
-    #: Ego depth at which this iso-class was discovered after any
-    #: ``auto_grow_shells`` retries inside :func:`find_adsorbate_sites`.
-    #: Re-used by :func:`optimise_adsorbate_site_positions` so that
-    #: representative→member Kabsch propagation uses an ego depth large
-    #: enough to span every bonded clique pair.
+    #: Anchor-enumeration depth selected after any ``auto_grow_shells`` retries
+    #: inside :func:`find_adsorbate_sites`. It is also used when projecting a
+    #: relaxed representative back into the graph's Cartesian frame.
     n_shells_settled: int                          = 0
+    #: Substrate-ego depth used by the decorated coordination graph that
+    #: defined this iso-class. This is distinct from anchor-enumeration depth.
+    coordination_n_shells: int                     = 0
     #: Lateral-interaction classes discovered so far for this iso-class
     #: (populated on demand by
     #: :func:`autokmc.sites.stability.adsorption.check_adsorbate_site_lateral`).
     lateral_classes : list[AdsorbateSiteLateral]   = field(default_factory=list)
+    #: Stable KMC identity.  Empty values from older checkpoints are upgraded
+    #: lazily by :func:`autokmc.sites.identity.site_identifier` after graph
+    #: materialisation has supplied the member-node signature.
+    site_id         : str                          = field(default="", compare=False)
+    # Mutable runtime state populated by graph materialisation, lateral
+    # classification, and reaction construction.  ``Any`` avoids importing
+    # reaction models back into the site layer.
+    # These remain lazily attached at runtime because ``hasattr`` is the
+    # compatibility signal used by older checkpoints and manually-built site
+    # objects.  Type checkers still see the fields explicitly, while the false
+    # runtime branch keeps them out of dataclass serialisation.
+    if TYPE_CHECKING:
+        _member_cliques : list[tuple[frozenset, ...]] = field(
+            init=False, repr=False, compare=False,
+        )
+        _n_occupied : int = field(init=False, repr=False, compare=False)
+        _lateral_fp_index : dict[tuple, list[AdsorbateSiteLateral]] = field(
+            init=False, repr=False, compare=False,
+        )
+        _member_lc : dict[int, AdsorbateSiteLateral] = field(
+            init=False, repr=False, compare=False,
+        )
+        applicable_reactions : list[Any] = field(
+            init=False, repr=False, compare=False,
+        )
 
     # ------------------------------------------------------------------
     # Occupancy helpers
@@ -324,12 +393,24 @@ def _mic_distance(
     return float(np.linalg.norm(dv))
 
 
+@dataclass(frozen=True)
+class _AnchorCandidateSpatialIndex:
+    tree: Any
+    source: np.ndarray
+    tiled_positions: np.ndarray
+    cell: np.ndarray
+    pbc: np.ndarray
+    cutoff: float
+
+
 def _build_anchor_spatial_index(
     candidates: list[tuple[frozenset, np.ndarray]],
     cell: np.ndarray,
     pbc: np.ndarray,
     use_mic: bool,
-):
+    *,
+    cutoff: float,
+) -> _AnchorCandidateSpatialIndex | None:
     """Build a KD-tree over anchor candidates, including periodic images."""
     if not candidates:
         return None
@@ -338,23 +419,31 @@ def _build_anchor_spatial_index(
     except Exception:  # pragma: no cover - SciPy is expected but optional here
         return None
 
+    radius = float(cutoff)
+    if not np.isfinite(radius) or radius < 0.0:
+        raise ValueError("spatial-index cutoff must be finite and non-negative")
+
+    cell_arr = np.asarray(cell, dtype=float)
+    pbc_arr = np.asarray(pbc, dtype=bool)
     pos = np.asarray([p for _, p in candidates], dtype=float)
     source = np.arange(len(candidates), dtype=int)
     tiled = pos
 
-    if use_mic and np.asarray(pbc, dtype=bool).any():
-        active_axes = [i for i, is_periodic in enumerate(pbc) if is_periodic]
-        shifts: list[np.ndarray] = []
-        for offsets in product((-1, 0, 1), repeat=len(active_axes)):
-            shift = np.zeros(3, dtype=int)
-            for ax, off in zip(active_axes, offsets):
-                shift[ax] = int(off)
-            shifts.append(shift)
-        translations = np.asarray(shifts, dtype=float) @ np.asarray(cell, dtype=float)
+    if use_mic and pbc_arr.any():
+        pos = wrap_positions_into_cell(pos, cell_arr, pbc_arr)
+        shifts = periodic_image_offsets(cell_arr, pbc_arr, radius)
+        translations = shifts.astype(float) @ cell_arr
         tiled = (pos[None, :, :] + translations[:, None, :]).reshape(-1, 3)
         source = np.tile(source, len(shifts))
 
-    return cKDTree(tiled), source, tiled
+    return _AnchorCandidateSpatialIndex(
+        tree=cKDTree(tiled),
+        source=source,
+        tiled_positions=tiled,
+        cell=cell_arr,
+        pbc=pbc_arr,
+        cutoff=radius,
+    )
 
 
 def _source_indices_within_radius(
@@ -365,12 +454,20 @@ def _source_indices_within_radius(
     """Return source indexes with any tiled point inside *radius* of centers."""
     if spatial_index is None:
         return []
-    tree, source, _ = spatial_index
+    radius_value = max(0.0, float(radius))
+    if radius_value > spatial_index.cutoff + 1.0e-12:
+        raise ValueError("query radius exceeds the spatial-index cutoff")
     centers_arr = np.asarray(centers, dtype=float).reshape(-1, 3)
+    if spatial_index.pbc.any():
+        centers_arr = wrap_positions_into_cell(
+            centers_arr,
+            spatial_index.cell,
+            spatial_index.pbc,
+        )
     seen: set[int] = set()
     for center in centers_arr:
-        for h in tree.query_ball_point(center, max(0.0, float(radius))):
-            seen.add(int(source[h]))
+        for h in spatial_index.tree.query_ball_point(center, radius_value):
+            seen.add(int(spatial_index.source[h]))
     return sorted(seen)
 
 
@@ -383,9 +480,17 @@ def _candidate_indices_in_annulus(
     """Return source candidate indexes within a Cartesian annulus."""
     if spatial_index is None:
         return []
-    tree, source, tiled = spatial_index
     outer = max(0.0, float(target) + float(tolerance))
-    hits = tree.query_ball_point(np.asarray(center, dtype=float), outer)
+    if outer > spatial_index.cutoff + 1.0e-12:
+        raise ValueError("annulus radius exceeds the spatial-index cutoff")
+    center_arr = np.asarray(center, dtype=float)
+    if spatial_index.pbc.any():
+        center_arr = wrap_positions_into_cell(
+            center_arr,
+            spatial_index.cell,
+            spatial_index.pbc,
+        )
+    hits = spatial_index.tree.query_ball_point(center_arr, outer)
     if not hits:
         return []
 
@@ -393,19 +498,21 @@ def _candidate_indices_in_annulus(
     out: set[int] = set()
     for h in hits:
         if lower > 0.0:
-            d = float(np.linalg.norm(tiled[h] - center))
+            d = float(
+                np.linalg.norm(spatial_index.tiled_positions[h] - center_arr)
+            )
             if d < lower:
                 continue
-        out.add(int(source[h]))
+        out.add(int(spatial_index.source[h]))
     return sorted(out)
 
 
 def _outward_normal_at(
     G: nx.Graph, p: np.ndarray, pbc: np.ndarray
 ) -> np.ndarray:
-    """Unit outward direction at *p*: +z for slabs, radial-out for NPs."""
+    """Unit outward direction at *p*: exposed slab face or radial-out for NPs."""
     if pbc.any():
-        return np.array([0.0, 0.0, 1.0])
+        return slab_outward_normal(G, p)
     surf_pos = np.array(
         [d["position"] for _, d in G.nodes(data=True)
          if d.get("type") == "surface"],
@@ -434,6 +541,12 @@ def _full_adsorbate_positions(
     n_atoms   = react_pos.shape[0]
 
     if len(bonded_indices) >= 2:
+        cell = np.asarray(G.graph.get("cell", np.eye(3)), dtype=float)
+        bonded_positions = unwrap_positions_about_reference(
+            bonded_positions,
+            cell,
+            pbc,
+        )
         R, t = _kabsch(react_pos[bonded_indices], bonded_positions)
         return react_pos @ R.T + t
 
@@ -468,7 +581,12 @@ def _full_adsorbate_positions(
                               [-axis[1], axis[0], 0.0]])
                 rel = rel @ (np.eye(3) + s * K + (1.0 - cos) * (K @ K)).T
             elif cos < 0.0:
-                rel = -rel
+                # A half-turn about any perpendicular axis is a proper
+                # rotation. Negating all coordinates would invert chirality.
+                basis = np.eye(3)[int(np.argmin(np.abs(v)))]
+                axis = np.cross(v, basis)
+                axis /= np.linalg.norm(axis)
+                rel = rel @ (2.0 * np.outer(axis, axis) - np.eye(3))
 
         # Planar one-anchor fragments such as CH3 have a near-zero centroid
         # of the non-bonded atoms.  Aligning that numerical noise to the
@@ -522,7 +640,7 @@ def _full_adsorbate_positions(
                               [-axis[1], axis[0], 0.0]])
                 rel = rel @ (np.eye(3) + s * K + (1.0 - cos) * (K @ K)).T
             elif cos < 0.0:
-                rel = -rel
+                _rotate_from_to(v, n_out)
     return rel + p_target
 
 
@@ -547,8 +665,8 @@ def _adsorbate_pose_is_outward(
         if not rows:
             continue
         if is_slab:
-            z_ref = max(float(p[2]) for p in rows)
-            if float(pos_arr[int(atom_i), 2] - z_ref) <= margin:
+            normal = slab_outward_normal(G, np.mean(rows, axis=0))
+            if float(np.dot(pos_arr[int(atom_i)], normal) - np.max(np.array(rows) @ normal)) <= margin:
                 return False
             continue
         centroid = np.asarray(rows, dtype=float).mean(axis=0)
@@ -576,8 +694,38 @@ def _canonical_subset_key(
     subset: tuple[int, ...],
     orbit_id: dict[int, tuple[str, int]],
 ) -> tuple:
-    """Orbit-multiset signature — equal keys → symmetry-equivalent subsets."""
+    """Coarse candidate bucket; equality does not prove subset equivalence."""
     return tuple(sorted(orbit_id[i] for i in subset))
+
+
+def _inequivalent_anchor_subsets(reactant_graph, subsets, orbit_id):
+    """Reduce whole marked subsets under a single molecular automorphism.
+
+    Individual atom orbits only prefilter comparisons. Exact marked-graph
+    matching avoids enumerating the potentially enormous automorphism group.
+    """
+    representatives: dict[tuple, list[nx.Graph]] = {}
+    canonical = []
+    for subset in subsets:
+        if not _anchor_subset_allowed(subset, orbit_id):
+            continue
+        key = _canonical_subset_key(subset, orbit_id)
+        marked = reactant_graph.copy()
+        selected = set(subset)
+        for node in marked:
+            marked.nodes[node]["selected_anchor"] = node in selected
+        matches = representatives.setdefault(key, [])
+        if any(nx.is_isomorphic(
+            marked, previous,
+            node_match=lambda a, b: (
+                a["selected_anchor"] == b["selected_anchor"]
+                and physical_node_match(a, b)
+            ),
+        ) for previous in matches):
+            continue
+        matches.append(marked)
+        canonical.append(subset)
+    return canonical
 
 
 def _anchor_subset_allowed(
@@ -606,7 +754,12 @@ def _anchor_subset_allowed(
 def _fingerprint(g: nx.Graph) -> tuple:
     """Cheap graph fingerprint — unequal → guaranteed non-isomorphic."""
     elem_deg = tuple(sorted(
-        (d.get("element", "X"), g.degree(n))
+        (
+            d.get("coordination_role", "substrate"),
+            d.get("element", "X"),
+            atom_metadata_key(d),
+            g.degree(n),
+        )
         for n, d in g.nodes(data=True)
     ))
     return (
@@ -614,12 +767,101 @@ def _fingerprint(g: nx.Graph) -> tuple:
         g.number_of_edges(),
         tuple(sorted(g.degree(n) for n in g.nodes())),
         elem_deg,
+        tuple(sorted(
+            d.get("coordination_kind", "substrate")
+            for _u, _v, d in g.edges(data=True)
+        )),
     )
 
 
 def _placement_signature(atom_cliques: list) -> tuple:
     """Hashable canonical key for a raw placement."""
     return tuple(None if c is None else frozenset(c) for c in atom_cliques)
+
+
+def _build_adsorbate_coordination_graph(
+    substrate_ego: nx.Graph,
+    atom_cliques: list,
+    reactant_graph: nx.Graph,
+) -> nx.Graph:
+    """Return the complete labeled graph used to classify one placement.
+
+    Node ids are namespaced so reactant indices cannot collide with substrate
+    ids.  ``coordination_role`` prevents a same-element adsorbate atom from
+    being mapped onto a substrate atom, while ``coordination_kind`` preserves
+    substrate, molecular, and adsorption edges as distinct edge types.
+
+    Including the individual adsorption edges is essential: the union of the
+    cliques alone cannot distinguish, for example, O2 bridge--bridge from
+    hollow--bridge when both placements touch the same set of surface atoms.
+    """
+    decorated = nx.Graph()
+
+    for node, data in substrate_ego.nodes(data=True):
+        attrs = dict(data)
+        attrs["coordination_role"] = "substrate"
+        decorated.add_node(("substrate", node), **attrs)
+    for left, right, data in substrate_ego.edges(data=True):
+        attrs = dict(data)
+        attrs["coordination_kind"] = "substrate"
+        decorated.add_edge(
+            ("substrate", left),
+            ("substrate", right),
+            **attrs,
+        )
+
+    for atom_index in range(len(atom_cliques)):
+        attrs = dict(reactant_graph.nodes[atom_index])
+        attrs["coordination_role"] = "adsorbate"
+        decorated.add_node(("adsorbate", atom_index), **attrs)
+    for left, right, data in reactant_graph.edges(data=True):
+        attrs = dict(data)
+        attrs["coordination_kind"] = "molecular"
+        decorated.add_edge(
+            ("adsorbate", int(left)),
+            ("adsorbate", int(right)),
+            **attrs,
+        )
+
+    for atom_index, clique in enumerate(atom_cliques):
+        if clique is None:
+            continue
+        for surface_node in clique:
+            substrate_node = ("substrate", surface_node)
+            if substrate_node not in decorated:
+                raise ValueError(
+                    "Adsorbate coordination clique contains substrate node "
+                    f"{surface_node!r} outside its substrate ego graph."
+                )
+            decorated.add_edge(
+                ("adsorbate", atom_index),
+                substrate_node,
+                coordination_kind="adsorption",
+            )
+
+    return decorated
+
+
+def _coordination_graph_for_placement(
+    G: nx.Graph,
+    atom_cliques: list,
+    reactant_graph: nx.Graph,
+    n_shells: int,
+) -> nx.Graph:
+    """Build the complete coordination graph for one stored placement."""
+    seed = frozenset(
+        int(surface_node)
+        for clique in atom_cliques
+        if clique is not None
+        for surface_node in clique
+    )
+    if not seed:
+        raise ValueError("an adsorbate placement must contain a bonded surface clique")
+    return _build_adsorbate_coordination_graph(
+        _build_ego_graph(G, seed, int(n_shells)),
+        atom_cliques,
+        reactant_graph,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -739,17 +981,33 @@ def _ensure_anchor_sites(
     co_factor: float = CO_FACTOR,
     opt_factor: float = OPT_FACTOR,
     repulsion_weight: float = REPULSION_WEIGHT,
+    repulsion_cutoff: float | None = REPULSION_CUTOFF,
     n_shells: int = N_SHELLS_DEFAULT,
+    anchor_k_max: int | None = None,
+    hull_tolerance: float = HULL_TOL,
+    kabsch_max_mappings: int = KABSCH_MAX_MAPPINGS,
     verbose: bool = False,
 ) -> None:
     """Lazily run :func:`~autokmc.sites.anchors.find_anchor_sites` if needed."""
-    if element not in G.graph.get("anchor_sites", {}):
+    cap_by_element = G.graph.get(ANCHOR_K_MAX_BY_ELEMENT, {})
+    needs_enumeration = element not in G.graph.get("anchor_sites", {})
+    if not needs_enumeration:
+        if element in cap_by_element:
+            needs_enumeration = cap_by_element[element] != anchor_k_max
+        else:
+            # Anchors restored from an older graph have no cap provenance.
+            needs_enumeration = True
+    if needs_enumeration:
         find_anchor_sites(
             G, element,
             co_factor=co_factor,
             opt_factor=opt_factor,
             repulsion_weight=repulsion_weight,
+            repulsion_cutoff=repulsion_cutoff,
             n_shells=n_shells,
+            k_max=anchor_k_max,
+            hull_tolerance=hull_tolerance,
+            kabsch_max_mappings=kabsch_max_mappings,
             verbose=verbose,
         )
 
@@ -833,6 +1091,7 @@ def _try_merge_or_new(
     positions: np.ndarray,
     ego_graph: nx.Graph,
     node_match,
+    edge_match,
     seen_signatures: set,
 ) -> None:
     """Merge into an existing iso-class if isomorphic, else append a new one.
@@ -857,7 +1116,10 @@ def _try_merge_or_new(
         if _fingerprint(ms.ego_graph) != fkey:
             continue
         if isomorphism.GraphMatcher(
-            ego_graph, ms.ego_graph, node_match=node_match
+            ego_graph,
+            ms.ego_graph,
+            node_match=node_match,
+            edge_match=edge_match,
         ).is_isomorphic():
             ms.members.append(list(atom_cliques))
             return
@@ -898,8 +1160,8 @@ def rebuild_adsorbate_reverse_indexes(G: nx.Graph) -> None:
     sites_by_smiles = G.graph.get("adsorbate_sites", {}) or {}
     for sites in sites_by_smiles.values():
         for ms in sites:
-            ms._member_cliques = []  # type: ignore[attr-defined]
-            ms._n_occupied = 0  # type: ignore[attr-defined]
+            ms._member_cliques = []
+            ms._n_occupied = 0
             for m_idx, node_ids in enumerate(ms.member_node_ids):
                 cliques: list = []
                 member_occupied = False
@@ -919,9 +1181,9 @@ def rebuild_adsorbate_reverse_indexes(G: nx.Graph) -> None:
                         surface_node_to_members.setdefault(
                             int(surf_id), [],
                         ).append((ms, m_idx))
-                ms._member_cliques.append(tuple(cliques))  # type: ignore[attr-defined]
+                ms._member_cliques.append(tuple(cliques))
                 if member_occupied:
-                    ms._n_occupied += 1  # type: ignore[attr-defined]
+                    ms._n_occupied += 1
                     n_occupied += 1
 
     G.graph["clique_to_members"] = clique_to_members
@@ -992,6 +1254,7 @@ def _materialise_adsorbate_nodes(
         reactant       = reactant.smiles
         iso_class      = ms.iso_class
         reactant_index = atom index within the reactant
+        reactant_orbit = molecular automorphism-orbit index for that element
         element        = atom element symbol
         clique         = frozenset of bonded surface atom ids (or None)
         is_bonded      = clique is not None
@@ -1036,6 +1299,7 @@ def _materialise_adsorbate_nodes(
         list(reactant.graph.edges())
         if reactant.graph is not None else []
     )
+    reactant_orbits = _orbit_id_of(reactant)
 
     _remove_adsorbate_nodes(G, smiles)
 
@@ -1066,9 +1330,9 @@ def _materialise_adsorbate_nodes(
                 positions, atom_cliques, cell, pbc,
             )
 
-            # Allocate a contiguous block of new node ids.
-            base     = _next_node_id(G)
-            node_ids = [base + i for i in range(len(react_sym))]
+            # Allocate a contiguous block without rescanning every graph node
+            # for every member.
+            node_ids = list(_reserve_node_ids(G, len(react_sym)))
 
             # Add one node per reactant atom.
             for i, nid in enumerate(node_ids):
@@ -1086,11 +1350,13 @@ def _materialise_adsorbate_nodes(
                     site_iso_class  = int(ms.iso_class),
                     site_member_index = int(member_index),
                     reactant_index  = int(i),
+                    reactant_orbit  = int(reactant_orbits[i][1]),
                     clique          = (frozenset(clq) if clq is not None else None),
                     k               = (len(clq) if clq is not None else 0),
                     is_bonded       = (clq is not None),
                     siblings        = tuple(n for n in node_ids if n != nid),
                     optimised       = False,
+                    atom_arrays     = atom_metadata(reactant.atoms, i),
                 )
 
             # Intramolecular edges (mirror reactant.graph topology).
@@ -1112,10 +1378,17 @@ def _materialise_adsorbate_nodes(
                 for surf_id in clq:
                     if surf_id not in G:
                         continue
-                    d = float(np.linalg.norm(
+                    displacement = (
                         np.asarray(G.nodes[surf_id]["position"], dtype=float)
                         - positions[i]
-                    ))
+                    )
+                    if pbc.any():
+                        displacement = minimum_image_vectors(
+                            displacement,
+                            cell,
+                            pbc,
+                        )
+                    d = float(np.linalg.norm(displacement))
                     G.add_edge(nid, surf_id, distance=d, offset=(0, 0, 0),
                                anchor_bond=True)
 
@@ -1132,6 +1405,7 @@ def _build_pruning_atoms(
     react_sym: list[str],
     *,
     frozen_indices: list[int] | None = None,
+    reactant_atoms=None,
 ):
     """Build an ASE Atoms object for a bare (no lateral neighbours) stability check.
 
@@ -1177,12 +1451,205 @@ def _build_pruning_atoms(
     pbc  = full_pbc_for_cell(cell)
 
     atoms = Atoms(symbols=symbols, positions=positions, cell=cell, pbc=pbc)
+    representative_ids = ms.member_node_ids[0] if ms.member_node_ids else []
+    if reactant_atoms is not None:
+        ads_metadata = [
+            {"element": symbol, "atom_arrays": atom_metadata(reactant_atoms, i)}
+            for i, symbol in enumerate(react_sym)
+        ]
+    elif len(representative_ids) == n_ads:
+        ads_metadata = [G.nodes[node] for node in representative_ids]
+    else:
+        ads_metadata = [{"element": symbol} for symbol in react_sym]
+    apply_atom_metadata(atoms, [G.nodes[node] for node in slab_nodes] + ads_metadata)
     atoms.arrays["surface"] = surface_array
     if frozen_indices:
         atoms.set_constraint(FixAtoms(indices=list(frozen_indices)))
 
     node_to_ase = {int(nid): i for i, nid in enumerate(slab_nodes)}
     return atoms, len(slab_nodes), n_ads, node_to_ase
+
+
+class _RigidAdsorbateOptimizable(Optimizable):
+    """Expose one adsorbate's rigid modes to an ASE optimizer.
+
+    The first pseudo-position contains translation in Angstrom.  Molecular
+    adsorbates have a second pseudo-position containing an axis-angle rotation
+    multiplied by a characteristic molecular length.  The corresponding
+    pseudo-forces are the net adsorbate force and torque divided by that same
+    length, so ASE's ordinary ``fmax`` test has eV/Angstrom units for both
+    rigid modes.  Slab coordinates are never exposed to the optimizer.
+    """
+
+    def __init__(self, atoms, n_slab: int) -> None:
+        self.atoms = atoms
+        self.n_slab = int(n_slab)
+        self.n_ads = len(atoms) - self.n_slab
+        if self.n_ads < 1:
+            raise ValueError(
+                "rigid adsorbate optimization requires at least one atom"
+            )
+
+        adsorbate_positions = np.asarray(
+            atoms.get_positions()[self.n_slab :],
+            dtype=float,
+        )
+        adsorbate_positions = unwrap_positions_about_reference(
+            adsorbate_positions,
+            np.asarray(atoms.cell, dtype=float),
+            np.asarray(atoms.pbc, dtype=bool),
+        )
+        self.center = adsorbate_positions.mean(axis=0)
+        self.reference_offsets = adsorbate_positions - self.center
+        squared_radii = np.einsum(
+            "ij,ij->i",
+            self.reference_offsets,
+            self.reference_offsets,
+        )
+        rms_radius = float(np.sqrt(np.mean(squared_radii)))
+        # A 1-Angstrom floor prevents tiny or nearly coincident structures
+        # from turning a harmless torque into a numerically enormous force.
+        self.rotation_scale = max(1.0, rms_radius)
+        self.has_rotation = self.n_ads > 1 and rms_radius > 1.0e-12
+        self.coordinates = np.zeros((2 if self.has_rotation else 1, 3))
+
+        positions = atoms.get_positions()
+        positions[self.n_slab :] = adsorbate_positions
+        atoms.set_positions(positions)
+
+    def ndofs(self) -> int:
+        """Return the number of generalized rigid-body degrees of freedom."""
+        return int(self.coordinates.size)
+
+    def get_x(self) -> np.ndarray:
+        """Return translation and scaled axis-angle coordinates."""
+        return self.coordinates.ravel().copy()
+
+    def set_x(self, coordinates) -> None:
+        """Set flat translation and scaled axis-angle coordinates."""
+        candidate = np.asarray(coordinates, dtype=float)
+        if candidate.ndim != 1 or candidate.size != self.coordinates.size:
+            raise ValueError(
+                "rigid optimizer coordinates must be a flat array containing "
+                f"{self.coordinates.size} values, got shape {candidate.shape}"
+            )
+        self.coordinates = candidate.reshape(self.coordinates.shape).copy()
+        if self.has_rotation:
+            rotvec = self.coordinates[1] / self.rotation_scale
+            rotation = _rotation_from_axis_angle(rotvec)
+            adsorbate_positions = self.reference_offsets @ rotation.T
+        else:
+            adsorbate_positions = self.reference_offsets.copy()
+        adsorbate_positions += self.center + self.coordinates[0]
+
+        positions = self.atoms.get_positions()
+        positions[self.n_slab :] = adsorbate_positions
+        self.atoms.set_positions(positions)
+
+    def _generalized_forces(self) -> np.ndarray:
+        """Return net translation and length-scaled rotational forces."""
+        atomic_forces = np.asarray(self.atoms.get_forces(), dtype=float)
+        adsorbate_forces = atomic_forces[self.n_slab :]
+        if not np.all(np.isfinite(adsorbate_forces)):
+            raise ValueError("calculator returned non-finite adsorbate forces")
+
+        generalized_forces = np.empty_like(self.coordinates)
+        generalized_forces[0] = adsorbate_forces.sum(axis=0)
+        if self.has_rotation:
+            rotvec = self.coordinates[1] / self.rotation_scale
+            rotation = _rotation_from_axis_angle(rotvec)
+            right_jacobian = _rotation_right_jacobian(rotvec)
+            body_forces = adsorbate_forces @ rotation
+            body_torque = np.cross(
+                self.reference_offsets,
+                body_forces,
+            ).sum(axis=0)
+            generalized_forces[1] = (
+                right_jacobian.T @ body_torque
+            ) / self.rotation_scale
+        return generalized_forces
+
+    def get_gradient(self) -> np.ndarray:
+        """Return the flat energy gradient for ASE's Optimizable protocol."""
+        return -self._generalized_forces().ravel()
+
+    def get_value(self) -> float:
+        """Return the potential energy of the full slab and adsorbate."""
+        return float(self.atoms.get_potential_energy())
+
+    def iterimages(self):
+        return self.atoms.iterimages()
+
+    def gradient_norm(self, gradient) -> float:
+        """Return the largest norm across translation and rotation modes."""
+        values = np.asarray(gradient, dtype=float)
+        if values.size != self.coordinates.size:
+            raise ValueError(
+                "rigid optimizer gradient must contain "
+                f"{self.coordinates.size} values, got {values.size}"
+            )
+        modes = values.reshape(self.coordinates.shape)
+        return float(np.linalg.norm(modes, axis=1).max())
+
+
+def _optimise_rigid_adsorbate_with_potential(
+    atoms,
+    n_slab: int,
+    calculator,
+    *,
+    fmax: float,
+    max_steps: int,
+    optimizer: str,
+    optimizer_kwargs: dict[str, Any] | None,
+):
+    """Optimize only rigid adsorbate translation/rotation with a potential."""
+    from autokmc.structure.optimization import (
+        StructureOptimisationError,
+        _optimizer_class,
+    )
+
+    result = atoms.copy()
+    result.calc = calculator
+    rigid = _RigidAdsorbateOptimizable(result, n_slab)
+    optimizer_cls = _optimizer_class(optimizer)
+    constructor_kwargs = normalize_optimizer_kwargs(
+        optimizer,
+        optimizer_kwargs,
+        allowed=REGULAR_OPTIMIZERS,
+        setting="optimizer_kwargs",
+    )
+    # One global optimizer restart/trajectory cannot safely be shared by the
+    # two-coordinate rigid body and the subsequent full atomic relaxation.
+    constructor_kwargs.pop("restart", None)
+    constructor_kwargs.pop("trajectory", None)
+    opt = optimizer_cls(rigid, logfile=os.devnull, **constructor_kwargs)
+    try:
+        opt.run(fmax=fmax, steps=max_steps)
+        gradient = rigid.get_gradient()
+    except CalculatorConfigError:
+        raise
+    except Exception as exc:
+        completed_steps = int(opt.get_number_of_steps())
+        raise StructureOptimisationError(
+            "rigid adsorbate optimization failed after "
+            f"{completed_steps} steps: {type(exc).__name__}: {exc}",
+            result,
+            converged=None,
+            steps=completed_steps,
+        ) from exc
+
+    completed_steps = int(opt.get_number_of_steps())
+    max_generalized_force = rigid.gradient_norm(gradient)
+    if not rigid.converged(gradient, fmax):
+        raise StructureOptimisationError(
+            "rigid adsorbate optimization did not converge within "
+            f"{max_steps} steps (fmax={fmax} eV/Angstrom; "
+            f"max rigid force={max_generalized_force:.6g} eV/Angstrom)",
+            result,
+            converged=False,
+            steps=completed_steps,
+        )
+    return result, max_generalized_force, completed_steps
 
 
 def _relaxed_adsorbate_positions_in_graph_frame(
@@ -1223,11 +1690,11 @@ def _relaxed_adsorbate_positions_in_graph_frame(
     if not frame_nodes:
         return ads_pos
 
-    graph_pos = np.asarray(
+    graph_pos_raw = np.asarray(
         [G.nodes[n]["position"] for n in frame_nodes],
         dtype=float,
     )
-    relaxed_pos = np.asarray(
+    relaxed_pos_raw = np.asarray(
         [all_pos[node_to_ase[n]] for n in frame_nodes],
         dtype=float,
     )
@@ -1235,11 +1702,25 @@ def _relaxed_adsorbate_positions_in_graph_frame(
     cell = np.array(G.graph.get("cell", np.eye(3)), dtype=float)
     pbc = _effective_pbc(G, cell)
     if pbc.any():
-        relaxed_pos = graph_pos + minimum_image_vectors(
-            relaxed_pos - graph_pos,
+        graph_pos = unwrap_positions_about_reference(
+            graph_pos_raw,
             cell,
             pbc,
         )
+        relaxed_pos = graph_pos + minimum_image_vectors(
+            relaxed_pos_raw - graph_pos_raw,
+            cell,
+            pbc,
+        )
+        ads_pos = unwrap_positions_about_reference(
+            ads_pos,
+            cell,
+            pbc,
+            reference=graph_pos[0],
+        )
+    else:
+        graph_pos = graph_pos_raw
+        relaxed_pos = relaxed_pos_raw
 
     R, t = _kabsch(relaxed_pos, graph_pos)
     return ads_pos @ R.T + t
@@ -1303,6 +1784,165 @@ def _adsorbate_edges_from_graph(
     return edges
 
 
+@dataclass(frozen=True)
+class _GeometryConnectivityContext:
+    """Precomputed invariant data for rigid-pose connectivity checks."""
+
+    slab_positions: np.ndarray
+    slab_cutoffs: np.ndarray
+    adsorbate_cutoffs: np.ndarray
+    node_to_slab_index: dict[int, int]
+    intramolecular_edges: frozenset[frozenset]
+    cell: np.ndarray
+    pbc: np.ndarray
+
+    @property
+    def n_slab(self) -> int:
+        return int(len(self.slab_positions))
+
+
+def _prepare_geometry_connectivity_context(
+    G: nx.Graph,
+    reactant,
+    *,
+    nl_mult: float,
+) -> _GeometryConnectivityContext:
+    """Build the invariant half of the ASE-neighbour-list connectivity test."""
+    from ase.data import atomic_numbers as _AN, covalent_radii as _RC
+
+    slab_nodes = sorted(
+        (
+            int(node)
+            for node, data in G.nodes(data=True)
+            if data.get("type") in ("bulk", "surface")
+        ),
+        key=lambda node: G.nodes[node].get("index", node),
+    )
+    slab_positions = np.asarray(
+        [G.nodes[node]["position"] for node in slab_nodes],
+        dtype=float,
+    ).reshape((-1, 3))
+    slab_cutoffs = np.asarray(
+        [
+            float(nl_mult) * float(_RC[_AN[G.nodes[node]["element"]]])
+            + NEIGHBORLIST_SKIN
+            for node in slab_nodes
+        ],
+        dtype=float,
+    )
+    adsorbate_cutoffs = np.asarray(
+        [
+            float(nl_mult) * float(_RC[_AN[symbol]])
+            + NEIGHBORLIST_SKIN
+            for symbol in reactant.atoms.get_chemical_symbols()
+        ],
+        dtype=float,
+    )
+    n_slab = len(slab_nodes)
+    intramolecular_edges = frozenset(
+        frozenset((n_slab + int(u), n_slab + int(v)))
+        for u, v in (
+            reactant.graph.edges()
+            if reactant.graph is not None
+            else ()
+        )
+    )
+    cell = np.asarray(G.graph.get("cell", np.zeros((3, 3))), dtype=float)
+    return _GeometryConnectivityContext(
+        slab_positions=slab_positions,
+        slab_cutoffs=slab_cutoffs,
+        adsorbate_cutoffs=adsorbate_cutoffs,
+        node_to_slab_index={
+            int(node): index for index, node in enumerate(slab_nodes)
+        },
+        intramolecular_edges=intramolecular_edges,
+        cell=cell,
+        # Match ``_build_pruning_atoms`` / ``build_graph`` exactly: a real
+        # material cell is treated as periodic along every lattice vector.
+        pbc=full_pbc_for_cell(cell),
+    )
+
+
+def _intended_geometry_edges(
+    context: _GeometryConnectivityContext,
+    atom_cliques: list,
+) -> set[frozenset]:
+    """Return intended intramolecular plus surface-anchor edges."""
+    intended = set(context.intramolecular_edges)
+    for adsorbate_index, clique in enumerate(atom_cliques):
+        if clique is None:
+            continue
+        adsorbate_node = context.n_slab + int(adsorbate_index)
+        for surface_node in clique:
+            slab_index = context.node_to_slab_index.get(int(surface_node))
+            if slab_index is not None:
+                intended.add(frozenset((adsorbate_node, slab_index)))
+    return intended
+
+
+def _actual_geometry_edges(
+    context: _GeometryConnectivityContext,
+    positions: np.ndarray,
+) -> set[frozenset]:
+    """Vectorised equivalent of ASE ``NeighborList`` adsorbate edges."""
+    positions = np.asarray(positions, dtype=float).reshape((-1, 3))
+    n_adsorbate = len(positions)
+    actual: set[frozenset] = set()
+
+    if context.n_slab and n_adsorbate:
+        displacements = (
+            context.slab_positions[None, :, :] - positions[:, None, :]
+        )
+        if context.pbc.any():
+            displacements = minimum_image_vectors(
+                displacements,
+                context.cell,
+                context.pbc,
+            )
+        distances = np.linalg.norm(displacements, axis=2)
+        thresholds = (
+            context.adsorbate_cutoffs[:, None]
+            + context.slab_cutoffs[None, :]
+        )
+        for adsorbate_index, slab_index in np.argwhere(
+            distances < thresholds
+        ):
+            actual.add(
+                frozenset(
+                    (
+                        context.n_slab + int(adsorbate_index),
+                        int(slab_index),
+                    )
+                )
+            )
+
+    if n_adsorbate > 1:
+        pair_displacements = positions[None, :, :] - positions[:, None, :]
+        if context.pbc.any():
+            pair_displacements = minimum_image_vectors(
+                pair_displacements,
+                context.cell,
+                context.pbc,
+            )
+        pair_distances = np.linalg.norm(pair_displacements, axis=2)
+        pair_thresholds = (
+            context.adsorbate_cutoffs[:, None]
+            + context.adsorbate_cutoffs[None, :]
+        )
+        for first in range(n_adsorbate):
+            for second in range(first + 1, n_adsorbate):
+                if pair_distances[first, second] < pair_thresholds[first, second]:
+                    actual.add(
+                        frozenset(
+                            (
+                                context.n_slab + first,
+                                context.n_slab + second,
+                            )
+                        )
+                    )
+    return actual
+
+
 def _geometry_connectivity_mismatch(
     G: nx.Graph,
     ms: AdsorbateSite,
@@ -1310,35 +1950,354 @@ def _geometry_connectivity_mismatch(
     positions: np.ndarray,
     *,
     nl_mult: float = NL_MULT_DEFAULT,
+    _context: _GeometryConnectivityContext | None = None,
 ) -> tuple[set[frozenset], set[frozenset]] | None:
     """Return ``(missing, extra)`` if a calc-free geometry has wrong bonds.
 
-    This uses the same canonical ``build_graph`` comparison as the later
-    calculator stability pruning, but runs on the rigid-body geometry before
-    any ML/DFT relaxation.  ``None`` means the geometry already satisfies the
-    required adsorbate intramolecular and adsorbate-surface connectivity.
+    The calculation is exactly equivalent to the ASE ``NeighborList`` cutoff
+    used by :func:`autokmc.core.graph.build_graph`, including its 0.3 Å
+    per-atom skin, but evaluates only adsorbate-touching pairs using vectorised
+    minimum-image distances.  Rigid refinement can therefore reuse one
+    precomputed slab/cutoff context instead of rebuilding a complete
+    ``Atoms`` and neighbour list after every orientation.
     """
-    from autokmc.core.graph import build_graph
+    return _geometry_connectivity_mismatch_for_cliques(
+        G,
+        ms.atom_cliques,
+        reactant,
+        positions,
+        nl_mult=nl_mult,
+        _context=_context,
+    )
 
-    original = np.asarray(ms.positions, dtype=float).copy()
-    try:
-        ms.positions = np.asarray(positions, dtype=float)
-        atoms_init, n_slab, _n_ads, node_to_ase = _build_pruning_atoms(
-            G,
-            ms,
-            list(reactant.atoms.get_chemical_symbols()),
-        )
-    finally:
-        ms.positions = original
 
-    intended_edges = _intended_adsorbate_edges(ms, reactant, n_slab, node_to_ase)
-    G_geometry = build_graph(atoms_init, nl_mult=nl_mult)
-    actual_edges = _adsorbate_edges_from_graph(G_geometry, n_slab)
+def _geometry_connectivity_mismatch_for_cliques(
+    G: nx.Graph,
+    atom_cliques: list,
+    reactant,
+    positions: np.ndarray,
+    *,
+    nl_mult: float = NL_MULT_DEFAULT,
+    _context: _GeometryConnectivityContext | None = None,
+) -> tuple[set[frozenset], set[frozenset]] | None:
+    """Connectivity mismatch for explicit per-atom surface cliques."""
+    context = _context or _prepare_geometry_connectivity_context(
+        G,
+        reactant,
+        nl_mult=float(nl_mult),
+    )
+    intended_edges = _intended_geometry_edges(context, atom_cliques)
+    actual_edges = _actual_geometry_edges(context, positions)
     missing = intended_edges - actual_edges
     extra = actual_edges - intended_edges
     if missing or extra:
         return missing, extra
     return None
+
+
+def _compact_graph_positions(
+    G: nx.Graph,
+    nodes: list[int],
+    seed_nodes: list[int],
+    cell: np.ndarray,
+    pbc: np.ndarray,
+) -> np.ndarray:
+    """Return graph-node positions in one MIC-consistent local image."""
+    positions = np.asarray(
+        [G.nodes[int(node)]["position"] for node in nodes],
+        dtype=float,
+    )
+    if not np.asarray(pbc, dtype=bool).any():
+        return positions
+
+    seed_positions = np.asarray(
+        [G.nodes[int(node)]["position"] for node in seed_nodes],
+        dtype=float,
+    )
+    seed_unwrapped = unwrap_positions_about_reference(
+        seed_positions,
+        cell,
+        pbc,
+    )
+    reference = seed_unwrapped.mean(axis=0)
+    return unwrap_positions_about_reference(
+        positions,
+        cell,
+        pbc,
+        reference=reference,
+    )
+
+
+def _mapped_adsorbate_positions(
+    representative_positions: np.ndarray,
+    mapping: dict,
+    rotation: np.ndarray,
+    translation: np.ndarray,
+) -> np.ndarray:
+    """Apply a decorated-graph mapping, including its molecular permutation."""
+    representative_positions = np.asarray(representative_positions, dtype=float)
+    transformed = representative_positions @ rotation.T + translation
+    member_positions = np.empty_like(transformed)
+    assigned: set[int] = set()
+
+    for representative_index in range(len(representative_positions)):
+        mapped_node = mapping.get(("adsorbate", representative_index))
+        if (
+            not isinstance(mapped_node, tuple)
+            or len(mapped_node) != 2
+            or mapped_node[0] != "adsorbate"
+        ):
+            raise ValueError(
+                "coordination-graph mapping did not preserve an adsorbate node"
+            )
+        member_index = int(mapped_node[1])
+        if member_index < 0 or member_index >= len(member_positions):
+            raise ValueError("coordination-graph mapping produced an invalid atom index")
+        if member_index in assigned:
+            raise ValueError("coordination-graph mapping is not a molecular permutation")
+        member_positions[member_index] = transformed[representative_index]
+        assigned.add(member_index)
+
+    if len(assigned) != len(member_positions):
+        raise ValueError("coordination-graph mapping omitted an adsorbate atom")
+    return member_positions
+
+
+def _unconstrained_orthogonal_alignment(
+    source: np.ndarray,
+    destination: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Best orthogonal alignment, permitting a reflection when required."""
+    source_centroid = source.mean(axis=0)
+    destination_centroid = destination.mean(axis=0)
+    covariance = (
+        (source - source_centroid).T
+        @ (destination - destination_centroid)
+    )
+    left, _singular_values, right_transpose = np.linalg.svd(covariance)
+    rotation = right_transpose.T @ left.T
+    translation = destination_centroid - rotation @ source_centroid
+    return rotation, translation
+
+
+def _molecular_mapping_preserves_handedness(
+    representative_positions: np.ndarray,
+    mapped_positions: np.ndarray,
+    *,
+    rmsd_tol: float = MOLECULAR_HANDEDNESS_RMSD_TOLERANCE,
+) -> bool:
+    """Return whether a mapped molecular pose is proper-rotation equivalent.
+
+    An improper substrate isometry is safe for a linear, planar, or achiral
+    molecular mapping when the resulting atom-ordered geometry can itself be
+    superimposed on the representative by a proper rotation within
+    ``rmsd_tol``. It is rejected when that test detects a resolved chiral
+    inversion. The default 0.01 Å tolerance accommodates molecular structures
+    converged against a force threshold rather than exact symmetry constraints.
+    """
+    rotation, translation = _kabsch(
+        np.asarray(representative_positions, dtype=float),
+        np.asarray(mapped_positions, dtype=float),
+    )
+    residual = (
+        np.asarray(representative_positions, dtype=float) @ rotation.T
+        + translation
+        - np.asarray(mapped_positions, dtype=float)
+    )
+    rmsd = float(np.sqrt(np.mean(np.einsum("ij,ij->i", residual, residual))))
+    return rmsd <= float(rmsd_tol)
+
+
+def _propagate_adsorbate_member_positions(
+    G: nx.Graph,
+    representative_cliques: list,
+    member_cliques: list,
+    representative_positions: np.ndarray,
+    reactant,
+    *,
+    n_shells: int,
+    nl_mult: float = NL_MULT_DEFAULT,
+    max_mappings: int = KABSCH_MAX_MAPPINGS,
+    rmsd_tol: float = 1.0e-4,
+    _context: _GeometryConnectivityContext | None = None,
+) -> np.ndarray:
+    """Map a representative pose to one member using the full site graph.
+
+    Every candidate graph isomorphism supplies both the substrate-node
+    correspondence used for the MIC-aware Kabsch fit and the molecular atom
+    permutation used to write the transformed coordinates. A candidate is
+    accepted only if it remains outward and has exactly the member's intended
+    intramolecular and surface-anchor connectivity.
+
+    Raises
+    ------
+    RuntimeError
+        If no valid decorated mapping is found within *max_mappings*. This is
+        deliberately fail-closed: leaving stale positions or writing a pose
+        validated only against the union of surface cliques can corrupt later
+        adsorption, diffusion, and bond-reaction structures.
+    """
+    mapping_limit = int(max_mappings)
+    if mapping_limit < 1:
+        raise ValueError("max_mappings must be at least 1")
+
+    representative_graph = _coordination_graph_for_placement(
+        G,
+        representative_cliques,
+        reactant.graph,
+        n_shells,
+    )
+    member_graph = _coordination_graph_for_placement(
+        G,
+        member_cliques,
+        reactant.graph,
+        n_shells,
+    )
+    def node_match(left, right):
+        return (
+            left.get("coordination_role", "substrate")
+            == right.get("coordination_role", "substrate")
+            and physical_node_match(left, right)
+        )
+    edge_match = isomorphism.categorical_edge_match(
+        "coordination_kind",
+        "substrate",
+    )
+    matcher = isomorphism.GraphMatcher(
+        representative_graph,
+        member_graph,
+        node_match=node_match,
+        edge_match=edge_match,
+    )
+
+    representative_surface_nodes = sorted(
+        int(node[1])
+        for node, data in representative_graph.nodes(data=True)
+        if data.get("coordination_role") == "substrate"
+    )
+    representative_seed = sorted(
+        {
+            int(surface_node)
+            for clique in representative_cliques
+            if clique is not None
+            for surface_node in clique
+        }
+    )
+    member_seed = sorted(
+        {
+            int(surface_node)
+            for clique in member_cliques
+            if clique is not None
+            for surface_node in clique
+        }
+    )
+    cell, _cell_inv, pbc, _use_mic = _get_cell(G)
+    source = _compact_graph_positions(
+        G,
+        representative_surface_nodes,
+        representative_seed,
+        cell,
+        pbc,
+    )
+
+    best_positions: np.ndarray | None = None
+    best_rmsd = np.inf
+    mappings_tested = 0
+    outward_rejections = 0
+    connectivity_rejections = 0
+    handedness_rejections = 0
+
+    for mapping_index, mapping in enumerate(matcher.isomorphisms_iter()):
+        if mapping_index >= mapping_limit:
+            break
+        mappings_tested += 1
+        mapped_member_nodes = [
+            int(mapping[("substrate", node)][1])
+            for node in representative_surface_nodes
+        ]
+        destination = _compact_graph_positions(
+            G,
+            mapped_member_nodes,
+            member_seed,
+            cell,
+            pbc,
+        )
+        proper_transform = _kabsch(source, destination)
+        orthogonal_transform = _unconstrained_orthogonal_alignment(
+            source,
+            destination,
+        )
+        transforms = [proper_transform]
+        if np.linalg.det(orthogonal_transform[0]) < 0.0:
+            transforms.append(orthogonal_transform)
+
+        for rotation, translation in transforms:
+            residual = source @ rotation.T + translation - destination
+            rmsd = float(np.sqrt(np.mean(np.einsum("ij,ij->i", residual, residual))))
+            candidate = _mapped_adsorbate_positions(
+                representative_positions,
+                mapping,
+                rotation,
+                translation,
+            )
+            if np.linalg.det(rotation) < 0.0:
+                reference_positions = np.asarray(
+                    reactant.atoms.get_positions(),
+                    dtype=float,
+                )
+                mapped_reference = _mapped_adsorbate_positions(
+                    reference_positions,
+                    mapping,
+                    rotation,
+                    np.zeros(3, dtype=float),
+                )
+                # A molecular graph automorphism need not be an exact
+                # geometric symmetry after finite-tolerance relaxation.
+                # Also test the reflection without atom relabeling, so a
+                # planar molecule's slightly unequal equivalent bonds do
+                # not look like chiral inversion. Retain the mapped test
+                # for nonplanar achiral molecular symmetries.
+                if not _molecular_mapping_preserves_handedness(
+                    reference_positions,
+                    mapped_reference,
+                ) and not _molecular_mapping_preserves_handedness(
+                    reference_positions,
+                    reference_positions @ rotation.T,
+                ):
+                    handedness_rejections += 1
+                    continue
+            if not np.isfinite(candidate).all():
+                connectivity_rejections += 1
+                continue
+            if not _adsorbate_pose_is_outward(G, member_cliques, candidate, pbc):
+                outward_rejections += 1
+                continue
+            if _geometry_connectivity_mismatch_for_cliques(
+                G,
+                member_cliques,
+                reactant,
+                candidate,
+                nl_mult=nl_mult,
+                _context=_context,
+            ) is not None:
+                connectivity_rejections += 1
+                continue
+            if rmsd < best_rmsd:
+                best_positions = candidate
+                best_rmsd = rmsd
+                if rmsd <= float(rmsd_tol):
+                    return best_positions
+
+    if best_positions is not None:
+        return best_positions
+
+    raise RuntimeError(
+        "no valid decorated adsorption mapping found "
+        f"(tested={mappings_tested}, limit={mapping_limit}, "
+        f"outward_rejections={outward_rejections}, "
+        f"handedness_rejections={handedness_rejections}, "
+        f"connectivity_rejections={connectivity_rejections})"
+    )
 
 
 def _remove_iso_class_nodes(G: nx.Graph, ms: AdsorbateSite) -> None:
@@ -1367,6 +2326,10 @@ def prune_unstable_adsorbate_sites(
     fmax: float = PRUNE_FMAX,
     max_steps: int = PRUNE_MAX_STEPS,
     nl_mult: float = NL_MULT_DEFAULT,
+    kabsch_max_mappings: int = KABSCH_MAX_MAPPINGS,
+    diagnostics_dir: str | None = None,
+    optimizer: str = DEFAULT_OPTIMIZER,
+    optimizer_kwargs: dict[str, Any] | None = None,
     verbose: bool = False,
 ) -> list[AdsorbateSite]:
     """Remove iso-classes whose representative placement is unstable under ML relaxation.
@@ -1378,9 +2341,14 @@ def prune_unstable_adsorbate_sites(
        :func:`_build_pruning_atoms`.  The adsorbate atoms are tagged
        ``surface == 2`` so :func:`autokmc.core.graph.build_graph` can be called
        on it directly.
-    2. Run a full ML relaxation via
-       :func:`~autokmc.structure.optimise_structure`.
-    3. Build the graph of the relaxed structure (same NL cutoff as the rest
+    2. Run a potential-driven rigid-body optimization with the slab fixed and
+       the adsorbate's internal coordinates held exactly constant.  The only
+       degrees of freedom are molecular translation and rotation.
+    3. Starting from that constrained minimum, run the existing full ML
+       relaxation via :func:`~autokmc.structure.optimise_structure`.  The
+       configured slab constraints are restored for this stage and the
+       adsorbate's internal coordinates may relax.
+    4. Build the graph of the relaxed structure (same NL cutoff as the rest
        of the package) and compare its **adsorbate-touching edge set** to
        the *intended* edge set:
 
@@ -1394,11 +2362,12 @@ def prune_unstable_adsorbate_sites(
        Slab–slab edges are *ignored* because un-frozen metal atoms relax by
        O(0.01–0.1 Å) under a real ML potential and can flip pairs across
        the natural-cutoff threshold without affecting the adsorbate.
-    4. Convergence is also checked (max|F| ≤ *fmax* on the un-frozen atoms);
-       non-converged iso-classes are pruned.
-    5. For surviving iso-classes the relaxed adsorbate positions are
-       written back to ``ms.positions`` and Kabsch-propagated to every
-       member via :func:`push_member_positions_to_graph`.
+    5. Both stages must converge.  The rigid stage applies *fmax* to the net
+       translational force and length-scaled torque; the relaxed stage applies
+       it to the un-frozen atomic forces.  Non-converged classes are pruned.
+    6. For surviving iso-classes the relaxed adsorbate positions are
+       written back to ``ms.positions`` and propagated to every member through
+       a validated adsorption-coordination graph mapping.
 
     ``G.graph["adsorbate_sites"][reactant.smiles]`` is updated in place
     with the surviving list.
@@ -1422,18 +2391,25 @@ def prune_unstable_adsorbate_sites(
         relaxation.  Pass ``atoms.info["frozen_indices"]`` from the slab
         directly.
     fmax : float
-        Force convergence threshold (eV/Å).  Default
-        :data:`~autokmc.core.constants.PRUNE_FMAX`.
+        Force convergence threshold (eV/Å) used for both the rigid and fully
+        relaxed stages.  Default :data:`~autokmc.core.constants.PRUNE_FMAX`.
     max_steps : int
-        Maximum LBFGS steps.  Default
+        Maximum optimizer steps for each of the two stages.  Default
         :data:`~autokmc.core.constants.PRUNE_MAX_STEPS`.
     nl_mult : float
         Neighbour-list cutoff multiplier handed to
         :func:`autokmc.core.graph.build_graph` for the connectivity comparison.
         Default :data:`~autokmc.core.constants.NL_MULT_DEFAULT` — matches the
         cutoff used everywhere else in the package.
+    kabsch_max_mappings : int
+        Maximum number of graph-isomorphism mappings tested when propagating
+        a relaxed representative to equivalent members.  Default
+        :data:`~autokmc.core.constants.KABSCH_MAX_MAPPINGS`.
+    diagnostics_dir : str | None
+        Run diagnostics directory. Rejected MLIP-pruning structures are
+        written below ``invalid_adsorption`` when supplied.
     verbose : bool
-        Print per-iso-class outcomes (stable ✓ / pruned ✗) to stdout.
+        Print whether each iso-class is stable or pruned to stdout.
 
     Returns
     -------
@@ -1441,24 +2417,61 @@ def prune_unstable_adsorbate_sites(
         Only the stable iso-classes, in their original order.  The
         ``iso_class`` integer labels are **not** renumbered.
     """
-    from autokmc.structure import optimise_structure  # avoid circular at module level
+    from autokmc.structure import (  # avoid circular at module level
+        StructureOptimisationError,
+        optimise_structure,
+    )
     from autokmc.core.graph import build_graph
+    from autokmc.io.atoms import copy_atoms_with_results
+    from autokmc.io.persistence import write_invalid_adsorption_diagnostic
 
     react_sym = list(reactant.atoms.get_chemical_symbols())
     stable: list[AdsorbateSite] = []
     n_pruned = 0
+    resolved_diagnostics_dir = (
+        diagnostics_dir or G.graph.get("diagnostics_dir")
+    )
+
+    def _persist_invalid(
+        site: AdsorbateSite,
+        atoms_initial,
+        atoms_optimized,
+        reason: str,
+        **details,
+    ) -> None:
+        if resolved_diagnostics_dir is None:
+            return
+        try:
+            write_invalid_adsorption_diagnostic(
+                resolved_diagnostics_dir,
+                site,
+                reactant_smiles=reactant.smiles,
+                atoms_initial=atoms_initial,
+                atoms_optimized=atoms_optimized,
+                invalid_reason=reason,
+                details=details,
+            )
+        except Exception as exc:
+            _log.warning(
+                "prune_unstable_adsorbate_sites: failed to persist invalid "
+                "adsorption iso_class=%d (%s)",
+                site.iso_class,
+                exc,
+            )
 
     if verbose:
         print(
             f"\nprune_unstable_adsorbate_sites: {len(adsorbate_sites)} iso-class(es)  "
-            f"fmax={fmax} eV/Å  max_steps={max_steps}"
+            f"rigid + relaxed potential stages  fmax={fmax} eV/Å  "
+            f"max_steps/stage={max_steps}"
         )
 
     for ms in adsorbate_sites:
-        # ── Build initial Atoms (already tagged + node_to_ase in hand) ────
+        # First, build the initial tagged structure and its node-to-atom map.
         try:
             atoms_init, n_slab, n_ads, node_to_ase = _build_pruning_atoms(
                 G, ms, react_sym, frozen_indices=frozen_indices,
+                reactant_atoms=reactant.atoms,
             )
         except Exception as exc:
             _log.warning(
@@ -1474,16 +2487,36 @@ def prune_unstable_adsorbate_sites(
             ms, reactant, n_slab, node_to_ase
         )
 
-        # ── ML relaxation ─────────────────────────────────────────────────
+        # First optimize only the molecule's rigid translation and rotation
+        # against the potential while leaving every slab atom stationary.
+        # Then restore the ordinary atom-level degrees of freedom and slab
+        # constraints for the existing relaxed stability check.
+        optimization_stage = "rigid"
+        rigid_max_force: float | None = None
+        rigid_steps: int | None = None
         try:
             with acquire_calculator(
                 calculator, purpose="adsorbate-site pruning"
             ) as calc:
+                atoms_rigid, rigid_max_force, rigid_steps = (
+                    _optimise_rigid_adsorbate_with_potential(
+                        atoms_init,
+                        n_slab,
+                        calc,
+                        fmax=fmax,
+                        max_steps=max_steps,
+                        optimizer=optimizer,
+                        optimizer_kwargs=optimizer_kwargs,
+                    )
+                )
+                optimization_stage = "relaxed"
                 atoms_opt = optimise_structure(
-                    atoms_init,
+                    atoms_rigid,
                     calculator = calc,
                     fmax       = fmax,
                     steps      = max_steps,
+                    optimizer  = optimizer,
+                    optimizer_kwargs = optimizer_kwargs,
                     verbose    = False,
                 )
                 forces = atoms_opt.get_forces()
@@ -1494,38 +2527,101 @@ def prune_unstable_adsorbate_sites(
                 else:
                     max_force = float(np.linalg.norm(forces, axis=1).max())
                 E = float(atoms_opt.get_potential_energy())
-                atoms_opt.calc = None
+                atoms_opt = copy_atoms_with_results(
+                    atoms_opt,
+                    energy=E,
+                    forces=forces,
+                )
         except Exception as exc:
             if isinstance(exc, CalculatorConfigError):
                 raise
+            failed_atoms = (
+                exc.atoms
+                if isinstance(exc, StructureOptimisationError)
+                else None
+            )
+            did_not_converge = (
+                isinstance(exc, StructureOptimisationError)
+                and exc.converged is False
+            )
+            if optimization_stage == "rigid":
+                invalid_reason = (
+                    "rigid_not_converged"
+                    if did_not_converge
+                    else "rigid_relaxation_failed"
+                )
+            else:
+                # Preserve the established diagnostics contract for the
+                # pre-existing fully relaxed stage.
+                invalid_reason = (
+                    "not_converged"
+                    if did_not_converge
+                    else "relaxation_failed"
+                )
             _log.debug(
                 "prune_unstable_adsorbate_sites: iso_class=%d relaxation raised %s",
                 ms.iso_class, exc,
             )
             if verbose:
-                print(f"  ✗ iso={ms.iso_class}: relaxation failed ({exc}) — pruned")
+                outcome = "PRUNED" if did_not_converge else "FAILED"
+                print(
+                    f"  {outcome} iso={ms.iso_class}: {optimization_stage} "
+                    f"optimization failed ({exc})"
+                )
+            _persist_invalid(
+                ms,
+                atoms_init,
+                failed_atoms,
+                invalid_reason,
+                error=f"{type(exc).__name__}: {exc}",
+                optimization_stage=optimization_stage,
+                rigid_max_force_ev_per_ang=rigid_max_force,
+                rigid_optimizer_steps=rigid_steps,
+                optimizer_steps=(
+                    exc.steps
+                    if isinstance(exc, StructureOptimisationError)
+                    else None
+                ),
+            )
+            # Backend/I/O errors do not establish instability. Preserve the
+            # failed geometry above, then let runtime expansion retry or abort.
+            if not did_not_converge:
+                raise
             n_pruned += 1
             _remove_iso_class_nodes(G, ms)
             continue
 
-        # ── Convergence check ─────────────────────────────────────────────
+        assert rigid_max_force is not None
+        assert rigid_steps is not None
+
+        # After relaxation, reject structures that did not reach the requested
+        # force threshold.
         if max_force > fmax:
             if verbose:
                 print(
-                    f"  ✗ iso={ms.iso_class}: not converged "
-                    f"(max|F|={max_force:.4f} eV/Å > {fmax}) — pruned"
+                    f"  PRUNED iso={ms.iso_class}: not converged "
+                    f"(max|F|={max_force:.4f} eV/Å > {fmax})"
                 )
+            _persist_invalid(
+                ms,
+                atoms_init,
+                atoms_opt,
+                "not_converged",
+                max_force_ev_per_ang=float(max_force),
+                fmax_ev_per_ang=float(fmax),
+                energy_ev=float(E),
+                rigid_max_force_ev_per_ang=float(rigid_max_force),
+                rigid_optimizer_steps=int(rigid_steps),
+            )
             n_pruned += 1
             _remove_iso_class_nodes(G, ms)
             continue
 
-        # ── Connectivity check via canonical build_graph ──────────────────
-        # Carry the intended ``surface`` tags forward (build_graph requires
-        # them) and build the full atom-connectivity graph of the relaxed
-        # structure, then compare its adsorbate-touching edges against the
-        # intended edge set.  Any mismatch — missing intramolecular or
-        # anchor bond, OR a brand-new edge from any adsorbate atom to a
-        # surface atom outside its intended clique — prunes the iso-class.
+        # A converged structure must also preserve the intended connectivity.
+        # Carry the surface tags into the relaxed graph, and compare every edge
+        # that touches the adsorbate with the intended edge set. Missing bonds
+        # and new bonds to atoms outside the intended clique both cause the
+        # iso-class to be pruned.
         atoms_for_graph = atoms_opt.copy()
         atoms_for_graph.arrays["surface"] = atoms_init.arrays["surface"]
         try:
@@ -1538,9 +2634,20 @@ def prune_unstable_adsorbate_sites(
             )
             if verbose:
                 print(
-                    f"  ✗ iso={ms.iso_class}: build_graph(relaxed) failed "
-                    f"({exc}) — pruned"
+                    f"  PRUNED iso={ms.iso_class}: build_graph(relaxed) failed "
+                    f"({exc})"
                 )
+            _persist_invalid(
+                ms,
+                atoms_init,
+                atoms_opt,
+                "relaxed_graph_failed",
+                error=f"{type(exc).__name__}: {exc}",
+                max_force_ev_per_ang=float(max_force),
+                energy_ev=float(E),
+                rigid_max_force_ev_per_ang=float(rigid_max_force),
+                rigid_optimizer_steps=int(rigid_steps),
+            )
             n_pruned += 1
             _remove_iso_class_nodes(G, ms)
             continue
@@ -1557,22 +2664,31 @@ def prune_unstable_adsorbate_sites(
                 miss_s = ", ".join(_fmt(e) for e in list(missing)[:3])
                 extr_s = ", ".join(_fmt(e) for e in list(extra)[:3])
                 print(
-                    f"  ✗ iso={ms.iso_class}: adsorbate connectivity changed "
+                    f"  PRUNED iso={ms.iso_class}: adsorbate connectivity changed "
                     f"(missing={len(missing)} [{miss_s}"
                     f"{'…' if len(missing) > 3 else ''}], "
                     f"extra={len(extra)} [{extr_s}"
                     f"{'…' if len(extra) > 3 else ''}]) — pruned"
                 )
+            _persist_invalid(
+                ms,
+                atoms_init,
+                atoms_opt,
+                "connectivity_changed",
+                missing_edge_count=len(missing),
+                extra_edge_count=len(extra),
+                max_force_ev_per_ang=float(max_force),
+                energy_ev=float(E),
+                rigid_max_force_ev_per_ang=float(rigid_max_force),
+                rigid_optimizer_steps=int(rigid_steps),
+            )
             n_pruned += 1
             _remove_iso_class_nodes(G, ms)
             continue
 
-        # ── Update positions from ML-relaxed geometry ─���───────────────────
-        # Extract the adsorbate atoms (last n_ads rows of atoms_opt), project
-        # them from the relaxed slab frame back onto the live graph's slab
-        # frame, then store them as the representative positions for this
-        # iso-class.  The ordering produced by _build_pruning_atoms matches
-        # reactant atom-index order.
+        # The relaxed adsorbate becomes the representative for this iso-class.
+        # Project its coordinates back into the live graph frame, and preserve
+        # the reactant atom order established when the structure was built.
         frame_depth = max(1, int(ms.n_shells_settled))
         new_pos: np.ndarray = _relaxed_adsorbate_positions_in_graph_frame(
             G,
@@ -1588,64 +2704,74 @@ def prune_unstable_adsorbate_sites(
         new_pos = _wrap_adsorbate_positions_for_storage(
             new_pos, ms.atom_cliques, cell_store, pbc_store,
         )
+        # Finally, propagate the representative geometry to the other members
+        # with the complete adsorption-coordination mapping. Build and validate
+        # every pose before mutating graph coordinates so a failure cannot leave
+        # a partially updated iso-class.
+        n_propagated = 0
+        if ms.member_node_ids:
+            propagation_context = _prepare_geometry_connectivity_context(
+                G,
+                reactant,
+                nl_mult=float(nl_mult),
+            )
+            if _geometry_connectivity_mismatch_for_cliques(
+                G,
+                ms.atom_cliques,
+                reactant,
+                new_pos,
+                nl_mult=nl_mult,
+                _context=propagation_context,
+            ) is not None:
+                raise RuntimeError(
+                    "prune_unstable_adsorbate_sites: projected representative "
+                    f"connectivity is invalid for iso-class {ms.iso_class}"
+                )
+            pending_positions = [new_pos]
+            if len(ms.members) > 1:
+                propagation_depth = int(ms.coordination_n_shells)
+                for m_idx in range(1, len(ms.members)):
+                    try:
+                        member_pos = _propagate_adsorbate_member_positions(
+                            G,
+                            ms.atom_cliques,
+                            ms.members[m_idx],
+                            new_pos,
+                            reactant,
+                            n_shells=propagation_depth,
+                            nl_mult=nl_mult,
+                            max_mappings=kabsch_max_mappings,
+                            _context=propagation_context,
+                        )
+                    except Exception as exc:
+                        raise RuntimeError(
+                            "prune_unstable_adsorbate_sites: decorated "
+                            f"propagation failed for iso-class {ms.iso_class}, "
+                            f"member {m_idx}"
+                        ) from exc
+                    pending_positions.append(member_pos)
+            for member_index, member_pos in enumerate(pending_positions):
+                push_member_positions_to_graph(
+                    G,
+                    ms,
+                    member_index,
+                    member_pos,
+                )
+            n_propagated = len(pending_positions) - 1
         ms.positions = new_pos
 
-        # ── Propagate to all members via Kabsch ego-alignment ─────────────
-        if ms.member_node_ids:
-            # Push representative (member 0) to G.
-            push_member_positions_to_graph(G, ms, 0, new_pos)
-
-            # Kabsch-propagate to every other member.
-            rep_seed: frozenset = frozenset(
-                int(n)
-                for c in ms.atom_cliques if c is not None
-                for n in c
+        if verbose:
+            suffix = (
+                f"propagated {n_propagated}/{max(0, len(ms.members) - 1)} members"
+                if ms.member_node_ids
+                else "no members yet"
             )
-            if rep_seed and len(ms.members) > 1:
-                cell_arr, cell_inv_arr, pbc_arr, use_mic_arr = _get_cell(G)
-                n_propagated = 0
-                for m_idx in range(1, len(ms.members)):
-                    mem_seed: frozenset = frozenset(
-                        int(n)
-                        for c in ms.members[m_idx] if c is not None
-                        for n in c
-                    )
-                    if not mem_seed:
-                        continue
-                    R, t = _kabsch_align_ego(
-                        G,
-                        rep_seed, mem_seed, frame_depth,
-                        cell_arr, cell_inv_arr, pbc_arr, use_mic_arr,
-                    )
-                    if R is None or t is None:
-                        continue
-                    member_pos = new_pos @ R.T + t
-                    if not _adsorbate_pose_is_outward(
-                        G, ms.members[m_idx], member_pos, pbc_arr,
-                    ):
-                        continue
-                    push_member_positions_to_graph(
-                        G, ms, m_idx, member_pos
-                    )
-                    n_propagated += 1
-                if verbose:
-                    print(
-                        f"  ✓ iso={ms.iso_class}: stable  "
-                        f"E={E:.4f} eV  max|F|={max_force:.4f} eV/Å  "
-                        f"propagated {n_propagated}/{max(0, len(ms.members) - 1)} members"
-                    )
-            else:
-                if verbose:
-                    print(
-                        f"  ✓ iso={ms.iso_class}: stable  "
-                        f"E={E:.4f} eV  max|F|={max_force:.4f} eV/Å"
-                    )
-        else:
-            if verbose:
-                print(
-                    f"  ✓ iso={ms.iso_class}: stable  "
-                    f"E={E:.4f} eV  max|F|={max_force:.4f} eV/Å  (no members yet)"
-                )
+            print(
+                f"  STABLE iso={ms.iso_class}: "
+                f"rigid max|F|={rigid_max_force:.4f} eV/Å "
+                f"({rigid_steps} steps); relaxed E={E:.4f} eV  "
+                f"max|F|={max_force:.4f} eV/Å  {suffix}"
+            )
 
         stable.append(ms)
 
@@ -1660,7 +2786,7 @@ def prune_unstable_adsorbate_sites(
         reactant.smiles, len(stable), len(adsorbate_sites),
     )
 
-    # Persist to graph so G is always consistent with the returned list.
+    # Store the surviving sites so the graph and the returned list agree.
     G.graph.setdefault("adsorbate_sites", {})[reactant.smiles] = stable
     rebuild_adsorbate_reverse_indexes(G)
     return stable
@@ -1746,21 +2872,33 @@ def find_adsorbate_sites(
     bond_tolerance: float = BOND_TOLERANCE,
     n_shells_anchor: int | None = None,
     n_shells_pair: int = N_SHELLS_DEFAULT,
+    anchor_k_max: int | None = None,
     co_factor: float = CO_FACTOR,
     opt_factor: float = OPT_FACTOR,
     repulsion_weight: float = REPULSION_WEIGHT,
+    repulsion_cutoff: float | None = REPULSION_CUTOFF,
+    contact_factor: float = CONTACT_FACTOR,
+    standoff_factor: float = STANDOFF_FACTOR,
+    n_restarts: int = N_RESTARTS,
+    nn_distance: float = NN_DISTANCE,
     include_partial: bool = True,
     require_anchors: bool = True,
     auto_grow_shells: bool = True,
     max_shell_retries: int = 3,
     require_surface_connected: bool = True,
     max_pair_shells: int = MAX_PAIR_SHELLS,
-    # ── Stability pruning ──────────────────────────────────────────────────
+    hull_tolerance: float = HULL_TOL,
+    kabsch_max_mappings: int = KABSCH_MAX_MAPPINGS,
+    nl_mult: float = NL_MULT_DEFAULT,
+    # If requested, prune the sites that do not remain stable.
     prune_stable_only: bool = True,
     calculator=None,
     frozen_indices: list[int] | None = None,
     prune_fmax: float = PRUNE_FMAX,
     prune_max_steps: int = PRUNE_MAX_STEPS,
+    diagnostics_dir: str | None = None,
+    optimizer: str = DEFAULT_OPTIMIZER,
+    optimizer_kwargs: dict[str, Any] | None = None,
     verbose: bool = False,
 ) -> list[AdsorbateSite]:
     """Universal N-atom adsorbate site enumerator (N ≥ 1).
@@ -1791,9 +2929,27 @@ def find_adsorbate_sites(
     n_shells_pair : int
         Minimum ego-graph depth for iso-class discrimination of adsorbate
         placements.  Default 1.
-    co_factor, opt_factor, repulsion_weight :
+    anchor_k_max : int or None
+        Optional hard cap on the coordination size enumerated for each
+        surface anchor element.  ``None`` preserves natural enumeration.
+    co_factor, opt_factor, repulsion_weight, repulsion_cutoff :
         Forwarded to :func:`~autokmc.sites.anchors.find_anchor_sites` if
         anchor sites have not yet been computed for an element.
+        *repulsion_cutoff* is also used by the rigid-body refinement.
+    contact_factor : float
+        Minimum adsorbate–surface contact scale used by rigid-body
+        refinement.  Default
+        :data:`~autokmc.core.constants.CONTACT_FACTOR`.
+    standoff_factor : float
+        Bonded-anchor standoff scale used by rigid-body refinement.  Default
+        :data:`~autokmc.core.constants.STANDOFF_FACTOR`.
+    n_restarts : int
+        Number of rotational restarts used by rigid-body refinement.  Default
+        :data:`~autokmc.core.constants.N_ADSORBATE_RESTARTS`.
+    nn_distance : float
+        Typical surface nearest-neighbour distance (Å) used to choose
+        *n_shells_anchor* when it is ``None``.  Default
+        :data:`~autokmc.core.constants.NN_DISTANCE`.
     include_partial : bool
         Enumerate all non-empty anchor subsets (including singletons).
         Set to ``False`` to try only the full-anchor subset.  Default True.
@@ -1809,12 +2965,25 @@ def find_adsorbate_sites(
         surface edges within *max_pair_shells* hops.  Default True.
     max_pair_shells : int
         Hard cap on the per-placement connectivity check.  Default 10.
+    hull_tolerance : float
+        Signed-distance tolerance (Å) forwarded to anchor-site enumeration
+        when filtering buried cliques.  Default
+        :data:`~autokmc.core.constants.HULL_TOL`.
+    kabsch_max_mappings : int
+        Maximum graph-isomorphism mappings tested during each Kabsch
+        propagation.  Default
+        :data:`~autokmc.core.constants.KABSCH_MAX_MAPPINGS`.
+    nl_mult : float
+        Neighbour-list cutoff multiplier used by calculator-free and
+        post-relaxation connectivity checks.  Default
+        :data:`~autokmc.core.constants.NL_MULT_DEFAULT`.
     prune_stable_only : bool
-        If ``True`` (default), run an ML-potential relaxation on the
-        representative geometry of every iso-class after enumeration and
-        discard any iso-class whose bond topology changes or whose relaxation
-        does not converge.  Requires *calculator* to be set; if *calculator*
-        is ``None`` a :class:`RuntimeWarning` is issued and pruning is skipped.
+        If ``True`` (default), optimize every iso-class representative against
+        the ML potential first as an exact rigid molecule on a fixed slab and
+        then with the ordinary atomic degrees of freedom.  Discard any class
+        whose bond topology changes or whose optimization does not converge.
+        Requires *calculator* to be set; if *calculator* is ``None`` a
+        :class:`RuntimeWarning` is issued and pruning is skipped.
     calculator
         ASE-compatible ML/empirical potential or CalculatorPool used for
         stability pruning.  Calculators are acquired rather than deep-copied.
@@ -1824,11 +2993,15 @@ def find_adsorbate_sites(
         ASE atom ``index``) to freeze during the pruning relaxation.  Pass
         ``atoms.info["frozen_indices"]`` directly for slab structures.
     prune_fmax : float
-        Force convergence threshold (eV/Å) for pruning relaxations.
+        Force convergence threshold (eV/Å) for each of the rigid and relaxed
+        pruning stages.
         Default :data:`~autokmc.core.constants.PRUNE_FMAX` (0.05).
     prune_max_steps : int
-        Maximum LBFGS steps for pruning relaxations.
-        Default :data:`~autokmc.core.constants.PRUNE_MAX_STEPS` (200).
+        Maximum optimizer steps for each pruning stage.
+        Default :data:`~autokmc.core.constants.PRUNE_MAX_STEPS` (500).
+    diagnostics_dir : str | None
+        Run diagnostics directory. Adsorption candidates rejected by MLIP
+        pruning are written below ``invalid_adsorption`` when supplied.
     verbose : bool
         Print per-step progress to stdout.
 
@@ -1838,6 +3011,8 @@ def find_adsorbate_sites(
         One entry per iso-class.  Also stored at
         ``G.graph["adsorbate_sites"][reactant.smiles]``.
     """
+    if anchor_k_max is not None and int(anchor_k_max) < 1:
+        raise ValueError("anchor_k_max must be at least 1 when supplied")
     n_atoms = len(reactant.atoms)
     if n_atoms < 1:
         raise ValueError(
@@ -1853,31 +3028,43 @@ def find_adsorbate_sites(
             raise ValueError("Reactant has no anchor atoms.")
         return []
 
-    # Remove stale adsorbate nodes from a previous call on the same SMILES.
+    # First, remove adsorbate nodes left by an earlier call for this SMILES.
     _remove_adsorbate_nodes(G, reactant.smiles)
 
     elements: dict[int, str] = {
         i: reactant.graph.nodes[i]["element"] for i in range(n_atoms)
     }
     react_pos = np.asarray(reactant.atoms.get_positions(), dtype=float)
-    # (N, N) intramolecular distance matrix.
+    # This matrix contains every intramolecular atom-pair distance.
     D = np.linalg.norm(
         react_pos[:, None, :] - react_pos[None, :, :], axis=-1
     )
 
-    # Heuristic shell depth from molecular reach.
+    # If no shell depth was given, estimate it from the molecular reach.
     if n_shells_anchor is None:
         if len(anchors) >= 2:
             reach = float(max(D[i, j] for i in anchors for j in anchors if i < j))
         else:
             reach = float(D[anchors[0]].max())
-        n_shells_eff = _suggested_n_shells(reach)
+        n_shells_eff = _suggested_n_shells(
+            reach,
+            nn_distance=nn_distance,
+        )
     else:
         n_shells_eff = int(n_shells_anchor)
 
     cell, cell_inv, pbc, use_mic = _get_cell(G)
     orbit_id   = _orbit_id_of(reactant)
-    node_match = isomorphism.categorical_node_match("element", "X")
+    def node_match(left, right):
+        return (
+            left.get("coordination_role", "substrate")
+            == right.get("coordination_role", "substrate")
+            and physical_node_match(left, right)
+        )
+    edge_match = isomorphism.categorical_edge_match(
+        "coordination_kind",
+        "substrate",
+    )
     apsp = (
         _get_surface_apsp(G, cutoff=max_pair_shells)
         if require_surface_connected else None
@@ -1891,7 +3078,7 @@ def find_adsorbate_sites(
             f"tol={bond_tolerance} Å"
         )
 
-    # ── Orbit-canonicalised anchor subsets ───────────────────────────────
+    # Next, reduce the anchor subsets by their molecular symmetry orbits.
     if include_partial:
         all_subsets: list[tuple[int, ...]] = []
         for r in range(1, len(anchors) + 1):
@@ -1899,17 +3086,11 @@ def find_adsorbate_sites(
     else:
         all_subsets = [tuple(anchors)]
 
-    seen_subset_keys: set = set()
-    canonical_subsets: list[tuple[int, ...]] = []
-    for sub in all_subsets:
-        if not _anchor_subset_allowed(sub, orbit_id):
-            continue
-        key = _canonical_subset_key(sub, orbit_id)
-        if key not in seen_subset_keys:
-            seen_subset_keys.add(key)
-            canonical_subsets.append(sub)
+    canonical_subsets = _inequivalent_anchor_subsets(
+        reactant.graph, all_subsets, orbit_id,
+    )
 
-    # ── Enumeration pass ─────────────────────────────────────────────────
+    # The enumeration pass builds candidate placements at the selected depth.
     def _run_pass(depth: int) -> list[AdsorbateSite]:
         anchor_elements = {elements[i] for i in anchors}
         for el in anchor_elements:
@@ -1918,15 +3099,29 @@ def find_adsorbate_sites(
                 co_factor=co_factor,
                 opt_factor=opt_factor,
                 repulsion_weight=repulsion_weight,
+                repulsion_cutoff=repulsion_cutoff,
                 n_shells=depth,
+                anchor_k_max=anchor_k_max,
+                hull_tolerance=hull_tolerance,
+                kabsch_max_mappings=kabsch_max_mappings,
                 verbose=verbose,
             )
 
         raw_by_elem: dict[str, list[tuple[frozenset, np.ndarray]]] = {
             el: _all_raw_sites_with_positions(G, el) for el in anchor_elements
         }
+        spatial_cutoff = max(
+            0.0,
+            float(D.max(initial=0.0)) + float(bond_tolerance),
+        )
         spatial_by_elem = {
-            el: _build_anchor_spatial_index(candidates, cell, pbc, use_mic)
+            el: _build_anchor_spatial_index(
+                candidates,
+                cell,
+                pbc,
+                use_mic,
+                cutoff=spatial_cutoff,
+            )
             for el, candidates in raw_by_elem.items()
         }
 
@@ -1944,7 +3139,8 @@ def find_adsorbate_sites(
             for i in bonded:
                 atom_cliques[i] = assigned_clique[i]
 
-            # Surface-connectivity guard.
+            # Reject a placement when its bonded cliques are too far apart on
+            # the surface graph.
             if apsp is not None:
                 bonded_cliques = [c for c in atom_cliques if c is not None]
                 needed = _min_ego_depth_for_connectivity(bonded_cliques, apsp)
@@ -1959,12 +3155,22 @@ def find_adsorbate_sites(
                 reactant, bonded, bonded_positions, G, pbc
             )
 
-            # Ego subgraph: n_shells_pair-shell BFS from union of bonded cliques.
+            # Build the local ego graph with a breadth-first search from the
+            # union of the bonded cliques.
             union: set[int] = set()
             for c in atom_cliques:
                 if c is not None:
                     union |= set(c)
-            ego = _build_ego_graph(G, frozenset(union), n_shells_pair)
+            substrate_ego = _build_ego_graph(
+                G,
+                frozenset(union),
+                n_shells_pair,
+            )
+            ego = _build_adsorbate_coordination_graph(
+                substrate_ego,
+                atom_cliques,
+                reactant.graph,
+            )
 
             _try_merge_or_new(
                 adsorbate_sites,
@@ -1973,6 +3179,7 @@ def find_adsorbate_sites(
                 positions       = positions,
                 ego_graph       = ego,
                 node_match      = node_match,
+                edge_match      = edge_match,
                 seen_signatures = seen_signatures,
             )
 
@@ -2063,7 +3270,8 @@ def find_adsorbate_sites(
 
         return adsorbate_sites
 
-    # ── Retry loop: auto-grow n_shells_anchor ────────────────────────────
+    # Repeat the enumeration with a larger shell when the initial depth cannot
+    # contain every bonded clique.
     adsorbate_sites = _run_pass(n_shells_eff)
     retries = 0
     while auto_grow_shells and apsp is not None and retries < max_shell_retries:
@@ -2072,7 +3280,7 @@ def find_adsorbate_sites(
             break
         if verbose:
             print(
-                f"  ⚠  bonded cliques span {needed} hops but iso depth was "
+                f"  WARNING bonded cliques span {needed} hops but iso depth was "
                 f"{n_shells_eff} — growing to {needed} and re-enumerating"
             )
         n_shells_eff    = needed
@@ -2092,20 +3300,18 @@ def find_adsorbate_sites(
             f"{total_members} placements total"
         )
 
-    # ── Stage A: stamp shell depth, materialise nodes, persist ──────────
-    # Nodes must exist on G before geometric optimisation can run, so
-    # materialisation always happens here — before any pruning.
+    # First, record the selected shell depth and materialize the graph nodes.
+    # Geometry optimization needs these nodes, so this happens before pruning.
     for ms in adsorbate_sites:
         ms.n_shells_settled = int(n_shells_eff)
+        ms.coordination_n_shells = int(n_shells_pair)
 
     _materialise_adsorbate_nodes(G, reactant, adsorbate_sites)
     G.graph.setdefault("adsorbate_sites", {})[reactant.smiles] = adsorbate_sites
 
-    # ── Reverse indexes for the KMC fast paths ─���───────────────────────────
-    # See suggestion.MD #4 / #8 / #9.  Every adsorbate node already carries
-    # its bonded surface clique as a frozenset under the "clique" attribute
-    # (set in :func:`_materialise_adsorbate_nodes`), so downstream code can
-    # use it directly without re-wrapping with ``frozenset(...)``.
+    # Next, build the reverse indexes used by the KMC update paths.
+    # Each adsorbate node already stores its bonded surface clique as a
+    # frozenset. The indexes below reuse that value directly.
     #
     #   G.graph["clique_to_members"]
     #       dict[frozenset, list[(AdsorbateSite, m_idx)]]
@@ -2138,13 +3344,13 @@ def find_adsorbate_sites(
     #       frozensets every KMC step.
     rebuild_adsorbate_reverse_indexes(G)
 
-    # ── Stage B: geometric optimisation → ML stability → prune → propagate
+    # After materialization, optimize the geometry, test its stability, prune
+    # invalid sites, and propagate each representative.
     if prune_stable_only:
         if calculator is not None:
-            # B-1: calculator-free rigid-body geometry optimisation.
-            # Refines representative positions and Kabsch-propagates to every
-            # member so that the ML relaxation in B-2 starts from a sensible
-            # geometry rather than the raw clique-centroid positions.
+            # First, refine the representative with a calculator-free rigid-body
+            # optimization. This gives the later calculator relaxation a useful
+            # starting geometry instead of the raw clique centroids.
             #
             # Skipped for single-atom reactants: a 1-atom adsorbate has no
             # rotational DOF and the anchor-node position is already the
@@ -2158,7 +3364,17 @@ def find_adsorbate_sites(
                         "  ──────────────────────────────────────────────────────"
                     )
                 adsorbate_sites = optimise_adsorbate_site_positions(
-                    G, reactant.smiles, reactant, verbose=verbose,
+                    G,
+                    reactant.smiles,
+                    reactant,
+                    repulsion_cutoff=repulsion_cutoff,
+                    contact_factor=contact_factor,
+                    standoff_factor=standoff_factor,
+                    n_restarts=n_restarts,
+                    n_shells_pair=n_shells_pair,
+                    nl_mult=nl_mult,
+                    kabsch_max_mappings=kabsch_max_mappings,
+                    verbose=verbose,
                 )
                 G.graph.setdefault("adsorbate_sites", {})[reactant.smiles] = adsorbate_sites
             elif verbose:
@@ -2166,13 +3382,14 @@ def find_adsorbate_sites(
                     "\n  Stage B-1 skipped (single-atom reactant — no rigid-body DOF)"
                 )
 
-            # B-2: ML-potential stability check.  Prunes unstable iso-classes,
-            # extracts the relaxed adsorbate positions, updates ms.positions,
-            # and Kabsch-propagates the new geometry to every member.
+            # Then use the configured calculator for a rigid molecular
+            # optimization followed by the ordinary atom-level relaxation.
+            # This prunes unstable iso-classes and propagates each relaxed
+            # representative to its remaining members.
             if verbose:
                 print(
                     "\n  ──────────────────────────────────────────────────────\n"
-                    "  Stage B-2 : ML stability check, pruning & position update\n"
+                    "  Stage B-2/3 : rigid + relaxed ML stability check\n"
                     "  ──────────────────────────────────────────────────────"
                 )
             adsorbate_sites = prune_unstable_adsorbate_sites(
@@ -2180,6 +3397,11 @@ def find_adsorbate_sites(
                 frozen_indices = frozen_indices,
                 fmax           = prune_fmax,
                 max_steps      = prune_max_steps,
+                nl_mult        = nl_mult,
+                kabsch_max_mappings=kabsch_max_mappings,
+                diagnostics_dir=diagnostics_dir,
+                optimizer       = optimizer,
+                optimizer_kwargs=optimizer_kwargs,
                 verbose        = verbose,
             )
             # prune_unstable_adsorbate_sites already updates G.graph; keep
@@ -2209,16 +3431,48 @@ def find_adsorbate_sites(
 # Rigid-body refinement
 # ---------------------------------------------------------------------------
 
+def _skew_matrix(vector: np.ndarray) -> np.ndarray:
+    """Return the matrix whose product with ``x`` is ``vector × x``."""
+    x, y, z = np.asarray(vector, dtype=float)
+    return np.array(
+        [[0.0, -z, y], [z, 0.0, -x], [-y, x, 0.0]],
+        dtype=float,
+    )
+
+
 def _rotation_from_axis_angle(rotvec: np.ndarray) -> np.ndarray:
     """3×3 rotation matrix from a Rodrigues axis-angle vector."""
+    rotvec = np.asarray(rotvec, dtype=float)
     theta = float(np.linalg.norm(rotvec))
-    if theta < 1e-12:
-        return np.eye(3)
-    axis = rotvec / theta
-    K = np.array([[0.0, -axis[2], axis[1]],
-                  [axis[2], 0.0, -axis[0]],
-                  [-axis[1], axis[0], 0.0]])
-    return np.eye(3) + np.sin(theta) * K + (1.0 - np.cos(theta)) * (K @ K)
+    skew = _skew_matrix(rotvec)
+    if theta < 1e-6:
+        theta2 = theta * theta
+        return (
+            np.eye(3)
+            + (1.0 - theta2 / 6.0) * skew
+            + (0.5 - theta2 / 24.0) * (skew @ skew)
+        )
+    return (
+        np.eye(3)
+        + (np.sin(theta) / theta) * skew
+        + ((1.0 - np.cos(theta)) / (theta * theta)) * (skew @ skew)
+    )
+
+
+def _rotation_right_jacobian(rotvec: np.ndarray) -> np.ndarray:
+    """Right Jacobian of the SO(3) exponential map for an axis-angle vector."""
+    rotvec = np.asarray(rotvec, dtype=float)
+    theta = float(np.linalg.norm(rotvec))
+    skew = _skew_matrix(rotvec)
+    if theta < 1e-6:
+        # Stable series through O(theta²).
+        return np.eye(3) - 0.5 * skew + (skew @ skew) / 6.0
+    theta2 = theta * theta
+    return (
+        np.eye(3)
+        - ((1.0 - np.cos(theta)) / theta2) * skew
+        + ((theta - np.sin(theta)) / (theta2 * theta)) * (skew @ skew)
+    )
 
 
 def _surface_atoms_array(
@@ -2270,9 +3524,11 @@ def optimise_adsorbate_site_positions(
     standoff_factor: float = STANDOFF_FACTOR,
     n_restarts: int = N_RESTARTS,
     try_flip: bool = True,
-    max_connectivity_attempts: int = 10,
+    max_connectivity_attempts: int = 3,
     max_iter: int = 100,
     n_shells_pair: int = N_SHELLS_DEFAULT,
+    nl_mult: float = NL_MULT_DEFAULT,
+    kabsch_max_mappings: int = KABSCH_MAX_MAPPINGS,
     verbose: bool = False,
 ) -> list[AdsorbateSite]:
     """Rigid-body refinement of every :attr:`AdsorbateSite.positions` for
@@ -2284,6 +3540,10 @@ def optimise_adsorbate_site_positions(
         E(R,t) = restraint_weight × Σ_{bonded i}  ‖p_i − p*_i‖²
                + repulsion_weight × Σ_{adsorbate a, surface s}
                                        max(0, R_min − d_as)²
+               + connectivity_weight × (
+                   Σ_required max(0, d_as − R_graph)²
+                   + Σ_forbidden max(0, R_graph − d_as)²
+                 )
 
     where ``p*_i`` is the clique centroid lifted by
     ``standoff_factor × (r_cov_a + ⟨r_cov_s⟩)`` along the local outward
@@ -2292,11 +3552,13 @@ def optimise_adsorbate_site_positions(
     Multi-start: ``n_restarts`` rotational kicks about the local outward
     normal.  When ``try_flip=True`` (default) each kick is also tried with
     a 180° in-plane flip (essential for adsorbates with unbonded atoms that
-    must point away from the surface).
+    must point away from the surface).  Failed connectivity rounds warm-start
+    each orientation from its previous optimum.  The rigid-body objective
+    supplies an analytical six-coordinate Jacobian to L-BFGS-B.
 
-    After refining the representative, Kabsch ego-alignment propagates the
-    new geometry to every other member via
-    :func:`~autokmc.sites.anchors._kabsch_align_ego`.
+    After refining the representative, full adsorption-coordination graph
+    mappings propagate the new geometry to every other member, including any
+    molecular atom permutation implied by the site isomorphism.
 
     Parameters
     ----------
@@ -2318,18 +3580,25 @@ def optimise_adsorbate_site_positions(
         Maximum number of connectivity-validity refinement rounds per
         iso-class.  The calculator-free geometry is accepted only once its
         graph has exactly the required intramolecular and surface-anchor
-        connectivity.  Default 10.
+        connectivity.  Default 3.
     max_iter : int
         L-BFGS-B iteration cap per restart.  Default 100.
     n_shells_pair : int
         Lower bound on the ego depth used to propagate the refined
-        representative onto every other member via Kabsch ego-alignment.
-        Each :class:`AdsorbateSite` carries its own ``n_shells_settled``
-        recorded during :func:`find_adsorbate_sites` (after any
-        ``auto_grow_shells`` retries); the propagation depth is
-        ``max(n_shells_pair, ms.n_shells_settled)`` so that members whose
-        bonded cliques span more hops than this kwarg are still aligned
-        through an ego large enough to contain every clique pair.
+        representative onto every other member via a decorated coordination
+        graph mapping and MIC-aware substrate alignment.
+        Each :class:`AdsorbateSite` records the classification depth in
+        ``coordination_n_shells``; the propagation depth is
+        ``max(n_shells_pair, ms.coordination_n_shells)`` so it cannot be
+        shallower than the graph that defined the iso-class.
+    nl_mult : float
+        Neighbour-list cutoff multiplier used to validate the refined
+        adsorbate connectivity.  Default
+        :data:`~autokmc.core.constants.NL_MULT_DEFAULT`.
+    kabsch_max_mappings : int
+        Maximum graph-isomorphism mappings tested while propagating the
+        refined representative to equivalent members.  Default
+        :data:`~autokmc.core.constants.KABSCH_MAX_MAPPINGS`.
     verbose : bool
 
     Returns
@@ -2378,11 +3647,21 @@ def optimise_adsorbate_site_positions(
     elements = {i: reactant.graph.nodes[i]["element"] for i in range(n_atoms)}
     site_idx = _clique_position_index(G, list(elements.values()))
     cell, cell_inv, pbc, use_mic = _get_cell(G)
-    surface_spatial_index = _build_anchor_spatial_index(
-        [(frozenset(), p) for p in surf_pos],
-        cell,
-        pbc,
-        use_mic,
+    connectivity_context = _prepare_geometry_connectivity_context(
+        G,
+        reactant,
+        nl_mult=float(nl_mult),
+    )
+    surface_spatial_index = (
+        _build_anchor_spatial_index(
+            [(frozenset(), p) for p in surf_pos],
+            cell,
+            pbc,
+            use_mic,
+            cutoff=float(repulsion_cutoff),
+        )
+        if repulsion_cutoff is not None
+        else None
     )
 
     def _refine(ms: AdsorbateSite) -> tuple[np.ndarray, float, float, int, int]:
@@ -2410,7 +3689,12 @@ def optimise_adsorbate_site_positions(
                 # surface).  Using `base` here double-counts the height,
                 # producing targets ~2× too far from the surface.
                 if rows:
-                    clique_centroid = surf_pos[rows].mean(axis=0)
+                    clique_positions = unwrap_positions_about_reference(
+                        surf_pos[rows],
+                        cell,
+                        pbc,
+                    )
+                    clique_centroid = clique_positions.mean(axis=0)
                 else:
                     clique_centroid = base
                 n_hat = _outward_normal_at(G, clique_centroid, pbc)
@@ -2420,6 +3704,13 @@ def optimise_adsorbate_site_positions(
             exclude_surf_by_atom[i].update(int(s) for s in clique)
 
         target_arr = np.array(targets, dtype=float).reshape(-1, 3)
+        if use_mic and target_arr.size:
+            current_bonded_positions = cur_pos[np.asarray(bonded_idx, dtype=int)]
+            target_arr = current_bonded_positions + minimum_image_vectors(
+                target_arr - current_bonded_positions,
+                cell,
+                pbc,
+            )
         free_rows  = np.arange(len(surf_ids), dtype=int)
         if (
             repulsion_cutoff is not None
@@ -2462,54 +3753,201 @@ def optimise_adsorbate_site_positions(
         else:
             R_flip = None
 
+        required_surface_mask = np.zeros(
+            (n_atoms, connectivity_context.n_slab),
+            dtype=bool,
+        )
+        for atom_index, clique in enumerate(ms.atom_cliques):
+            if clique is None:
+                continue
+            for surface_node in clique:
+                slab_index = connectivity_context.node_to_slab_index.get(
+                    int(surface_node)
+                )
+                if slab_index is not None:
+                    required_surface_mask[atom_index, slab_index] = True
+        connectivity_thresholds = (
+            connectivity_context.adsorbate_cutoffs[:, None]
+            + connectivity_context.slab_cutoffs[None, :]
+        )
+        # A narrow buffer keeps optimized poses away from the strict
+        # neighbour-list boundary without materially changing their geometry.
+        connectivity_margin = 0.02
+        connectivity_weight = max(
+            10.0,
+            float(restraint_weight),
+            float(repulsion_weight),
+        )
+
         def _make_pose(R_base):
             def _pose(x):
-                return q_centred @ (R_base @ _rotation_from_axis_angle(x[3:])).T \
-                       + (cur_centroid + x[:3])
+                return (
+                    q_centred
+                    @ (
+                        R_base
+                        @ _rotation_from_axis_angle(
+                            np.asarray(x[3:], dtype=float)
+                        )
+                    ).T
+                    + (cur_centroid + np.asarray(x[:3], dtype=float))
+                )
             return _pose
 
-        def _make_energy(pose_fn, restraint_scale: float, repulsion_scale: float):
-            def _energy(x):
-                p = pose_fn(x)
-                E = 0.0
-                if bonded_idx:
-                    disp = p[bonded_idx] - target_arr
-                    E += (
-                        restraint_weight
-                        * float(restraint_scale)
-                        * float(np.einsum("ij,ij->", disp, disp))
+        def _make_energy_and_jac(
+            R_base,
+            restraint_scale: float,
+            repulsion_scale: float,
+            connectivity_scale: float,
+        ):
+            """Return cached scalar objective and analytical Jacobian."""
+            cache: dict[str, np.ndarray | float | None] = {
+                "x": None,
+                "energy": None,
+                "gradient": None,
+            }
+
+            def _evaluate(x):
+                x = np.asarray(x, dtype=float)
+                cached_x = cache["x"]
+                if (
+                    isinstance(cached_x, np.ndarray)
+                    and np.array_equal(x, cached_x)
+                ):
+                    return float(cache["energy"]), np.asarray(cache["gradient"])
+
+                rotvec = x[3:]
+                rotation = R_base @ _rotation_from_axis_angle(rotvec)
+                p = (
+                    q_centred @ rotation.T
+                    + (cur_centroid + x[:3])
+                )
+                right_jacobian = _rotation_right_jacobian(rotvec)
+                rotation_jacobian = np.empty((n_atoms, 3, 3), dtype=float)
+                for atom_index, reference_position in enumerate(q_centred):
+                    rotation_jacobian[atom_index] = (
+                        -rotation
+                        @ _skew_matrix(reference_position)
+                        @ right_jacobian
                     )
+
+                energy = 0.0
+                gradient_positions = np.zeros_like(p)
+                if bonded_idx:
+                    displacement = p[bonded_idx] - target_arr
+                    weight = float(restraint_weight) * float(restraint_scale)
+                    energy += weight * float(
+                        np.einsum("ij,ij->", displacement, displacement)
+                    )
+                    gradient_positions[bonded_idx] += 2.0 * weight * displacement
+
                 if free_pos.size:
                     # Vectorised pairwise (adsorbate, free-surface) repulsion.
-                    # ``dv`` has shape (n_atoms, n_surf, 3); MIC-wrapping is
-                    # applied once on the whole tensor instead of per-atom
-                    # (the previous implementation looped on ``ai`` in
-                    # Python, which dominated the L-BFGS-B objective cost).
                     dv = free_pos[None, :, :] - p[:, None, :]
                     if use_mic and cell_inv is not None:
                         dv = minimum_image_vectors(dv, cell, pbc)
-                    d2    = np.einsum("ijk,ijk->ij", dv, dv)
-                    R_min = contact_factor * (
+                    d2 = np.einsum("ijk,ijk->ij", dv, dv)
+                    distance = np.sqrt(d2 + 1e-12)
+                    minimum_distance = contact_factor * (
                         ads_rcov[:, None] + free_r[None, :]
                     )
-                    delta = R_min - np.sqrt(d2 + 1e-12)
-                    pos_c = np.maximum(delta, 0.0)
-                    pos_c = np.where(repulsion_pair_mask, pos_c, 0.0)
-                    E += (
-                        repulsion_weight
-                        * float(repulsion_scale)
-                        * float(np.einsum("ij,ij->", pos_c, pos_c))
+                    overlap = np.maximum(minimum_distance - distance, 0.0)
+                    overlap = np.where(repulsion_pair_mask, overlap, 0.0)
+                    weight = float(repulsion_weight) * float(repulsion_scale)
+                    energy += weight * float(
+                        np.einsum("ij,ij->", overlap, overlap)
                     )
-                return E
-            return _energy
+                    coefficient = 2.0 * weight * overlap / distance
+                    gradient_positions += np.einsum(
+                        "ij,ijk->ik",
+                        coefficient,
+                        dv,
+                    )
 
-        E0 = _make_energy(_make_pose(R0), 1.0, 1.0)(np.zeros(6))
+                if connectivity_context.n_slab:
+                    dv = (
+                        connectivity_context.slab_positions[None, :, :]
+                        - p[:, None, :]
+                    )
+                    if connectivity_context.pbc.any():
+                        dv = minimum_image_vectors(
+                            dv,
+                            connectivity_context.cell,
+                            connectivity_context.pbc,
+                        )
+                    d2 = np.einsum("ijk,ijk->ij", dv, dv)
+                    distance = np.sqrt(d2 + 1e-12)
+                    required_excess = np.where(
+                        required_surface_mask,
+                        np.maximum(
+                            distance
+                            - (connectivity_thresholds - connectivity_margin),
+                            0.0,
+                        ),
+                        0.0,
+                    )
+                    forbidden_overlap = np.where(
+                        ~required_surface_mask,
+                        np.maximum(
+                            (connectivity_thresholds + connectivity_margin)
+                            - distance,
+                            0.0,
+                        ),
+                        0.0,
+                    )
+                    weight = connectivity_weight * float(connectivity_scale)
+                    energy += weight * float(
+                        np.einsum(
+                            "ij,ij->",
+                            required_excess,
+                            required_excess,
+                        )
+                        + np.einsum(
+                            "ij,ij->",
+                            forbidden_overlap,
+                            forbidden_overlap,
+                        )
+                    )
+                    coefficient = (
+                        2.0
+                        * weight
+                        * (forbidden_overlap - required_excess)
+                        / distance
+                    )
+                    gradient_positions += np.einsum(
+                        "ij,ijk->ik",
+                        coefficient,
+                        dv,
+                    )
+
+                gradient = np.empty(6, dtype=float)
+                gradient[:3] = gradient_positions.sum(axis=0)
+                gradient[3:] = np.einsum(
+                    "ni,nij->j",
+                    gradient_positions,
+                    rotation_jacobian,
+                )
+                cache["x"] = x.copy()
+                cache["energy"] = float(energy)
+                cache["gradient"] = gradient.copy()
+                return float(energy), gradient
+
+            def _energy(x):
+                return _evaluate(x)[0]
+
+            def _jacobian(x):
+                return _evaluate(x)[1]
+
+            return _energy, _jacobian
+
+        energy0, _jacobian0 = _make_energy_and_jac(R0, 1.0, 1.0, 1.0)
+        E0 = energy0(np.zeros(6))
         if _geometry_connectivity_mismatch(
             G,
             ms,
             reactant,
             cur_pos,
-            nl_mult=NL_MULT_DEFAULT,
+            nl_mult=nl_mult,
+            _context=connectivity_context,
         ) is None:
             return cur_pos.copy(), E0, E0, -1, 0
 
@@ -2528,32 +3966,49 @@ def optimise_adsorbate_site_positions(
         best_mismatch: tuple[set[frozenset], set[frozenset]] | None = None
         last_exc: Exception | None = None
         attempts = max(1, int(max_connectivity_attempts))
+        start_vectors = [np.zeros(6, dtype=float) for _ in bases]
         for attempt in range(attempts):
             restraint_scale = 1.0 + float(attempt)
             repulsion_scale = 1.0 + 0.25 * float(attempt)
+            connectivity_scale = 1.0 + float(attempt)
             connected: list[tuple[float, np.ndarray, int]] = []
             for k, R_base in enumerate(bases):
                 pose_k = _make_pose(R_base)
-                energy_k = _make_energy(
-                    pose_k,
+                energy_k, jacobian_k = _make_energy_and_jac(
+                    R_base,
                     restraint_scale,
                     repulsion_scale,
+                    connectivity_scale,
                 )
                 try:
                     res = minimize(
                         energy_k,
-                        np.zeros(6),
+                        start_vectors[k],
                         method="L-BFGS-B",
+                        jac=jacobian_k,
                         options={"maxiter": max_iter, "ftol": 1e-7},
                     )
+                    result_vector = np.asarray(res.x, dtype=float)
+                    if result_vector.shape != (6,) or not np.isfinite(
+                        result_vector
+                    ).all():
+                        raise ValueError(
+                            "optimizer returned a non-finite rigid-body pose"
+                        )
                     E_k = float(res.fun)
-                    p_k = pose_k(res.x)
+                    if not np.isfinite(E_k):
+                        raise ValueError(
+                            "optimizer returned a non-finite objective"
+                        )
+                    start_vectors[k] = result_vector.copy()
+                    p_k = pose_k(result_vector)
                     mismatch = _geometry_connectivity_mismatch(
                         G,
                         ms,
                         reactant,
                         p_k,
-                        nl_mult=NL_MULT_DEFAULT,
+                        nl_mult=nl_mult,
+                        _context=connectivity_context,
                     )
                 except Exception as exc:
                     last_exc = exc
@@ -2609,54 +4064,57 @@ def optimise_adsorbate_site_positions(
             _remove_iso_class_nodes(G, ms)
             continue
 
-        rms = float(np.sqrt(np.mean(
-            np.sum((new_pos - np.asarray(ms.positions)) ** 2, axis=1)
-        )))
+        position_change = new_pos - np.asarray(ms.positions)
+        if use_mic:
+            position_change = minimum_image_vectors(position_change, cell, pbc)
+        rms = float(np.sqrt(np.mean(np.sum(position_change ** 2, axis=1))))
         new_pos = _wrap_adsorbate_positions_for_storage(
             new_pos, ms.atom_cliques, cell, pbc,
         )
-        ms.positions = new_pos
 
-        # Push representative positions and Kabsch-propagate to other members.
+        # Push representative positions and propagate to other members using
+        # the same decorated coordination graph that defines the iso-class.
+        # Validate the complete class before writing any graph positions.
         n_propagated = 0
         if ms.member_node_ids:
-            push_member_positions_to_graph(G, ms, 0, new_pos)
-
-            rep_seed: frozenset = frozenset(
-                int(n)
-                for c in ms.atom_cliques if c is not None
-                for n in c
-            )
-            if rep_seed:
-                cell_arr, cell_inv_arr, pbc_arr, use_mic_arr = _get_cell(G)
-                # Use whichever depth is larger: the kwarg floor, or the
-                # depth ``find_adsorbate_sites`` settled on for *this*
-                # iso-class.  Without this, members whose bonded cliques
-                # span more hops than ``n_shells_pair`` would silently
-                # fail to align (rep / mem ego non-isomorphic).
-                depth = max(int(n_shells_pair), int(ms.n_shells_settled))
+            pending_positions = [new_pos]
+            if any(c is not None for c in ms.atom_cliques):
+                # Rebuild members at the same substrate-ego depth that defined
+                # their decorated iso-class. The explicit kwarg remains a
+                # lower bound for manually constructed sites.
+                depth = max(
+                    int(n_shells_pair),
+                    int(ms.coordination_n_shells),
+                )
                 for m_idx in range(1, len(ms.members)):
-                    mem_seed: frozenset = frozenset(
-                        int(n)
-                        for c in ms.members[m_idx] if c is not None
-                        for n in c
-                    )
-                    if not mem_seed:
-                        continue
-                    R, t = _kabsch_align_ego(
-                        G,
-                        rep_seed, mem_seed, depth,
-                        cell_arr, cell_inv_arr, pbc_arr, use_mic_arr,
-                    )
-                    if R is None or t is None:
-                        continue
-                    member_pos = new_pos @ R.T + t
-                    if not _adsorbate_pose_is_outward(
-                        G, ms.members[m_idx], member_pos, pbc_arr,
-                    ):
-                        continue
-                    push_member_positions_to_graph(G, ms, m_idx, member_pos)
-                    n_propagated += 1
+                    try:
+                        member_pos = _propagate_adsorbate_member_positions(
+                            G,
+                            ms.atom_cliques,
+                            ms.members[m_idx],
+                            new_pos,
+                            reactant,
+                            n_shells=depth,
+                            nl_mult=nl_mult,
+                            max_mappings=kabsch_max_mappings,
+                            _context=connectivity_context,
+                        )
+                    except Exception as exc:
+                        raise RuntimeError(
+                            "optimise_adsorbate_site_positions: decorated "
+                            f"propagation failed for iso-class {ms.iso_class}, "
+                            f"member {m_idx}: {exc}"
+                        ) from exc
+                    pending_positions.append(member_pos)
+            for member_index, member_pos in enumerate(pending_positions):
+                push_member_positions_to_graph(
+                    G,
+                    ms,
+                    member_index,
+                    member_pos,
+                )
+            n_propagated = len(pending_positions) - 1
+        ms.positions = new_pos
 
         if verbose:
             print(

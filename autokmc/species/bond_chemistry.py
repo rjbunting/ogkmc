@@ -10,12 +10,11 @@ reactions of molecular species:
   can be formed by joining them with a new bond.
 
 .. important::
-    All SMILES passed to these functions must be **charge-free**.  Formal
-    charges confuse radical-electron counting and prevent correct valence
-    detection.  Use bracket notation with explicit radical electrons instead
-    of dative-bond shorthands:
+    Bond enumeration uses a **charge-free** radical model. Other formally
+    charged inputs are rejected before enumeration. Both common CO spellings
+    normalize to the model's neutral representation:
 
-    * CO: use ``[C]=O`` (C has 2 radical electrons) — **not** ``[C-]#[O+]``
+    * CO: ``[C]=O`` or ``[C-]#[O+]`` → ``[C]=O``
     * OH: ``[OH]`` (O has 1 radical electron)
 
 Typical usage — fragmentation
@@ -28,7 +27,7 @@ Typical usage — fragmentation
     for p in pairs:
         print(p.bond_type, p.smiles_a, p.smiles_b)
 
-    # Water ��� break every O-H bond
+    # For water, break each O-H bond.
     pairs = get_all_fragments("O", bond_types=("SINGLE",))
 
     # Build Reactant objects for each fragment (requires RDKit)
@@ -45,7 +44,7 @@ Typical usage — combination
     # Reconnect fragments that already carry * attachment points
     products = combine_fragments("[CH3]*", "[OH]*")
     for s in products:
-        print(s.smiles)           # 'CO'  (methanol)
+        print(s.smiles)           # explicit-atom methanol SMILES
 
     # Enumerate every possible bond between two bare radicals
     products = combine_fragments("[CH3]", "[OH]")
@@ -76,6 +75,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from autokmc.core.constants import NL_MULT_DEFAULT, RANDOM_SEED
+from autokmc.species.smiles import (
+    molecule_from_smiles, molecule_from_reactant, require_charge_free, SmilesError,
+)
 from autokmc.utils.logging import get_logger
 from autokmc.utils.rdkit_logging import silence_rdkit_warnings
 
@@ -142,26 +144,16 @@ class FragmentPair:
 # ---------------------------------------------------------------------------
 
 def _rdkit_mol_from_smiles(smiles: str, *, add_hydrogens: bool):
-    """Return an RDKit ``Mol`` from *smiles*, optionally with explicit H."""
+    """Return an RDKit ``Mol`` while retaining explicitly specified H."""
     try:
-        from rdkit import Chem
         from rdkit.Chem import AllChem
     except ImportError as exc:
         raise ImportError(
             "RDKit is required.  Install with: conda install -c conda-forge rdkit"
         ) from exc
 
-    mol = Chem.MolFromSmiles(smiles)
-    if mol is None:
-        raise ValueError(f"RDKit could not parse SMILES: {smiles!r}")
-
-    if add_hydrogens:
-        only_atoms = [
-            a.GetIdx() for a in mol.GetAtoms()
-            if a.GetNumImplicitHs() > 0 or a.GetNumExplicitHs() > 0
-        ]
-        if only_atoms:
-            mol = Chem.AddHs(mol, onlyOnAtoms=only_atoms)
+    mol = molecule_from_smiles(smiles, add_hydrogens=add_hydrogens)
+    require_charge_free(mol)
 
     # Embed + quick MMFF pre-relax so positions are meaningful.
     params = AllChem.ETKDGv3()
@@ -198,6 +190,12 @@ def _rdkit_mol_from_atoms(atoms):
     from autokmc.core.graph import build_graph
     import numpy as _np
 
+    if _np.any(atoms.get_initial_charges() != 0.0):
+        raise SmilesError(
+            "Cannot infer charge-free bond chemistry from charged Atoms; "
+            "pass a supported molecular SMILES or Reactant"
+        )
+
     # Ensure surface tags exist (build_graph requires them).
     if "surface" not in atoms.arrays:
         atoms = atoms.copy()
@@ -215,8 +213,22 @@ def _rdkit_mol_from_atoms(atoms):
     symbols = atoms.get_chemical_symbols()
     rwmol = Chem.RWMol()
 
-    for sym in symbols:
+    from ase.data import atomic_masses, atomic_numbers
+
+    isotope_table = Chem.GetPeriodicTable()
+    for sym, mass in zip(symbols, atoms.get_masses()):
         atom = Chem.Atom(sym)
+        number = atomic_numbers[sym]
+        if not _np.isclose(mass, atomic_masses[number], rtol=0.0, atol=1e-8):
+            isotope = int(round(float(mass)))
+            isotope_mass = isotope_table.GetMassForIsotope(number, isotope)
+            if isotope_mass <= 0 or not _np.isclose(
+                mass, isotope_mass, rtol=0.0, atol=1e-3,
+            ):
+                raise ValueError(
+                    f"Cannot represent {sym} mass {mass:g} as an isotope in SMILES"
+                )
+            atom.SetIsotope(isotope)
         atom.SetNoImplicit(True)
         rwmol.AddAtom(atom)
 
@@ -238,13 +250,8 @@ def _rdkit_mol_from_atoms(atoms):
         conf.SetAtomPosition(i, pos.tolist())
     rwmol.AddConformer(conf, assignId=True)
 
-    try:
-        mol = rwmol.GetMol()
-        Chem.SanitizeMol(mol)
-    except Exception as exc:
-        _log.warning("_rdkit_mol_from_atoms: sanitization warning: %s", exc)
-        mol = rwmol.GetMol()
-
+    mol = rwmol.GetMol()
+    Chem.SanitizeMol(mol)
     return mol
 
 
@@ -288,10 +295,7 @@ def _strip_dummy_atoms(mol) -> str:
     dummies = [a.GetIdx() for a in rw.GetAtoms() if a.GetAtomicNum() == 0]
     for idx in sorted(dummies, reverse=True):
         rw.RemoveAtom(idx)
-    try:
-        Chem.SanitizeMol(rw)
-    except Exception:
-        pass
+    Chem.SanitizeMol(rw)
     return Chem.MolToSmiles(rw.GetMol())
 
 
@@ -354,16 +358,10 @@ def _strip_dummy_atoms_from_smiles(smiles: str) -> str:
     all (e.g. a product SMILES from :func:`combine_fragments`), no atoms are
     modified and the function is essentially a round-trip canonicaliser.
     """
-    try:
-        from rdkit import Chem
-        from rdkit.Chem import RWMol
-    except ImportError:
-        import re
-        return re.sub(r'\[\*\]|\*', '', smiles).strip('- ')
+    from rdkit import Chem
+    from rdkit.Chem import RWMol
 
-    mol = Chem.MolFromSmiles(smiles)
-    if mol is None:
-        return smiles
+    mol = molecule_from_smiles(smiles, allow_dummies=True)
     rw = RWMol(mol)
 
     dummies = sorted(
@@ -383,10 +381,7 @@ def _strip_dummy_atoms_from_smiles(smiles: str) -> str:
         for idx in dummies:
             rw.RemoveAtom(idx)
 
-    try:
-        Chem.SanitizeMol(rw)
-    except Exception:
-        pass
+    Chem.SanitizeMol(rw)
     return Chem.MolToSmiles(rw.GetMol())
 
 
@@ -477,7 +472,7 @@ def get_all_fragments(
             "RDKit is required.  Install with: conda install -c conda-forge rdkit"
         ) from exc
 
-    # ── Build the RDKit molecule ─────────────────────────────────────────────
+    # First, build the RDKit molecule.
     try:
         from ase import Atoms as _ASEAtoms
         _ase_available = True
@@ -513,7 +508,7 @@ def get_all_fragments(
 
     _bt_name_map = {v: k for k, v in _bt_map.items()}
 
-    # ── Iterate over bonds ───────────────────────────────────────────────────
+    # Next, consider each bond in the molecule.
     results: list[FragmentPair] = []
     seen_smiles_pairs: set[frozenset] = set()
 
@@ -534,7 +529,7 @@ def get_all_fragments(
         elem_b   = atom_b.GetSymbol()
         bt_name  = _bt_name_map.get(bond.GetBondType(), str(bond.GetBondType()))
 
-        # ── Fragment the molecule at this bond ────────────────────────────
+        # Break this bond to form a candidate fragment pair.
         try:
             frag_mol = Chem.FragmentOnBonds(
                 mol,
@@ -582,7 +577,7 @@ def get_all_fragments(
         frag_a = _mark_dummy_nbrs(frag_a)
         frag_b = _mark_dummy_nbrs(frag_b)
 
-        # ── Convert to SMILES ─────────────────────────────────────────────
+        # Convert the two fragments to SMILES.
         if strip_dummies:
             smi_a = _strip_dummy_atoms(frag_a)
             smi_b = _strip_dummy_atoms(frag_b)
@@ -590,7 +585,7 @@ def get_all_fragments(
             smi_a = Chem.MolToSmiles(frag_a)
             smi_b = Chem.MolToSmiles(frag_b)
 
-        # ── Optional deduplication by {smi_a, smi_b} ─────────────────────
+        # If requested, remove duplicate unordered SMILES pairs.
         if deduplicate:
             key = frozenset({smi_a, smi_b})
             if key in seen_smiles_pairs:
@@ -613,7 +608,7 @@ def get_all_fragments(
         input_label, len(results),
     )
 
-    # ── Optionally build Reactant objects for each fragment ──────────────────
+    # Finally, build Reactant objects for the fragments when requested.
     if as_reactants:
         from autokmc.species.reactant import build_reactant
 
@@ -732,57 +727,82 @@ def _available_valence_indices(mol) -> list[int]:
     return out
 
 
-def _fix_overvalent_atoms(rw, pt=None) -> None:
-    """Reduce bond orders to resolve over-valency introduced by a new bond.
+def _bondable_real_atom_indices(mol) -> list[int]:
+    """Return heavy atoms plus free hydrogen radicals, excluding bound H."""
+    return [
+        atom.GetIdx()
+        for atom in mol.GetAtoms()
+        if (
+            atom.GetAtomicNum() > 1
+            or (atom.GetAtomicNum() == 1 and atom.GetDegree() == 0)
+        )
+    ]
 
-    After :func:`_join_mols` adds a new single bond between two fragments,
-    one of the atoms may now exceed its default valence (e.g. the O in
-    ``[C]=O`` gains a third bond when O–OH is formed).  This function scans
-    every non-H atom and, if its bond-order sum exceeds its default valence,
-    reduces the highest-order *existing* bond (TRIPLE→DOUBLE or
-    DOUBLE→SINGLE) to make room.  The process repeats until no over-valent
-    atom remains.
 
-    Note: radical electron counts are **not** explicitly updated here; they
-    are recomputed correctly when the caller subsequently calls
-    ``Chem.SanitizeMol`` with ``SANITIZE_FINDRADICALS``.
+def _coupling_bond_type(mol_a, mol_b, idx_a: int, idx_b: int):
+    """Choose a bond order from the two attachment sites' open valences.
+
+    A dummy bond records the order of the cleaved bond; use that order
+    without consuming any additional radicals on its neighbour. For bare
+    atoms, pair as many radical electrons as both sides supply (up to a
+    triple bond). A saturated recipient still accepts a single-bond radical
+    addition, with existing multiple bonds adjusted by ``_join_mols``.
     """
     from rdkit import Chem
 
-    if pt is None:
-        pt = Chem.GetPeriodicTable()
+    def capacity(mol, idx):
+        atom = mol.GetAtomWithIdx(idx)
+        if atom.GetAtomicNum() == 0:
+            bonds = list(atom.GetBonds())
+            if len(bonds) != 1:
+                return 0
+            return bonds[0].GetBondTypeAsDouble()
+        return max(1, atom.GetNumRadicalElectrons())
+
+    order = min(3, capacity(mol_a, idx_a), capacity(mol_b, idx_b))
+    return {
+        1: Chem.BondType.SINGLE,
+        2: Chem.BondType.DOUBLE,
+        3: Chem.BondType.TRIPLE,
+    }.get(order)
+
+
+def _fix_overvalent_atoms(rw, protected_bond) -> bool:
+    """Repair genuine RDKit valence violations using existing multiple bonds.
+
+    RDKit checks all allowed valences, including hypervalent S/P. Using just
+    the element's default valence would damage valid bonds elsewhere in the
+    molecule. The new connecting bond must retain its selected order.
+    """
+    from rdkit import Chem
 
     _reduce = {
         Chem.BondType.TRIPLE: Chem.BondType.DOUBLE,
         Chem.BondType.DOUBLE: Chem.BondType.SINGLE,
     }
 
-    changed = True
-    max_iters = 20
-    while changed and max_iters > 0:
-        changed = False
-        max_iters -= 1
-        for atom in rw.GetAtoms():
-            if atom.GetAtomicNum() <= 1:
-                continue  # skip H and dummy (*)
-            dv = pt.GetDefaultValence(atom.GetAtomicNum())
-            if dv <= 0:
-                continue
-            bo = int(round(sum(b.GetBondTypeAsDouble() for b in atom.GetBonds())))
-            if bo <= dv:
-                continue  # valence OK
-            # Reduce the highest-order bond of this over-valent atom.
+    for atom in rw.GetAtoms():
+        while True:
+            try:
+                atom.UpdatePropertyCache(strict=True)
+                break
+            except Chem.AtomValenceException:
+                pass
             for bond in sorted(atom.GetBonds(),
                                key=lambda b: b.GetBondTypeAsDouble(), reverse=True):
+                if bond.GetIdx() == protected_bond.GetIdx():
+                    continue
                 new_type = _reduce.get(bond.GetBondType())
                 if new_type is None:
-                    continue  # already SINGLE — cannot reduce further
+                    continue
                 bond.SetBondType(new_type)
-                changed = True
                 break
+            else:
+                return False
+    return True
 
 
-def _join_mols(mol_a, mol_b, idx_a: int, idx_b: int, rdkit_bond_type) -> str | None:
+def _join_mols(mol_a, mol_b, idx_a: int, idx_b: int, rdkit_bond_type):
     """Join *mol_a* and *mol_b* by forming a bond between atom *idx_a* in A
     and atom *idx_b* in B.
 
@@ -790,7 +810,7 @@ def _join_mols(mol_a, mol_b, idx_a: int, idx_b: int, rdkit_bond_type) -> str | N
     is formed and replaced by a direct bond to the dummy's neighbour.  This
     handles the ``FragmentOnBonds``-style attachment-point SMILES.
 
-    Returns the canonical SMILES of the combined molecule, or ``None`` if
+    Returns (canonical SMILES, actual connecting bond type), or ``None`` if
     RDKit sanitisation fails.
     """
     from rdkit import Chem
@@ -803,7 +823,7 @@ def _join_mols(mol_a, mol_b, idx_a: int, idx_b: int, rdkit_bond_type) -> str | N
         atom = mol.GetAtomWithIdx(idx)
         if atom.GetAtomicNum() == 0:
             nbrs = list(atom.GetNeighbors())
-            if not nbrs:
+            if len(nbrs) != 1:
                 return None, True   # isolated dummy — nothing to connect to
             return nbrs[0].GetIdx(), True
         return idx, False
@@ -837,12 +857,21 @@ def _join_mols(mol_a, mol_b, idx_a: int, idx_b: int, rdkit_bond_type) -> str | N
 
     # If the new bond made any atom over-valent (e.g. O in C=O gaining a
     # third bond), reduce existing bond orders to resolve it.
-    _fix_overvalent_atoms(rw)
+    shifted_a = real_a - sum(d < real_a for d in dummies_to_remove)
+    shifted_b = offset + real_b - sum(d < offset + real_b for d in dummies_to_remove)
+    new_bond = rw.GetBondBetweenAtoms(shifted_a, shifted_b)
+    if not _fix_overvalent_atoms(rw, new_bond):
+        return None
 
     try:
         mol = rw.GetMol()
         Chem.SanitizeMol(mol)
-        return Chem.MolToSmiles(mol)
+        # _set_no_implicit() above deliberately removes hydrogens that were
+        # only implicit in the input fragments.  Write all *remaining*
+        # hydrogens explicitly so a subsequent parse cannot collapse a real
+        # simulated H atom into implicit valence (for example H + O2 -> HO2).
+        bond_type = str(mol.GetBondBetweenAtoms(shifted_a, shifted_b).GetBondType())
+        return Chem.MolToSmiles(mol, allHsExplicit=True), bond_type
     except Exception:
         return None
 
@@ -853,31 +882,24 @@ def _parse_fragment_smiles(smiles_or_obj, add_hydrogens: bool = False):
     Accepts:
     * ``str``             — treated as SMILES (no embedding needed here).
     * ``FragmentPair``    — raises ``TypeError`` (pass ``.smiles_a`` directly).
-    * ``Reactant``        — uses ``reactant.atoms`` via ``_rdkit_mol_from_atoms``.
+    * ``Reactant``        — uses its SMILES and validated atom inventory.
     * ``ase.Atoms``       — via ``_rdkit_mol_from_atoms``.
 
     ``SetNoImplicit(True)`` is applied to all heavy atoms so that downstream
     operations never silently introduce implicit H.
     """
-    from rdkit import Chem
-    from rdkit.Chem import RWMol
-
     if isinstance(smiles_or_obj, str):
-        mol = Chem.MolFromSmiles(smiles_or_obj)
-        if mol is None:
-            raise ValueError(f"RDKit could not parse SMILES: {smiles_or_obj!r}")
-        if add_hydrogens:
-            only = [a.GetIdx() for a in mol.GetAtoms()
-                    if a.GetNumImplicitHs() > 0 or a.GetNumExplicitHs() > 0]
-            if only:
-                mol = Chem.AddHs(mol, onlyOnAtoms=only)
-        rw = RWMol(mol)
-        _set_no_implicit(rw)
-        return rw.GetMol()
+        mol = molecule_from_smiles(
+            smiles_or_obj, add_hydrogens=add_hydrogens, allow_dummies=True,
+        )
+        require_charge_free(mol)
+        return mol
 
     # Reactant dataclass has an .atoms attribute (ASE Atoms).
     if hasattr(smiles_or_obj, "atoms"):
-        return _rdkit_mol_from_atoms(smiles_or_obj.atoms)
+        mol = molecule_from_reactant(smiles_or_obj)
+        require_charge_free(mol)
+        return mol
 
     try:
         from ase import Atoms as _ASEAtoms
@@ -906,14 +928,10 @@ def combine_fragments(
     nl_mult: float = NL_MULT_DEFAULT,
 ) -> list[CombinedSpecies]:
     """Return all species formed by joining *fragment_a* and *fragment_b*
-    with a new **single** bond.
+    with one new bond whose order follows their attachment valences.
 
-    A single bond is always formed at each valid atom pair.  The actual
-    equilibrium bond order (single / double / triple) is a property of the
-    electronic structure and is best determined by a subsequent geometry
-    optimisation rather than hard-coded at the enumeration stage — this
-    function's job is only to identify *which atoms can connect* and to
-    return a chemically valid SMILES seed for each unique connectivity.
+    The selected bond order is part of the product's SMILES identity.
+    Subsequent geometry optimisation does not reassign that identity.
 
     The function operates in two modes depending on whether the input SMILES
     contain ``*`` (dummy) attachment-point atoms:
@@ -922,22 +940,27 @@ def combine_fragments(
         ``*`` atoms are treated as explicit attachment points — as produced by
         :func:`get_all_fragments` with ``strip_dummies=False`` (the default).
         Every pairing of a ``*`` in fragment A with a ``*`` in fragment B is
-        tried; the two dummies are removed and replaced by a single bond
-        between their respective heavy-atom neighbours.
+        tried; the two dummies are removed and their neighbours joined using
+        the smaller of the two dummy-bond orders. This restores the broken
+        order for matching fragments. When only one fragment has a dummy,
+        the other atom's radical count limits the order in the same way.
 
     **Undirected mode** (neither fragment contains ``*``)
-        Every pair (atom_i from A, atom_j from B) whose atoms both carry at
-        least one radical electron is tried.  A radical electron signals a
-        genuine open valence from a previous bond-breaking event (not merely
-        an implicit H that could be displaced).
+        Every pair (atom_i from A, atom_j from B) with at least one radical
+        atom is tried. When both atoms carry radicals, the new bond consumes
+        the smaller radical count, capped at a triple bond: O + O gives O=O,
+        and N + N gives N#N. Addition to a saturated recipient uses a single
+        bond and reduces existing multiple bonds if needed (e.g. H + O2).
+        Bound hydrogen atoms are excluded as recipients.
 
     Parameters
     ----------
     fragment_a, fragment_b : str, Reactant, or ase.Atoms
         The two fragments to join.  SMILES strings are parsed directly;
-        :class:`autokmc.species.reactant.Reactant` objects and ASE
-        :class:`~ase.Atoms` objects are converted via
-        :func:`_rdkit_mol_from_atoms`.
+        :class:`autokmc.species.reactant.Reactant` objects retain their
+        declared molecular bond orders after validating their atom inventory.
+        ASE :class:`~ase.Atoms` objects infer single bonds from connectivity
+        via :func:`_rdkit_mol_from_atoms`.
     deduplicate : bool
         Collapse entries that produce the same canonical SMILES into a single
         :class:`CombinedSpecies`.  Default ``True``.
@@ -954,8 +977,9 @@ def combine_fragments(
     Returns
     -------
     list[CombinedSpecies]
-        One entry per unique single-bond connectivity (when *deduplicate* is
-        ``True``).  The ``bond_type`` field is always ``"SINGLE"``.
+        One entry per unique product SMILES (when *deduplicate* is ``True``).
+        ``bond_type`` records the selected ``"SINGLE"``, ``"DOUBLE"``, or
+        ``"TRIPLE"`` bond order.
 
     Raises
     ------
@@ -970,14 +994,14 @@ def combine_fragments(
 
         >>> from autokmc.species.bond_chemistry import combine_fragments
         >>> products = combine_fragments("[CH3]*", "*[OH]")
-        >>> [s.smiles for s in products]
-        ['CO']                  # methanol
+        >>> products[0].smiles  # methanol with explicit atom inventory
+        '[H][O][C]([H])([H])[H]'
 
     **Bare radical fragments (undirected mode)**::
 
         >>> products = combine_fragments("[CH3]", "[OH]")
-        >>> [s.smiles for s in products]
-        ['CO']                  # C radical + O radical → methanol
+        >>> products[0].smiles
+        '[H][O][C]([H])([H])[H]'
 
     **Round-trip: break CO double bond, recombine**::
 
@@ -985,23 +1009,16 @@ def combine_fragments(
         >>> pairs = get_all_fragments("[C]=O", bond_types=("DOUBLE",))
         >>> p = pairs[0]
         >>> products = combine_fragments(p.smiles_a, p.smiles_b)
-        >>> [s.smiles for s in products]    # single bond seed
-        ['[C][O]']
+        >>> [s.smiles for s in products]
+        ['[C]=[O]']
     """
-    try:
-        from rdkit import Chem
-    except ImportError as exc:
-        raise ImportError(
-            "RDKit is required.  Install with: conda install -c conda-forge rdkit"
-        ) from exc
-
     mol_a = _parse_fragment_smiles(fragment_a)
     mol_b = _parse_fragment_smiles(fragment_b)
 
     dummies_a = _dummy_indices(mol_a)
     dummies_b = _dummy_indices(mol_b)
 
-    # ── Choose mode ──────────────────────────────────────────────────────────
+    # First, choose the requested coupling mode.
     directed = bool(dummies_a or dummies_b)
 
     if directed:
@@ -1011,10 +1028,16 @@ def combine_fragments(
         if dummies_a and dummies_b:
             pairs_to_try = [(ia, ib) for ia in dummies_a for ib in dummies_b]
         elif dummies_a:
-            avail_b = _available_valence_indices(mol_b) or list(range(mol_b.GetNumAtoms()))
+            avail_b = (
+                _available_valence_indices(mol_b)
+                or _bondable_real_atom_indices(mol_b)
+            )
             pairs_to_try = [(ia, ib) for ia in dummies_a for ib in avail_b]
         else:
-            avail_a = _available_valence_indices(mol_a) or list(range(mol_a.GetNumAtoms()))
+            avail_a = (
+                _available_valence_indices(mol_a)
+                or _bondable_real_atom_indices(mol_a)
+            )
             pairs_to_try = [(ia, ib) for ia in avail_a for ib in dummies_b]
     else:
         # Undirected mode: for each radical atom in fragment A, try every
@@ -1022,13 +1045,12 @@ def combine_fragments(
         # radical" (rather than "both radicals") allows a radical atom to
         # attack a saturated site — the bond-order reduction in _join_mols
         # resolves any resulting over-valency.
-        # NOTE: filter is > 0 (exclude dummy * atoms only), NOT > 1 — using
-        # > 1 incorrectly excludes hydrogen (GetAtomicNum() == 1), which
-        # prevents homo-coupling of radical H atoms to form H₂ ([H][H]).
+        # Bound explicit H atoms are not recipients, but free radical H atoms
+        # remain eligible so homo-coupling can still form H₂ ([H][H]).
         avail_a = _available_valence_indices(mol_a)
         avail_b = _available_valence_indices(mol_b)
-        heavy_a = [a.GetIdx() for a in mol_a.GetAtoms() if a.GetAtomicNum() > 0]
-        heavy_b = [a.GetIdx() for a in mol_b.GetAtoms() if a.GetAtomicNum() > 0]
+        heavy_a = _bondable_real_atom_indices(mol_a)
+        heavy_b = _bondable_real_atom_indices(mol_b)
 
         seen_pairs: set[tuple[int, int]] = set()
         pairs_to_try = []
@@ -1042,12 +1064,6 @@ def combine_fragments(
                 if (ia, ib) not in seen_pairs:
                     seen_pairs.add((ia, ib))
                     pairs_to_try.append((ia, ib))
-
-    # ── Always form a single bond ─────────────────────────────────────────────
-    # The equilibrium bond order (single/double/triple) is a property of the
-    # electronic structure — determining it is the job of the downstream
-    # calculator, not the enumerator.
-    rdkit_single = Chem.BondType.SINGLE
 
     def _real_atom(mol, idx):
         """Resolve dummy → its heavy-atom neighbour."""
@@ -1068,9 +1084,13 @@ def combine_fragments(
         real_idx_a  = real_atom_a.GetIdx()
         real_idx_b  = real_atom_b.GetIdx()
 
-        smi = _join_mols(mol_a, mol_b, idx_a, idx_b, rdkit_single)
-        if smi is None:
+        bond_type = _coupling_bond_type(mol_a, mol_b, idx_a, idx_b)
+        if bond_type is None:
             continue
+        joined = _join_mols(mol_a, mol_b, idx_a, idx_b, bond_type)
+        if joined is None:
+            continue
+        smi, actual_bond_type = joined
 
         if deduplicate:
             if smi in seen_smiles:
@@ -1079,7 +1099,7 @@ def combine_fragments(
 
         results.append(CombinedSpecies(
             smiles     = smi,
-            bond_type  = "SINGLE",
+            bond_type  = actual_bond_type,
             atom_idx_a = real_idx_a,
             atom_idx_b = real_idx_b,
             element_a  = elem_a,
@@ -1087,11 +1107,11 @@ def combine_fragments(
         ))
 
     _log.debug(
-        "combine_fragments: %d unique single-bond species found",
+        "combine_fragments: %d unique species found",
         len(results),
     )
 
-    # ── Optionally build Reactant objects ────────────────────────────────────
+    # Finally, build Reactant objects for the products when requested.
     if as_reactants:
         from autokmc.species.reactant import build_reactant
 

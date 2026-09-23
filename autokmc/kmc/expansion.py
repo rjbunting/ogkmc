@@ -36,9 +36,10 @@ Note
   coupling templates are NOT enumerated immediately.  Those expansions
   happen lazily when (and only when) a KMC event actually produces that
   species — exactly the same on-the-fly contract that drives this module.
-* Species whose Reactant build or site enumeration fails are recorded
-  with ``None`` / ``[]`` in the registry so we do not retry on every
-  KMC step.
+* Deterministically invalid molecular definitions are recorded as
+  permanently unavailable.  Calculator, optimisation, I/O, and other
+  runtime failures are retried and then raised explicitly; they never mark
+  a species as expanded or silently remove chemistry from the network.
 
 Public API
 ----------
@@ -55,10 +56,22 @@ Public API
 
 from __future__ import annotations
 
-from typing import Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping, TypeVar, cast
 
 import networkx as nx
 
+from autokmc.core.graph_state import (
+    BOND_CLIQUE_TO_MEMBERS,
+    BOND_SURFACE_NODE_TO_MEMBERS,
+    DIFFUSION_CLIQUE_TO_MEMBERS,
+    DIFFUSION_SURFACE_NODE_TO_MEMBERS,
+    get_bond_reaction_sites,
+    get_bond_registry,
+    get_diffusion_sites,
+    set_bond_reaction_sites,
+    set_bond_registry,
+    set_diffusion_sites,
+)
 from autokmc.sites.adsorbate import AdsorbateSite, find_adsorbate_sites
 from autokmc.sites.bond import (
     BondReactionTemplate,
@@ -76,24 +89,52 @@ from autokmc.sites.diffusion import (
     find_diffusion_sites,
     rebuild_diffusion_reverse_indexes,
 )
-from autokmc.species.reactant import Reactant, build_reactant
+from autokmc.sites.identity import SiteId, site_identifier
+from autokmc.species.reactant import (
+    Reactant,
+    ReactantDefinitionError,
+    ReactantGasUnstableError,
+    build_reactant,
+)
 from autokmc.io.calculators import CalculatorConfigError
+from autokmc.species.smiles import (
+    canonical_atom_inventory_smiles, reactant_atom_inventory_smiles,
+)
 from autokmc.core.constants import (
+    BOND_TOLERANCE,
     BOND_MAX_HOPS,
     BOND_PAIR_N_SHELLS,
     BOND_PRUNE_BY_TRIPLE,
     BOND_PRUNE_WITH_CALCULATOR,
     BOND_GAS_LIFT_HEIGHT,
+    CO_FACTOR,
+    CONTACT_FACTOR,
     DIFFUSION_MAX_HOPS,
+    HULL_TOL,
+    KABSCH_MAX_MAPPINGS,
     MAX_PAIR_SHELLS,
     NL_MULT_DEFAULT,
+    NN_DISTANCE,
+    N_ADSORBATE_RESTARTS,
     N_SHELLS_DEFAULT,
+    OPT_FACTOR,
     PRUNE_FMAX,
     PRUNE_MAX_STEPS,
+    RANDOM_SEED,
+    REPULSION_WEIGHT,
+    SITE_REPULSION_CUTOFF,
+    STANDOFF_FACTOR,
 )
 from autokmc.utils.logging import get_logger
+from autokmc.utils.optimizers import DEFAULT_OPTIMIZER
 
 _log = get_logger(__name__)
+_T = TypeVar("_T")
+_EXPANSION_MAX_ATTEMPTS = 3
+
+
+class SpeciesExpansionError(RuntimeError):
+    """A retryable runtime operation exhausted its expansion attempts."""
 
 
 # ---------------------------------------------------------------------------
@@ -102,23 +143,156 @@ _log = get_logger(__name__)
 
 def _registry(G: nx.Graph) -> dict:
     """Return the lazily-initialised on-graph registry dict."""
-    reg = G.graph.get("bond_registry")
-    if reg is None:
-        reg = {
-            "species":          {},     # smi (canon) → Reactant | None
-            "adsorbate_sites":  {},     # smi (canon) → list[AdsorbateSite]
-            "templates":        set(),  # set[(smi_a, smi_b, smi_c)]
-            # Species for which bond templates have been fully derived and
-            # enumerated (not just pre-built as leaf / product nodes).
-            # Used by expand_bond_sites_for_new_species as the idempotency
-            # guard so that leaf species (pre-built but not template-derived)
-            # can still be expanded when they first appear on the surface.
-            "expanded_species": set(),  # set[canonical_smiles]
-        }
-        G.graph["bond_registry"] = reg
-    # Back-fill for registries created before this field was added.
+    reg = get_bond_registry(G)
+    if not reg:
+        reg = {}
+        set_bond_registry(G, reg)
+    # Back-fill registries created by earlier releases.
+    reg.setdefault("species", {})
+    reg.setdefault("adsorbate_sites", {})
+    reg.setdefault("templates", set())
     reg.setdefault("expanded_species", set())
+    reg.setdefault("expansion_failures", {})
+    reg.setdefault("invalid_templates", [])
     return reg
+
+
+def _failure_record(reg: dict, smi: str, stage: str) -> dict:
+    """Return the persistent diagnostic record for one expansion stage."""
+    by_species = reg["expansion_failures"].setdefault(smi, {})
+    return by_species.setdefault(stage, {"attempts": 0})
+
+
+def record_unstable_gas_species(
+    reg: dict, smi: str, error: ReactantGasUnstableError, *, attempts: int = 1,
+) -> None:
+    """Persist a chemical exclusion shared by initial and runtime discovery."""
+    _failure_record(reg, smi, "build_reactant").update(
+        attempts=attempts, status="unstable_gas",
+        error_type=type(error).__name__, error=str(error),
+    )
+    reg["species"][smi] = None
+    reg["adsorbate_sites"][smi] = []
+    _log.warning("Excluding gas-unstable species %r from the reaction network: %s", smi, error)
+
+
+def filter_unavailable_templates(
+    reg: dict, templates: list[BondReactionTemplate], unavailable_species: set[str],
+) -> list[BondReactionTemplate]:
+    """Exclude and record templates requiring rejected species."""
+    viable = []
+    for template in templates:
+        required = {template.smiles_a, template.smiles_b, template.smiles_c}
+        invalid = sorted(required & unavailable_species)
+        if not invalid:
+            viable.append(template)
+            continue
+        unstable = any(
+            reg["expansion_failures"].get(smi, {}).get("build_reactant", {}).get("status")
+            == "unstable_gas" for smi in invalid
+        )
+        diagnostic = {
+            "smiles_a": template.smiles_a,
+            "smiles_b": template.smiles_b,
+            "smiles_c": template.smiles_c,
+            "reason": "unstable_gas_species" if unstable else "permanently_invalid_species",
+            "species": invalid,
+        }
+        if diagnostic not in reg["invalid_templates"]:
+            reg["invalid_templates"].append(diagnostic)
+        _log.warning(
+            "Excluding template %s + %s <-> %s: required species were excluded: %s",
+            template.smiles_a, template.smiles_b, template.smiles_c, invalid,
+        )
+    return viable
+
+
+def _retry_expansion_operation(
+    reg: dict,
+    smi: str,
+    stage: str,
+    operation: Callable[[], _T],
+    *,
+    max_attempts: int = _EXPANSION_MAX_ATTEMPTS,
+) -> _T:
+    """Run an expansion operation with bounded retries and diagnostics.
+
+    Gas instability, molecular-definition failures, and configuration/dependency
+    errors remain explicit and are not retried. Other failures are retried
+    because calculator services and filesystem-backed caches can fail
+    transiently during a long run.
+    """
+    existing_record = (
+        reg["expansion_failures"].get(smi, {}).get(stage)
+    )
+    prior_attempts = (
+        int(existing_record.get("attempts", 0))
+        if isinstance(existing_record, dict)
+        else 0
+    )
+    for local_attempt in range(1, max_attempts + 1):
+        try:
+            result = operation()
+        except ReactantGasUnstableError as exc:
+            record_unstable_gas_species(
+                reg, smi, exc, attempts=prior_attempts + local_attempt,
+            )
+            raise
+        except ReactantDefinitionError as exc:
+            record = _failure_record(reg, smi, stage)
+            record.update(
+                attempts=prior_attempts + local_attempt,
+                status="permanent_invalid",
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+            raise
+        except (CalculatorConfigError, ImportError) as exc:
+            record = _failure_record(reg, smi, stage)
+            record.update(
+                attempts=prior_attempts + local_attempt,
+                status="fatal",
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+            raise
+        except Exception as exc:
+            record = _failure_record(reg, smi, stage)
+            record.update(
+                attempts=prior_attempts + local_attempt,
+                status=(
+                    "retryable_failure"
+                    if local_attempt < max_attempts
+                    else "retry_exhausted"
+                ),
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+            if local_attempt < max_attempts:
+                _log.warning(
+                    "Runtime expansion stage %s for species %r failed "
+                    "(attempt %d/%d): %s; retrying",
+                    stage,
+                    smi,
+                    local_attempt,
+                    max_attempts,
+                    exc,
+                )
+                continue
+            raise SpeciesExpansionError(
+                f"runtime expansion stage {stage!r} for species {smi!r} "
+                f"failed after {max_attempts} attempts: {exc}"
+            ) from exc
+
+        if local_attempt > 1 or existing_record is not None:
+            record = _failure_record(reg, smi, stage)
+            record.update(
+                attempts=prior_attempts + local_attempt,
+                status="recovered",
+            )
+        return result
+
+    raise AssertionError("unreachable expansion retry state")
 
 
 def initialise_bond_registry(
@@ -171,53 +345,82 @@ def initialise_bond_registry(
     """
     reg = _registry(G)
 
-    # Reactants
+    # First, register the known reactants.
     if isinstance(reactants, Reactant):
         items: list[tuple[str, Reactant]] = [(reactants.smiles, reactants)]
     elif isinstance(reactants, Mapping):
         items = [(str(k), v) for k, v in reactants.items()]
     else:
-        items = [(r.smiles, r) for r in reactants]
+        reactant_items = cast(Iterable[Reactant], reactants)
+        items = [(reactant.smiles, reactant) for reactant in reactant_items]
+    pending = dict(reg["species"])
+    inventory_labels = {
+        reactant_atom_inventory_smiles(reactant): label
+        for label, reactant in pending.items() if isinstance(reactant, Reactant)
+    }
     for smi, r in items:
-        reg["species"][_canon_smiles(smi)] = r
+        label = _canon_smiles(smi)
+        previous = pending.get(label)
+        if previous is not None and previous is not r:
+            raise ValueError(f"Species label {label!r} is already registered; reuse its reactant")
+        if isinstance(r, Reactant):
+            inventory = reactant_atom_inventory_smiles(r)
+            previous_label = inventory_labels.get(inventory)
+            if previous_label is not None and previous_label != label:
+                raise ValueError(
+                    f"Species {label!r} duplicates the atom inventory of {previous_label!r}; "
+                    "reuse the registered species"
+                )
+            inventory_labels[inventory] = label
+        pending[label] = r
+    reg["species"].update(pending)
 
-    # Adsorbate sites
+    # Next, register their adsorbate sites.
     if adsorbate_sites is not None:
         if isinstance(adsorbate_sites, Mapping):
             for smi, sites in adsorbate_sites.items():
                 reg["adsorbate_sites"][_canon_smiles(smi)] = list(sites)
         else:
-            for s in adsorbate_sites:
+            flat_sites = cast(Iterable[AdsorbateSite], adsorbate_sites)
+            for s in flat_sites:
                 reg["adsorbate_sites"].setdefault(
                     _canon_smiles(s.reactant), []
                 ).append(s)
 
-    # Templates
+    # The reaction templates are registered after their species and sites.
     if templates is not None:
         for t in templates:
             reg["templates"].add((t.smiles_a, t.smiles_b, t.smiles_c))
 
-    # Mark explicitly-expanded species so the on-the-fly expander won't
-    # needlessly re-derive their templates during the KMC loop.
+    # Species expanded during initialization do not need to be derived again
+    # during the KMC loop, so mark them here.
     if expanded_smiles is not None:
         for smi in expanded_smiles:
             cs = _canon_smiles(smi)
             if cs:
                 reg["expanded_species"].add(cs)
 
-    # Bond sites — primary store stays on G.graph for compatibility
+    # Finally, register the bond sites. The graph remains the primary store for
+    # compatibility with existing callers.
     if bond_sites is not None:
-        G.graph["bond_reaction_sites"] = list(bond_sites)
+        set_bond_reaction_sites(G, bond_sites)
 
     return reg
 
 
 def bond_species_known(G: nx.Graph, smiles: str) -> bool:
     """Return True iff *smiles* is already in the bond-reaction registry."""
-    reg = G.graph.get("bond_registry")
-    if reg is None:
+    reg = get_bond_registry(G)
+    if not reg:
         return False
-    return _canon_smiles(smiles) in reg["species"]
+    if _canon_smiles(smiles) in reg["species"]:
+        return True
+    inventory = canonical_atom_inventory_smiles(smiles)
+    return any(
+        isinstance(reactant, Reactant)
+        and reactant_atom_inventory_smiles(reactant) == inventory
+        for reactant in reg["species"].values()
+    )
 
 
 def _rebuild_bond_reverse_indexes(
@@ -226,6 +429,65 @@ def _rebuild_bond_reverse_indexes(
 ) -> None:
     """Rebuild bond reverse indexes from the complete active site list."""
     rebuild_bond_reverse_indexes(G, bond_sites)
+
+
+def _preserve_reverse_index(G: nx.Graph, key: str) -> dict | None:
+    """Keep an existing index object before an enumerator replaces its key."""
+    if key not in G.graph:
+        return None
+    index = G.graph.get(key)
+    return index if isinstance(index, dict) else {}
+
+
+def _append_diffusion_reverse_indexes(
+    G: nx.Graph,
+    clique_index: dict,
+    surface_index: dict,
+    sites: Iterable[DiffusionSite],
+) -> None:
+    for site in sites:
+        for member_index, _ in enumerate(site.member_node_ids):
+            site_a, member_a, site_b, member_b = site.members[member_index]
+            cliques: list[frozenset] = []
+            member_cliques_a = getattr(site_a, "_member_cliques", None)
+            member_cliques_b = getattr(site_b, "_member_cliques", None)
+            if (
+                member_cliques_a is not None
+                and member_a < len(member_cliques_a)
+            ):
+                cliques.extend(member_cliques_a[member_a])
+            if (
+                member_cliques_b is not None
+                and member_b < len(member_cliques_b)
+            ):
+                cliques.extend(member_cliques_b[member_b])
+            for clique in cliques:
+                clique_index.setdefault(clique, []).append(
+                    (site, member_index)
+                )
+                for surface_id in clique:
+                    surface_index.setdefault(int(surface_id), []).append(
+                        (site, member_index)
+                    )
+
+
+def _append_bond_reverse_indexes(
+    clique_index: dict,
+    surface_index: dict,
+    sites: Iterable[BondReactionSite],
+) -> None:
+    for site in sites:
+        for member_index, (cliques_a, cliques_b, cliques_c) in enumerate(
+            site._member_cliques
+        ):
+            for clique in (*cliques_a, *cliques_b, *cliques_c):
+                clique_index.setdefault(clique, []).append(
+                    (site, member_index)
+                )
+                for surface_id in clique:
+                    surface_index.setdefault(int(surface_id), []).append(
+                        (site, member_index)
+                    )
 
 
 # ---------------------------------------------------------------------------
@@ -240,8 +502,28 @@ def _ensure_species_known(
     calculator,
     frozen_indices: list[int] | None,
     nl_mult: float,
-    prune_fmax: float,
-    prune_max_steps: int,
+    random_seed: int,
+    adsorption_prune_fmax: float,
+    adsorption_prune_max_steps: int,
+    reactant_fmax: float,
+    reactant_max_steps: int,
+    optimizer: str,
+    optimizer_kwargs: dict[str, Any] | None,
+    anchor_k_max: int | None,
+    adsorbate_bond_tolerance: float,
+    adsorbate_n_shells_anchor: int | None,
+    adsorbate_n_shells_pair: int,
+    co_bond_factor: float,
+    anchor_bond_factor: float,
+    anchor_repulsion_weight: float,
+    site_repulsion_cutoff: float | None,
+    adsorbate_contact_factor: float,
+    adsorbate_standoff_factor: float,
+    adsorbate_rotational_restarts: int,
+    typical_neighbor_distance: float,
+    adsorbate_max_pair_shells: int,
+    anchor_hull_tolerance: float,
+    kabsch_max_mappings: int,
     add_hydrogens: bool,
     verbose: bool,
     free_energy_options=None,
@@ -250,65 +532,108 @@ def _ensure_species_known(
 ) -> bool:
     """Build a Reactant + find adsorbate sites for *smi* if not already known.
 
-    Returns ``True`` on success, ``False`` if the build / enumeration
-    failed (the registry still records the failure to prevent retries).
+    Returns ``True`` on success and ``False`` for an invalid molecular
+    definition or gas-unstable species. Runtime failures are retried
+    and then raised as :class:`SpeciesExpansionError`.
     """
     if smi in reg["species"]:
-        return reg["species"][smi] is not None
+        existing = reg["species"][smi]
+        if existing is None:
+            status = (
+                reg["expansion_failures"]
+                .get(smi, {})
+                .get("build_reactant", {})
+                .get("status")
+            )
+            if status in {"permanent_invalid", "unstable_gas"}:
+                return False
+            # Legacy checkpoints used ``None`` for every failure, including
+            # transient backend errors.  Retry those records instead of
+            # silently preserving an incomplete reaction network.
+            del reg["species"][smi]
+            reg["adsorbate_sites"].pop(smi, None)
+        elif smi in reg["adsorbate_sites"]:
+            return True
 
     if verbose:
         print(
             f"  [KMC] species {smi!r} is new to the registry; "
             "building gas reference and adsorbate placements"
         )
-    try:
-        # Newly-discovered species introduced during a KMC run should
-        # default to zero partial pressure (they are produced on-surface
-        # and are not assumed to be present in the gas phase unless the
-        # user explicitly adds them to the config).  Pass
-        # partial_pressure_bar=0.0 to enforce this behaviour for
-        # on-the-fly builds while leaving the global API default intact.
-        r = build_reactant(
-            smi,
-            calculator            = calculator,
-            add_hydrogens         = add_hydrogens,
-            nl_mult               = nl_mult,
-            partial_pressure_bar = 0.0,
-            free_energy_options       = free_energy_options,
-            free_energy_temperature_k = free_energy_temperature_k,
-            vib_cache_root            = vib_cache_root,
-        )
-    except CalculatorConfigError:
-        raise
-    except Exception as exc:
-        _log.warning(
-            "expand_bond_sites: build_reactant(%r) failed: %s "
-            "— species marked unbuildable",
-            smi, exc,
-        )
-        reg["species"][smi]         = None
-        reg["adsorbate_sites"][smi] = []
-        return False
-    reg["species"][smi] = r
 
-    try:
-        sites = find_adsorbate_sites(
-            G, r,
-            prune_stable_only = True,
-            calculator        = calculator,
-            frozen_indices    = frozen_indices,
-            prune_fmax        = prune_fmax,
-            prune_max_steps   = prune_max_steps,
-            verbose           = verbose,
+    r = reg["species"].get(smi)
+    if r is None:
+        try:
+            # Newly-discovered species introduced during a KMC run should
+            # default to zero partial pressure (they are produced on-surface
+            # and are not assumed to be present in the gas phase unless the
+            # user explicitly adds them to the config).
+            r = _retry_expansion_operation(
+                reg,
+                smi,
+                "build_reactant",
+                lambda: build_reactant(
+                    smi,
+                    calculator=calculator,
+                    add_hydrogens=add_hydrogens,
+                    fmax=reactant_fmax,
+                    steps=reactant_max_steps,
+                    nl_mult=nl_mult,
+                    random_seed=random_seed,
+                    partial_pressure_bar=0.0,
+                    free_energy_options=free_energy_options,
+                    free_energy_temperature_k=free_energy_temperature_k,
+                    vib_cache_root=vib_cache_root,
+                    optimizer=optimizer,
+                    optimizer_kwargs=optimizer_kwargs,
+                ),
+            )
+        except ReactantGasUnstableError:
+            return False
+        except ReactantDefinitionError as exc:
+            _log.error(
+                "Runtime expansion rejected species %r permanently: %s",
+                smi,
+                exc,
+            )
+            reg["species"][smi] = None
+            reg["adsorbate_sites"][smi] = []
+            return False
+        reg["species"][smi] = r
+
+    sites = _retry_expansion_operation(
+        reg,
+        smi,
+        "find_adsorbate_sites",
+        lambda: find_adsorbate_sites(
+            G,
+            r,
+            bond_tolerance=adsorbate_bond_tolerance,
+            n_shells_anchor=adsorbate_n_shells_anchor,
+            n_shells_pair=adsorbate_n_shells_pair,
+            anchor_k_max=anchor_k_max,
+            co_factor=co_bond_factor,
+            opt_factor=anchor_bond_factor,
+            repulsion_weight=anchor_repulsion_weight,
+            repulsion_cutoff=site_repulsion_cutoff,
+            contact_factor=adsorbate_contact_factor,
+            standoff_factor=adsorbate_standoff_factor,
+            n_restarts=adsorbate_rotational_restarts,
+            nn_distance=typical_neighbor_distance,
+            max_pair_shells=adsorbate_max_pair_shells,
+            hull_tolerance=anchor_hull_tolerance,
+            kabsch_max_mappings=kabsch_max_mappings,
+            nl_mult=nl_mult,
+            prune_stable_only=True,
+            calculator=calculator,
+            frozen_indices=frozen_indices,
+            prune_fmax=adsorption_prune_fmax,
+            prune_max_steps=adsorption_prune_max_steps,
+            optimizer=optimizer,
+            optimizer_kwargs=optimizer_kwargs,
+            verbose=verbose,
         )
-    except CalculatorConfigError:
-        raise
-    except Exception as exc:
-        _log.warning(
-            "expand_bond_sites: find_adsorbate_sites(%r) failed: %s",
-            smi, exc,
-        )
-        sites = []
+    )
     reg["adsorbate_sites"][smi] = list(sites)
 
     if verbose:
@@ -320,8 +645,150 @@ def _ensure_species_known(
 
 
 # ---------------------------------------------------------------------------
-# Public API — main expansion entry point
+# Diffusion discovery, independent of bond-template expansion
 # ---------------------------------------------------------------------------
+
+def _pending_diffusion_sites(
+    G: nx.Graph, reg: dict, species: Iterable[str],
+) -> list[AdsorbateSite]:
+    """Find species whose ready adsorption placements have not been searched.
+
+    The diffusion store retains a species key even when no legal hops exist.
+    This records a completed search independently of bond-template expansion.
+    Adsorption placements for a species are constructed together and stay
+    immutable once indexed.
+    """
+    existing = get_diffusion_sites(G) or {}
+    pending: list[AdsorbateSite] = []
+    seen: set[SiteId] = set()
+    for smi in sorted(set(species)):
+        for site in reg.get("adsorbate_sites", {}).get(smi, []):
+            if site.reactant in existing:
+                continue
+            identifier = site_identifier(site)
+            if identifier not in seen:
+                pending.append(site)
+                seen.add(identifier)
+    return pending
+
+
+def _ensure_species_diffusion(
+    G: nx.Graph,
+    reg: dict,
+    cs: str,
+    species: Iterable[str],
+    *,
+    diffusion_max_hops: int,
+    diffusion_n_shells_pair: int,
+    diffusion_prune_by_ads_pair: bool | None,
+    verbose: bool,
+) -> None:
+    """Discover missing hops and append them without replacing existing rates."""
+    species = tuple(sorted(set(species)))
+    new_ads_sites = _pending_diffusion_sites(G, reg, species)
+    if not new_ads_sites:
+        return
+    if verbose:
+        n_members = sum(len(s.member_node_ids) for s in new_ads_sites)
+        print(
+            f"  [KMC] diffusion expansion: {len(new_ads_sites)} "
+            f"new adsorbate iso-class(es), {n_members} placement(s); "
+            "enumerating hop permutations"
+        )
+    diff_kwargs: dict = dict(
+        max_hops            = diffusion_max_hops,
+        n_shells_pair       = diffusion_n_shells_pair,
+        verbose             = verbose,
+    )
+    if diffusion_prune_by_ads_pair is not None:
+        diff_kwargs["prune_by_adsorption_pair"] = diffusion_prune_by_ads_pair
+
+    existing_diff: dict = dict(get_diffusion_sites(G) or {})
+    existing_diff_cliques = _preserve_reverse_index(
+        G,
+        DIFFUSION_CLIQUE_TO_MEMBERS,
+    )
+    existing_diff_surfaces = _preserve_reverse_index(
+        G,
+        DIFFUSION_SURFACE_NODE_TO_MEMBERS,
+    )
+
+    def _enumerate_diffusion_sites() -> dict:
+        try:
+            return find_diffusion_sites(
+                G,
+                new_ads_sites,
+                **diff_kwargs,
+            )
+        except Exception:
+            # The enumerator replaces graph-level stores as it works.
+            # Restore the pre-expansion state before retrying or
+            # surfacing the terminal error.
+            set_diffusion_sites(G, existing_diff)
+            if existing_diff_cliques is None:
+                G.graph.pop(DIFFUSION_CLIQUE_TO_MEMBERS, None)
+            else:
+                G.graph[DIFFUSION_CLIQUE_TO_MEMBERS] = (
+                    existing_diff_cliques
+                )
+            if existing_diff_surfaces is None:
+                G.graph.pop(DIFFUSION_SURFACE_NODE_TO_MEMBERS, None)
+            else:
+                G.graph[DIFFUSION_SURFACE_NODE_TO_MEMBERS] = (
+                    existing_diff_surfaces
+                )
+            raise
+
+    new_diff = _retry_expansion_operation(
+        reg,
+        cs,
+        "find_diffusion_sites",
+        _enumerate_diffusion_sites,
+    )
+
+    # ``find_diffusion_sites`` overwrites ``G.graph["diffusion_sites"]``
+    # with whatever it just enumerated.  Merge with existing entries
+    # so previously-discovered diffusion channels are preserved.
+    merged: dict[str, list[DiffusionSite]] = {
+        k: list(v) for k, v in existing_diff.items()
+    }
+    accepted_new_diffusion: list[DiffusionSite] = []
+    for smi, sites in new_diff.items():
+        merged.setdefault(smi, [])
+        # Avoid duplicate DiffusionSite identity on re-entry.
+        seen_ds = {site_identifier(x) for x in merged[smi]}
+        for ds in sites:
+            identifier = site_identifier(ds)
+            if identifier not in seen_ds:
+                merged[smi].append(ds)
+                seen_ds.add(identifier)
+                accepted_new_diffusion.append(ds)
+    set_diffusion_sites(G, merged)
+    if (
+        existing_diff_cliques is not None
+        and existing_diff_surfaces is not None
+    ):
+        _append_diffusion_reverse_indexes(
+            G,
+            existing_diff_cliques,
+            existing_diff_surfaces,
+            accepted_new_diffusion,
+        )
+        G.graph[DIFFUSION_CLIQUE_TO_MEMBERS] = existing_diff_cliques
+        G.graph[DIFFUSION_SURFACE_NODE_TO_MEMBERS] = (
+            existing_diff_surfaces
+        )
+    else:
+        # Legacy graphs may not have reverse indexes yet; build the
+        # complete pair once, after which expansions append to it.
+        rebuild_diffusion_reverse_indexes(G, merged)
+    if verbose:
+        added = sum(len(v) for v in new_diff.values())
+        print(
+            f"  → diffusion: +{added} diffusion iso-class(es) across "
+            f"species {list(species)}"
+        )
+
 
 def expand_bond_sites_for_new_species(
     G: nx.Graph,
@@ -330,10 +797,31 @@ def expand_bond_sites_for_new_species(
     calculator,
     frozen_indices: list[int] | None = None,
     bond_max_hops: int = BOND_MAX_HOPS,
-    surface_apsp_cutoff: int = MAX_PAIR_SHELLS,
     nl_mult: float = NL_MULT_DEFAULT,
-    prune_fmax: float = PRUNE_FMAX,
-    prune_max_steps: int = PRUNE_MAX_STEPS,
+    random_seed: int = RANDOM_SEED,
+    adsorption_prune_fmax: float = PRUNE_FMAX,
+    adsorption_prune_max_steps: int = PRUNE_MAX_STEPS,
+    bond_prune_fmax: float = PRUNE_FMAX,
+    bond_prune_max_steps: int = PRUNE_MAX_STEPS,
+    reactant_fmax: float = 0.05,
+    reactant_max_steps: int = 500,
+    optimizer: str = DEFAULT_OPTIMIZER,
+    optimizer_kwargs: dict[str, Any] | None = None,
+    anchor_k_max: int | None = None,
+    adsorbate_bond_tolerance: float = BOND_TOLERANCE,
+    adsorbate_n_shells_anchor: int | None = None,
+    adsorbate_n_shells_pair: int = N_SHELLS_DEFAULT,
+    co_bond_factor: float = CO_FACTOR,
+    anchor_bond_factor: float = OPT_FACTOR,
+    anchor_repulsion_weight: float = REPULSION_WEIGHT,
+    site_repulsion_cutoff: float | None = SITE_REPULSION_CUTOFF,
+    adsorbate_contact_factor: float = CONTACT_FACTOR,
+    adsorbate_standoff_factor: float = STANDOFF_FACTOR,
+    adsorbate_rotational_restarts: int = N_ADSORBATE_RESTARTS,
+    typical_neighbor_distance: float = NN_DISTANCE,
+    adsorbate_max_pair_shells: int = MAX_PAIR_SHELLS,
+    anchor_hull_tolerance: float = HULL_TOL,
+    kabsch_max_mappings: int = KABSCH_MAX_MAPPINGS,
     bond_types: tuple[str, ...] = ("SINGLE", "DOUBLE", "TRIPLE"),
     include_ring_bonds: bool = False,
     add_hydrogens: bool = True,
@@ -357,12 +845,13 @@ def expand_bond_sites_for_new_species(
 ) -> list[BondReactionSite]:
     """Add a newly-formed species to the bond-reaction registry and expand.
 
-    Idempotent: if *new_smiles* is already in the registry the function
-    returns ``[]`` without rebuilding anything.
+    Idempotent: completed bond expansion is not repeated. When requested,
+    missing diffusion channels are discovered even for an expanded species
+    or a species with no new bond templates.
 
     Steps
     -----
-    1. Canonicalise *new_smiles*; bail out if already known.
+    1. Canonicalise *new_smiles*; reuse already constructed species and sites.
     2. Build a :class:`~autokmc.species.reactant.Reactant` and find
        :class:`~autokmc.sites.adsorbate.AdsorbateSite`'s for it.
     3. Derive new :class:`BondReactionTemplate`'s centred on the new
@@ -377,7 +866,9 @@ def expand_bond_sites_for_new_species(
     4. For every species *X*, *Y*, *W* referenced by the new templates
        that is **not** yet in the registry, build its Reactant + sites
        (a one-shot per species — see :func:`_ensure_species_known`).
-    5. Run :func:`autokmc.sites.bond.find_bond_sites` for the new
+    5. When enabled, discover diffusion for the new species and every ready
+       species referenced by its templates, preserving existing channels.
+    6. Run :func:`autokmc.sites.bond.find_bond_sites` for the new
        templates against the cumulative AdsorbateSite list, append the
        resulting :class:`BondReactionSite`'s to
        ``G.graph["bond_reaction_sites"]`` with continuous global
@@ -392,9 +883,13 @@ def expand_bond_sites_for_new_species(
     calculator
         ASE calculator handed to :func:`autokmc.species.reactant.build_reactant`
         and :func:`autokmc.sites.adsorbate.find_adsorbate_sites`.
-    frozen_indices, nl_mult, prune_fmax, prune_max_steps, add_hydrogens
-        Forwarded to the per-species reactant + site enumeration.
-    bond_max_hops, surface_apsp_cutoff
+    frozen_indices, nl_mult, adsorption_prune_fmax,
+    adsorption_prune_max_steps, bond_prune_fmax, bond_prune_max_steps,
+    reactant_fmax, reactant_max_steps, anchor_k_max,
+    add_hydrogens
+        Forwarded to the per-species reactant, adsorption-site enumeration,
+        and bond-site pruning stages as applicable.
+    bond_max_hops
         Forwarded to :func:`find_bond_sites`.
     bond_types, include_ring_bonds
         Forwarded to :func:`derive_dissociation_templates`.
@@ -408,6 +903,9 @@ def expand_bond_sites_for_new_species(
     include_homo_coupling : bool
         Include the homo-coupling template ``new_smiles + new_smiles → W``.
         Default ``True``.
+    find_diffusion : bool
+        Discover missing hops independently of whether new bond templates
+        exist. A completed search with no legal hops is also remembered.
     verbose : bool
 
     Returns
@@ -417,53 +915,101 @@ def expand_bond_sites_for_new_species(
         ``G.graph["bond_reaction_sites"]``).
     """
     reg = _registry(G)
+
+    def ensure_species_known(smi: str) -> bool:
+        """Forward the typed expansion settings to the species builder."""
+        return _ensure_species_known(
+            G,
+            smi,
+            reg,
+            calculator=calculator,
+            frozen_indices=frozen_indices,
+            nl_mult=nl_mult,
+            random_seed=random_seed,
+            adsorption_prune_fmax=adsorption_prune_fmax,
+            adsorption_prune_max_steps=adsorption_prune_max_steps,
+            reactant_fmax=reactant_fmax,
+            reactant_max_steps=reactant_max_steps,
+            optimizer=optimizer,
+            optimizer_kwargs=optimizer_kwargs,
+            anchor_k_max=anchor_k_max,
+            adsorbate_bond_tolerance=adsorbate_bond_tolerance,
+            adsorbate_n_shells_anchor=adsorbate_n_shells_anchor,
+            adsorbate_n_shells_pair=adsorbate_n_shells_pair,
+            co_bond_factor=co_bond_factor,
+            anchor_bond_factor=anchor_bond_factor,
+            anchor_repulsion_weight=anchor_repulsion_weight,
+            site_repulsion_cutoff=site_repulsion_cutoff,
+            adsorbate_contact_factor=adsorbate_contact_factor,
+            adsorbate_standoff_factor=adsorbate_standoff_factor,
+            adsorbate_rotational_restarts=adsorbate_rotational_restarts,
+            typical_neighbor_distance=typical_neighbor_distance,
+            adsorbate_max_pair_shells=adsorbate_max_pair_shells,
+            anchor_hull_tolerance=anchor_hull_tolerance,
+            kabsch_max_mappings=kabsch_max_mappings,
+            add_hydrogens=add_hydrogens,
+            verbose=verbose,
+            free_energy_options=free_energy_options,
+            free_energy_temperature_k=free_energy_temperature_k,
+            vib_cache_root=vib_cache_root,
+        )
+
     cs = _canon_smiles(new_smiles)
     if not cs:
         return []
     if cs in reg["expanded_species"]:
+        if find_diffusion:
+            _ensure_species_diffusion(
+                G, reg, cs, [cs],
+                diffusion_max_hops=diffusion_max_hops,
+                diffusion_n_shells_pair=diffusion_n_shells_pair,
+                diffusion_prune_by_ads_pair=diffusion_prune_by_ads_pair,
+                verbose=verbose,
+            )
         if verbose:
-            print(f"  ⏭  species {cs!r} already expanded — no expansion needed")
+            print(f"  SKIPPED species {cs!r}: already expanded")
         return []
 
-    # 1–2. Build Reactant + sites for the newly-introduced species.
-    built_ok = _ensure_species_known(
-        G, cs, reg,
-        calculator      = calculator,
-        frozen_indices  = frozen_indices,
-        nl_mult         = nl_mult,
-        prune_fmax      = prune_fmax,
-        prune_max_steps = prune_max_steps,
-        add_hydrogens   = add_hydrogens,
-        verbose         = verbose,
-        free_energy_options       = free_energy_options,
-        free_energy_temperature_k = free_energy_temperature_k,
-        vib_cache_root            = vib_cache_root,
-    )
+    # First, build the new reactant and its surface sites.
+    built_ok = ensure_species_known(cs)
     if not built_ok:
-        # Still mark as expanded so we do not retry on every KMC step.
+        # Invalid definitions and chemically unstable gases reach this path.
+        # They are permanently classified in ``expansion_failures`` and can
+        # safely be excluded without hiding a transient backend problem.
         reg["expanded_species"].add(cs)
         return []
 
-    # 3. Derive new templates centred on cs.
+    # Next, derive every new template that contains this species.
     new_tpls: list[BondReactionTemplate] = []
     pending_template_keys: set[tuple[str, str, str]] = set()
+    inventories = {
+        label: reactant_atom_inventory_smiles(reactant)
+        for label, reactant in reg["species"].items()
+        if reactant is not None
+    }
 
-    # 3a. Dissociation: cs → X + Y
+    # Begin with dissociation templates in which this species forms X and Y.
     if include_dissociation:
         for t in derive_dissociation_templates(
             cs,
             bond_types         = bond_types,
             include_ring_bonds = include_ring_bonds,
             add_hydrogens      = add_hydrogens,
+            atom_inventory_smiles = inventories,
         ):
             key = (t.smiles_a, t.smiles_b, t.smiles_c)
             if key not in reg["templates"] and key not in pending_template_keys:
                 pending_template_keys.add(key)
                 new_tpls.append(t)
 
-    # 3b. Coupling: cs + Z → W for every known Z (including cs itself).
+    # Then form coupling templates between this species and every known
+    # species, including itself.
     if include_coupling:
-        known_smiles = list(reg["species"].keys())  # cs is now in here
+        known_smiles = [
+            smi
+            for smi, reactant in reg["species"].items()
+            if reactant is not None
+        ]  # cs is now in here
         for z in known_smiles:
             if z == cs:
                 if not include_homo_coupling:
@@ -473,8 +1019,10 @@ def expand_bond_sites_for_new_species(
             else:
                 pair_inputs = [cs, z]
                 kwargs = dict(include_homo=False, include_hetero=True)
-            for t in derive_coupling_templates(pair_inputs, **kwargs):
-                # Only keep templates that involve cs (skip Z+Z entries).
+            for t in derive_coupling_templates(
+                pair_inputs, atom_inventory_smiles=inventories, **kwargs,
+            ):
+                # Keep only templates that contain the species being expanded.
                 if cs not in (t.smiles_a, t.smiles_b):
                     continue
                 key = (t.smiles_a, t.smiles_b, t.smiles_c)
@@ -483,11 +1031,15 @@ def expand_bond_sites_for_new_species(
                     new_tpls.append(t)
 
     if not auto_build_leaf_species and new_tpls:
-        available = set(reg["species"])
+        available_species = {
+            smi
+            for smi, reactant in reg["species"].items()
+            if reactant is not None
+        }
         kept: list[BondReactionTemplate] = []
         for template in new_tpls:
             required = {template.smiles_a, template.smiles_b, template.smiles_c}
-            missing = sorted(required - available)
+            missing = sorted(required - available_species)
             if missing:
                 _log.warning(
                     "Skipping runtime bond template %s + %s <-> %s because "
@@ -501,21 +1053,13 @@ def expand_bond_sites_for_new_species(
             kept.append(template)
         new_tpls = kept
 
-    for template in new_tpls:
-        reg["templates"].add(
-            (template.smiles_a, template.smiles_b, template.smiles_c)
-        )
-
     if not new_tpls:
         if verbose:
             print(
                 f"  → species {cs!r}: no new templates generated"
             )
-        # Mark as expanded so we don't retry on future KMC steps.
-        reg["expanded_species"].add(cs)
-        return []
 
-    if verbose:
+    if verbose and new_tpls:
         n_dissoc = sum(1 for t in new_tpls if t.source == "dissociation")
         n_couple = sum(1 for t in new_tpls if t.source == "coupling")
         print(
@@ -524,94 +1068,38 @@ def expand_bond_sites_for_new_species(
             f"({n_dissoc} dissociation, {n_couple} coupling)"
         )
 
-    # 4. Ensure every species referenced by new_tpls is known.
-    newly_built: list[str] = []
-    if cs in reg["adsorbate_sites"]:
-        newly_built.append(cs)
+    # After the templates are built, materialize every species they reference.
+    diffusion_species = {cs}
+    unavailable_species: set[str] = set()
+    checked_species: set[str] = set()
     for t in new_tpls:
         for smi in (t.smiles_a, t.smiles_b, t.smiles_c):
-            if auto_build_leaf_species and smi not in reg["species"]:
-                _ensure_species_known(
-                    G, smi, reg,
-                    calculator      = calculator,
-                    frozen_indices  = frozen_indices,
-                    nl_mult         = nl_mult,
-                    prune_fmax      = prune_fmax,
-                    prune_max_steps = prune_max_steps,
-                    add_hydrogens   = add_hydrogens,
-                    verbose         = verbose,
-                    free_energy_options       = free_energy_options,
-                    free_energy_temperature_k = free_energy_temperature_k,
-                    vib_cache_root            = vib_cache_root,
-                )
-                if reg["adsorbate_sites"].get(smi):
-                    newly_built.append(smi)
+            diffusion_species.add(smi)
+            if auto_build_leaf_species and smi not in checked_species:
+                checked_species.add(smi)
+                available = ensure_species_known(smi)
+                if not available:
+                    unavailable_species.add(smi)
 
-    # 4b. Discover diffusion site-pairs for every newly-introduced species
-    # so the KMC loop can hop them as soon as they appear on the surface.
-    # Only the new species' sites are passed to ``find_diffusion_sites`` —
-    # results are merged into ``G.graph["diffusion_sites"]`` rather than
-    # overwriting it.
-    if find_diffusion and newly_built:
-        new_ads_sites: list[AdsorbateSite] = []
-        seen_ids: set[int] = set()
-        for smi in newly_built:
-            for s in reg["adsorbate_sites"].get(smi, []):
-                if id(s) not in seen_ids:
-                    seen_ids.add(id(s))
-                    new_ads_sites.append(s)
-        if new_ads_sites:
-            if verbose:
-                n_members = sum(len(s.member_node_ids) for s in new_ads_sites)
-                print(
-                    f"  [KMC] diffusion expansion: {len(new_ads_sites)} "
-                    f"new adsorbate iso-class(es), {n_members} placement(s); "
-                    "enumerating hop permutations"
-                )
-            diff_kwargs: dict = dict(
-                max_hops            = diffusion_max_hops,
-                n_shells_pair       = diffusion_n_shells_pair,
-                surface_apsp_cutoff = max(int(diffusion_max_hops),
-                                          int(surface_apsp_cutoff)),
-                verbose             = verbose,
-            )
-            if diffusion_prune_by_ads_pair is not None:
-                diff_kwargs["prune_by_adsorption_pair"] = diffusion_prune_by_ads_pair
+    if unavailable_species:
+        new_tpls = filter_unavailable_templates(reg, new_tpls, unavailable_species)
 
-            existing_diff: dict = dict(G.graph.get("diffusion_sites", {}) or {})
-            try:
-                new_diff = find_diffusion_sites(G, new_ads_sites, **diff_kwargs)
-            except Exception as exc:
-                _log.warning(
-                    "expand_bond_sites: find_diffusion_sites for new "
-                    "species %r failed: %s", newly_built, exc,
-                )
-                new_diff = {}
+    if find_diffusion:
+        _ensure_species_diffusion(
+            G, reg, cs, diffusion_species,
+            diffusion_max_hops=diffusion_max_hops,
+            diffusion_n_shells_pair=diffusion_n_shells_pair,
+            diffusion_prune_by_ads_pair=diffusion_prune_by_ads_pair,
+            verbose=verbose,
+        )
 
-            # ``find_diffusion_sites`` overwrites ``G.graph["diffusion_sites"]``
-            # with whatever it just enumerated.  Merge with existing entries
-            # so previously-discovered diffusion channels are preserved.
-            merged: dict[str, list[DiffusionSite]] = {
-                k: list(v) for k, v in existing_diff.items()
-            }
-            for smi, sites in new_diff.items():
-                merged.setdefault(smi, [])
-                # Avoid duplicate DiffusionSite identity on re-entry.
-                seen_ds = {id(x) for x in merged[smi]}
-                for ds in sites:
-                    if id(ds) not in seen_ds:
-                        merged[smi].append(ds)
-                        seen_ds.add(id(ds))
-            G.graph["diffusion_sites"] = merged
-            rebuild_diffusion_reverse_indexes(G, merged)
-            if verbose:
-                added = sum(len(v) for v in new_diff.values())
-                print(
-                    f"  → diffusion: +{added} site-pair(s) across "
-                    f"species {newly_built}"
-                )
+    if not new_tpls:
+        # Requested diffusion discovery is complete even without new chemistry.
+        reg["expanded_species"].add(cs)
+        return []
 
-    # 5. Enumerate bond-reaction iso-classes for the new templates.
+    # With every referenced species available, enumerate the new bond-reaction
+    # iso-classes.
     cumulative_sites: list[AdsorbateSite] = []
     for sites in reg["adsorbate_sites"].values():
         cumulative_sites.extend(sites)
@@ -622,57 +1110,110 @@ def expand_bond_sites_for_new_species(
             "adsorbate iso-class(es)"
         )
 
-    # ``find_bond_sites`` overwrites G.graph["bond_reaction_sites"] with
-    # whatever it just enumerated.  Save → enumerate → splice → restore.
-    existing_brs: list[BondReactionSite] = list(
-        G.graph.get("bond_reaction_sites", [])
+    # The bond-site enumerator replaces the graph store. Save the existing
+    # sites, enumerate the new sites, merge both sets, and restore the store.
+    existing_brs: list[BondReactionSite] = get_bond_reaction_sites(G)
+    existing_bond_cliques = _preserve_reverse_index(
+        G,
+        BOND_CLIQUE_TO_MEMBERS,
+    )
+    existing_bond_surfaces = _preserve_reverse_index(
+        G,
+        BOND_SURFACE_NODE_TO_MEMBERS,
     )
 
-    new_brs = find_bond_sites(
-        G, cumulative_sites, new_tpls,
-        max_hops            = bond_max_hops,
-        surface_apsp_cutoff = surface_apsp_cutoff,
-        deduplicate_iso     = deduplicate_iso,
-        n_shells_pair       = bond_pair_n_shells,
-        # Match the config pipeline: never run the ego-size triple prune
-        # before calculator stability pruning, or a stable representative can
-        # be discarded in favour of an unstable smaller-ego one.
-        prune_by_triple     = False,
-        gas_species         = reg["species"],
-        gas_lift_height     = float(gas_lift_height),
-        verbose             = verbose,
+    def _enumerate_and_prune_bond_sites() -> list[BondReactionSite]:
+        try:
+            candidate_sites = find_bond_sites(
+                G, cumulative_sites, new_tpls,
+                max_hops            = bond_max_hops,
+                deduplicate_iso     = deduplicate_iso,
+                n_shells_pair       = bond_pair_n_shells,
+                # Match the config pipeline: never run the ego-size triple
+                # prune before calculator stability pruning, or a stable
+                # representative can be discarded in favour of an unstable
+                # smaller-ego one.
+                prune_by_triple     = False,
+                gas_species         = reg["species"],
+                gas_lift_height     = float(gas_lift_height),
+                verbose             = verbose,
+            )
+
+            # Stage-1 calculator-based stability prune of the freshly
+            # enumerated iso-classes; followed by a re-application of the
+            # iso-class triple prune so the surviving set stays
+            # one-per-triple.
+            if (
+                bond_prune_with_calculator
+                and calculator is not None
+                and candidate_sites
+            ):
+                candidate_sites = prune_unstable_bond_sites(
+                    G,
+                    list(candidate_sites),
+                    reg["species"],
+                    calculator,
+                    frozen_indices=frozen_indices,
+                    fmax=bond_prune_fmax,
+                    max_steps=bond_prune_max_steps,
+                    nl_mult=nl_mult,
+                    optimizer=optimizer,
+                    optimizer_kwargs=optimizer_kwargs,
+                    verbose=verbose,
+                )
+            if bond_prune_by_triple and candidate_sites:
+                prefix = " (post-stability)" if (
+                    bond_prune_with_calculator and calculator is not None
+                ) else ""
+                candidate_sites = _prune_one_per_adsorption_triple(
+                    candidate_sites,
+                    verbose=verbose,
+                    prefix=prefix,
+                )
+            return list(candidate_sites)
+        except Exception:
+            # Enumeration replaces graph-level stores before returning.  Keep
+            # the previous usable network intact across retries and failures.
+            set_bond_reaction_sites(G, existing_brs)
+            if existing_bond_cliques is None:
+                G.graph.pop(BOND_CLIQUE_TO_MEMBERS, None)
+            else:
+                G.graph[BOND_CLIQUE_TO_MEMBERS] = existing_bond_cliques
+            if existing_bond_surfaces is None:
+                G.graph.pop(BOND_SURFACE_NODE_TO_MEMBERS, None)
+            else:
+                G.graph[BOND_SURFACE_NODE_TO_MEMBERS] = existing_bond_surfaces
+            raise
+
+    new_brs = _retry_expansion_operation(
+        reg,
+        cs,
+        "find_bond_sites",
+        _enumerate_and_prune_bond_sites,
     )
 
-    # Stage-1 calculator-based stability prune of the freshly-enumerated
-    # iso-classes; followed by a re-application of the iso-class triple
-    # prune so the surviving set stays one-per-triple.
-    if bond_prune_with_calculator and calculator is not None and new_brs:
-        new_brs = prune_unstable_bond_sites(
-            G, list(new_brs), reg["species"], calculator,
-            frozen_indices = frozen_indices,
-            fmax           = prune_fmax,
-            max_steps      = prune_max_steps,
-            nl_mult        = nl_mult,
-            verbose        = verbose,
-        )
-    if bond_prune_by_triple and new_brs:
-        prefix = " (post-stability)" if (
-            bond_prune_with_calculator and calculator is not None
-        ) else ""
-        new_brs = _prune_one_per_adsorption_triple(
-            new_brs, verbose=verbose, prefix=prefix,
-        )
-
-    # Splice + globally renumber so iso_class is unique across all expansions.
+    # Merge the new sites and renumber them so each iso-class remains unique
+    # across all expansions.
     combined = existing_brs + list(new_brs)
     for i, brs in enumerate(combined):
         brs.iso_class = i
-    G.graph["bond_reaction_sites"] = combined
+    set_bond_reaction_sites(G, combined)
 
-    # find_bond_sites and prune_unstable_bond_sites rebuild these indexes for
-    # the newly enumerated/pruned list only. After splicing with existing sites,
-    # rebuild from the complete list so incremental KMC updates see everything.
-    _rebuild_bond_reverse_indexes(G, combined)
+    # The enumerators build indexes for only the new subset. Preserve the
+    # existing indexes, and append the members that survived pruning.
+    if (
+        existing_bond_cliques is not None
+        and existing_bond_surfaces is not None
+    ):
+        _append_bond_reverse_indexes(
+            existing_bond_cliques,
+            existing_bond_surfaces,
+            new_brs,
+        )
+        G.graph[BOND_CLIQUE_TO_MEMBERS] = existing_bond_cliques
+        G.graph[BOND_SURFACE_NODE_TO_MEMBERS] = existing_bond_surfaces
+    else:
+        _rebuild_bond_reverse_indexes(G, combined)
 
     if verbose:
         print(
@@ -681,7 +1222,13 @@ def expand_bond_sites_for_new_species(
             f"(total: {len(combined)} iso-class(es))"
         )
 
-    # Mark this species as fully expanded so future calls are no-ops.
+    for template in new_tpls:
+        reg["templates"].add(
+            (template.smiles_a, template.smiles_b, template.smiles_c)
+        )
+
+    # Finally, mark the species as fully expanded so later calls can return
+    # without repeating the work.
     reg["expanded_species"].add(cs)
 
     return list(new_brs)
@@ -703,7 +1250,7 @@ def expand_bond_sites_after_event(
     Inspects *reaction* and, when it is a
     :class:`~autokmc.reactions.bond.BondReaction` (``kind == "bond"``), triggers
     :func:`expand_bond_sites_for_new_species` for any species that has not
-    yet been fully expanded:
+    yet been fully expanded, and checks for missing diffusion when enabled:
 
     * **Coupling** ``A + B → C``: expands for ``smiles_c``.  This is the
       primary path that introduces a genuinely new product species.
@@ -758,6 +1305,7 @@ def expand_bond_sites_after_event(
 
 
 __all__ = [
+    "SpeciesExpansionError",
     "initialise_bond_registry",
     "bond_species_known",
     "expand_bond_sites_for_new_species",

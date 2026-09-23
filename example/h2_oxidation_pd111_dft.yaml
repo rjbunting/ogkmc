@@ -1,0 +1,175 @@
+# autokmc - H2 oxidation on Pd(111) with VASP PBE at the Gamma point
+# Run from the repository root with:
+#   VASP_PP_PATH=/Users/bunting4/Programs/vasppps \
+#     autokmc run example/h2_oxidation_pd111_dft.yaml
+schema_version: "1"
+
+output:
+  dir: ./runs/h2_oxidation_pd111_dft
+  trajectory_dump_every: 10
+  log_level: DEBUG
+
+checkpoint:
+  enabled: true
+  path: ./runs/h2_oxidation_pd111_dft/checkpoint.pkl
+  every_n_steps: 10
+  # To restart a stopped run, set:
+  # resume_from: ./runs/h2_oxidation_pd111_dft/checkpoint.pkl
+
+structure:
+  kind: surface
+  composition: Pd
+  crystal_structure: fcc
+  miller_index: [1, 1, 1]
+  lattice_constant: 3.89
+  # For Pd(111), 8.0 Å builds four metal layers.
+  min_slab_size: 8.0
+  min_vacuum_size: 12.0
+  # The primitive Pd(111) in-plane vectors are about 2.75 Å. Targets of
+  # 10.0 Å therefore select a 4x4 repeat while retaining the skew cell.
+  goal_x: 10.0
+  goal_y: 10.0
+  extra_kwargs:
+    orthogonalise: false
+  # Freeze the bottom two of the four metal layers.
+  n_freeze_layers: 2
+  fmax: 0.01
+  max_steps: 1000
+
+reactants:
+  # H2 feed.
+  - smiles: "[H][H]"
+    add_hydrogens: false
+    relax_in_gas: true
+    fmax: 0.05
+    max_steps: 500
+    partial_pressure_bar: 10.0
+    geometry: linear
+
+  # O2 feed; bond dissociation templates produce O* + O* <=> O2.
+  - smiles: "O=O"
+    add_hydrogens: false
+    relax_in_gas: true
+    fmax: 0.05
+    max_steps: 500
+    partial_pressure_bar: 10.0
+    geometry: linear
+    spin: 1.0
+
+# H* and O* can be auto-built as zero-pressure leaf species from dissociation
+# templates. The KMC bond-expansion hook then derives later surface reactions.
+
+# VASP setup: PBE, 400 eV plane-wave cutoff, and a Gamma-only 1x1x1 mesh.
+# One calculator/worker serializes VASP's file-backed calculations.
+calculator:
+  import_path: ase.calculators.vasp.Vasp
+  kwargs:
+    command: mpirun --host localhost:8 --map-by slot --bind-to none -np 8 /Users/bunting4/Programs/vasp.6.4.2/bin/vasp_gam
+    xc: PBE
+    encut: 400
+    algo: Fast
+    # Tight, deterministic electronic settings are important when comparing
+    # force smoothness along an NEB path.
+    ediff: 1.0e-7
+    nelm: 120
+    prec: Accurate
+    lreal: false
+    ismear: 0
+    sigma: 0.05
+    kpts: [1, 1, 1]
+    gamma: true
+    # AutoKMC reuses this file-backed calculator for chemically different
+    # systems. Do not seed a new system from the previous system's files.
+    istart: 0
+    icharg: 2
+    lwave: false
+    lcharg: false
+    directory: ./runs/h2_oxidation_pd111_dft/vasp
+    txt: vasp.out
+  copies: 1
+  max_workers: 1
+
+optimization:
+  optimizer: fire
+  neb_optimizer: fire
+  neb_optimizer_kwargs:
+    dt: 0.01
+    dtmax: 0.01
+    maxstep: 0.02
+    downhill_check: true
+  neb_climb_optimizer: mdmin
+  neb_climb_optimizer_kwargs:
+    dt: 0.05
+    maxstep: 0.01
+  neb_method: improvedtangent
+  neb_band_eval: images
+  neb_geometry_guard_multiplier: 3.0
+
+adsorption:
+  prune_stable_only: true
+  prune_fmax: 0.05
+  prune_max_steps: 500
+  endpoint_fmax: 0.05
+  endpoint_max_steps: 1000
+
+# Disable vibrational corrections for this long DFT debug run. Set enabled:
+# true once the reaction network is behaving as expected.
+free_energy:
+  enabled: false
+  pressure_bar: 1.0
+
+kmc:
+  temperature_k: 300.0
+  n_steps: 10000000
+  transmission_coefficient: 1.0
+  log_every: 10
+  random_seed: 69
+  lateral_interactions: true
+
+diffusion:
+  enabled: true
+  max_hops: 0
+  n_shells_pair: 1
+  prune_by_adsorption_pair: true
+  fmax: 0.05
+  max_steps: 1000
+  n_images: 8
+  image_spacing: 0.25
+  min_images: 6
+  max_images: 8
+  climb: true
+  spring_k: 1.0
+  interpolation: linear
+  persist_neb_path: true
+
+bond:
+  enabled: true
+  bond_max_hops: 0
+  bond_types: ["SINGLE", "DOUBLE", "TRIPLE"]
+  include_ring_bonds: false
+  include_dissociation: true
+  include_coupling: true
+  include_homo_coupling: true
+  deduplicate_iso: true
+  auto_build_leaf_species: true
+  gas_precursor_relax: true
+  gas_precursor_distance: 2.5
+
+  pair_n_shells: 1
+  prune_by_triple: true
+  prune_with_calculator: true
+  prune_fmax: 0.05
+  prune_max_steps: 1000
+
+  neb_fmax: 0.05
+  neb_max_steps: 1000
+  neb_n_images: 8
+  neb_image_spacing: 0.25
+  neb_min_images: 6
+  neb_max_images: 8
+  neb_climb: true
+  neb_spring_k: 1.0
+  neb_interpolation: linear
+  atom_matching: auto
+  matching_trials: 8
+  persist_neb_path: true

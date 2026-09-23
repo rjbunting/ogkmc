@@ -9,14 +9,21 @@ import pytest
 from autokmc.core.graph import build_graph
 from autokmc.core.graph_state import (
     get_adsorbate_sites,
+    get_bond_reaction_sites,
     get_bond_registry,
     get_clique_to_members,
+    get_frozen_indices,
     get_n_occupied,
     get_occupied_by_clique,
+    get_run_id,
     invalidate_position_caches,
     invalidate_surface_apsp,
     invalidate_surface_shell_cache,
+    set_bond_reaction_sites,
+    set_frozen_indices,
     set_n_occupied,
+    set_run_id,
+    validate_runtime_indexes,
 )
 
 
@@ -62,6 +69,10 @@ def test_graph_state_create_and_invalidate_helpers():
     bond_registry["CO+O"] = object()
     assert "CO+O" in get_bond_registry(G)
 
+    marker = object()
+    set_bond_reaction_sites(G, [marker])
+    assert get_bond_reaction_sites(G) == [marker]
+
     set_n_occupied(G, -5)
     assert get_n_occupied(G) == 0
     set_n_occupied(G, 2)
@@ -80,3 +91,35 @@ def test_graph_state_create_and_invalidate_helpers():
     assert "_surface_shells_cache" not in G.graph
     assert "_clique_position_index_cache" not in G.graph
     assert "_surface_atoms_array_cache" not in G.graph
+
+
+def test_graph_runtime_identity_and_occupancy_invariants():
+    graph = nx.Graph()
+    clique = frozenset({1})
+    graph.add_node(
+        10,
+        type="adsorbate",
+        occupied=True,
+        clique=clique,
+        reactant="[O]",
+        site_iso_class=0,
+        site_member_index=0,
+    )
+    graph.graph["occupied_by_clique"] = {clique: {10}}
+    graph.graph["n_occupied"] = 1
+
+    set_run_id(graph, "run-123")
+    set_frozen_indices(graph, [4, 2])
+
+    assert get_run_id(graph) == "run-123"
+    assert get_frozen_indices(graph) == [4, 2]
+    validate_runtime_indexes(graph)
+
+    graph.graph["n_occupied"] = 2
+    with pytest.raises(ValueError, match="n_occupied"):
+        validate_runtime_indexes(graph)
+
+    graph.graph["n_occupied"] = 1
+    graph.nodes[10]["occupied"] = False
+    with pytest.raises(ValueError, match="unoccupied node"):
+        validate_runtime_indexes(graph)

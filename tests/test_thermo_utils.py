@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 import logging
 from pathlib import Path
+import threading
+import time
 
 import numpy as np
 import pytest
 from ase import Atoms
 
 import autokmc.thermo.free_energy as free_energy
+from autokmc.io.calculators import CalculatorPool, calculator_batch_context
 
 
 def test_thermo_and_utils_package_exports():
@@ -272,3 +277,224 @@ def test_disabled_harmonic_thermo_remains_noop_for_unchecked_indices():
 
     assert result["enabled"] is False
     assert result["vib_indices"] == [1]
+
+
+def test_vibration_displacements_use_pool_and_reuse_completed_cache(tmp_path):
+    class Tracker:
+        def __init__(self):
+            self.calls = 0
+            self.active = 0
+            self.maximum = 0
+            self.lock = threading.Lock()
+
+        @contextmanager
+        def call(self):
+            with self.lock:
+                self.calls += 1
+                self.active += 1
+                self.maximum = max(self.maximum, self.active)
+            try:
+                time.sleep(0.01)
+                yield
+            finally:
+                with self.lock:
+                    self.active -= 1
+
+    class HarmonicCalculator:
+        def __init__(self, tracker):
+            self.tracker = tracker
+
+        def get_forces(self, atoms):
+            with self.tracker.call():
+                return -np.asarray(atoms.positions, dtype=float)
+
+    tracker = Tracker()
+    pool = CalculatorPool(
+        [HarmonicCalculator(tracker), HarmonicCalculator(tracker)],
+        max_workers=2,
+    )
+    atoms = Atoms("H", positions=[[0.2, 0.0, 0.0]])
+    options = free_energy.FreeEnergyOptions(
+        enabled=True,
+        vibration_nfree=2,
+    )
+
+    first = free_energy._run_vibrations(
+        atoms.copy(),
+        [0],
+        calculator=pool,
+        options=options,
+        cache_dir=tmp_path,
+        label="parallel",
+        purpose="test",
+    )
+    calls_after_first = tracker.calls
+    second = free_energy._run_vibrations(
+        atoms.copy(),
+        [0],
+        calculator=pool,
+        options=options,
+        cache_dir=tmp_path,
+        label="parallel",
+        purpose="test",
+    )
+
+    assert calls_after_first == 7
+    assert tracker.maximum >= 2
+    assert tracker.calls == calls_after_first
+    assert np.asarray(first[2], dtype=complex) == pytest.approx(
+        np.asarray(second[2], dtype=complex)
+    )
+
+    tracker.maximum = 0
+    with calculator_batch_context():
+        free_energy._run_vibrations(
+            atoms.copy(),
+            [0],
+            calculator=pool,
+            options=options,
+            cache_dir=tmp_path,
+            label="outer-batch",
+            purpose="test",
+        )
+    assert tracker.maximum == 1
+    pool.shutdown()
+
+
+def test_vibration_cache_identity_includes_calculator_relevant_atom_arrays():
+    atoms = Atoms("H2", positions=[[0.0, 0.0, 0.0], [0.7, 0.0, 0.0]])
+    options = free_energy.FreeEnergyOptions()
+
+    def cache_label(candidate):
+        return free_energy._vibration_cache_label(
+            candidate,
+            [0, 1],
+            options=options,
+            label="arrays",
+            calculator=None,
+        )
+
+    baseline = cache_label(atoms)
+    variants = []
+    with_charges = atoms.copy()
+    with_charges.set_initial_charges([0.1, -0.1])
+    variants.append(with_charges)
+    with_magmoms = atoms.copy()
+    with_magmoms.set_initial_magnetic_moments([1.0, 0.0])
+    variants.append(with_magmoms)
+    with_tags = atoms.copy()
+    with_tags.set_tags([1, 0])
+    variants.append(with_tags)
+    with_custom_array = atoms.copy()
+    with_custom_array.new_array("calculator_state", np.array([2, 3]))
+    variants.append(with_custom_array)
+
+    assert all(cache_label(candidate) != baseline for candidate in variants)
+
+
+def test_same_label_vibration_runs_are_serialized_and_reuse_cache(
+    tmp_path,
+    monkeypatch,
+):
+    class Tracker:
+        def __init__(self):
+            self.calls = 0
+            self.lock = threading.Lock()
+
+        def record(self):
+            with self.lock:
+                self.calls += 1
+            time.sleep(0.01)
+
+    class HarmonicCalculator:
+        def __init__(self, tracker):
+            self.tracker = tracker
+
+        def get_forces(self, atoms):
+            self.tracker.record()
+            return -np.asarray(atoms.positions, dtype=float)
+
+    from ase.vibrations import Vibrations
+
+    original_clean = Vibrations.clean
+
+    def clean_stale_files(vibration, *, empty_files=False):
+        # Cleanup must run under the whole-workflow lock, with no forces in
+        # flight, and must preserve every completed displacement.
+        assert empty_files is True
+        return original_clean(vibration, empty_files=empty_files)
+
+    monkeypatch.setattr(Vibrations, "clean", clean_stale_files)
+    tracker = Tracker()
+    pool = CalculatorPool(
+        [HarmonicCalculator(tracker), HarmonicCalculator(tracker)],
+        max_workers=2,
+    )
+    atoms = Atoms("H", positions=[[0.2, 0.0, 0.0]])
+    options = free_energy.FreeEnergyOptions(
+        enabled=True,
+        vibration_nfree=2,
+    )
+
+    def run():
+        return free_energy._run_vibrations(
+            atoms.copy(),
+            [0],
+            calculator=pool,
+            options=options,
+            cache_dir=tmp_path,
+            label="same-label",
+            purpose="test",
+        )
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            first_future = executor.submit(run)
+            second_future = executor.submit(run)
+            first = first_future.result()
+            second = second_future.result()
+    finally:
+        pool.shutdown()
+
+    assert tracker.calls == 7
+    assert np.asarray(first[2], dtype=complex) == pytest.approx(
+        np.asarray(second[2], dtype=complex)
+    )
+
+
+def test_ephemeral_vibrations_skip_content_identity(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        free_energy,
+        "_vibration_cache_label",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("ephemeral cache must not build a persistent identity")
+        ),
+    )
+    labels = []
+
+    def fake_vibrate(
+        atoms,
+        indices,
+        *,
+        options,
+        cache_dir,
+        label,
+    ):
+        del atoms, indices, options, cache_dir
+        labels.append(label)
+        return [], [], []
+
+    monkeypatch.setattr(free_energy, "_vibrate", fake_vibrate)
+    result = free_energy._run_vibrations(
+        Atoms("H"),
+        [0],
+        calculator=None,
+        options=free_energy.FreeEnergyOptions(),
+        cache_dir=tmp_path,
+        label="ephemeral",
+        purpose="test",
+        persistent_cache=False,
+    )
+
+    assert result == ([], [], [])
+    assert labels == ["ephemeral"]

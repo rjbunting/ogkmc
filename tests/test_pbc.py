@@ -1,14 +1,28 @@
 import networkx as nx
 import numpy as np
+import pytest
 from ase.build import fcc111
 
-from autokmc.core.pbc import minimum_image_vectors
+from autokmc.core.pbc import (
+    minimum_image_vectors,
+    periodic_image_offsets,
+    unwrap_positions_about_reference,
+    wrap_positions_into_cell,
+)
 from autokmc.core.graph import build_graph
 from autokmc.io.atoms import atoms_from_graph
-from autokmc.sites.adsorbate import _mic_distance
-from autokmc.sites.anchors import _build_co_bond_graph
-from autokmc.sites.adsorbate import find_adsorbate_sites
-from autokmc.sites.anchors import find_anchor_sites
+from autokmc.sites.adsorbate import (
+    _build_anchor_spatial_index,
+    _mic_distance,
+    _source_indices_within_radius,
+    find_adsorbate_sites,
+)
+from autokmc.sites.anchors import (
+    _build_co_bond_graph,
+    _circular_centroid,
+    _periodic_clique_is_contractible,
+    find_anchor_sites,
+)
 from autokmc.species.reactant import build_reactant
 from autokmc.structure import find_surface_atoms, find_surface_atoms_raycasting
 
@@ -30,6 +44,31 @@ def test_minimum_image_vectors_handles_skew_cells():
 
     assert np.allclose(mic, [-0.3, -0.3, 0.0])
     assert np.linalg.norm(mic) < np.linalg.norm(vector)
+
+
+def test_unwrap_positions_about_reference_keeps_boundary_group_contiguous():
+    positions = np.array(
+        [
+            [9.8, 4.0, 2.0],
+            [0.2, 4.0, 2.0],
+            [9.6, 4.0, 2.0],
+        ]
+    )
+
+    unwrapped = unwrap_positions_about_reference(
+        positions,
+        np.diag([10.0, 10.0, 10.0]),
+        [True, True, False],
+    )
+
+    np.testing.assert_allclose(
+        unwrapped,
+        [
+            [9.8, 4.0, 2.0],
+            [10.2, 4.0, 2.0],
+            [9.6, 4.0, 2.0],
+        ],
+    )
 
 
 def test_adsorbate_mic_distance_uses_true_triclinic_mic():
@@ -71,6 +110,108 @@ def test_anchor_co_bond_graph_keeps_skew_boundary_pairs():
     assert cbg.has_edge(0, 1)
 
 
+def test_periodic_candidate_indexes_cover_unreduced_skew_cells():
+    cell = np.array(
+        [
+            [10.0, 0.0, 0.0],
+            [39.0, 1.0, 0.0],
+            [0.0, 0.0, 20.0],
+        ]
+    )
+    pbc = np.array([True, True, False])
+    origin = np.zeros(3)
+    across_boundary = np.array([0.0, 0.5, 0.0]) @ cell
+
+    # The nearest image uses 2*a - b, outside the historical ±1 image box.
+    offsets = periodic_image_offsets(cell, pbc, cutoff=1.0)
+    assert any(np.array_equal(offset, [2, -1, 0]) for offset in offsets)
+    np.testing.assert_allclose(
+        minimum_image_vectors(across_boundary - origin, cell, pbc),
+        [-0.5, 0.5, 0.0],
+    )
+
+    graph = nx.Graph()
+    graph.graph["cell"] = cell
+    graph.graph["pbc"] = pbc
+    for node, position in enumerate((origin, across_boundary)):
+        graph.add_node(
+            node,
+            type="surface",
+            element="X",
+            position=position,
+            covalent_radius=0.0,
+        )
+
+    co_bond_graph = _build_co_bond_graph(
+        graph,
+        r_cov_ads=0.5,
+        co_factor=1.0,
+    )
+    assert co_bond_graph.has_edge(0, 1)
+
+    spatial_index = _build_anchor_spatial_index(
+        [(frozenset({1}), across_boundary)],
+        cell,
+        pbc,
+        True,
+        cutoff=1.0,
+    )
+    assert _source_indices_within_radius(
+        spatial_index,
+        origin,
+        radius=1.0,
+    ) == [0]
+
+
+def test_compact_centroid_uses_true_mic_in_skew_cell():
+    cell = np.array(
+        [
+            [1.0, 0.0, 0.0],
+            [0.5, np.sqrt(3.0) / 2.0, 0.0],
+            [0.0, 0.0, 10.0],
+        ]
+    )
+    pbc = np.array([True, True, False])
+    positions = np.array([[0.0, 0.0, 0.0], [0.49, 0.49, 0.0]]) @ cell
+
+    centroid = _circular_centroid(
+        positions,
+        cell,
+        np.linalg.inv(cell),
+        pbc,
+        True,
+    )
+    expected = wrap_positions_into_cell(
+        unwrap_positions_about_reference(positions, cell, pbc).mean(axis=0),
+        cell,
+        pbc,
+    )
+
+    np.testing.assert_allclose(centroid, expected)
+    np.testing.assert_allclose(centroid, [0.8675, 0.21217622, 0.0])
+
+
+def test_periodic_clique_filter_rejects_a_noncontractible_three_cycle():
+    graph = nx.Graph()
+    cell = np.diag([3.0, 10.0, 10.0])
+    graph.graph["cell"] = cell
+    graph.graph["pbc"] = np.array([True, False, False])
+    for node, x_position in enumerate([0.0, 1.0, 2.0]):
+        graph.add_node(
+            node,
+            type="surface",
+            position=np.array([x_position, 0.0, 0.0]),
+        )
+
+    assert not _periodic_clique_is_contractible(
+        graph,
+        frozenset({0, 1, 2}),
+        cell,
+        graph.graph["pbc"],
+        True,
+    )
+
+
 def test_materialised_site_positions_are_wrapped_for_skew_slab():
     atoms = fcc111("Cu", size=(3, 3, 3), vacuum=8.0, orthogonal=False)
     atoms.wrap()
@@ -79,7 +220,7 @@ def test_materialised_site_positions_are_wrapped_for_skew_slab():
 
     anchors = find_anchor_sites(G, "O", k_max=3)
     reactant = build_reactant("[O]", add_hydrogens=False)
-    sites = find_adsorbate_sites(G, reactant, prune_stable_only=False)
+    sites = find_adsorbate_sites(G, reactant, anchor_k_max=3, prune_stable_only=False)
 
     cell_inv = np.linalg.inv(np.asarray(G.graph["cell"], dtype=float))
     pbc_axes = np.where(np.asarray(G.graph["pbc"], dtype=bool))[0]
@@ -91,6 +232,17 @@ def test_materialised_site_positions_are_wrapped_for_skew_slab():
         positions.extend(np.asarray(site.positions, dtype=float))
         for node_ids in site.member_node_ids:
             positions.extend(G.nodes[n]["position"] for n in node_ids)
+
+    for left, right, data in G.edges(data=True):
+        if not data.get("anchor_bond"):
+            continue
+        displacement = minimum_image_vectors(
+            np.asarray(G.nodes[right]["position"], dtype=float)
+            - np.asarray(G.nodes[left]["position"], dtype=float),
+            G.graph["cell"],
+            G.graph["pbc"],
+        )
+        assert data["distance"] == pytest.approx(np.linalg.norm(displacement))
 
     frac = np.asarray(positions, dtype=float) @ cell_inv
     periodic_frac = frac[:, pbc_axes]
@@ -149,3 +301,27 @@ def test_raycasting_uses_connectivity_axes_for_tilted_z_axis():
     assert top_indices.tolist() == [1]
     assert bottom_mask.tolist() == [True, False]
     assert bottom_indices.tolist() == [0]
+
+
+def test_raycasting_is_invariant_to_rigid_rotation_of_skew_slab():
+    reference = fcc111(
+        "Cu",
+        size=(3, 3, 4),
+        vacuum=8.0,
+        orthogonal=False,
+    )
+    rotated = reference.copy()
+    rotated.rotate(25.0, "y", rotate_cell=True)
+    reference_cell = reference.cell.array.copy()
+    rotated_cell = rotated.cell.array.copy()
+
+    reference_result = find_surface_atoms(reference)
+    rotated_result = find_surface_atoms(rotated)
+
+    assert reference_result.indices.tolist() == list(range(27, 36))
+    np.testing.assert_array_equal(
+        rotated_result.indices,
+        reference_result.indices,
+    )
+    np.testing.assert_allclose(reference.cell.array, reference_cell)
+    np.testing.assert_allclose(rotated.cell.array, rotated_cell)

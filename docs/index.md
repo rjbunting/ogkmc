@@ -1,10 +1,11 @@
 # AutoKMC Documentation
 
-AutoKMC constructs and runs graph-based surface kinetic Monte Carlo models
-from atomic structures and SMILES reactants. The workflow can enumerate
-adsorption, desorption, diffusion, bond formation, and bond dissociation;
-calculate endpoint and transition-state energetics; run KMC; and save enough
-event and structural information for reproducible post-processing.
+AutoKMC constructs graph-based surface kinetic Monte Carlo models from atomic
+structures and SMILES reactants. It first builds the catalyst, reactants, and
+surface sites. It then enumerates adsorption, desorption, diffusion, bond
+formation, and bond dissociation and calculates their required energetics.
+Finally, it runs KMC and saves the event and structural information needed for
+reproducible post-processing.
 
 ## Documentation map
 
@@ -16,32 +17,40 @@ event and structural information for reproducible post-processing.
   event schema, trajectories, checkpoint continuation, product rates, and
   backward-propagated mechanisms.
 - [ISAAC reaction database](reaction-database.md): record layout, `.extxyz`
-  assets, matching rules, index recovery, and the intentional
-  geometry-insensitive fallback.
+  assets, geometry/model-aware matching rules, and index recovery.
 - [Development guide](development.md): package layout, tests, static checks,
   and schema-change conventions.
 
-The repository [README](../README.md) remains the installation and quick-start
-entry point. The two production-style platinum examples are:
+Start with the repository [README](../README.md) for installation and a first
+run. Then use these production-style surface examples:
 
-- [`co_oxidation_pt111_uma_4gpu.yaml`](../example/co_oxidation_pt111_uma_4gpu.yaml)
-- [`co_oxidation_ptnano_uma_4gpu.yaml`](../example/co_oxidation_ptnano_uma_4gpu.yaml)
+- [`h2_oxidation_pd111_uma.yaml`](../example/h2_oxidation_pd111_uma.yaml)
+- [`h2_oxidation_pd100_uma.yaml`](../example/h2_oxidation_pd100_uma.yaml)
+- [`co_adsorption_diffusion_cu111_uma.yaml`](../example/co_adsorption_diffusion_cu111_uma.yaml)
 
 ## Command summary
 
 ```bash
 autokmc validate-config CONFIG.yaml
+autokmc preflight CONFIG.yaml
+autokmc doctor [CONFIG.yaml]
 autokmc run CONFIG.yaml
 autokmc analyze RUN_DIR
+autokmc report RUN_DIR
 autokmc rebuild-index CALCULATION_CACHE_DIR
 ```
 
 Use `autokmc COMMAND --help` for the current command-line arguments. Running
-`python -m autokmc.cli ...` is equivalent to the installed `autokmc` command.
+`python -m autokmc.cli ...` is equivalent to using the installed `autokmc`
+command. First use `preflight` for read-only run-safety and calculator-import
+checks. Add `--check-calculator` to require a finite energy/force probe. Use
+`doctor` to report runtime and package readiness without running chemistry.
+Expected failures are concise; put the global `--debug` option before the
+command to show a traceback.
 
 ## Reproducibility model
 
-AutoKMC separates three kinds of state:
+AutoKMC separates three kinds of state, and each has a different purpose:
 
 1. The run directory records what the KMC trajectory actually did.
 2. The checkpoint records the live simulation state needed to continue that
@@ -49,6 +58,6 @@ AutoKMC separates three kinds of state:
 3. The reaction database records reusable scientific calculations and their
    checksum-verified structures.
 
-Product identity, product rates, and mechanisms are not maintained in the
-live KMC state. They are reconstructed from `run_manifest.json` and the
-append-only `events.jsonl` log after the run.
+The live KMC state does not maintain product identity, product rates, or
+mechanisms. After the run, AutoKMC reconstructs them from `run_manifest.json`
+and the append-only `events.jsonl` log.

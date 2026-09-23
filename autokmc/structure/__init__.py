@@ -27,6 +27,7 @@ from autokmc.structure.builders import (
     _validate_crystal_structure,
 )
 from autokmc.structure.optimization import (
+    StructureOptimisationError,
     _resolve_lattice_params,
     optimise_bulk,
     optimise_structure,
@@ -36,12 +37,20 @@ from autokmc.structure.nanoparticle import (
     calculate_surface_energies,
     normalise_surface_energies,
 )
+from autokmc.structure.loading import (
+    StructureInputError,
+    load_structure_file,
+    resolve_frozen_indices,
+    resolve_structure_path,
+)
 from autokmc.structure.slab import (
+    _align_slab_normal,
     _get_bottom_layer_indices,
     _orthogonalise_slab,
     build_surface,
 )
 from autokmc.structure.surface import (
+    align_periodic_slab_frame,
     find_surface_atoms,
     find_surface_atoms_convexhull,
     find_surface_atoms_raycasting,
@@ -56,8 +65,14 @@ __all__ = [
     "calculate_surface_energies",
     "normalise_surface_energies",
     "build_surface",
+    "StructureInputError",
+    "StructureOptimisationError",
+    "load_structure_file",
+    "resolve_frozen_indices",
+    "resolve_structure_path",
     "optimise_bulk",
     "optimise_structure",
+    "align_periodic_slab_frame",
     "find_surface_atoms",
     "find_surface_atoms_convexhull",
     "find_surface_atoms_raycasting",
@@ -76,6 +91,7 @@ __all__ = [
     "_fmt_lp",
     "_print_header",
     "_print_divider",
+    "_align_slab_normal",
     "_orthogonalise_slab",
     "_get_bottom_layer_indices",
 ]

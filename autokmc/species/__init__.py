@@ -9,11 +9,22 @@ from autokmc.species.bond_chemistry import (
     fragment_smiles_to_atoms,
     get_all_fragments,
 )
-from autokmc.species.reactant import Reactant, build_reactant, find_anchor_atoms, find_unique_atoms
+from autokmc.species.reactant import (
+    Reactant,
+    ReactantConnectivityError,
+    ReactantDefinitionError,
+    ReactantGasUnstableError,
+    build_reactant,
+    find_anchor_atoms,
+    find_unique_atoms,
+)
 from autokmc.species.smiles import canonical_smiles, smiles_to_dirname
 
 __all__ = [
     "Reactant",
+    "ReactantConnectivityError",
+    "ReactantDefinitionError",
+    "ReactantGasUnstableError",
     "build_reactant",
     "find_anchor_atoms",
     "find_unique_atoms",

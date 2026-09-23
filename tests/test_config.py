@@ -3,17 +3,23 @@
 from __future__ import annotations
 
 import textwrap
+from dataclasses import fields
 from pathlib import Path
 
 import pytest
 
 from autokmc.io.config import (
+    AdsorptionCfg,
+    ConstantsCfg,
+    OptimizationCfg,
+    ReactantCfg,
     RunConfig,
     ConfigError,
     load_config,
 )
 from autokmc.io.calculators import (
     CalculatorCfg,
+    CalculatorConfigError,
     CalculatorPool,
     build_calculator,
     calculator_meta,
@@ -45,6 +51,11 @@ kmc:
   n_steps: 10
 """
 
+CALCULATOR_YAML = """\
+calculator:
+  import_path: ase.calculators.emt.EMT
+"""
+
 
 def test_load_yaml_ok(tmp_path):
     pytest.importorskip("yaml")
@@ -54,10 +65,498 @@ def test_load_yaml_ok(tmp_path):
     assert cfg.output.dir == "./out"
     assert cfg.structure.miller_index == (1, 1, 1)
     assert cfg.reactants[0].smiles == "[C-]#[O+]"
+    assert cfg.reactants[0].fmax == pytest.approx(0.05)
+    assert cfg.reactants[0].max_steps == 500
     assert cfg.calculator.import_path == "ase.calculators.emt.EMT"
     assert cfg.kmc.n_steps == 10
     assert cfg.diffusion.enabled is False
+    assert cfg.diffusion.spring_k == pytest.approx(5.0)
+    assert cfg.diffusion.image_spacing == pytest.approx(0.25)
+    assert cfg.diffusion.min_images == 6
+    assert cfg.diffusion.max_images == 8
+    assert cfg.bond.neb_spring_k == pytest.approx(5.0)
+    assert cfg.bond.neb_image_spacing == pytest.approx(0.25)
+    assert cfg.bond.neb_min_images == 6
+    assert cfg.bond.neb_max_images == 8
     assert cfg.free_energy.symmetry_tolerance == pytest.approx(0.3)
+    assert cfg.adsorption.anchor_k_max == 4
+    assert cfg.adsorption.endpoint_fmax == pytest.approx(0.05)
+    assert cfg.adsorption.endpoint_max_steps == 200
+    assert cfg.output.calculation_cache_lookup_enabled is False
+    assert cfg.output.isaac_export_enabled is False
+    assert cfg.optimization.optimizer == "lbfgs"
+    assert cfg.optimization.neb_optimizer == "bfgs"
+    assert cfg.optimization.neb_method == "improvedtangent"
+    assert cfg.optimization.neb_geometry_guard_multiplier == pytest.approx(3.0)
+    assert cfg.optimization.neb_intermediate_stagnation_steps == 100
+    assert cfg.optimization.neb_intermediate_max_refinements == 10
+    assert cfg.optimization.neb_intermediate_energy_tolerance == pytest.approx(
+        0.001
+    )
+    assert cfg.optimization.neb_intermediate_minimum_prominence == pytest.approx(
+        0.01
+    )
+
+
+def test_loads_optimizer_choices(tmp_path):
+    pytest.importorskip("yaml")
+    path = _write(
+        tmp_path,
+        """
+schema_version: "1"
+optimization:
+  optimizer: fire
+  optimizer_kwargs:
+    dt: 0.01
+    dtmax: 0.05
+    maxstep: 0.05
+    downhill_check: true
+  neb_optimizer: mdmin
+  neb_optimizer_kwargs:
+    dt: 0.02
+    maxstep: 0.04
+  neb_climb_optimizer: fire
+  neb_climb_optimizer_kwargs:
+    dt: 0.005
+    dtmax: 0.02
+    maxstep: 0.01
+    downhill_check: false
+  neb_method: aseneb
+  neb_geometry_guard_multiplier: 4.0
+  neb_intermediate_stagnation_steps: 75
+  neb_intermediate_max_refinements: 4
+  neb_intermediate_energy_tolerance: 0.002
+  neb_intermediate_minimum_prominence: 0.03
+reactants:
+  - smiles: "[O]"
+calculator:
+  import_path: ase.calculators.emt.EMT
+""",
+    )
+
+    cfg = load_config(path)
+
+    assert cfg.optimization.optimizer == "fire"
+    assert cfg.optimization.optimizer_kwargs == {
+        "dt": pytest.approx(0.01),
+        "dtmax": pytest.approx(0.05),
+        "maxstep": pytest.approx(0.05),
+        "downhill_check": True,
+    }
+    assert cfg.optimization.neb_optimizer == "mdmin"
+    assert cfg.optimization.neb_optimizer_kwargs == {
+        "dt": pytest.approx(0.02),
+        "maxstep": pytest.approx(0.04),
+    }
+    assert cfg.optimization.neb_climb_optimizer == "fire"
+    assert cfg.optimization.neb_climb_optimizer_kwargs == {
+        "dt": pytest.approx(0.005),
+        "dtmax": pytest.approx(0.02),
+        "maxstep": pytest.approx(0.01),
+        "downhill_check": False,
+    }
+    assert cfg.optimization.neb_method == "aseneb"
+    assert cfg.optimization.neb_geometry_guard_multiplier == pytest.approx(4.0)
+    assert cfg.optimization.neb_intermediate_stagnation_steps == 75
+    assert cfg.optimization.neb_intermediate_max_refinements == 4
+    assert cfg.optimization.neb_intermediate_energy_tolerance == pytest.approx(
+        0.002
+    )
+    assert cfg.optimization.neb_intermediate_minimum_prominence == pytest.approx(
+        0.03
+    )
+
+
+@pytest.mark.parametrize(
+    ("body", "message"),
+    [
+        (
+            "optimizer: bfgs\n  optimizer_kwargs: {dt: 0.01}",
+            "unsupported bfgs argument.*dt",
+        ),
+        (
+            "neb_optimizer: fire\n  neb_optimizer_kwargs: {logfile: fire.log}",
+            "cannot override AutoKMC-managed argument.*logfile",
+        ),
+        (
+            "neb_optimizer: fire\n  neb_optimizer_kwargs: 0.01",
+            "neb_optimizer_kwargs must be a mapping",
+        ),
+        (
+            "neb_climb_optimizer: mdmin\n  "
+            "neb_climb_optimizer_kwargs: {dtmax: 0.05}",
+            "unsupported mdmin argument.*dtmax",
+        ),
+    ],
+)
+def test_rejects_invalid_optimizer_kwargs(tmp_path, body, message):
+    pytest.importorskip("yaml")
+    path = _write(
+        tmp_path,
+        f"""
+schema_version: "1"
+optimization:
+  {body}
+reactants:
+  - smiles: "[O]"
+calculator:
+  import_path: ase.calculators.emt.EMT
+""",
+    )
+
+    with pytest.raises(ConfigError, match=message):
+        load_config(path)
+
+
+@pytest.mark.parametrize(
+    ("optimizer", "kwargs"),
+    [
+        (
+            "lbfgs",
+            {
+                "maxstep": 0.05,
+                "memory": 50,
+                "damping": 0.5,
+                "alpha": 50.0,
+                "use_line_search": False,
+            },
+        ),
+        ("bfgs", {"maxstep": 0.05, "alpha": 50.0, "master": False}),
+        (
+            "fire",
+            {
+                "dt": 0.01,
+                "dtmax": 0.05,
+                "maxstep": 0.05,
+                "Nmin": 5,
+                "finc": 1.05,
+                "fdec": 0.5,
+                "astart": 0.1,
+                "fa": 0.99,
+                "a": 0.1,
+                "downhill_check": True,
+            },
+        ),
+        ("mdmin", {"dt": 0.01, "maxstep": 0.05}),
+    ],
+)
+def test_accepts_installed_ase_regular_optimizer_controls(optimizer, kwargs):
+    from autokmc.utils.optimizers import normalize_optimizer_kwargs
+
+    assert normalize_optimizer_kwargs(optimizer, kwargs) == kwargs
+
+
+@pytest.mark.parametrize(
+    ("optimizer", "kwargs"),
+    [
+        ("bfgs", {"maxstep": 0.05, "alpha": 50.0}),
+        ("fire", {"dt": 0.01, "dtmax": 0.05, "maxstep": 0.05}),
+        ("mdmin", {"dt": 0.01, "maxstep": 0.05}),
+    ],
+)
+def test_accepts_installed_ase_neb_optimizer_controls(optimizer, kwargs):
+    from autokmc.utils.optimizers import (
+        NEB_OPTIMIZERS,
+        normalize_optimizer_kwargs,
+    )
+
+    assert normalize_optimizer_kwargs(
+        optimizer,
+        kwargs,
+        allowed=NEB_OPTIMIZERS,
+        setting="optimization.neb_optimizer_kwargs",
+    ) == kwargs
+
+
+@pytest.mark.parametrize(
+    ("key", "value", "message"),
+    [
+        ("optimizer", "not-an-optimizer", "optimization.optimizer"),
+        ("neb_optimizer", "lbfgs", "optimization.neb_optimizer"),
+        ("neb_method", "not-a-method", "optimization.neb_method"),
+    ],
+)
+def test_rejects_invalid_optimizer_choices(tmp_path, key, value, message):
+    pytest.importorskip("yaml")
+    path = _write(
+        tmp_path,
+        f"""
+schema_version: "1"
+optimization:
+  {key}: {value}
+reactants:
+  - smiles: "[O]"
+calculator:
+  import_path: ase.calculators.emt.EMT
+""",
+    )
+
+    with pytest.raises(ConfigError, match=message):
+        load_config(path)
+
+
+@pytest.mark.parametrize("value", [0.0, -1.0])
+def test_rejects_nonpositive_neb_geometry_guard_multiplier(tmp_path, value):
+    pytest.importorskip("yaml")
+    path = _write(
+        tmp_path,
+        f"""
+schema_version: "1"
+optimization:
+  neb_geometry_guard_multiplier: {value}
+reactants:
+  - smiles: "[O]"
+calculator:
+  import_path: ase.calculators.emt.EMT
+""",
+    )
+
+    with pytest.raises(
+        ConfigError,
+        match="optimization.neb_geometry_guard_multiplier",
+    ):
+        load_config(path)
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("neb_intermediate_stagnation_steps", 0),
+        ("neb_intermediate_max_refinements", 0),
+        ("neb_intermediate_energy_tolerance", -0.001),
+        ("neb_intermediate_minimum_prominence", -0.001),
+    ],
+)
+def test_rejects_invalid_neb_intermediate_refinement_controls(
+    tmp_path,
+    key,
+    value,
+):
+    pytest.importorskip("yaml")
+    path = _write(
+        tmp_path,
+        f"""
+schema_version: "1"
+optimization:
+  {key}: {value}
+reactants:
+  - smiles: "[O]"
+calculator:
+  import_path: ase.calculators.emt.EMT
+""",
+    )
+
+    with pytest.raises(ConfigError, match=f"optimization.{key}"):
+        load_config(path)
+
+
+def test_standoff_default_reaches_configuration_and_public_entry_points(tmp_path):
+    pytest.importorskip("yaml")
+    from inspect import signature
+
+    from autokmc.core.constants import STANDOFF_FACTOR
+    from autokmc.kmc.expansion import expand_bond_sites_for_new_species
+    from autokmc.kmc.models import BondGrowthOptions
+    from autokmc.sites.adsorbate import (
+        find_adsorbate_sites,
+        optimise_adsorbate_site_positions,
+    )
+    from autokmc.workflow.stages import configured_adsorbate_site_kwargs
+
+    cfg = load_config(_write(tmp_path, YAML_OK))
+
+    assert STANDOFF_FACTOR == pytest.approx(0.90)
+    assert ConstantsCfg().adsorbate_standoff_factor == pytest.approx(0.90)
+    assert cfg.constants.adsorbate_standoff_factor == pytest.approx(0.90)
+    assert BondGrowthOptions().adsorbate_standoff_factor == pytest.approx(0.90)
+    assert configured_adsorbate_site_kwargs(cfg)["standoff_factor"] == pytest.approx(0.90)
+    for function, parameter in (
+        (find_adsorbate_sites, "standoff_factor"),
+        (optimise_adsorbate_site_positions, "standoff_factor"),
+        (expand_bond_sites_for_new_species, "adsorbate_standoff_factor"),
+    ):
+        assert signature(function).parameters[parameter].default == pytest.approx(0.90)
+
+
+@pytest.mark.parametrize("standoff", [0.0, 0.85])
+def test_explicit_standoff_override_is_preserved(tmp_path, standoff):
+    pytest.importorskip("yaml")
+    from autokmc.workflow.stages import configured_adsorbate_site_kwargs
+
+    cfg = load_config(_write(
+        tmp_path,
+        YAML_OK + f"\nconstants:\n  adsorbate_standoff_factor: {standoff}\n",
+    ))
+
+    assert cfg.constants.adsorbate_standoff_factor == pytest.approx(standoff)
+    assert configured_adsorbate_site_kwargs(cfg)["standoff_factor"] == pytest.approx(standoff)
+
+
+def test_loads_every_shared_constant_and_site_geometry_control(tmp_path):
+    pytest.importorskip("yaml")
+    path = _write(
+        tmp_path,
+        """
+schema_version: "1"
+constants:
+  neighbor_list_multiplier: 0.91
+  co_bond_factor: 0.92
+  anchor_bond_factor: 0.83
+  anchor_repulsion_weight: 0.15
+  site_repulsion_cutoff: null
+  adsorbate_contact_factor: 1.08
+  adsorbate_standoff_factor: 0.1
+  adsorbate_rotational_restarts: 9
+  typical_neighbor_distance: 2.7
+  adsorbate_bond_tolerance: 0.35
+  anchor_hull_tolerance: -0.1
+  raycast_coverage_threshold: 0.8
+  raycast_disc_samples: 12
+  kabsch_max_mappings: 5000
+  lateral_shells: 2
+structure:
+  surface_side: both
+  surface_radius_factor: 1.1
+  nanoparticle_hull_tolerance_factor: 0.6
+adsorption:
+  n_shells_anchor: 2
+  pair_n_shells: 3
+  max_pair_shells: 12
+reactants:
+  - smiles: "[O]"
+calculator:
+  import_path: ase.calculators.emt.EMT
+""",
+    )
+
+    cfg = load_config(path)
+
+    assert cfg.constants.neighbor_list_multiplier == pytest.approx(0.91)
+    assert cfg.constants.co_bond_factor == pytest.approx(0.92)
+    assert cfg.constants.anchor_bond_factor == pytest.approx(0.83)
+    assert cfg.constants.anchor_repulsion_weight == pytest.approx(0.15)
+    assert cfg.constants.site_repulsion_cutoff is None
+    assert cfg.constants.adsorbate_contact_factor == pytest.approx(1.08)
+    assert cfg.constants.adsorbate_standoff_factor == pytest.approx(0.1)
+    assert cfg.constants.adsorbate_rotational_restarts == 9
+    assert cfg.constants.typical_neighbor_distance == pytest.approx(2.7)
+    assert cfg.constants.adsorbate_bond_tolerance == pytest.approx(0.35)
+    assert cfg.constants.anchor_hull_tolerance == pytest.approx(-0.1)
+    assert cfg.constants.raycast_coverage_threshold == pytest.approx(0.8)
+    assert cfg.constants.raycast_disc_samples == 12
+    assert cfg.constants.kabsch_max_mappings == 5000
+    assert cfg.constants.lateral_shells == 2
+    assert cfg.structure.surface_side == "both"
+    assert cfg.structure.surface_radius_factor == pytest.approx(1.1)
+    assert cfg.structure.nanoparticle_hull_tolerance_factor == pytest.approx(0.6)
+    assert cfg.adsorption.n_shells_anchor == 2
+    assert cfg.adsorption.pair_n_shells == 3
+    assert cfg.adsorption.max_pair_shells == 12
+
+
+def test_all_options_template_lists_every_shared_constant():
+    yaml = pytest.importorskip("yaml")
+    path = Path(__file__).parents[1] / "example" / "all_options.yaml"
+
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    cfg = load_config(path)
+
+    assert set(raw["constants"]) == {item.name for item in fields(ConstantsCfg)}
+    assert set(raw["optimization"]) == {
+        item.name for item in fields(OptimizationCfg)
+    }
+    assert set(raw["adsorption"]) == {
+        item.name for item in fields(AdsorptionCfg)
+    }
+    assert set(raw["reactants"][0]) == {
+        item.name for item in fields(ReactantCfg)
+    }
+    assert cfg.structure.goal_x == pytest.approx(10.0)
+    assert cfg.structure.goal_y == pytest.approx(10.0)
+    assert cfg.structure.extra_kwargs["orthogonalise"] is False
+    assert cfg.structure.surface_side == "top"
+    assert cfg.adsorption.max_pair_shells == 10
+    assert cfg.constants.adsorbate_standoff_factor == pytest.approx(0.90)
+
+
+@pytest.mark.parametrize(
+    ("facet", "miller_index", "min_slab_size", "goal_size"),
+    [
+        ("111", (1, 1, 1), 8.0, 12.0),
+        ("100", (1, 0, 0), 6.0, 10.0),
+    ],
+)
+def test_h2_oxidation_pd_uma_examples_have_expected_size_and_are_batched(
+    facet,
+    miller_index,
+    min_slab_size,
+    goal_size,
+):
+    pytest.importorskip("yaml")
+    path = (
+        Path(__file__).parents[1]
+        / "example"
+        / f"h2_oxidation_pd{facet}_uma.yaml"
+    )
+
+    cfg = load_config(path)
+
+    assert cfg.structure.composition == "Pd"
+    assert cfg.structure.miller_index == miller_index
+    assert cfg.structure.min_slab_size == pytest.approx(min_slab_size)
+    assert cfg.structure.goal_x == pytest.approx(goal_size)
+    assert cfg.structure.goal_y == pytest.approx(goal_size)
+    assert cfg.structure.extra_kwargs["orthogonalise"] is False
+    assert cfg.structure.n_freeze_layers == 2
+    assert [reactant.smiles for reactant in cfg.reactants] == ["[H][H]", "O=O"]
+    assert cfg.calculator.factory == "fairchem.core.FAIRChemCalculator"
+    predictor = cfg.calculator.factory_kwargs["predict_unit"]
+    assert predictor["factory"] == (
+        "autokmc.io.fairchem.get_predict_unit_on_device"
+    )
+    assert predictor["factory_kwargs"] == {
+        "name_or_path": "uma-s-1p2",
+        "device": "cuda",
+        "workers": 1,
+    }
+    assert cfg.calculator.factory_kwargs["task_name"] == "oc20"
+    assert cfg.calculator.copies == 4
+    assert cfg.calculator.max_workers == 4
+    assert cfg.calculator.gpu_devices == [
+        "cuda:0",
+        "cuda:1",
+        "cuda:2",
+        "cuda:3",
+    ]
+    assert cfg.calculator.gpu_device_arg == (
+        "predict_unit.factory_kwargs.device"
+    )
+    assert cfg.optimization.neb_band_eval == "batched"
+    assert cfg.optimization.neb_method == "improvedtangent"
+
+
+def test_co_cu111_example_enables_only_intact_co_diffusion_chemistry():
+    pytest.importorskip("yaml")
+    path = (
+        Path(__file__).parents[1]
+        / "example"
+        / "co_adsorption_diffusion_cu111_uma.yaml"
+    )
+
+    cfg = load_config(path)
+
+    assert cfg.structure.composition == "Cu"
+    assert cfg.structure.miller_index == (1, 1, 1)
+    assert cfg.structure.goal_x == pytest.approx(10.0)
+    assert cfg.structure.goal_y == pytest.approx(10.0)
+    assert cfg.structure.extra_kwargs["orthogonalise"] is False
+    assert [reactant.smiles for reactant in cfg.reactants] == ["[C-]#[O+]"]
+    assert cfg.reactants[0].partial_pressure_bar == pytest.approx(1.0)
+    assert cfg.diffusion.enabled is True
+    assert cfg.diffusion.max_hops == 1
+    assert cfg.bond.enabled is False
+    assert cfg.kmc.lateral_interactions is False
+    assert cfg.optimization.neb_band_eval == "batched"
 
 
 def test_load_toml_ok(tmp_path):
@@ -88,11 +587,91 @@ def test_load_toml_ok(tmp_path):
     assert cfg.kmc.n_steps == 10
 
 
+@pytest.mark.parametrize(
+    "calculator_yaml",
+    ["", "calculator: {}\n", "calculator: null\n"],
+)
+def test_load_config_requires_an_explicit_calculator(tmp_path, calculator_yaml):
+    pytest.importorskip("yaml")
+    path = _write(
+        tmp_path,
+        "schema_version: '1'\n"
+        "reactants:\n"
+        "  - smiles: '[O]'\n"
+        + calculator_yaml,
+    )
+
+    with pytest.raises(
+        ConfigError,
+        match=r"calculator\.import_path or calculator\.factory",
+    ):
+        load_config(path)
+
+
+def test_load_file_structure_resolves_path_and_coerces_frozen_indices(tmp_path):
+    pytest.importorskip("yaml")
+    path = _write(
+        tmp_path,
+        """
+schema_version: "1"
+structure:
+  kind: file
+  path: structures/catalyst.extxyz
+  format: extxyz
+  index: 3
+  frozen_indices: [0, 2, 5]
+reactants:
+  - smiles: "[O]"
+calculator:
+  import_path: ase.calculators.emt.EMT
+""",
+    )
+
+    cfg = load_config(path)
+
+    assert cfg.structure.path == str(
+        (tmp_path / "structures" / "catalyst.extxyz").resolve()
+    )
+    assert cfg.structure.format == "extxyz"
+    assert cfg.structure.index == 3
+    assert cfg.structure.frozen_indices == [0, 2, 5]
+    assert isinstance(cfg.structure.frozen_indices, list)
+
+
 def test_unknown_key_raises(tmp_path):
     pytest.importorskip("yaml")
     p = _write(tmp_path, YAML_OK + "\nbogus: 1\n")
     with pytest.raises(ConfigError):
         load_config(p)
+
+
+@pytest.mark.parametrize(
+    ("fragment", "message"),
+    [
+        ("adsorbate_sites:\n  prune_stable_only: true\n", "adsorbate_sites"),
+        ("adsorption:\n  fmax: 0.05\n", "adsorption.*fmax"),
+        ("adsorption:\n  max_steps: 200\n", "adsorption.*max_steps"),
+        ("kmc:\n  fmax: 0.05\n", "kmc.*fmax"),
+        ("kmc:\n  max_steps: 200\n", "kmc.*max_steps"),
+    ],
+)
+def test_retired_adsorption_convergence_keys_are_rejected(
+    tmp_path,
+    fragment,
+    message,
+):
+    pytest.importorskip("yaml")
+    path = _write(
+        tmp_path,
+        "schema_version: '1'\n"
+        "reactants:\n"
+        "  - smiles: '[O]'\n"
+        + CALCULATOR_YAML
+        + fragment,
+    )
+
+    with pytest.raises(ConfigError, match=message):
+        load_config(path)
 
 
 def test_schema_version_mismatch(tmp_path):
@@ -111,8 +690,12 @@ def test_build_calculator_emt():
         assert hasattr(concrete, "get_potential_energy")
 
 
-def test_build_calculator_none():
-    assert build_calculator(CalculatorCfg()) is None
+def test_build_calculator_requires_construction_path():
+    with pytest.raises(
+        CalculatorConfigError,
+        match=r"calculator\.import_path or calculator\.factory",
+    ):
+        build_calculator(CalculatorCfg())
 
 
 def test_calculator_meta_roundtrip():
@@ -136,7 +719,9 @@ schema_version: "1"
 output:
   dir: ./out
   calculation_cache_enabled: true
+  calculation_cache_lookup_enabled: false
   calculation_cache_dir: calc_cache
+  isaac_export_enabled: true
   isaac_export_filename: isaac_upload.json
 reactants:
   - smiles: "[C-]#[O+]"
@@ -165,7 +750,9 @@ structure:
     assert cfg.checkpoint.every_n_steps == 5
     assert cfg.structure.surface_energy_facets == ((1, 1, 1), (1, 0, 0))
     assert cfg.output.calculation_cache_enabled is True
+    assert cfg.output.calculation_cache_lookup_enabled is False
     assert cfg.output.calculation_cache_dir == "calc_cache"
+    assert cfg.output.isaac_export_enabled is True
     assert cfg.output.isaac_export_filename == "isaac_upload.json"
     assert cfg.output.run_manifest_filename == "run_manifest.json"
 
@@ -177,12 +764,16 @@ schema_version: "1"
 reactants:
   - smiles: "[OH]"
     add_hydrogens: false
+calculator:
+  import_path: ase.calculators.emt.EMT
 bond:
   enabled: true
   neb_interpolation: idpp
   atom_matching: hungarian
   matching_trials: 12
   gas_lift_height: 4.5
+  gas_precursor_relax: false
+  gas_precursor_distance: 2.1
 """)
     cfg = load_config(p)
     assert cfg.bond.enabled is True
@@ -190,6 +781,8 @@ bond:
     assert cfg.bond.atom_matching == "hungarian"
     assert cfg.bond.matching_trials == 12
     assert cfg.bond.gas_lift_height == 4.5
+    assert cfg.bond.gas_precursor_relax is False
+    assert cfg.bond.gas_precursor_distance == 2.1
 
 
 def test_unknown_extension(tmp_path):
@@ -207,22 +800,131 @@ def test_missing_file():
 @pytest.mark.parametrize(
     "fragment",
     [
+        "output:\n  calculation_cache_lookup_enabled: 'false'\n",
         "diffusion:\n  enabled: 'false'\n",
         "bond:\n  neb_climb: 'true'\n",
+        "diffusion:\n  image_spacing: 0\n",
+        "diffusion:\n  min_images: 4\n  max_images: 3\n",
+        "bond:\n  neb_image_spacing: -0.1\n",
+        "bond:\n  neb_min_images: 5\n  neb_max_images: 4\n",
         "kmc:\n  temperature_k: 0\n",
+        "reactants:\n  - smiles: '[O]'\n    fmax: 0\n",
+        "reactants:\n  - smiles: '[O]'\n    max_steps: 0\n",
         "free_energy:\n  vibration_nfree: 3\n",
         "free_energy:\n  symmetry_tolerance: 0\n",
         "free_energy:\n  pressure_bar: -0.1\n",
+        "adsorption:\n  anchor_k_max: 0\n",
+        "adsorption:\n  anchor_k_max: true\n",
+        "adsorption:\n  n_shells_anchor: -1\n",
+        "adsorption:\n  pair_n_shells: -1\n",
+        "adsorption:\n  max_pair_shells: -1\n",
+        "adsorption:\n  prune_fmax: 0\n",
+        "adsorption:\n  prune_max_steps: 0\n",
+        "adsorption:\n  endpoint_fmax: 0\n",
+        "adsorption:\n  endpoint_max_steps: 0\n",
+        "structure:\n  miller_index: [1, 1, 1.0]\n",
+        "structure:\n  surface_side: sideways\n",
+        "structure:\n  surface_radius_factor: 0\n",
+        "structure:\n  nanoparticle_hull_tolerance_factor: -0.1\n",
+        "constants:\n  neighbor_list_multiplier: 0\n",
+        "constants:\n  co_bond_factor: -0.1\n",
+        "constants:\n  anchor_bond_factor: 0\n",
+        "constants:\n  anchor_repulsion_weight: -0.1\n",
+        "constants:\n  site_repulsion_cutoff: 0\n",
+        "constants:\n  adsorbate_contact_factor: 0\n",
+        "constants:\n  adsorbate_standoff_factor: -0.1\n",
+        "constants:\n  adsorbate_rotational_restarts: 0\n",
+        "constants:\n  typical_neighbor_distance: 0\n",
+        "constants:\n  adsorbate_bond_tolerance: -0.1\n",
+        "constants:\n  anchor_hull_tolerance: .nan\n",
+        "constants:\n  raycast_coverage_threshold: 1.1\n",
+        "constants:\n  raycast_disc_samples: 0\n",
+        "constants:\n  kabsch_max_mappings: 0\n",
+        "constants:\n  lateral_shells: -1\n",
+        "kmc:\n  random_seed: -1\n",
+        "bond:\n  bond_types: [SINGLE, QUADRUPLE]\n",
+        (
+            "calculator:\n"
+            "  import_path: ase.calculators.emt.EMT\n"
+            "  factory: ase.calculators.emt.EMT\n"
+        ),
+        (
+            "calculator:\n"
+            "  import_path: ase.calculators.emt.EMT\n"
+            "  kwargs: []\n"
+        ),
+        (
+            "calculator:\n"
+            "  import_path: ase.calculators.emt.EMT\n"
+            "  copies: 1\n"
+            "  max_workers: 2\n"
+        ),
+        (
+            "calculator:\n"
+            "  import_path: ase.calculators.emt.EMT\n"
+            "  copies: 2\n"
+            "  gpu_devices: [cuda:0]\n"
+        ),
+        "output:\n  isaac_export_enabled: 'false'\n",
+        "output:\n  reactions_filename: ../events.jsonl\n",
+        (
+            "output:\n"
+            "  reactions_filename: results.json\n"
+            "  summary_filename: results.json\n"
+        ),
     ],
 )
 def test_strict_validation_rejects_coercible_types_and_invalid_ranges(tmp_path, fragment):
     pytest.importorskip("yaml")
+    calculator = "" if fragment.startswith("calculator:") else CALCULATOR_YAML
     path = _write(
         tmp_path,
-        "schema_version: '1'\nreactants:\n  - smiles: '[O]'\n" + fragment,
+        "schema_version: '1'\nreactants:\n  - smiles: '[O]'\n"
+        + calculator
+        + fragment,
     )
     with pytest.raises(ConfigError):
         load_config(path)
+
+
+def test_empty_reactants_are_rejected(tmp_path):
+    pytest.importorskip("yaml")
+    path = _write(
+        tmp_path,
+        "schema_version: '1'\nreactants: []\n" + CALCULATOR_YAML,
+    )
+
+    with pytest.raises(ConfigError, match="at least one species"):
+        load_config(path)
+
+
+def test_invalid_smiles_is_rejected_during_config_validation(tmp_path):
+    pytest.importorskip("yaml")
+    path = _write(
+        tmp_path,
+        "schema_version: '1'\nreactants:\n  - smiles: 'not valid ('\n"
+        + CALCULATOR_YAML,
+    )
+
+    with pytest.raises(ConfigError, match="could not be parsed by RDKit"):
+        load_config(path)
+
+
+def test_explicit_null_anchor_clique_cap_restores_unbounded_mode(tmp_path):
+    pytest.importorskip("yaml")
+    path = _write(
+        tmp_path,
+        "schema_version: '1'\n"
+        "reactants:\n"
+        "  - smiles: '[O]'\n"
+        + CALCULATOR_YAML
+        + "adsorption:\n"
+        "  anchor_k_max: null\n",
+    )
+
+    cfg = load_config(path)
+
+    assert cfg.adsorption.anchor_k_max is None
 
 
 def test_zero_default_partial_pressure_is_allowed(tmp_path):
@@ -233,6 +935,8 @@ def test_zero_default_partial_pressure_is_allowed(tmp_path):
 schema_version: "1"
 reactants:
   - smiles: "[O]"
+calculator:
+  import_path: ase.calculators.emt.EMT
 free_energy:
   pressure_bar: 0.0
 """,
@@ -253,8 +957,72 @@ schema_version: "1"
 reactants:
   - smiles: "C(O)"
   - smiles: "OC"
+calculator:
+  import_path: ase.calculators.emt.EMT
 """,
     )
 
     with pytest.raises(ConfigError, match="duplicates reactants\\[0\\]"):
+        load_config(path)
+
+
+@pytest.mark.parametrize(
+    ("structure", "message"),
+    [
+        ("kind: file", "structure.path must be a non-empty string"),
+        (
+            "kind: file\n  path: catalyst.xyz\n  format: '   '",
+            "structure.format must be a non-empty string",
+        ),
+        (
+            "kind: file\n  path: catalyst.xyz\n  index: true",
+            "structure.index must be an integer",
+        ),
+        (
+            "kind: file\n  path: catalyst.xyz\n  frozen_indices: [0, -1]",
+            r"structure\.frozen_indices\[1\] must be >= 0",
+        ),
+        (
+            "kind: file\n  path: catalyst.xyz\n  frozen_indices: [1, 1]",
+            "structure.frozen_indices entries must be unique",
+        ),
+        (
+            "kind: file\n  path: catalyst.xyz\n  frozen_indices: [false]",
+            r"structure\.frozen_indices\[0\] must be an integer",
+        ),
+        (
+            "kind: surface\n  path: catalyst.xyz",
+            "structure.path is only valid",
+        ),
+        (
+            "kind: nanoparticle\n  format: xyz",
+            "structure.format is only valid",
+        ),
+        (
+            "kind: surface\n  frozen_indices: []",
+            "structure.frozen_indices is only valid",
+        ),
+        (
+            "kind: surface\n  index: 0",
+            "structure.index is only valid",
+        ),
+    ],
+)
+def test_file_structure_validation_rejects_invalid_or_unused_fields(
+    tmp_path,
+    structure,
+    message,
+):
+    pytest.importorskip("yaml")
+    path = _write(
+        tmp_path,
+        "schema_version: '1'\n"
+        "reactants:\n"
+        "  - smiles: '[O]'\n"
+        + CALCULATOR_YAML
+        + "structure:\n"
+        f"  {structure}\n",
+    )
+
+    with pytest.raises(ConfigError, match=message):
         load_config(path)

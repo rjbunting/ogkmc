@@ -16,9 +16,9 @@ that share
 
 Pairs are deduplicated into iso-classes by graph-isomorphism of the union
 ego-graph (the surface-only ``n_shells_pair``-shell BFS around the union of
-both endpoints' bonded cliques, with the two adsorbate placements stamped on
-as labelled occupied leaves — consistent with the adsorption lateral
-ego-graph convention).
+both endpoints' bonded cliques, with only the two adsorbate placements stamped
+on as labelled endpoint leaves).  Other occupied adsorbates are excluded from
+this base classification and represented later by diffusion lateral classes.
 
 There is **no ML pruning** at this stage — the underlying
 :class:`AdsorbateSite`'s have already been pruned by
@@ -55,22 +55,21 @@ Public API
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Iterable
+from typing import TYPE_CHECKING, Any, Iterable
 
 import networkx as nx
 from networkx.algorithms import isomorphism
 
 from autokmc.sites.adsorbate import (
     AdsorbateSite,
-    _get_surface_apsp,
-    _shortest_path_between_cliques,
 )
+from autokmc.sites.identity import SiteId, site_identifier
 from autokmc.sites.stability.adsorption import _surface_bfs_shells
+from autokmc.core.atom_metadata import atom_metadata_key
 from autokmc.core.constants import (
     DIFFUSION_MAX_HOPS,
     DIFFUSION_PRUNE_BY_ADS_PAIR,
     N_SHELLS_DEFAULT,
-    MAX_PAIR_SHELLS,
 )
 from autokmc.utils.logging import get_logger
 
@@ -114,17 +113,26 @@ class DiffusionLateral:
     atoms_a, atoms_b, atoms_ts : Atoms | None
         Relaxed ASE atoms snapshots persisted by
         :class:`autokmc.io.persistence.ReactionWriter`.
+    atoms_a_initial, atoms_b_initial : Atoms | None
+        Pre-optimization endpoint structures supplied to the relaxations.
+    atoms_neb_path_initial : list[Atoms] | None
+        Interpolated NEB band before any NEB optimization.
     atoms_neb_path : list[Atoms] | None
         Full NEB band (endpoints + intermediate images) — optional, only
         kept when ``persist_neb_path=True``.
     stable : bool | None
         ``True`` when both endpoint relaxations and the NEB converged
         without changing surface / adsorbate connectivity; ``False`` on
-        any stability failure; ``None`` until the check has run.
+        a demonstrated stability failure; ``None`` before evaluation or
+        after an unresolved numerical failure.
     invalid_reason : str | None
         Human-readable explanation of why this lateral class is invalid
         (set when ``stable=False``).  ``None`` when ``stable`` is ``True``
         or not yet evaluated.
+    last_failure_reason : str | None
+        Most recent numerical failure.  This is diagnostic state;
+        :attr:`stable` remains ``None``, while the non-empty failure reason
+        suppresses automatic reevaluation of this lateral class.
     """
     lateral_class : int
     ego_graph     : Any              = None
@@ -136,11 +144,24 @@ class DiffusionLateral:
     atoms_a       : Any              = None
     atoms_b       : Any              = None
     atoms_ts      : Any              = None
+    atoms_a_initial: Any             = None
+    atoms_b_initial: Any             = None
+    atoms_neb_path_initial: Any      = None
     atoms_neb_path: Any              = None
     neb_path_energies: list[float] | None = None
+    neb_n_images: int | None       = None
+    neb_n_frames: int | None       = None
+    neb_max_endpoint_displacement: float | None = None
+    neb_target_image_spacing: float | None = None
+    neb_estimated_image_spacing: float | None = None
+    neb_image_count_limited_by: str | None = None
+    neb_intermediate_refinement: dict[str, Any] | None = None
+    atoms_neb_refinement_initial: Any = None
+    atoms_neb_refinement_final: Any = None
     stable        : bool | None      = None
     invalid_reason: str | None       = None
-    # ── Free-energy / vibrational fields (autokmc.thermo.free_energy) ────────────
+    last_failure_reason: str | None  = None
+    # The free-energy module populates these vibrational fields.
     g_correction_a   : float | None = None
     g_correction_b   : float | None = None
     g_correction_ts  : float | None = None
@@ -162,6 +183,18 @@ class DiffusionLateral:
     vib_indices_a    : list = field(default_factory=list)
     vib_indices_b    : list = field(default_factory=list)
     vib_indices_ts   : list = field(default_factory=list)
+    # Appended after every pre-existing init field for positional-checkpoint
+    # compatibility.
+    neb_intermediate_refinement_history: list[dict[str, Any]] = field(
+        default_factory=list
+    )
+    direct_event_status: str | None = None
+    direct_event_reason: str | None = None
+    direct_event_certificate: dict[str, Any] | None = None
+    direct_event_network_signature: str | None = None
+    if TYPE_CHECKING:
+        _fingerprint : tuple = field(init=False, repr=False, compare=False)
+        _rate_cache : dict = field(init=False, repr=False, compare=False)
 
 
 @dataclass
@@ -204,6 +237,20 @@ class DiffusionSite:
     ego_graph             : Any = None
     n_shells_pair_settled : int = 0
     lateral_classes       : list[DiffusionLateral] = field(default_factory=list)
+    #: Stable KMC identity, assigned lazily once member nodes are available.
+    site_id                : str = field(default="", compare=False)
+    # Lazily attached so older checkpoints and manual instances retain the
+    # established ``hasattr``-based initialisation path.
+    if TYPE_CHECKING:
+        _lateral_fp_index : dict[tuple, list[DiffusionLateral]] = field(
+            init=False, repr=False, compare=False,
+        )
+        _member_lc : dict[int, DiffusionLateral] = field(
+            init=False, repr=False, compare=False,
+        )
+        applicable_reactions : list[Any] = field(
+            init=False, repr=False, compare=False,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -223,6 +270,16 @@ def _member_clique_union(site: AdsorbateSite, m_idx: int) -> frozenset[int]:
     for clq in member_cliques[m_idx]:
         out |= set(clq)
     return frozenset(out)
+
+
+def _reactant_orbit_label(data: dict) -> int:
+    """Return an adsorbate atom's molecular automorphism-orbit label.
+
+    Newly materialised nodes carry ``reactant_orbit``.  Falling back to the
+    raw atom index preserves compatibility with lightweight hand-built test
+    graphs and site objects that predate the orbit attribute.
+    """
+    return int(data.get("reactant_orbit", data.get("reactant_index", -1)))
 
 
 def _surface_node_index_for_placements(
@@ -301,18 +358,15 @@ def _build_pair_ego_graph(
 ) -> nx.Graph:
     """Build the iso-class ego-graph for a diffusion pair.
 
-    Uses **surface-only BFS** — consistent with the adsorption lateral
-    ego-graph (:func:`autokmc.sites.stability.adsorption._build_lateral_ego_graph`).
     Two cached surface-only BFS expansions are run (one per endpoint's
     bonded-clique union, at that endpoint's own iso-class shell depth) and
-    their results are unioned.
-
-    After the BFS, any *other* occupied adsorbate nodes adjacent to the
-    surface set are collected as leaves (but not traversed further).
+    their results are unioned.  Other occupied adsorbates are deliberately
+    omitted because they belong to the later lateral-environment
+    classification, not the base diffusion iso-class.
 
     Both endpoint placements are then added as labelled occupied leaves with
     ``endpoint_role="endpoint"`` so the iso-match treats A↔B symmetrically
-    and endpoints cannot be confused with third-party adsorbate neighbours.
+    and the two endpoints retain their reaction role during isomorphism.
 
     G is **not mutated** — no temporary occupancy changes are made.
     """
@@ -324,22 +378,9 @@ def _build_pair_ego_graph(
     visited_b = _surface_bfs_shells(G, b_clique_union, n_shells_b)
     visited: set = (set(visited_a) | set(visited_b)) - endpoint_ids
 
-    # 2. Collect *other* occupied adsorbate leaves adjacent to the BFS set;
-    #    endpoints are added explicitly afterwards with their role label.
-    ads_leaves: set = set()
-    for n in visited:
-        for nb in G.neighbors(n):
-            if nb in visited or nb in endpoint_ids:
-                continue
-            d = G.nodes[nb]
-            if d.get("type") != "adsorbate":
-                continue
-            if d.get("occupied", False):
-                ads_leaves.add(nb)
+    result = G.subgraph(visited).copy()
 
-    result = G.subgraph(visited | ads_leaves).copy()
-
-    # 3. Add endpoint nodes as labelled occupied leaves with endpoint_role.
+    # 2. Add endpoint nodes as labelled occupied leaves with endpoint_role.
     for nid in all_endpoint_nids:
         if nid not in G:
             continue
@@ -348,10 +389,12 @@ def _build_pair_ego_graph(
             result.add_node(
                 nid,
                 element        = d.get("element"),
+                atom_arrays=d.get("atom_arrays", {}),
                 type           = d.get("type", "adsorbate"),
                 iso_class      = int(d.get("iso_class", -1)),
                 reactant       = str(d.get("reactant",  "")),
                 reactant_index = int(d.get("reactant_index", -1)),
+                reactant_orbit = _reactant_orbit_label(d),
                 occupied       = True,
                 endpoint_role  = "endpoint",
             )
@@ -359,10 +402,10 @@ def _build_pair_ego_graph(
             result.nodes[nid]["occupied"]      = True
             result.nodes[nid]["endpoint_role"] = "endpoint"
         # Restore intramolecular edges.
-        for sib in d.get("siblings", ()):
+        for sib in G.neighbors(nid):
             sib = int(sib)
-            if sib in result and not result.has_edge(nid, sib):
-                result.add_edge(nid, sib, intra_adsorbate=True)
+            if sib in endpoint_ids and sib in result:
+                result.add_edge(nid, sib, **G.edges[nid, sib])
         # Restore anchor bonds to bonded surface atoms.
         clq = d.get("clique")
         if clq is not None:
@@ -378,21 +421,23 @@ def _pair_node_match(d1: dict, d2: dict) -> bool:
 
     * ``type == "surface"``   — must share ``element``.
     * ``type == "adsorbate"`` — must share ``element``, ``iso_class``,
-      ``reactant``, ``reactant_index`` *and* ``endpoint_role`` (so an
+      ``reactant``, molecular ``reactant_orbit`` *and* ``endpoint_role`` (so an
       endpoint never maps onto a third-party occupied adsorbate that happens
-      to share the SMILES, and symmetry-inequivalent atoms of the same element
-      within a multi-atom adsorbate are not interchanged).
+      to share the SMILES, symmetry-equivalent atoms may be interchanged, and
+      symmetry-inequivalent atoms of the same element are kept distinct).
     """
     if d1.get("type") != d2.get("type"):
         return False
     if d1.get("element") != d2.get("element"):
+        return False
+    if atom_metadata_key(d1) != atom_metadata_key(d2):
         return False
     if d1.get("type") == "adsorbate":
         if d1.get("iso_class") != d2.get("iso_class"):
             return False
         if d1.get("reactant") != d2.get("reactant"):
             return False
-        if d1.get("reactant_index") != d2.get("reactant_index"):
+        if _reactant_orbit_label(d1) != _reactant_orbit_label(d2):
             return False
         if d1.get("endpoint_role") != d2.get("endpoint_role"):
             return False
@@ -410,9 +455,10 @@ def _pair_fingerprint(g: nx.Graph) -> tuple:
         (
             d.get("type",    "X"),
             d.get("element", "X"),
+            atom_metadata_key(d),
             int(d.get("iso_class",      -1)) if d.get("type") == "adsorbate" else -1,
             str(d.get("reactant",       "")) if d.get("type") == "adsorbate" else "",
-            int(d.get("reactant_index", -1)) if d.get("type") == "adsorbate" else -1,
+            _reactant_orbit_label(d) if d.get("type") == "adsorbate" else -1,
             (d.get("endpoint_role", "") or "") if d.get("type") == "adsorbate" else "",
             g.degree(n),
         )
@@ -468,10 +514,10 @@ def _prune_one_per_adsorption_pair(
             return 0
         return g.number_of_nodes() + g.number_of_edges()
 
-    kept_ids: set[int] = set()
+    kept_ids: set[SiteId] = set()
     for pair_key, candidates in groups.items():
         best = min(candidates, key=_ego_size)
-        kept_ids.add(id(best))
+        kept_ids.add(site_identifier(best))
         if verbose and len(candidates) > 1:
             discarded = [c for c in candidates if c is not best]
             print(
@@ -482,7 +528,7 @@ def _prune_one_per_adsorption_pair(
             )
 
     # Preserve original insertion order of surviving sites.
-    return [ds for ds in diffusion_sites if id(ds) in kept_ids]
+    return [ds for ds in diffusion_sites if site_identifier(ds) in kept_ids]
 
 
 # ---------------------------------------------------------------------------
@@ -495,7 +541,6 @@ def find_diffusion_sites(
     *,
     max_hops: int = DIFFUSION_MAX_HOPS,
     n_shells_pair: int = N_SHELLS_DEFAULT,
-    surface_apsp_cutoff: int = MAX_PAIR_SHELLS,
     prune_by_adsorption_pair: bool = DIFFUSION_PRUNE_BY_ADS_PAIR,
     verbose: bool = False,
 ) -> dict[str, list[DiffusionSite]]:
@@ -517,9 +562,6 @@ def find_diffusion_sites(
         :data:`~autokmc.core.constants.DIFFUSION_MAX_HOPS` (= 1).
     n_shells_pair : int
         Surface-only BFS depth used for iso-class deduplication.
-    surface_apsp_cutoff : int
-        Cutoff handed to :func:`autokmc.sites.adsorbate._get_surface_apsp`
-        for the cached APSP table.  Must be ≥ ``max_hops``.
     prune_by_adsorption_pair : bool
         When ``True`` (default), for every unordered pair of adsorption
         iso-classes keep only the single :class:`DiffusionSite` whose
@@ -540,10 +582,6 @@ def find_diffusion_sites(
     sites_by_smiles: dict[str, list[AdsorbateSite]] = {}
     for s in adsorbate_sites:
         sites_by_smiles.setdefault(s.reactant, []).append(s)
-
-    apsp = _get_surface_apsp(
-        G, cutoff=max(int(max_hops), int(surface_apsp_cutoff)),
-    )
 
     out: dict[str, list[DiffusionSite]] = {}
 
@@ -580,14 +618,6 @@ def find_diffusion_sites(
                     continue
                 site_b, m_b, clq_b = flat[j]
                 n_pairs_considered += 1
-
-                # Reject pairs whose cliques are too far apart, or that
-                # share *all* their surface atoms (same physical site).
-                hop = _shortest_path_between_cliques(clq_a, clq_b, apsp)
-                if hop > int(max_hops):
-                    continue
-                if clq_a == clq_b:
-                    continue
 
                 a_nids = list(site_a.member_node_ids[m_a])
                 b_nids = list(site_b.member_node_ids[m_b])
@@ -637,23 +667,16 @@ def find_diffusion_sites(
 
                 n_pairs_kept += 1
 
-        # ── Optional: keep one DiffusionSite per adsorption-pair ────────────
+        # If requested, keep one diffusion site for each adsorption pair.
         if prune_by_adsorption_pair:
             diffusion_sites = _prune_one_per_adsorption_pair(
                 diffusion_sites, verbose=verbose, smiles=smiles,
             )
 
-        # ── Renumber iso_class sequentially ─────────────────────────────────
-        # NOTE: The earlier "one iso-class per (ads_iso_a, ads_iso_b) pair"
-        # pruning step has been removed.  That step assumed only one distinct
-        # hop type exists per ordered adsorbate-iso-class pair, but this is
-        # incorrect in general: hops in different crystallographic directions
-        # (or over different hop distances) between the same pair of adsorption
-        # site types can have genuinely different barriers.  Collapsing them
-        # into one DiffusionSite caused the lateral classifier to re-split them
-        # as spurious "lateral classes" with no second adsorbate present.
-        # The graph-isomorphism deduplication in the loop above already handles
-        # true equivalents, so no further collapse is needed.
+        # Finally, renumber the remaining iso-classes in sequence. Different
+        # crystallographic directions and hop distances can have different
+        # barriers even when they connect the same adsorption-site types. The
+        # graph-isomorphism check above removes only true equivalents.
         for new_idx, ds in enumerate(diffusion_sites):
             ds.iso_class = new_idx
 
@@ -670,7 +693,7 @@ def find_diffusion_sites(
                 f"{n_pairs_considered} candidate pair(s) considered, "
                 f"{n_pairs_kept} kept (max_hops={max_hops}) → "
                 f"{len(diffusion_sites)} iso-class(es), "
-                f"{n_members} placement(s)"
+                f"{n_members} pair member(s)"
             )
 
         out[smiles] = diffusion_sites

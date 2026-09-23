@@ -65,6 +65,7 @@ Public API
 
 from __future__ import annotations
 
+
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -78,10 +79,14 @@ from ase.data import (
     atomic_numbers as _ASE_AN,
 )
 
+from autokmc.core.atom_metadata import atom_metadata_key, physical_node_match
 from autokmc.core.pbc import (
     full_pbc_for_cell,
     minimum_image_distances,
     minimum_image_vectors,
+    periodic_image_offsets,
+    slab_outward_normal,
+    unwrap_positions_about_reference,
     wrap_positions_into_cell,
 )
 from autokmc.utils.logging import get_logger
@@ -112,6 +117,7 @@ from autokmc.core.constants import (
 
 #: Human-readable coordination labels used in verbose / log output.
 COORD_LABELS: dict[int, str] = {1: "top", 2: "bridge", 3: "hollow"}
+ANCHOR_K_MAX_BY_ELEMENT = "_anchor_k_max_by_element"
 
 
 # ---------------------------------------------------------------------------
@@ -203,21 +209,12 @@ def _circular_centroid(
     pbc: np.ndarray,
     use_mic: bool,
 ) -> np.ndarray:
-    """Circular-mean MIC-robust centroid of *positions* (N×3)."""
+    """Cartesian centroid of one compact periodic group."""
     if not use_mic or cell_inv is None or not pbc.any():
         return positions.mean(axis=0)
-    frac = positions @ cell_inv
-    out = np.empty(3)
-    for ax in range(3):
-        if pbc[ax]:
-            theta = 2.0 * np.pi * frac[:, ax]
-            ang = np.arctan2(np.sin(theta).mean(), np.cos(theta).mean())
-            if ang < 0.0:
-                ang += 2.0 * np.pi
-            out[ax] = ang / (2.0 * np.pi)
-        else:
-            out[ax] = frac[:, ax].mean()
-    return out @ cell
+    unwrapped = unwrap_positions_about_reference(positions, cell, pbc)
+    centroid = unwrapped.mean(axis=0)
+    return wrap_positions_into_cell(centroid, cell, pbc)
 
 
 def _clique_centroid(
@@ -230,6 +227,54 @@ def _clique_centroid(
 ) -> np.ndarray:
     positions = np.array([G.nodes[n]["position"] for n in clique], dtype=float)
     return _circular_centroid(positions, cell, cell_inv, pbc, use_mic)
+
+
+def _periodic_clique_is_contractible(
+    G: nx.Graph,
+    clique,
+    cell: np.ndarray,
+    pbc: np.ndarray,
+    use_mic: bool,
+    *,
+    atol: float = 1.0e-6,
+) -> bool:
+    """Return whether a periodic clique is one compact physical site.
+
+    Very small periodic surface graphs can contain graph-theoretic triangles
+    that wind around the torus (for example, three atoms spanning an entire
+    3×3 lattice row). Every pair is MIC-adjacent, but no single choice of
+    periodic images makes all clique atoms mutually local. Such a cycle is not
+    an adsorption hollow and must be rejected before iso classification.
+    """
+    nodes = list(clique)
+    if not use_mic or len(nodes) < 3:
+        return True
+
+    positions = np.asarray(
+        [G.nodes[node]["position"] for node in nodes],
+        dtype=float,
+    )
+    raw_pairs = positions[:, None, :] - positions[None, :, :]
+    mic_lengths = np.linalg.norm(
+        minimum_image_vectors(raw_pairs, cell, pbc),
+        axis=2,
+    )
+
+    # Try every atom as the image reference so exact half-cell ties in ASE's
+    # MIC choice cannot reject an otherwise compact local clique.
+    for reference in positions:
+        unwrapped = reference + minimum_image_vectors(
+            positions - reference,
+            cell,
+            pbc,
+        )
+        unwrapped_lengths = np.linalg.norm(
+            unwrapped[:, None, :] - unwrapped[None, :, :],
+            axis=2,
+        )
+        if np.allclose(unwrapped_lengths, mic_lengths, rtol=0.0, atol=atol):
+            return True
+    return False
 
 
 def _mic_distances(
@@ -263,7 +308,7 @@ def _mic_unwrap(
 
 
 # ---------------------------------------------------------------------------
-# Ego-graph (BFS ignoring invisible nodes)
+# Ego-graph (substrate-only BFS)
 # ---------------------------------------------------------------------------
 
 def _build_ego_graph(
@@ -278,8 +323,10 @@ def _build_ego_graph(
 
     * ``type == "anchor"``          — anchor bookkeeping nodes; would
       short-circuit between every clique that touches the same surface atom.
-    * ``type == "adsorbate"`` **and** ``occupied == False`` — unoccupied
-      adsorbate placeholder; becomes visible once ``occupied=True``.
+    * ``type == "adsorbate"`` — both occupied adsorbates and unoccupied
+      placeholders.  Base adsorption iso-classes describe the substrate;
+      live adsorbate occupancy is classified separately by the lateral-site
+      machinery.
     """
     frontier: set = set(clique)
     visited:  set = set(clique)
@@ -289,9 +336,7 @@ def _build_ego_graph(
             for nb in G.neighbors(n):
                 d = G.nodes[nb]
                 t = d.get("type")
-                if t == "anchor":
-                    continue
-                if t == "adsorbate" and not d.get("occupied", False):
+                if t in ("anchor", "adsorbate"):
                     continue
                 nxt.add(nb)
         frontier = nxt - visited
@@ -306,7 +351,7 @@ def _build_ego_graph(
 def _fingerprint(g: nx.Graph) -> tuple:
     """Cheap graph fingerprint — unequal keys → guaranteed non-isomorphic."""
     elem_deg = tuple(sorted(
-        (d["element"], g.degree(n))
+        (d["element"], atom_metadata_key(d), g.degree(n))
         for n, d in g.nodes(data=True)
     ))
     return (
@@ -333,7 +378,8 @@ def _build_co_bond_graph(
         d(i, j) ≤ co_factor × (2·r_cov_ads + r_cov_i + r_cov_j)
 
     Uses a :class:`scipy.spatial.cKDTree` (orthogonal cells use native
-    ``boxsize``; non-orthogonal cells tile ±1 periodic images).
+    ``boxsize``; non-orthogonal cells use a cutoff-complete periodic image
+    box derived from the reciprocal lattice).
     """
     surf_nodes = [(n, d) for n, d in G.nodes(data=True)
                   if d["type"] == "surface"]
@@ -367,22 +413,16 @@ def _build_co_bond_graph(
         pairs = tree.query_pairs(r=r_query, output_type="ndarray")
 
     elif use_mic:
-        offsets = []
-        for dx in (-1, 0, 1):
-            for dy in (-1, 0, 1):
-                for dz in (-1, 0, 1):
-                    if dx and not pbc[0]: continue
-                    if dy and not pbc[1]: continue
-                    if dz and not pbc[2]: continue
-                    offsets.append(np.array([dx, dy, dz], dtype=int))
+        search_pos = wrap_positions_into_cell(pos, cell, pbc)
+        offsets = periodic_image_offsets(cell, pbc, r_query)
         tiled_pos: list[np.ndarray] = []
         tiled_idx: list[int]        = []
         for off in offsets:
-            tiled_pos.append(pos + off @ cell)
+            tiled_pos.append(search_pos + off @ cell)
             tiled_idx.extend(range(len(pos)))
         tree = cKDTree(np.concatenate(tiled_pos))
         raw: set[tuple[int, int]] = set()
-        for i, p in enumerate(pos):
+        for i, p in enumerate(search_pos):
             for hit in tree.query_ball_point(p, r=r_query):
                 j = tiled_idx[hit]
                 if j == i:
@@ -468,20 +508,16 @@ def _kabsch_align_ego(
     rep_ego = _build_ego_graph(G, rep_seed, n_shells)
     mem_ego = _build_ego_graph(G, mem_seed, n_shells)
 
-    # Tag seed membership so the mapping is forced to send seed → seed.
-    # NOTE: we mutate ``_seed`` on the *copies* returned by
-    # :func:`_build_ego_graph` (which calls ``G.subgraph(...).copy()``).
-    # The parent graph *G* is therefore never touched; the egos themselves
-    # are throw-away locals and are not cached anywhere, so the stale
-    # ``_seed`` attribute cannot leak across calls.
+    # Tag the seed nodes so the mapping sends the representative seed to the
+    # member seed. The ego graphs are temporary copies, so these tags do not
+    # modify the parent graph or persist across calls.
     for n in rep_ego.nodes:
         rep_ego.nodes[n]["_seed"] = (n in rep_seed)
     for n in mem_ego.nodes:
         mem_ego.nodes[n]["_seed"] = (n in mem_seed)
 
-    node_match = isomorphism.categorical_node_match(
-        ["element", "_seed"], ["X", False]
-    )
+    def node_match(left, right):
+        return left.get("_seed", False) == right.get("_seed", False) and physical_node_match(left, right)
     matcher = isomorphism.GraphMatcher(rep_ego, mem_ego, node_match=node_match)
     if not matcher.is_isomorphic():
         return None, None
@@ -538,8 +574,9 @@ def _outward_height_for_clique(
 ) -> float:
     """Signed outward height of *position* above a surface clique."""
     if use_mic:
-        z_ref = max(float(G.nodes[int(n)]["position"][2]) for n in clique)
-        return float(np.asarray(position, dtype=float)[2] - z_ref)
+        rows = np.array([G.nodes[int(n)]["position"] for n in clique], dtype=float)
+        normal = slab_outward_normal(G, rows.mean(axis=0))
+        return float(np.dot(position, normal) - np.max(rows @ normal))
     centroid = _clique_centroid(G, clique, cell, cell_inv, pbc, use_mic)
     normal = _outward_normal(G, centroid)
     return float(np.dot(np.asarray(position, dtype=float) - centroid, normal))
@@ -564,9 +601,9 @@ def _optimise_position(
     where i loops over bonded atoms in *clique*, j over nearby non-bonded
     surface atoms (restricted to the n-shell ego and within *repulsion_cutoff*).
 
-    Periodic slabs use L-BFGS-B with a hard z-floor at the highest bonded-atom
-    z coordinate (valid for the orthogonalised slabs produced by
-    :mod:`autokmc.structure` where the surface normal is aligned with +z).
+    Periodic slabs use L-BFGS-B with a bound outside the selected exposed
+    face: +z for the top face and -z for the bottom face. Slab builders
+    align the surface with the Cartesian xy plane.
     Nanoparticles use SLSQP constrained to the outward half-space.
     """
     from scipy.optimize import minimize
@@ -613,9 +650,7 @@ def _optimise_position(
         return E
 
     if use_mic:
-        # Slab: start above the highest bonded atom along +z (valid because
-        # :func:`autokmc.structure._orthogonalise_slab` guarantees the
-        # surface normal is aligned with the cartesian z-axis).
+        # Start outside the bonded atoms along the selected face normal.
         if cell_inv is not None:
             dv_b = b_pos - b_pos[0]
             mic_rel = minimum_image_vectors(dv_b, cell, pbc)
@@ -623,12 +658,13 @@ def _optimise_position(
             mic_rel = b_pos - b_pos[0]
         lat_d = np.linalg.norm(mic_rel[:, :2] - mic_rel[:, :2].mean(0), axis=1)
         h     = np.sqrt(np.maximum(0.0, d_ideal ** 2 - lat_d ** 2))
-        z_min = float(b_pos[:, 2].max()) + max(float(h.mean()), 0.25)
-        z0    = z_min
+        sign = float(slab_outward_normal(G, centroid)[2])
+        outward_limit = float(np.max(sign * b_pos[:, 2])) + max(float(h.mean()), 0.25)
+        z0 = sign * outward_limit
         x0    = np.array([centroid[0], centroid[1], z0])
         res   = minimize(obj, x0, method="L-BFGS-B",
                          bounds=[(None, None), (None, None),
-                                 (z_min, None)])
+                                 (z0, None) if sign > 0 else (None, z0)])
     else:
         # Nanoparticle: constrained to the outward half-space.
         n_out  = _outward_normal(G, centroid)
@@ -655,18 +691,45 @@ def _optimise_position(
 # Graph-side anchor node management
 # ---------------------------------------------------------------------------
 
-def _next_node_id(G: nx.Graph) -> int:
-    """Smallest integer node id strictly greater than all existing ids.
+_NODE_ID_CURSOR = "_autokmc_next_node_id"
 
-    Accepts both Python ``int`` and ``numpy.integer`` ids so callers
-    that produce ids from numpy ranges (``np.arange``) interoperate
-    cleanly with callers using plain ``int``.
+
+def _reserve_node_ids(G: nx.Graph, count: int = 1) -> range:
+    """Reserve a collision-free block of integer node identifiers.
+
+    The cursor is seeded from existing integer ids once, then stored as graph
+    metadata so materialising ``M`` sites no longer performs ``M`` full graph
+    scans.  It survives graph copies and checkpoints and never recycles ids
+    when bookkeeping nodes are removed.
     """
-    if not G.nodes:
-        return 0
-    return int(max(
-        int(n) for n in G.nodes if isinstance(n, (int, np.integer))
-    )) + 1
+    n_ids = int(count)
+    if n_ids < 0:
+        raise ValueError("cannot reserve a negative number of node ids")
+    if n_ids == 0:
+        return range(0, 0)
+
+    cursor = G.graph.get(_NODE_ID_CURSOR)
+    if cursor is None:
+        integer_ids = [
+            int(node)
+            for node in G.nodes
+            if isinstance(node, (int, np.integer))
+        ]
+        cursor = max(integer_ids) + 1 if integer_ids else 0
+    cursor = int(cursor)
+
+    # Accommodate a graph augmented outside the allocator without restoring
+    # the old max-id scan on every call.
+    while any((cursor + offset) in G for offset in range(n_ids)):
+        cursor += 1
+
+    G.graph[_NODE_ID_CURSOR] = cursor + n_ids
+    return range(cursor, cursor + n_ids)
+
+
+def _next_node_id(G: nx.Graph) -> int:
+    """Return one newly reserved integer graph-node identifier."""
+    return _reserve_node_ids(G, 1).start
 
 
 def _remove_anchor_nodes(G: nx.Graph, element: str) -> None:
@@ -712,12 +775,16 @@ def _add_anchor_node(
         ego_subgraph    = ego_graph,
         optimised       = False,
     )
+    cell, cell_inv, pbc, use_mic = _get_cell(G)
     for s in clique:
         if s not in G:
             continue
-        d = float(np.linalg.norm(
+        displacement = (
             np.asarray(G.nodes[s]["position"], dtype=float) - position
-        ))
+        )
+        if use_mic and cell_inv is not None:
+            displacement = minimum_image_vectors(displacement, cell, pbc)
+        d = float(np.linalg.norm(displacement))
         G.add_edge(nid, s, distance=d, offset=(0, 0, 0), anchor_bond=True)
     return nid
 
@@ -731,26 +798,33 @@ def _enumerate_cliques(
     element: str,
     r_cov_ads: float,
     co_factor: float = CO_FACTOR,
+    k_max: int | None = None,
+    hull_tolerance: float = HULL_TOL,
 ) -> dict[int, list[frozenset]]:
     """Return ``{k: [frozenset_of_node_ids, …]}`` for every clique size 1…k_max.
 
-    Two geometric filters drop spurious wrap-around / sub-surface cliques:
+    Three geometric filters drop spurious wrap-around / sub-surface cliques:
+
+    * **Periodic slabs** — graph-theoretic cliques that wind around a small
+      periodic cell are rejected unless all atoms can be unwrapped into one
+      mutually local cluster.
 
     * **Nanoparticles** — the convex hull of the *surface* atoms is used as
       the boundary of the particle.  A clique whose MIC-aware centroid sits
-      strictly inside the hull (signed distance below :data:`HULL_TOL`) is
+      strictly inside the hull (signed distance below *hull_tolerance*) is
       a wrap-around artefact (e.g. an "anchor site" buried at the centre
       of a periodic image of the NP) and is dropped.
     * **Slabs** — a clique whose centroid sits below the lowest surface
       atom along the local outward normal is similarly buried beneath the
-      surface and dropped.  The outward normal is just ``+z`` for the
-      orthogonalised slabs that :mod:`autokmc.structure` produces.
+      surface and dropped. Top and bottom faces use +z and -z respectively;
+      cliques spanning both exposed faces are rejected.
     """
+    if k_max is not None and int(k_max) < 1:
+        raise ValueError("k_max must be at least 1 when supplied")
+    clique_limit = None if k_max is None else int(k_max)
     cbg = _build_co_bond_graph(G, r_cov_ads, co_factor)
     if cbg.number_of_nodes() == 0:
         return {1: []}
-
-    k_max = max((len(c) for c in nx.find_cliques(cbg)), default=1)
     cell, cell_inv, pbc, use_mic = _get_cell(G)
 
     # ------------------------------------------------------------------
@@ -763,10 +837,10 @@ def _enumerate_cliques(
     )
 
     hull_eq: np.ndarray | None = None
-    z_floor: float | None      = None
+    slab_faces: dict[float, float] = {}
 
     if not use_mic:
-        # ── Nanoparticle: convex hull of surface atoms ────────────────
+        # For a nanoparticle, use the convex hull of its surface atoms.
         hull_eq = G.graph.get("hull_equations")
         if hull_eq is None and len(surf_pos) >= 4:
             try:
@@ -778,34 +852,48 @@ def _enumerate_cliques(
             except Exception:
                 hull_eq = None
     else:
-        # ── Slab: drop cliques whose centroid is below the surface ────
-        # All builders orthogonalise the slab cell (surface ‖ xy plane,
-        # outward normal = +z), so a simple z-floor is sufficient and
-        # cheap.  ``HULL_TOL`` is reused as the (negative) Å tolerance
-        # below the lowest surface atom that we still accept.
-        if len(surf_pos):
-            z_floor = float(surf_pos[:, 2].min()) + HULL_TOL
+        # Keep an independent inward boundary for each exposed slab face.
+        # hull_tolerance is the allowed negative distance below that face.
+        for position in surf_pos:
+            sign = float(slab_outward_normal(G, position)[2])
+            height = sign * float(position[2])
+            slab_faces[sign] = min(slab_faces.get(sign, height), height)
 
-    sites: dict[int, list[frozenset]] = {k: [] for k in range(1, k_max + 1)}
+    sites: dict[int, list[frozenset]] = {}
     seen: set[frozenset] = set()
     for clique in nx.enumerate_all_cliques(cbg):
         k = len(clique)
-        if k > k_max:
+        # NetworkX emits cliques in non-decreasing size, so a configured cap
+        # can stop the combinatorial tail before it is generated.
+        if clique_limit is not None and k > clique_limit:
             break
         key = frozenset(clique)
+        if not _periodic_clique_is_contractible(G, key, cell, pbc, use_mic):
+            continue
         if key in seen:
             continue
         seen.add(key)
 
-        if hull_eq is not None or z_floor is not None:
+        if hull_eq is not None or slab_faces:
             c = _clique_centroid(G, key, cell, cell_inv, pbc, use_mic)
             if hull_eq is not None:
-                if float(np.max(hull_eq[:, :3] @ c + hull_eq[:, 3])) < HULL_TOL:
+                if (
+                    float(np.max(hull_eq[:, :3] @ c + hull_eq[:, 3]))
+                    < hull_tolerance
+                ):
                     continue   # buried inside the NP hull
-            elif z_floor is not None and c[2] < z_floor:
-                continue       # buried beneath the slab surface
+            elif slab_faces:
+                signs = {
+                    float(slab_outward_normal(G, G.nodes[n]["position"])[2])
+                    for n in key
+                }
+                if len(signs) != 1:
+                    continue  # a clique cannot join opposite slab faces
+                sign = signs.pop()
+                if sign * c[2] < slab_faces[sign] + hull_tolerance:
+                    continue
 
-        sites[k].append(key)
+        sites.setdefault(k, []).append(key)
 
     return {k: v for k, v in sites.items() if v}
 
@@ -824,7 +912,7 @@ def _reduce_by_isomorphism(
     Two cliques belong to the same iso-class iff their n-shell ego-subgraphs
     are graph-isomorphic under element-label matching.
     """
-    node_match = isomorphism.categorical_node_match("element", "X")
+    node_match = physical_node_match
     unique: dict[int, list[AnchorSite]] = {}
 
     cell, cell_inv, pbc, use_mic = _get_cell(G)
@@ -909,6 +997,8 @@ def find_anchor_sites(
     repulsion_cutoff: float | None = REPULSION_CUTOFF,
     n_shells: int = N_SHELLS,
     k_max: int | None = None,
+    hull_tolerance: float = HULL_TOL,
+    kabsch_max_mappings: int = KABSCH_MAX_MAPPINGS,
     verbose: bool = False,
 ) -> list[AnchorSite]:
     """Enumerate, classify and geometrically optimise all anchor sites for
@@ -927,10 +1017,10 @@ def find_anchor_sites(
     opt_factor : float
         Ideal bond-length scale for geometric optimisation.  Default 0.85.
     repulsion_weight : float
-        Weight on the soft non-bonded repulsion term.  Default 0.1.
+        Weight on the soft non-bonded repulsion term.  Default 0.2.
     repulsion_cutoff : float or None
         Spatial cutoff (Å) on which non-bonded atoms enter the repulsion sum.
-        ``None`` disables the cutoff (slower but exact).  Default 6.0 Å.
+        ``None`` disables the cutoff (slower but exact).  Default 10.0 Å.
     n_shells : int
         Ego-graph depth for iso-class discrimination.  1 distinguishes fcc vs
         hcp hollows on (111); 0 collapses them.  Default 1.
@@ -939,6 +1029,14 @@ def find_anchor_sites(
         natural ``k_max`` from the co-bonding graph.  Set explicitly to
         suppress runaway clique enumeration on very dense surfaces (see
         ``todo.MD``).
+    hull_tolerance : float
+        Signed-distance tolerance (Å) for rejecting buried nanoparticle
+        cliques and below-surface slab cliques.  Default
+        :data:`~autokmc.core.constants.HULL_TOL`.
+    kabsch_max_mappings : int
+        Maximum number of graph-isomorphism mappings tested while propagating
+        representative positions to equivalent members.  Default
+        :data:`~autokmc.core.constants.KABSCH_MAX_MAPPINGS`.
     verbose : bool
         Print a per-k summary table.
 
@@ -971,22 +1069,26 @@ def find_anchor_sites(
     # Remove stale anchor nodes from a previous call.
     _remove_anchor_nodes(G, element)
 
-    # ── Step 1: enumerate raw cliques ─────────────────────────────────────
-    sites_by_k = _enumerate_cliques(G, element, r_cov, co_factor)
-    if k_max is not None:
-        # Drop oversized cliques up-front (todo.MD: clique blowup).
-        sites_by_k = {k: v for k, v in sites_by_k.items() if k <= k_max}
-        if not sites_by_k:
-            sites_by_k = {1: []}
+    # First, enumerate the raw surface cliques.
+    sites_by_k = _enumerate_cliques(
+        G,
+        element,
+        r_cov,
+        co_factor,
+        k_max=k_max,
+        hull_tolerance=hull_tolerance,
+    )
+    if not sites_by_k:
+        sites_by_k = {1: []}
     n_raw = sum(len(v) for v in sites_by_k.values())
     _log.debug("find_anchor_sites: %r  %d raw cliques  k_max=%d",
                element, n_raw, max(sites_by_k) if sites_by_k else 0)
 
-    # ── Step 2: reduce by isomorphism ─────────────────────────────────────
+    # Next, reduce equivalent cliques by graph isomorphism.
     unique_by_k = _reduce_by_isomorphism(G, sites_by_k, n_shells=n_shells)
     n_iso = sum(len(v) for v in unique_by_k.values())
 
-    # ── Step 3: build clique → (k, index) reverse map ─────────────────────
+    # Then build the reverse map from each clique to its size and index.
     clique_to_loc: dict[frozenset, tuple[int, int]] = {}
     for k, cliques in sites_by_k.items():
         for idx, clq in enumerate(cliques):
@@ -1000,7 +1102,8 @@ def find_anchor_sites(
     cell, cell_inv, pbc, use_mic = _get_cell(G)
 
 
-    # ── Step 4 + 5: optimise representative, propagate to members ─────────
+    # Optimize one representative for each class, and propagate its geometry
+    # to the remaining members.
     all_sites: list[AnchorSite] = []
     for k, classes in sorted(unique_by_k.items()):
         n_prop     = 0
@@ -1029,6 +1132,7 @@ def find_anchor_sites(
                 R, t = _kabsch_align_ego(
                     G, iso.representative, member, n_shells,
                     cell, cell_inv, pbc, use_mic,
+                    max_mappings=kabsch_max_mappings,
                 )
                 k_m, idx_m = clique_to_loc[member]
                 if R is not None and t is not None:
@@ -1070,7 +1174,7 @@ def find_anchor_sites(
         )
         all_sites.extend(classes)
 
-    # ── Step 6: materialise anchor nodes on G ─────────────────────────────
+    # After the geometries are available, materialize the anchor nodes.
     # Build a clique → position lookup from the just-filled arrays.
     clique_to_pos: dict[frozenset, np.ndarray] = {}
     for k, cliques in sites_by_k.items():
@@ -1113,9 +1217,12 @@ def find_anchor_sites(
         iso.node_ids = [node_ids_by_clique[m] for m in iso.members
                         if m in node_ids_by_clique]
 
-    # ── Persist to G.graph ────────────────────────────────────────────────
+    # Finally, store the anchor data on the graph.
     G.graph.setdefault("anchor_sites", {})[element]  = all_sites
     G.graph.setdefault("raw_cliques",  {})[element]  = sites_by_k
+    G.graph.setdefault(ANCHOR_K_MAX_BY_ELEMENT, {})[element] = (
+        None if k_max is None else int(k_max)
+    )
 
     if verbose:
         print(f"  {'k':>3}  {'type':<10}  {'raw':>6}  {'unique':>6}")

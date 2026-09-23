@@ -10,9 +10,9 @@ Two regimes:
   reactant, derives the Gibbs free-energy correction from
   :class:`ase.thermochemistry.IdealGasThermo` at ``(T, p)``.
 * **Surface (adsorbate / TS)** — :func:`compute_harmonic_thermo` runs
-  vibrations only on a subset of atom indices (the *reactive* species) so
-  that frozen slab atoms and frozen lateral-shell adsorbates do not enter
-  the vibrational manifold.  The Helmholtz / Gibbs correction comes from
+  vibrations jointly on the reacting adsorbate and complete neighboring
+  molecules selected within the lateral shell range. Slab atoms do not enter
+  the vibrational manifold. The Helmholtz / Gibbs correction comes from
   :class:`ase.thermochemistry.HarmonicThermo`.
 
 Adsorption rate convention: the user-facing ``ΔG_ads`` and barrier are
@@ -27,8 +27,13 @@ extra glue.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import tempfile
-from contextlib import nullcontext
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager, nullcontext
+from contextvars import copy_context
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Sequence
@@ -37,7 +42,15 @@ import numpy as np
 from ase import Atoms
 
 from autokmc.core.pbc import has_real_cell
-from autokmc.io.calculators import acquire_calculator
+from autokmc.io.calculation_cache import (
+    _scientific_atom_arrays as _calculation_atom_arrays,
+    calculator_identity,
+)
+from autokmc.io.calculators import (
+    CalculatorPool,
+    acquire_calculator,
+    calculator_batch_active,
+)
 from autokmc.utils.logging import get_logger
 
 _log = get_logger(__name__)
@@ -45,6 +58,9 @@ _log = get_logger(__name__)
 
 # Conversion: 1 bar ≈ 100 000 Pa.
 _BAR_PA: float = 1.0e5
+_VIBRATION_LOCKS_GUARD = threading.Lock()
+_VIBRATION_THREAD_LOCKS: dict[str, tuple[threading.Lock, int]] = {}
+SURFACE_VIBRATION_SUBSYSTEM = "local_adsorbates_v1"
 
 
 # ---------------------------------------------------------------------------
@@ -74,8 +90,8 @@ class FreeEnergyOptions:
         Number of displacements per atom direction (2 → central, 4 → 5pt).
     include_ts_vibrations : bool
         If ``True``, run a second harmonic vibrational analysis on the
-        NEB / bond TS structure (drops the principal imaginary mode).  If
-        ``False``, the TS gets only an averaged endpoint ZPE correction.
+        NEB / bond TS structure (omits imaginary modes).  If
+        ``False``, the TS gets the averaged endpoint free-energy correction.
     min_frequency_ev : float
         Modes with ``|E_vib| < min_frequency_ev`` are treated as imaginary /
         spurious and dropped from the harmonic partition function.  The
@@ -117,6 +133,55 @@ def _normalise_harmonic_pbc(atoms: Atoms) -> None:
         atoms.set_pbc(True)
 
 
+@contextmanager
+def _vibration_cache_lock(cache_dir: Path, label: str):
+    """Serialize one content-addressed vibration cache across threads/processes.
+
+    ASE represents an in-progress displacement with an empty JSON file.
+    Deleting empty files before a run can therefore remove another process's
+    active lock. Remove abandoned empty files only after acquiring this
+    whole-workflow lock. A separate advisory lock protects the complete same-label
+    workflow, while the small in-process registry covers platforms where file
+    locks are process-scoped.
+    """
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = (cache_dir / f".vib_{label}.lock").resolve()
+    key = str(lock_path)
+    with _VIBRATION_LOCKS_GUARD:
+        entry = _VIBRATION_THREAD_LOCKS.get(key)
+        if entry is None:
+            thread_lock = threading.Lock()
+            _VIBRATION_THREAD_LOCKS[key] = (thread_lock, 1)
+        else:
+            thread_lock, users = entry
+            _VIBRATION_THREAD_LOCKS[key] = (thread_lock, users + 1)
+
+    thread_lock.acquire()
+    try:
+        with lock_path.open("a+b") as handle:
+            try:
+                import fcntl
+            except ImportError:  # pragma: no cover - non-POSIX fallback
+                yield
+            else:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    finally:
+        thread_lock.release()
+        with _VIBRATION_LOCKS_GUARD:
+            registered_lock, users = _VIBRATION_THREAD_LOCKS[key]
+            if users == 1:
+                del _VIBRATION_THREAD_LOCKS[key]
+            else:
+                _VIBRATION_THREAD_LOCKS[key] = (
+                    registered_lock,
+                    users - 1,
+                )
+
+
 def _split_real_imag_ev(
     energies_ev: Sequence[complex] | Sequence[float],
     *,
@@ -132,6 +197,8 @@ def _split_real_imag_ev(
     imag_ev: list[float] = []
     for e in energies_ev:
         e_complex = complex(e)
+        if not np.isfinite(e_complex.real) or not np.isfinite(e_complex.imag):
+            raise ValueError(f"Non-finite vibrational energy {e!r}")
         # ASE convention: imaginary energies are stored as 1j * |e|.
         if abs(e_complex.imag) > abs(e_complex.real):
             imag_ev.append(float(abs(e_complex.imag)))
@@ -222,6 +289,38 @@ def _infer_rotational_symmetry_number(
         analyzer = PointGroupAnalyzer(molecule, tolerance=tol)
         symmetry_number = int(analyzer.get_rotational_symmetry_number())
         point_group = str(analyzer.sch_symbol)
+        # Pymatgen's elemental symmetry operations can exchange isotopes.
+        # Count only proper rotations that also preserve the nuclear masses.
+        from scipy.optimize import linear_sum_assignment
+
+        coordinates = np.asarray(analyzer.centered_mol.cart_coords)
+        masses = atoms.get_masses()
+        same_nuclei = (
+            (atoms.numbers[:, None] == atoms.numbers[None, :])
+            & np.isclose(masses[:, None], masses[None, :], rtol=0.0, atol=1e-8)
+        )
+
+        def preserves_nuclei(transformed):
+            distances = np.linalg.norm(
+                transformed[:, None, :] - coordinates[None, :, :], axis=2,
+            )
+            left, right = linear_sum_assignment(
+                np.where(same_nuclei, distances, np.inf),
+            )
+            return bool(np.all(distances[left, right] <= tol))
+
+        if point_group in {"D*h", "C*v"}:
+            # A linear molecule has symmetry number two exactly when end-for-
+            # end reversal preserves its nuclei. Some pymatgen versions omit
+            # that proper half-turn from the finite operation list.
+            symmetry_number = 2 if preserves_nuclei(-coordinates) else 1
+            point_group = "D*h" if symmetry_number == 2 else "C*v"
+        else:
+            symmetry_number = sum(
+                1 for operation in analyzer.get_symmetry_operations()
+                if np.isclose(np.linalg.det(operation.rotation_matrix), 1.0, atol=1e-4)
+                and preserves_nuclei(operation.operate_multi(coordinates))
+            )
     except Exception as exc:
         raise ValueError(
             "Could not infer the gas-phase rotational symmetry number from "
@@ -271,18 +370,183 @@ def _vibrate(
         delta        = float(options.vibration_displacement),
         nfree        = int(options.vibration_nfree),
     )
-    # Always recompute — caches mix poorly when the underlying calculator
-    # state changes or the number of atoms differs between lateral classes.
-    # clean(empty_files=False) removes ALL cached displacement files, not
-    # just the empty ones, preventing stale force arrays from a previous
-    # lateral class (different n_atoms) from poisoning the Hessian assembly.
-    vib.clean(empty_files=False)
+    # The outer cache lock excludes live writers. A failed displacement can
+    # leave an empty ASE lock file, which must be retried rather than reused.
+    vib.clean(empty_files=True)
     vib.run()
     energies = list(vib.get_energies())
     real_ev, imag_ev = _split_real_imag_ev(
         energies, min_frequency_ev=options.min_frequency_ev,
     )
     return real_ev, imag_ev, energies
+
+
+def _vibration_cache_label(
+    atoms: Atoms,
+    indices: Sequence[int] | None,
+    *,
+    options: FreeEnergyOptions,
+    label: str,
+    calculator,
+) -> str:
+    """Return a content-addressed label for restart-safe displacement reuse."""
+    calculator_payload = (
+        None if calculator is None else calculator_identity(calculator)
+    )
+    payload = {
+        "schema": 2,
+        "symbols": atoms.get_chemical_symbols(),
+        "positions_A": np.asarray(atoms.positions, dtype=float).round(10).tolist(),
+        "cell_A": np.asarray(atoms.cell.array, dtype=float).round(10).tolist(),
+        "pbc": [bool(value) for value in atoms.pbc],
+        # Keep this in lockstep with calculation-cache geometry identity:
+        # charges, magnetic moments, tags, and arbitrary calculator-relevant
+        # ASE arrays can all change forces at identical coordinates.
+        "atom_arrays": _calculation_atom_arrays(atoms),
+        "indices": None if indices is None else [int(index) for index in indices],
+        "delta_A": float(options.vibration_displacement),
+        "nfree": int(options.vibration_nfree),
+        "calculator": calculator_payload,
+    }
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("utf-8")
+    digest = hashlib.sha256(encoded).hexdigest()[:20]
+    return f"{label}_{digest}"
+
+
+def _vibrate_parallel(
+    atoms: Atoms,
+    indices: Sequence[int] | None,
+    *,
+    calculator: CalculatorPool,
+    options: FreeEnergyOptions,
+    cache_dir: Path,
+    label: str,
+) -> tuple[list[float], list[float], list[complex]]:
+    """Evaluate independent finite-difference displacements across a pool."""
+    from ase.vibrations import Vibrations
+
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    if atoms.constraints:
+        atoms.set_constraint([])
+    vibration = Vibrations(
+        atoms,
+        indices=list(indices) if indices is not None else None,
+        name=str(cache_dir / f"vib_{label}"),
+        delta=float(options.vibration_displacement),
+        nfree=int(options.vibration_nfree),
+    )
+    if not vibration.cache.writable:
+        raise RuntimeError(
+            "Cannot run vibration calculation because its cache is not writable"
+        )
+    vibration._check_old_pickles()
+    vibration.clean(empty_files=True)
+
+    def _calculate(displacement, displaced: Atoms) -> None:
+        with vibration.cache.lock(displacement.name) as handle:
+            if handle is None:
+                return
+            with calculator.acquire() as concrete:
+                displaced.calc = concrete
+                try:
+                    result = {
+                        "forces": np.asarray(
+                            concrete.get_forces(displaced),
+                            dtype=float,
+                        )
+                    }
+                    if getattr(vibration, "ir", False):
+                        result["dipole"] = concrete.get_dipole_moment(displaced)
+                finally:
+                    displaced.calc = None
+            handle.save(result)
+
+    max_workers = max(
+        1,
+        min(
+            len(calculator),
+            int(getattr(calculator, "max_workers", len(calculator)) or len(calculator)),
+        ),
+    )
+    jobs = list(vibration.iterdisplace(inplace=False))
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [
+            executor.submit(
+                copy_context().run,
+                _calculate,
+                displacement,
+                displaced,
+            )
+            for displacement, displaced in jobs
+        ]
+        for future in futures:
+            future.result()
+
+    energies = list(vibration.get_energies())
+    real_ev, imag_ev = _split_real_imag_ev(
+        energies,
+        min_frequency_ev=options.min_frequency_ev,
+    )
+    return real_ev, imag_ev, energies
+
+
+def _run_vibrations(
+    atoms: Atoms,
+    indices: Sequence[int] | None,
+    *,
+    calculator,
+    options: FreeEnergyOptions,
+    cache_dir: Path,
+    label: str,
+    purpose: str,
+    persistent_cache: bool = True,
+) -> tuple[list[float], list[float], list[complex]]:
+    """Choose serial or calculator-pool finite-difference execution."""
+    cache_label = (
+        _vibration_cache_label(
+            atoms,
+            indices,
+            options=options,
+            label=label,
+            calculator=calculator,
+        )
+        if persistent_cache
+        else label
+    )
+    with _vibration_cache_lock(cache_dir, cache_label):
+        if (
+            isinstance(calculator, CalculatorPool)
+            and len(calculator) > 1
+            and int(
+                getattr(calculator, "max_workers", len(calculator))
+                or len(calculator)
+            ) > 1
+            and not calculator_batch_active()
+        ):
+            atoms.calc = None
+            return _vibrate_parallel(
+                atoms,
+                indices,
+                calculator=calculator,
+                options=options,
+                cache_dir=cache_dir,
+                label=cache_label,
+            )
+
+        with acquire_calculator(calculator, purpose=purpose) as concrete:
+            _ensure_calc(atoms, concrete)
+            return _vibrate(
+                atoms,
+                indices=indices,
+                options=options,
+                cache_dir=cache_dir,
+                label=cache_label,
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -352,6 +616,7 @@ def compute_gas_thermo(
 
     from ase.thermochemistry import IdealGasThermo
 
+    calculator = calculator if calculator is not None else atoms.calc
     snap = atoms.copy()
     snap.set_pbc(False)
     if calculator is not None:
@@ -377,24 +642,32 @@ def compute_gas_thermo(
 
     label = f"gas_{snap.get_chemical_formula(empirical=False)}"
 
-    with acquire_calculator(calculator, purpose="gas-phase thermochemistry") as calc:
-        _ensure_calc(snap, calc)
-        with _cache_context(options, cache_dir) as cache_root_raw:
-            cache_root = _cache_path(cache_root_raw)
-            real_ev, imag_ev, raw_energies = _vibrate(
-                snap, indices=None, options=options,
-                cache_dir=cache_root, label=label,
-            )
+    with _cache_context(options, cache_dir) as cache_root_raw:
+        cache_root = _cache_path(cache_root_raw)
+        real_ev, imag_ev, raw_energies = _run_vibrations(
+            snap,
+            None,
+            calculator=calculator,
+            options=options,
+            cache_dir=cache_root,
+            label=label,
+            purpose="gas-phase thermochemistry",
+            persistent_cache=(
+                cache_dir is not None or options.cache_dir is not None
+            ),
+        )
 
-    # IdealGasThermo wants vibrational energies in eV (real, positive).
-    # Use `real_ev` which has already been filtered by `_split_real_imag_ev`.
-    # The raw `raw_energies` list
-    # contains spurious near-zero / imaginary modes that would inflate the
-    # vibrational partition function and make the computed entropy diverge.
-    # IdealGasThermo selects the appropriate number of modes (subtracting
-    # translations / rotations) based on `geometry`, so pass all real
-    # modes sorted descending.
-    vib_energies_ev = np.asarray(sorted(real_ev, reverse=True), dtype=float)
+    # Keep the usual ideal-gas mode count, allowing fewer real modes when
+    # imaginary or low-frequency contributions have been omitted.
+    if geom == "monatomic":
+        n_modes = 0
+    elif geom == "linear":
+        n_modes = max(0, 3 * len(snap) - 5)
+    elif geom == "nonlinear":
+        n_modes = max(0, 3 * len(snap) - 6)
+    else:
+        raise ValueError(f"Unsupported gas geometry: {geom!r}")
+    vib_energies_ev = np.asarray(sorted(real_ev, reverse=True)[:n_modes], dtype=float)
 
     thermo = IdealGasThermo(
         vib_energies     = vib_energies_ev,
@@ -403,6 +676,7 @@ def compute_gas_thermo(
         symmetrynumber   = sym,
         spin             = spin_,
         potentialenergy  = float(energy_ev),
+        vib_selection    = "all",
     )
     # Always evaluate at the standard-state reference pressure of 1 bar.
     # The caller's partial pressure (which may be 0 for on-surface species)
@@ -458,8 +732,9 @@ def compute_harmonic_thermo(
 ) -> dict[str, Any]:
     """Compute Helmholtz/Gibbs correction via ASE :class:`HarmonicThermo`.
 
-    Only the atoms in *vib_indices* are displaced.  Frozen slab atoms and
-    frozen lateral-shell adsorbates contribute zero by construction.
+    Only the atoms in *vib_indices* are displaced. Surface callers include
+    all adsorbate atoms present in each state together, retaining couplings
+    between molecules; slab atoms contribute zero by construction.
 
     Parameters
     ----------
@@ -468,14 +743,13 @@ def compute_harmonic_thermo(
         not, the calculator is attached and used for the displaced
         single-points).
     vib_indices : iterable[int]
-        Atom indices to displace — typically the *reactive* species.
+        Atom indices to displace — all adsorbates in the selected local structure.
     energy_ev : float
         The relaxed-structure electronic potential energy (cached on the
         lateral-class dataclass).  Used as the ZPE-anchor reference.
     drop_imaginary : bool
-        ``True`` (default) drops imaginary modes from the partition
-        function.  Set ``False`` for TS analysis where you want to keep
-        all modes (the principal imaginary mode is reported separately).
+        ``True`` (default) omits imaginary and low-frequency modes from
+        the partition function. ``False`` uses their absolute magnitudes.
 
     Returns
     -------
@@ -511,62 +785,69 @@ def compute_harmonic_thermo(
 
     from ase.thermochemistry import HarmonicThermo
 
+    calculator = calculator if calculator is not None else atoms.calc
     snap = atoms.copy()
     _normalise_harmonic_pbc(snap)
     if calculator is not None:
         snap.calc = None
-    with acquire_calculator(calculator, purpose="harmonic thermochemistry") as calc:
-        _ensure_calc(snap, calc)
-        with _cache_context(options, cache_dir) as cache_root_raw:
-            cache_root = _cache_path(cache_root_raw)
-            real_ev, imag_ev, raw_energies = _vibrate(
-                snap, indices=indices, options=options,
-                cache_dir=cache_root, label=label,
-            )
+    with _cache_context(options, cache_dir) as cache_root_raw:
+        cache_root = _cache_path(cache_root_raw)
+        real_ev, imag_ev, raw_energies = _run_vibrations(
+            snap,
+            indices,
+            calculator=calculator,
+            options=options,
+            cache_dir=cache_root,
+            label=label,
+            purpose="harmonic thermochemistry",
+            persistent_cache=(
+                cache_dir is not None or options.cache_dir is not None
+            ),
+        )
 
-            # HarmonicThermo wants real, positive energies in eV.
-            vib_energies_ev: list[float] = []
-            for e in raw_energies:
-                ec = complex(e)
-                if abs(ec.imag) > abs(ec.real):
-                    if drop_imaginary:
-                        continue
-                    vib_energies_ev.append(float(abs(ec.imag)))
+        # HarmonicThermo wants real, positive energies in eV.
+        vib_energies_ev: list[float] = []
+        for e in raw_energies:
+            ec = complex(e)
+            if abs(ec.imag) > abs(ec.real):
+                if drop_imaginary:
                     continue
-                e_real = float(ec.real)
-                if e_real <= 0.0 or abs(e_real) < options.min_frequency_ev:
-                    if drop_imaginary:
-                        continue
-                vib_energies_ev.append(float(abs(e_real)))
+                vib_energies_ev.append(float(abs(ec.imag)))
+                continue
+            e_real = float(ec.real)
+            if e_real <= 0.0 or abs(e_real) < options.min_frequency_ev:
+                if drop_imaginary:
+                    continue
+            vib_energies_ev.append(float(abs(e_real)))
 
-            vib_arr = np.asarray(sorted(vib_energies_ev, reverse=True), dtype=float)
-            if vib_arr.size == 0:
-                # No modes survived — return a zero correction rather than letting
-                # HarmonicThermo blow up.
-                return {
-                    "enabled":          True,
-                    "g_corr_ev":        0.0,
-                    "g_total_ev":       float(energy_ev),
-                    "zpe_ev":           0.0,
-                    "entropy_ev_per_k": 0.0,
-                    "frequencies_ev":   list(real_ev),
-                    "imaginary_ev":     list(imag_ev),
-                    "vib_indices":      indices,
-                    "temperature_k":    float(temperature_k),
-                }
+        vib_arr = np.asarray(sorted(vib_energies_ev, reverse=True), dtype=float)
+        if vib_arr.size == 0:
+            # No modes survived — return a zero correction rather than letting
+            # HarmonicThermo blow up.
+            return {
+                "enabled":          True,
+                "g_corr_ev":        0.0,
+                "g_total_ev":       float(energy_ev),
+                "zpe_ev":           0.0,
+                "entropy_ev_per_k": 0.0,
+                "frequencies_ev":   list(real_ev),
+                "imaginary_ev":     list(imag_ev),
+                "vib_indices":      indices,
+                "temperature_k":    float(temperature_k),
+            }
 
-            thermo = HarmonicThermo(
-                vib_energies    = vib_arr,
-                potentialenergy = float(energy_ev),
-            )
-            g_total = float(thermo.get_helmholtz_energy(
-                temperature=float(temperature_k), verbose=False,
-            ))
-            zpe = float(thermo.get_ZPE_correction())
-            s   = float(thermo.get_entropy(
-                temperature=float(temperature_k), verbose=False,
-            ))
-            g_corr = g_total - float(energy_ev)
+        thermo = HarmonicThermo(
+            vib_energies    = vib_arr,
+            potentialenergy = float(energy_ev),
+        )
+        g_total = float(thermo.get_helmholtz_energy(
+            temperature=float(temperature_k), verbose=False,
+        ))
+        zpe = float(thermo.get_ZPE_correction())
+        s   = float(thermo.get_entropy(
+            temperature=float(temperature_k), verbose=False,
+        ))
+        g_corr = g_total - float(energy_ev)
 
     return {
         "enabled":          True,

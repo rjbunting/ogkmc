@@ -1,0 +1,49 @@
+"""Artifact-specific persistence schema versions.
+
+The original persistence format used one version for events, reaction
+documents, and summaries.  Those artifacts evolve independently, so new
+writers stamp a dedicated version while readers continue to accept the legacy
+version-2 expanded event format.
+"""
+
+from __future__ import annotations
+
+
+EVENT_SCHEMA_VERSION = "3"
+REACTION_DOCUMENT_SCHEMA_VERSION = "3"
+REACTION_INDEX_SCHEMA_VERSION = "1"
+SUMMARY_SCHEMA_VERSION = "3"
+TRAJECTORY_METADATA_SCHEMA_VERSION = "1"
+
+LEGACY_EXPANDED_EVENT_SCHEMA_VERSION = "2"
+SUPPORTED_EVENT_SCHEMA_VERSIONS = frozenset(
+    {LEGACY_EXPANDED_EVENT_SCHEMA_VERSION, EVENT_SCHEMA_VERSION}
+)
+SUPPORTED_REACTION_INDEX_SCHEMA_VERSIONS = frozenset(
+    {REACTION_INDEX_SCHEMA_VERSION}
+)
+
+EVENT_ARTIFACT_TYPE = "autokmc.event"
+REACTION_DOCUMENT_ARTIFACT_TYPE = "autokmc.reaction"
+REACTION_INDEX_ARTIFACT_TYPE = "autokmc.reaction_index"
+REACTION_INDEX_ENTRY_ARTIFACT_TYPE = "autokmc.reaction_definition"
+SUMMARY_ARTIFACT_TYPE = "autokmc.summary"
+TRAJECTORY_ARTIFACT_TYPE = "autokmc.trajectory_frame"
+
+
+__all__ = [
+    "EVENT_ARTIFACT_TYPE",
+    "EVENT_SCHEMA_VERSION",
+    "LEGACY_EXPANDED_EVENT_SCHEMA_VERSION",
+    "REACTION_DOCUMENT_ARTIFACT_TYPE",
+    "REACTION_DOCUMENT_SCHEMA_VERSION",
+    "REACTION_INDEX_ARTIFACT_TYPE",
+    "REACTION_INDEX_ENTRY_ARTIFACT_TYPE",
+    "REACTION_INDEX_SCHEMA_VERSION",
+    "SUMMARY_ARTIFACT_TYPE",
+    "SUMMARY_SCHEMA_VERSION",
+    "SUPPORTED_EVENT_SCHEMA_VERSIONS",
+    "SUPPORTED_REACTION_INDEX_SCHEMA_VERSIONS",
+    "TRAJECTORY_ARTIFACT_TYPE",
+    "TRAJECTORY_METADATA_SCHEMA_VERSION",
+]

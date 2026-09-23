@@ -2,18 +2,38 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
+from ase import Atoms
+from ase.calculators.singlepoint import SinglePointCalculator
 from ase.constraints import FixAtoms
 from ase.io import read as ase_read, write as ase_write
 
+from autokmc.species.smiles import smiles_to_dirname
 from autokmc.io.persistence import (
+    EventLogCommit,
     ReactionWriter,
-    PERSISTENCE_SCHEMA_VERSION,
+    reconcile_event_log,
 )
-from autokmc.io.atoms import atoms_from_graph
+from autokmc.io.reaction_index import (
+    load_reaction_index,
+    resolve_event_definition,
+)
+from autokmc.io.schemas import (
+    EVENT_ARTIFACT_TYPE,
+    EVENT_SCHEMA_VERSION,
+    REACTION_DOCUMENT_SCHEMA_VERSION,
+    REACTION_INDEX_SCHEMA_VERSION,
+)
+from autokmc.io.event_log import EventHistory
+from autokmc.io.atoms import atoms_from_graph, copy_atoms_with_results
+from autokmc.io import persistence as persistence_module
+from autokmc.utils.telemetry import RuntimeTelemetry, telemetry_context
 
 
 def test_atoms_from_graph_includes_only_occupied_adsorbates(tmp_path, synth_graph):
@@ -53,6 +73,20 @@ def test_atoms_from_graph_excludes_unoccupied(synth_graph):
     assert atoms.get_chemical_symbols() == ["Cu", "Cu"]
 
 
+def test_result_snapshot_rejects_stale_single_point_data():
+    atoms = Atoms("H", positions=[[0.0, 0.0, 0.0]])
+    atoms.calc = SinglePointCalculator(
+        atoms,
+        energy=-0.5,
+        forces=[[0.1, 0.0, 0.0]],
+    )
+    atoms.positions[0, 0] = 0.25
+
+    snapshot = copy_atoms_with_results(atoms)
+
+    assert snapshot.calc is None
+
+
 def test_atoms_from_graph_uses_legacy_iso_class_as_metadata_fallback(synth_graph):
     synth_graph.nodes[100]["iso_class"] = 7
     atoms = atoms_from_graph(synth_graph)
@@ -67,6 +101,19 @@ def test_reaction_writer_creates_per_lateral_class_folder(
     # check_site_stability does in production).
     a_occ   = tiny_atoms.copy()
     a_unocc = tiny_atoms.copy()[:2]   # slab only
+    occupied_forces = np.full((len(a_occ), 3), 0.125)
+    unoccupied_forces = np.full((len(a_unocc), 3), -0.25)
+    a_occ.calc = SinglePointCalculator(
+        a_occ,
+        energy=-10.0,
+        forces=occupied_forces,
+    )
+    a_unocc.calc = SinglePointCalculator(
+        a_unocc,
+        energy=-8.5,
+        forces=unoccupied_forces,
+    )
+    stub_reaction.lateral_class.atoms_occupied_initial = tiny_atoms.copy()
     stub_reaction.lateral_class.atoms_occupied   = a_occ
     stub_reaction.lateral_class.atoms_unoccupied = a_unocc
 
@@ -78,7 +125,7 @@ def test_reaction_writer_creates_per_lateral_class_folder(
     )
     w.close()
 
-    folder = tmp_path / "reactions" / "adsorption" / "(C-)#(O+)" / "iso0_lat0"
+    folder = tmp_path / "reactions" / "adsorption" / smiles_to_dirname("[C-]#[O+]") / "iso0_lat0"
     assert folder.is_dir()
     assert (folder / "occupied.extxyz").is_file()
     assert (folder / "unoccupied.extxyz").is_file()
@@ -87,15 +134,37 @@ def test_reaction_writer_creates_per_lateral_class_folder(
     jsonl = (tmp_path / "events.jsonl").read_text().strip().splitlines()
     assert len(jsonl) == 1
     payload = json.loads(jsonl[0])
-    assert payload["schema_version"] == PERSISTENCE_SCHEMA_VERSION
+    assert payload["artifact_type"] == EVENT_ARTIFACT_TYPE
+    assert payload["schema_version"] == EVENT_SCHEMA_VERSION
+    assert payload["event_id"].startswith("event-")
+    assert payload["reaction_id"].startswith("reaction-")
     assert payload["kind"] == "adsorption"
     assert payload["inputs"][0]["phase"] == "gas"
     assert payload["outputs"][0]["phase"] == "surface"
     assert payload["outputs"][0]["placement_id"].startswith("placement-")
-    assert payload["reaction_dir"] == "reactions/adsorption/(C-)#(O+)/iso0_lat0"
-    assert "ΔE" in payload["description"]
+    assert {
+        "description",
+        "reaction_dir",
+        "template",
+        "gas_product",
+    }.isdisjoint(payload)
+
+    definitions = load_reaction_index(tmp_path / "reactions" / "index.jsonl")
+    resolved = resolve_event_definition(
+        payload,
+        definitions,
+        require_definition=True,
+    )
+    assert resolved["reaction_dir"] == f"reactions/adsorption/{smiles_to_dirname('[C-]#[O+]')}/iso0_lat0"
+    assert "ΔE" in resolved["description"]
+    definition = definitions[payload["reaction_id"]]
+    assert definition["schema_version"] == REACTION_INDEX_SCHEMA_VERSION
+    assert definition["firing_count"] == 1
+    assert definition["directions"] == ["adsorption", "desorption"]
 
     rxn_meta = json.loads((folder / "reaction.json").read_text())
+    assert rxn_meta["schema_version"] == REACTION_DOCUMENT_SCHEMA_VERSION
+    assert rxn_meta["reaction_id"] == payload["reaction_id"]
     assert rxn_meta["iso_class"] == 0
     assert rxn_meta["lateral_class"] == 0
     assert rxn_meta["energies_ev"]["occupied"]   == -10.0
@@ -107,6 +176,344 @@ def test_reaction_writer_creates_per_lateral_class_folder(
 
     a_occ_rt = ase_read(folder / "occupied.extxyz")
     assert a_occ_rt.get_chemical_symbols() == a_occ.get_chemical_symbols()
+    assert a_occ_rt.get_potential_energy() == pytest.approx(-10.0)
+    np.testing.assert_allclose(a_occ_rt.get_forces(), occupied_forces)
+    a_unocc_rt = ase_read(folder / "unoccupied.extxyz")
+    assert a_unocc_rt.get_potential_energy() == pytest.approx(-8.5)
+    np.testing.assert_allclose(a_unocc_rt.get_forces(), unoccupied_forces)
+    assert ase_read(folder / "occupied_initial.extxyz").calc is None
+
+
+def test_reaction_writer_atomically_publishes_structure_files(
+    tmp_path,
+    stub_reaction,
+    tiny_atoms,
+    monkeypatch,
+):
+    stub_reaction.lateral_class.atoms_occupied = tiny_atoms.copy()
+    stub_reaction.lateral_class.atoms_unoccupied = tiny_atoms.copy()[:2]
+    published: list[Path] = []
+    atomic_output_path = persistence_module.atomic_output_path
+
+    @contextmanager
+    def track_publication(path):
+        with atomic_output_path(path) as temporary:
+            yield temporary
+        published.append(Path(path))
+
+    monkeypatch.setattr(
+        persistence_module,
+        "atomic_output_path",
+        track_publication,
+    )
+
+    writer = ReactionWriter(tmp_path)
+    folder = writer.ensure_reaction(stub_reaction, step=0)
+    writer.close()
+
+    assert folder / "occupied.extxyz" in published
+    assert folder / "unoccupied.extxyz" in published
+    assert not list(folder.glob(".*.extxyz.*"))
+
+
+def test_reaction_writer_persists_initial_structures_and_neb_paths(
+    tmp_path,
+    stub_reaction,
+    tiny_atoms,
+):
+    initial = tiny_atoms.copy()
+    optimized = tiny_atoms.copy()
+    path_initial = [tiny_atoms.copy(), tiny_atoms.copy()]
+    path_optimized = [tiny_atoms.copy(), tiny_atoms.copy()]
+
+    adsorption_lateral = stub_reaction.lateral_class
+    adsorption_lateral.atoms_occupied_initial = initial.copy()
+    adsorption_lateral.atoms_unoccupied_initial = initial.copy()
+    adsorption_lateral.atoms_occupied = optimized.copy()
+    adsorption_lateral.atoms_unoccupied = optimized.copy()
+
+    diffusion_lateral = SimpleNamespace(
+        lateral_class=2,
+        energy_a=-2.0,
+        energy_b=-1.8,
+        energy_ts=-1.0,
+        atoms_a_initial=initial.copy(),
+        atoms_b_initial=initial.copy(),
+        atoms_a=optimized.copy(),
+        atoms_b=optimized.copy(),
+        atoms_ts=optimized.copy(),
+        atoms_neb_refinement_initial=optimized.copy(),
+        atoms_neb_refinement_final=optimized.copy(),
+        atoms_neb_path_initial=path_initial,
+        atoms_neb_path=path_optimized,
+        neb_intermediate_refinement={
+            "performed": True,
+            "policy": "highest_peak_nearest_minima_iterative_v3",
+            "refinement_count": 3,
+            "max_refinements": 10,
+            "trigger": "geometry_rollback",
+            "source_stage": "NEB pre-climb relaxation",
+            "checkpoint_fmax_ev_per_ang": 0.2,
+            "peak_image_index": 4,
+            "left_state_image_index": 2,
+            "right_state_image_index": 5,
+            "other_segments_refined": False,
+        },
+        neb_n_images=6,
+        neb_n_frames=8,
+        neb_max_endpoint_displacement=1.5,
+        neb_target_image_spacing=0.25,
+        neb_estimated_image_spacing=1.5 / 7.0,
+        neb_image_count_limited_by="distance",
+        neb_climb_performed=True,
+    )
+    diffusion_reaction = SimpleNamespace(
+        kind="diffusion",
+        direction="a_to_b",
+        site=SimpleNamespace(iso_class=1, reactant="[O]"),
+        member_index=0,
+        lateral_class=diffusion_lateral,
+        delta_e=0.2,
+        barrier=1.0,
+        rate=1.0,
+    )
+
+    bond_lateral = SimpleNamespace(
+        lateral_class=3,
+        energy_ab=-3.0,
+        energy_c=-4.7,
+        energy_c_precursor=-3.7,
+        energy_c_gas_reference=-4.1,
+        energy_ts=-2.0,
+        atoms_ab_initial=initial.copy(),
+        atoms_c_initial=initial.copy(),
+        atoms_ab=optimized.copy(),
+        atoms_c=optimized.copy(),
+        atoms_c_gas_reference=Atoms(
+            "Pt2", positions=[[0.0, 0.0, 0.0], [2.7, 0.0, 0.0]]
+        ),
+        atoms_gas_molecule=Atoms(
+            "H2", positions=[[0.0, 0.0, 0.0], [0.0, 0.0, 0.74]]
+        ),
+        atoms_ts=optimized.copy(),
+        atoms_neb_refinement_initial=optimized.copy(),
+        atoms_neb_refinement_final=optimized.copy(),
+        atoms_neb_path_initial=path_initial,
+        atoms_neb_path=path_optimized,
+        neb_intermediate_refinement={
+            "performed": True,
+            "policy": "highest_peak_nearest_minima_iterative_v3",
+            "refinement_count": 2,
+            "max_refinements": 10,
+            "trigger": "geometry_rollback",
+            "source_stage": "CI-NEB",
+            "checkpoint_fmax_ev_per_ang": 0.15,
+            "peak_image_index": 4,
+            "left_state_image_index": 2,
+            "right_state_image_index": 5,
+            "other_segments_refined": False,
+        },
+        neb_n_images=6,
+        neb_n_frames=8,
+        neb_max_endpoint_displacement=1.5,
+        neb_target_image_spacing=0.25,
+        neb_estimated_image_spacing=1.5 / 7.0,
+        neb_image_count_limited_by="distance",
+        neb_climb_performed=False,
+    )
+    bond_reaction = SimpleNamespace(
+        kind="bond",
+        direction="couple",
+        site=SimpleNamespace(
+            iso_class=2,
+            gas_product=True,
+            gas_reactant=SimpleNamespace(energy=-0.6),
+            template=SimpleNamespace(
+                smiles_a="[H]",
+                smiles_b="[H]",
+                smiles_c="[H][H]",
+                bond_type="SINGLE",
+                source="test",
+            ),
+        ),
+        member_index=0,
+        lateral_class=bond_lateral,
+        delta_e=-0.5,
+        barrier=1.0,
+        rate=1.0,
+    )
+
+    writer = ReactionWriter(tmp_path)
+    adsorption_folder = writer.ensure_reaction(stub_reaction, step=0)
+    diffusion_folder = writer.ensure_reaction(diffusion_reaction, step=0)
+    bond_folder = writer.ensure_reaction(bond_reaction, step=0)
+    writer.close()
+
+    assert (adsorption_folder / "occupied_initial.extxyz").is_file()
+    assert (adsorption_folder / "unoccupied_initial.extxyz").is_file()
+    assert (diffusion_folder / "state_a_initial.extxyz").is_file()
+    assert (diffusion_folder / "state_b_initial.extxyz").is_file()
+    assert (diffusion_folder / "neb_path_initial.extxyz").is_file()
+    assert (diffusion_folder / "neb_path.extxyz").is_file()
+    assert (diffusion_folder / "neb_refinement_initial.extxyz").is_file()
+    assert (diffusion_folder / "neb_refinement_final.extxyz").is_file()
+    assert (bond_folder / "state_ab_initial.extxyz").is_file()
+    assert (bond_folder / "state_c_initial.extxyz").is_file()
+    assert (bond_folder / "state_c_gas_reference.extxyz").is_file()
+    assert (bond_folder / "gas_molecule.extxyz").is_file()
+    assert (bond_folder / "neb_path_initial.extxyz").is_file()
+    assert (bond_folder / "neb_path.extxyz").is_file()
+    assert (bond_folder / "neb_refinement_initial.extxyz").is_file()
+    assert (bond_folder / "neb_refinement_final.extxyz").is_file()
+    bond_payload = json.loads((bond_folder / "reaction.json").read_text())
+    assert bond_payload["energies_ev"]["state_c"] == pytest.approx(-4.7)
+    assert bond_payload["energies_ev"]["state_c_precursor"] == pytest.approx(
+        -3.7
+    )
+    assert bond_payload["energies_ev"]["state_c_gas_reference"] == pytest.approx(
+        -4.1
+    )
+    assert bond_payload["energies_ev"]["gas_molecule"] == pytest.approx(-0.6)
+    assert bond_payload["atoms"]["state_c_gas_reference"] == (
+        "state_c_gas_reference.extxyz"
+    )
+    assert bond_payload["atoms"]["gas_molecule"] == "gas_molecule.extxyz"
+    assert bond_payload["atoms"]["neb_refinement_initial"] == (
+        "neb_refinement_initial.extxyz"
+    )
+    assert bond_payload["neb_intermediate_refinement"][
+        "other_segments_refined"
+    ] is False
+    assert bond_payload["neb_intermediate_refinement"]["trigger"] == "geometry_rollback"
+    assert bond_payload["neb_intermediate_refinement"]["refinement_count"] == 2
+    assert bond_payload["neb_intermediate_refinement"]["max_refinements"] == 10
+    assert bond_payload["neb_intermediate_refinement"]["source_stage"] == "CI-NEB"
+    assert bond_payload["neb_intermediate_refinement"][
+        "checkpoint_fmax_ev_per_ang"
+    ] == pytest.approx(0.15)
+    gas_surface = ase_read(bond_folder / "state_c_gas_reference.extxyz")
+    gas_molecule = ase_read(bond_folder / "gas_molecule.extxyz")
+    assert gas_surface.get_chemical_symbols() == ["Pt", "Pt"]
+    assert gas_molecule.get_chemical_symbols() == ["H", "H"]
+    assert bond_payload["neb_images"]["interior_images"] == 6
+    assert bond_payload["neb_images"]["total_frames"] == 8
+    assert bond_payload["neb_images"]["target_spacing_ang"] == pytest.approx(
+        0.25
+    )
+    assert bond_payload["neb_images"]["climb_performed"] is False
+    diffusion_payload = json.loads(
+        (diffusion_folder / "reaction.json").read_text()
+    )
+    assert diffusion_payload["atoms"]["state_a_initial"] == (
+        "state_a_initial.extxyz"
+    )
+    assert diffusion_payload["neb_images"]["interior_images"] == 6
+    assert diffusion_payload["neb_images"]["climb_performed"] is True
+    assert diffusion_payload["atoms"]["neb_path_initial"] == (
+        "neb_path_initial.extxyz"
+    )
+    assert diffusion_payload["atoms"]["neb_refinement_final"] == (
+        "neb_refinement_final.extxyz"
+    )
+    assert diffusion_payload["neb_intermediate_refinement"]["refinement_count"] == 3
+
+
+def test_resumed_successful_bond_backfills_late_structure_assets(tmp_path):
+    gas = Atoms(
+        "H2",
+        positions=[[0.0, 0.0, 0.0], [0.0, 0.0, 0.74]],
+    )
+    lateral = SimpleNamespace(
+        lateral_class=7,
+        energy_ab=None,
+        energy_c=None,
+        energy_ts=None,
+        atoms_ab_initial=None,
+        atoms_c_initial=None,
+        atoms_ab=None,
+        atoms_c=None,
+        atoms_ts=None,
+        atoms_neb_path_initial=None,
+        atoms_neb_path=None,
+    )
+    site = SimpleNamespace(
+        iso_class=5,
+        gas_product=True,
+        gas_reactant=SimpleNamespace(atoms=gas, energy=-0.6),
+        template=SimpleNamespace(
+            smiles_a="[H]",
+            smiles_b="[H]",
+            smiles_c="[H][H]",
+            bond_type="SINGLE",
+            source="test",
+        ),
+    )
+    reaction = SimpleNamespace(
+        kind="bond",
+        direction="couple",
+        site=site,
+        member_index=0,
+        lateral_class=lateral,
+        delta_e=0.0,
+        barrier=0.5,
+        rate=1.0,
+    )
+
+    first = ReactionWriter(tmp_path, run_id="run-a")
+    folder = first.ensure_reaction(reaction, step=0)
+    first.close()
+    assert (folder / "gas_molecule.extxyz").is_file()
+    assert not (folder / "state_c_gas_reference.extxyz").exists()
+
+    combined = Atoms(
+        "PtH2",
+        positions=[
+            [0.0, 0.0, 0.0],
+            [-0.37, 0.0, 3.0],
+            [0.37, 0.0, 3.0],
+        ],
+    )
+    lateral.energy_ab = -4.0
+    lateral.energy_c = -4.6
+    lateral.energy_ts = -3.5
+    lateral.atoms_ab_initial = combined.copy()
+    lateral.atoms_c_initial = combined.copy()
+    lateral.atoms_ab = combined.copy()
+    lateral.atoms_c = combined.copy()
+    lateral.atoms_ts = combined.copy()
+
+    resumed = ReactionWriter(
+        tmp_path,
+        append=True,
+        run_id="run-a",
+        checkpoint_step=0,
+    )
+    assert resumed.ensure_reaction(reaction, step=1) == folder
+    resumed.close()
+
+    for filename in (
+        "state_ab_initial.extxyz",
+        "state_c_initial.extxyz",
+        "state_ab.extxyz",
+        "state_c.extxyz",
+        "state_c_gas_reference.extxyz",
+        "gas_molecule.extxyz",
+        "ts.extxyz",
+    ):
+        assert (folder / filename).is_file()
+    assert len(ase_read(folder / "state_c_gas_reference.extxyz")) == 1
+    assert len(ase_read(folder / "gas_molecule.extxyz")) == 2
+    payload = json.loads((folder / "reaction.json").read_text())
+    assert payload["atoms"]["state_c_gas_reference"] == (
+        "state_c_gas_reference.extxyz"
+    )
+    assert payload["atoms"]["gas_molecule"] == "gas_molecule.extxyz"
+    assert payload["energies_ev"]["state_ab"] == pytest.approx(-4.0)
+    assert payload["energies_ev"]["state_c"] == pytest.approx(-4.6)
+    assert payload["energies_ev"]["transition_raw"] == pytest.approx(-3.5)
+    assert payload["energies_ev"]["state_c_gas_reference"] == pytest.approx(
+        -4.0
+    )
 
 
 def test_reaction_writer_reuses_folder_across_events(
@@ -128,7 +535,7 @@ def test_reaction_writer_reuses_folder_across_events(
     assert w.n_unique_reactions == 1
     assert w.n_written == 2
 
-    folder = tmp_path / "reactions" / "adsorption" / "(C-)#(O+)" / "iso0_lat0"
+    folder = tmp_path / "reactions" / "adsorption" / smiles_to_dirname("[C-]#[O+]") / "iso0_lat0"
     rxn_meta = json.loads((folder / "reaction.json").read_text())
     assert rxn_meta["stats"]["count"] == 2
     assert rxn_meta["stats"]["first_step"] == 1
@@ -136,6 +543,476 @@ def test_reaction_writer_reuses_folder_across_events(
 
     jsonl = (tmp_path / "events.jsonl").read_text().strip().splitlines()
     assert len(jsonl) == 2
+
+
+def test_event_and_reaction_ids_are_deterministic_and_index_compacts(
+    tmp_path,
+    stub_reaction,
+):
+    first_root = tmp_path / "first"
+    first = ReactionWriter(first_root, run_id="run-a")
+    event_1 = first.record(
+        step=1,
+        time_s=1e-6,
+        tau_s=1e-6,
+        reaction=stub_reaction,
+    )
+    event_2 = first.record(
+        step=2,
+        time_s=2e-6,
+        tau_s=1e-6,
+        reaction=stub_reaction,
+    )
+    first.close()
+
+    replay = ReactionWriter(tmp_path / "replay", run_id="run-a")
+    replay_event = replay.record(
+        step=1,
+        time_s=9e-6,
+        tau_s=9e-6,
+        reaction=stub_reaction,
+    )
+    replay.close()
+    other_run = ReactionWriter(tmp_path / "other", run_id="run-b")
+    other_event = other_run.record(
+        step=1,
+        time_s=1e-6,
+        tau_s=1e-6,
+        reaction=stub_reaction,
+    )
+    other_run.close()
+
+    assert event_1.event_id == replay_event.event_id
+    assert event_1.event_id != event_2.event_id
+    assert event_1.event_id != other_event.event_id
+    assert event_1.reaction_id == event_2.reaction_id
+    assert event_1.reaction_id == replay_event.reaction_id
+    assert event_1.reaction_id == other_event.reaction_id
+
+    index_rows = [
+        json.loads(line)
+        for line in (first_root / "reactions" / "index.jsonl").read_text().splitlines()
+    ]
+    assert [row["record_type"] for row in index_rows] == ["header", "reaction"]
+    assert index_rows[1]["reaction_id"] == event_1.reaction_id
+    assert index_rows[1]["firing_count"] == 2
+    assert index_rows[1]["first_step"] == 1
+    assert index_rows[1]["last_step"] == 2
+
+
+def test_reaction_writer_batches_reaction_json_until_sync(
+    tmp_path, stub_reaction
+):
+    writer = ReactionWriter(tmp_path, run_id="run-a")
+    writer.record(
+        step=1,
+        time_s=1e-6,
+        tau_s=1e-6,
+        reaction=stub_reaction,
+    )
+    folder = tmp_path / "reactions" / "adsorption" / smiles_to_dirname("[C-]#[O+]") / "iso0_lat0"
+
+    before = json.loads((folder / "reaction.json").read_text())
+    assert before["stats"]["count"] == 0
+
+    commit = writer.sync_for_checkpoint()
+    after = json.loads((folder / "reaction.json").read_text())
+    assert after["stats"] == {"count": 1, "first_step": 1, "last_step": 1}
+    assert after["rate_energy_bases"] == ["electronic"]
+    index_rows = [
+        json.loads(line)
+        for line in (tmp_path / "reactions" / "index.jsonl").read_text().splitlines()
+    ]
+    assert [row["record_type"] for row in index_rows] == [
+        "header",
+        "reaction",
+        "stats",
+    ]
+    assert commit.count == 1
+    assert commit.offset == (tmp_path / "events.jsonl").stat().st_size
+    writer.close()
+
+
+def test_reaction_writer_reports_append_sync_and_metadata_flush_telemetry(
+    tmp_path,
+    stub_reaction,
+):
+    telemetry = RuntimeTelemetry()
+    writer = ReactionWriter(tmp_path)
+
+    with telemetry_context(telemetry):
+        writer.record(
+            step=1,
+            time_s=1e-6,
+            tau_s=1e-6,
+            reaction=stub_reaction,
+        )
+        writer.sync_for_checkpoint()
+        writer.close()
+
+    assert telemetry.counters["persistence.event_append.calls"] == 1
+    assert telemetry.counters["persistence.event_sync.calls"] == 2
+    # close() observes that the explicit checkpoint sync already published all
+    # pending metadata instead of rewriting it a second time.
+    assert telemetry.counters["persistence.metadata_flush.calls"] == 1
+    assert telemetry.timings_s["persistence.event_append.seconds"] >= 0.0
+    assert telemetry.timings_s["persistence.event_sync.seconds"] >= 0.0
+    assert telemetry.timings_s["persistence.metadata_flush.seconds"] >= 0.0
+
+
+def test_event_recovery_is_shared_without_reparsing_jsonl(
+    tmp_path,
+    stub_reaction,
+    monkeypatch,
+):
+    writer = ReactionWriter(tmp_path, run_id="run-a")
+    writer.record(
+        step=1,
+        time_s=1e-6,
+        tau_s=1e-6,
+        reaction=stub_reaction,
+    )
+    durable = writer.sync_for_checkpoint()
+    writer.close()
+
+    event_path = tmp_path / "events.jsonl"
+    recovered = reconcile_event_log(
+        event_path,
+        checkpoint_step=1,
+        committed_event_count=durable.count,
+        committed_event_offset=durable.offset,
+        run_id="run-a",
+    )
+    assert isinstance(recovered.recovery.history, EventHistory)
+    assert recovered.recovery.history.in_memory_count == 0
+    assert recovered.recovery.history == [
+        (1, 1e-6, "adsorption", 0, 0, 0, -0.2, 0.1, 1234000000.0)
+    ]
+    assert recovered.recovery.summary.n == 1
+    [(key, folder_state)] = recovered.recovery.reaction_states.items()
+    assert key == ("adsorption", smiles_to_dirname("[C-]#[O+]"), 0, 0)
+    assert folder_state.count == 1
+    assert folder_state.rate_energy_bases == {"electronic"}
+
+    path_open = Path.open
+
+    def reject_event_read(path, mode="r", *args, **kwargs):
+        if path == event_path and str(mode).startswith("r"):
+            raise AssertionError("events.jsonl was parsed a second time")
+        return path_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", reject_event_read)
+    resumed = ReactionWriter(
+        tmp_path,
+        append=True,
+        run_id="run-a",
+        event_recovery=recovered.recovery,
+    )
+    assert resumed.n_written == 1
+    resumed.close()
+
+
+def test_event_recovery_collects_history_only_when_explicitly_requested(
+    tmp_path,
+):
+    path = tmp_path / "events.jsonl"
+    rows = [
+        {
+            "step": step,
+            "time_s": float(step),
+            "kind": "adsorption",
+            "reactant_smiles": "[O]",
+            "iso_class": 0,
+            "member_index": 0,
+            "lateral_class": 0,
+            "rate_hz": 2.0,
+            "delta_e_ev": -0.2,
+            "barrier_ev": 0.1,
+            "run_id": "run-a",
+        }
+        for step in range(1, 101)
+    ]
+    path.write_text(
+        "".join(json.dumps(row) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+    offset = path.stat().st_size
+
+    lazy = reconcile_event_log(
+        path,
+        checkpoint_step=100,
+        committed_event_count=100,
+        committed_event_offset=offset,
+        run_id="run-a",
+    )
+    assert isinstance(lazy.recovery.history, EventHistory)
+    assert lazy.recovery.history.in_memory_count == 0
+    assert len(lazy.recovery.history) == 100
+    assert lazy.recovery.summary.n == 100
+    assert lazy.recovery.history[-1][0] == 100
+
+    eager = reconcile_event_log(
+        path,
+        checkpoint_step=100,
+        committed_event_count=100,
+        committed_event_offset=offset,
+        run_id="run-a",
+        collect_history=True,
+    )
+    assert isinstance(eager.recovery.history, list)
+    assert len(eager.recovery.history) == 100
+
+    continuation = dict(rows[-1])
+    continuation["step"] = 101
+    continuation["time_s"] = 101.0
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(continuation) + "\n")
+    lazy.recovery.history.append(
+        (101, 101.0, "adsorption", 0, 0, 0, -0.2, 0.1, 2.0)
+    )
+    assert lazy.recovery.history.in_memory_count == 1
+    lazy.recovery.history.mark_committed(
+        count=101,
+        offset=path.stat().st_size,
+    )
+    assert lazy.recovery.history.in_memory_count == 0
+    assert lazy.recovery.history[-1][0] == 101
+
+
+def test_reaction_static_payload_is_built_once_per_discovered_class(
+    tmp_path,
+    stub_reaction,
+    monkeypatch,
+):
+    build_payload = persistence_module.build_reaction_payload
+    calls = []
+
+    def counted(*args, **kwargs):
+        calls.append(True)
+        return build_payload(*args, **kwargs)
+
+    monkeypatch.setattr(persistence_module, "build_reaction_payload", counted)
+    writer = ReactionWriter(tmp_path)
+    writer.record(
+        step=1,
+        time_s=1e-6,
+        tau_s=1e-6,
+        reaction=stub_reaction,
+    )
+    writer.record(
+        step=2,
+        time_s=2e-6,
+        tau_s=1e-6,
+        reaction=stub_reaction,
+    )
+    writer.close()
+
+    assert calls == [True]
+
+
+def test_checkpoint_reconciliation_truncates_crash_tail_and_repairs_stats(
+    tmp_path, stub_reaction
+):
+    writer = ReactionWriter(tmp_path, run_id="run-a")
+    writer.record(step=1, time_s=1e-6, tau_s=1e-6, reaction=stub_reaction)
+    committed = writer.sync_for_checkpoint()
+    writer.record(step=2, time_s=2e-6, tau_s=1e-6, reaction=stub_reaction)
+    writer.close()
+
+    restored = reconcile_event_log(
+        tmp_path / "events.jsonl",
+        checkpoint_step=1,
+        committed_event_count=committed.count,
+        committed_event_offset=committed.offset,
+        run_id="run-a",
+    )
+    assert restored == committed
+    rows = [json.loads(line) for line in (tmp_path / "events.jsonl").read_text().splitlines()]
+    assert [row["step"] for row in rows] == [1]
+
+    resumed = ReactionWriter(tmp_path, append=True, run_id="run-a")
+    resumed.close()
+    folder = tmp_path / "reactions" / "adsorption" / smiles_to_dirname("[C-]#[O+]") / "iso0_lat0"
+    metadata = json.loads((folder / "reaction.json").read_text())
+    assert metadata["stats"] == {"count": 1, "first_step": 1, "last_step": 1}
+    assert metadata["last_event"]["step"] == 1
+
+
+def test_checkpoint_reconciliation_rejects_event_log_behind_checkpoint(
+    tmp_path, stub_reaction
+):
+    writer = ReactionWriter(tmp_path, run_id="run-a")
+    writer.record(step=1, time_s=1e-6, tau_s=1e-6, reaction=stub_reaction)
+    commit = writer.sync_for_checkpoint()
+    writer.close()
+
+    with pytest.raises(ValueError, match="behind checkpoint step 2"):
+        reconcile_event_log(
+            tmp_path / "events.jsonl",
+            checkpoint_step=2,
+            committed_event_count=commit.count,
+            committed_event_offset=commit.offset,
+            run_id="run-a",
+        )
+
+
+def test_checkpoint_reconciliation_rejects_empty_v3_commit_after_step_zero(tmp_path):
+    with pytest.raises(ValueError, match="step 7.*empty event prefix"):
+        reconcile_event_log(
+            tmp_path / "missing-events.jsonl",
+            checkpoint_step=7,
+            committed_event_count=0,
+            committed_event_offset=0,
+            run_id="run-a",
+        )
+
+
+@pytest.mark.parametrize(
+    ("count", "offset", "match"),
+    [
+        (1, None, "count and offset must both be set"),
+        (None, 10, "count and offset must both be set"),
+        (-1, 0, "negative count/offset"),
+        (0, -1, "negative count/offset"),
+    ],
+)
+def test_checkpoint_reconciliation_rejects_malformed_commit_metadata(
+    tmp_path, count, offset, match
+):
+    with pytest.raises(ValueError, match=match):
+        reconcile_event_log(
+            tmp_path / "missing-events.jsonl",
+            checkpoint_step=0,
+            committed_event_count=count,
+            committed_event_offset=offset,
+            run_id="run-a",
+        )
+
+
+def test_checkpoint_reconciliation_rejects_wrong_run_and_non_boundary_offset(tmp_path):
+    path = tmp_path / "events.jsonl"
+    row = json.dumps({"step": 1, "run_id": "other-run"})
+    path.write_text(row + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="does not match checkpoint run_id"):
+        reconcile_event_log(
+            path,
+            checkpoint_step=1,
+            committed_event_count=1,
+            committed_event_offset=path.stat().st_size,
+            run_id="run-a",
+        )
+
+    path.write_text(row, encoding="utf-8")
+    with pytest.raises(ValueError, match="does not end at a JSONL boundary"):
+        reconcile_event_log(
+            path,
+            checkpoint_step=1,
+            committed_event_count=1,
+            committed_event_offset=path.stat().st_size,
+            run_id="other-run",
+        )
+
+
+def test_legacy_reconciliation_rejects_newline_terminated_malformed_row(tmp_path):
+    path = tmp_path / "events.jsonl"
+    path.write_bytes(b'{"step": 1}\nnot-json\n')
+
+    with pytest.raises(ValueError, match="invalid event line 2"):
+        reconcile_event_log(
+            path,
+            checkpoint_step=1,
+            committed_event_count=None,
+            committed_event_offset=None,
+        )
+
+
+def test_legacy_runless_prefix_remains_resumable_after_v3_continuation(tmp_path):
+    path = tmp_path / "events.jsonl"
+    path.write_text(
+        "\n".join(
+            json.dumps({"step": step, "kind": "legacy"})
+            for step in (1, 2, 3)
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    legacy_commit = reconcile_event_log(
+        path,
+        checkpoint_step=2,
+        committed_event_count=None,
+        committed_event_offset=None,
+        run_id="run-a",
+    )
+    legacy_rows = [json.loads(line) for line in path.read_text().splitlines()]
+    assert [row["step"] for row in legacy_rows] == [1, 2]
+    assert all(row["run_id"] == "run-a" for row in legacy_rows)
+    assert legacy_commit == EventLogCommit(count=2, offset=path.stat().st_size)
+
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"step": 3, "kind": "new", "run_id": "run-a"}) + "\n")
+    v3_commit = EventLogCommit(count=3, offset=path.stat().st_size)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"step": 4, "kind": "crash", "run_id": "run-a"}) + "\n")
+
+    restored = reconcile_event_log(
+        path,
+        checkpoint_step=3,
+        committed_event_count=v3_commit.count,
+        committed_event_offset=v3_commit.offset,
+        run_id="run-a",
+    )
+    assert restored == v3_commit
+    assert [json.loads(line)["step"] for line in path.read_text().splitlines()] == [
+        1,
+        2,
+        3,
+    ]
+
+
+@pytest.mark.parametrize("exact", [False, True])
+def test_event_reconciliation_rejects_step_gaps_without_modifying_file(
+    tmp_path, exact
+):
+    path = tmp_path / "events.jsonl"
+    rows = [{"step": 1}, {"step": 3}]
+    if exact:
+        rows = [{**row, "run_id": "run-a"} for row in rows]
+    original = b"".join((json.dumps(row) + "\n").encode() for row in rows)
+    path.write_bytes(original)
+
+    with pytest.raises(ValueError, match="not consecutive"):
+        reconcile_event_log(
+            path,
+            checkpoint_step=3,
+            committed_event_count=2 if exact else None,
+            committed_event_offset=len(original) if exact else None,
+            run_id="run-a",
+        )
+
+    assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize("exact", [False, True])
+@pytest.mark.parametrize("bad_step", [-1, 0, 1.0, True, "1"])
+def test_event_reconciliation_rejects_invalid_json_steps_without_modifying_file(
+    tmp_path, exact, bad_step
+):
+    path = tmp_path / "events.jsonl"
+    original = (json.dumps({"step": bad_step}) + "\n").encode()
+    path.write_bytes(original)
+
+    with pytest.raises(ValueError, match="has no valid step"):
+        reconcile_event_log(
+            path,
+            checkpoint_step=1,
+            committed_event_count=1 if exact else None,
+            committed_event_offset=len(original) if exact else None,
+            run_id="run-a",
+        )
+
+    assert path.read_bytes() == original
 
 
 def test_reaction_writer_append_restores_counts_and_run_id(
@@ -154,9 +1031,43 @@ def test_reaction_writer_append_restores_counts_and_run_id(
     rows = [json.loads(line) for line in (tmp_path / "events.jsonl").read_text().splitlines()]
     assert [row["step"] for row in rows] == [1, 2]
     assert all(row["run_id"] == "run-a" for row in rows)
-    folder = tmp_path / "reactions" / "adsorption" / "(C-)#(O+)" / "iso0_lat0"
+    folder = tmp_path / "reactions" / "adsorption" / smiles_to_dirname("[C-]#[O+]") / "iso0_lat0"
     metadata = json.loads((folder / "reaction.json").read_text())
     assert metadata["stats"] == {"count": 2, "first_step": 1, "last_step": 2}
+
+
+def test_reaction_index_preserves_rate_bases_across_resume_without_refiring(
+    tmp_path,
+    stub_reaction,
+):
+    first = ReactionWriter(tmp_path, run_id="run-a")
+    event = first.record(
+        step=1,
+        time_s=1e-6,
+        tau_s=1e-6,
+        reaction=stub_reaction,
+    )
+    first.close()
+
+    before = load_reaction_index(tmp_path / "reactions" / "index.jsonl")
+    assert before[event.reaction_id]["rate_energy_bases"] == ["electronic"]
+
+    resumed = ReactionWriter(tmp_path, append=True, run_id="run-a")
+    resumed.close()
+
+    after = load_reaction_index(tmp_path / "reactions" / "index.jsonl")
+    assert after[event.reaction_id]["rate_energy_bases"] == ["electronic"]
+    metadata = json.loads(
+        (
+            tmp_path
+            / "reactions"
+            / "adsorption"
+            / smiles_to_dirname("[C-]#[O+]")
+            / "iso0_lat0"
+            / "reaction.json"
+        ).read_text()
+    )
+    assert metadata["rate_energy_bases"] == ["electronic"]
 
 
 def test_reaction_writer_warns_when_no_atoms(tmp_path, stub_reaction):
@@ -166,7 +1077,7 @@ def test_reaction_writer_warns_when_no_atoms(tmp_path, stub_reaction):
     w.record(step=1, time_s=1e-6, tau_s=1e-6, reaction=stub_reaction)
     w.close()
 
-    folder = tmp_path / "reactions" / "adsorption" / "(C-)#(O+)" / "iso0_lat0"
+    folder = tmp_path / "reactions" / "adsorption" / smiles_to_dirname("[C-]#[O+]") / "iso0_lat0"
     assert (folder / "reaction.json").is_file()
     assert not (folder / "occupied.extxyz").exists()
     assert not (folder / "unoccupied.extxyz").exists()
@@ -189,10 +1100,10 @@ def test_reaction_writer_keeps_species_folders_separate(tmp_path, make_reaction)
     w.close()
 
     assert (
-        tmp_path / "reactions" / "adsorption" / "(C-)#(O+)" / "iso0_lat0"
+        tmp_path / "reactions" / "adsorption" / smiles_to_dirname("[C-]#[O+]") / "iso0_lat0"
     ).is_dir()
     assert (
-        tmp_path / "reactions" / "adsorption" / "(O)" / "iso0_lat0"
+        tmp_path / "reactions" / "adsorption" / smiles_to_dirname("[O]") / "iso0_lat0"
     ).is_dir()
     assert w.n_unique_reactions == 2
 
@@ -209,7 +1120,7 @@ def test_reaction_writer_persists_gas_free_energy(tmp_path, stub_reaction):
     )
     w.close()
 
-    folder = tmp_path / "reactions" / "adsorption" / "(C-)#(O+)" / "iso0_lat0"
+    folder = tmp_path / "reactions" / "adsorption" / smiles_to_dirname("[C-]#[O+]") / "iso0_lat0"
     rxn_meta = json.loads((folder / "reaction.json").read_text())
     assert rxn_meta["free_energies_ev"]["g_gas"] == -13.5
 
@@ -243,9 +1154,11 @@ def test_reaction_writer_records_adsorption_free_energy_event_fields(
     assert payload["rate_energy_basis"] == "free_energy"
     assert payload["rate_delta_ev"] == -0.25
     assert payload["rate_barrier_ev"] == 0.1
-    assert "ΔG" in payload["description"]
+    definitions = load_reaction_index(tmp_path / "reactions" / "index.jsonl")
+    resolved = resolve_event_definition(payload, definitions, require_definition=True)
+    assert "ΔG" in resolved["description"]
 
-    folder = tmp_path / "reactions" / "adsorption" / "(C-)#(O+)" / "iso0_lat0"
+    folder = tmp_path / "reactions" / "adsorption" / smiles_to_dirname("[C-]#[O+]") / "iso0_lat0"
     rxn_meta = json.loads((folder / "reaction.json").read_text())
     vib = rxn_meta["vibrations"]["occupied"]
     assert set(vib) == {"real_ev", "imag_ev", "zpe_ev", "entropy_ev_per_k"}
@@ -286,9 +1199,11 @@ def test_reaction_writer_records_diffusion_direction(tmp_path):
     assert payload["rate_energy_basis"] == "electronic"
     assert payload["rate_delta_ev"] == pytest.approx(-0.2)
     assert payload["rate_barrier_ev"] == pytest.approx(0.3)
-    assert "dir=b_to_a" in payload["description"]
+    definitions = load_reaction_index(tmp_path / "reactions" / "index.jsonl")
+    resolved = resolve_event_definition(payload, definitions, require_definition=True)
+    assert "dir=b_to_a" in resolved["description"]
 
-    folder = tmp_path / "reactions" / "diffusion" / "(O)" / "diff_iso3_lat4"
+    folder = tmp_path / "reactions" / "diffusion" / smiles_to_dirname("[O]") / "diff_iso3_lat4"
     rxn_meta = json.loads((folder / "reaction.json").read_text())
     assert "dir=b_to_a" in rxn_meta["description"]
     assert rxn_meta["last_event"]["direction"] == "b_to_a"
@@ -333,25 +1248,274 @@ def test_reaction_writer_records_bond_direction(tmp_path):
     assert payload["rate_energy_basis"] == "electronic"
     assert payload["rate_delta_ev"] == -1.0
     assert payload["rate_barrier_ev"] == 0.5
-    assert "dir=couple" in payload["description"]
+    definitions = load_reaction_index(tmp_path / "reactions" / "index.jsonl")
+    resolved = resolve_event_definition(payload, definitions, require_definition=True)
+    assert "dir=couple" in resolved["description"]
 
 
 def test_invalid_diffusion_record_tolerates_missing_energies(tmp_path):
     ds = SimpleNamespace(iso_class=1, reactant="[O]")
-    lc = SimpleNamespace(lateral_class=2, invalid_reason="NEB failed early")
+    atoms = Atoms("H", positions=[[0.0, 0.0, 0.0]])
+    lc = SimpleNamespace(
+        lateral_class=2,
+        stable=None,
+        invalid_reason=None,
+        last_failure_reason="NEBNotConvergedError: NEB failed early",
+        atoms_a_initial=atoms.copy(),
+        atoms_b_initial=atoms.copy(),
+        atoms_neb_refinement_initial=atoms.copy(),
+        atoms_neb_refinement_final=atoms.copy(),
+        neb_intermediate_refinement={
+            "performed": True,
+            "policy": "highest_peak_nearest_minima_iterative_v3",
+            "trigger": "geometry_rollback",
+            "other_segments_refined": False,
+        },
+        atoms_neb_path_initial=[atoms.copy(), atoms.copy()],
+        atoms_neb_path=[atoms.copy(), atoms.copy()],
+    )
 
     w = ReactionWriter(tmp_path)
     folder = w.write_invalid_diffusion(ds, lc)
     w.close()
 
+    assert folder == (
+        tmp_path
+        / "diagnostics"
+        / "invalid_diffusion"
+        / smiles_to_dirname("[O]")
+        / "diff_iso1_lat2"
+    )
     payload = json.loads((folder / "reaction.json").read_text())
     assert payload["valid"] is False
-    assert payload["invalid_reason"] == "NEB failed early"
+    assert payload["stable"] is None
+    assert payload["diagnostic_status"] == "numerical_failure"
+    assert payload["retryable"] is False
+    assert payload["automatic_retry"] is False
+    assert payload["invalid_reason"] == (
+        "NEBNotConvergedError: NEB failed early"
+    )
     assert payload["energies_ev"] == {
         "state_a": None,
         "state_b": None,
         "transition": None,
     }
+    assert (folder / "state_a_initial.extxyz").is_file()
+    assert (folder / "state_b_initial.extxyz").is_file()
+    assert (folder / "neb_path_initial.extxyz").is_file()
+    assert (folder / "neb_path.extxyz").is_file()
+    assert (folder / "neb_refinement_initial.extxyz").is_file()
+    assert (folder / "neb_refinement_final.extxyz").is_file()
+    assert payload["atoms"]["state_a_initial"] == "state_a_initial.extxyz"
+    assert payload["atoms"]["state_b_initial"] == "state_b_initial.extxyz"
+    assert payload["atoms"]["neb_path_initial"] == "neb_path_initial.extxyz"
+    assert payload["atoms"]["neb_path"] == "neb_path.extxyz"
+    assert payload["atoms"]["neb_refinement_initial"] == (
+        "neb_refinement_initial.extxyz"
+    )
+    assert payload["neb_intermediate_refinement"][
+        "other_segments_refined"
+    ] is False
+    assert payload["neb_intermediate_refinement"]["trigger"] == "geometry_rollback"
+    definitions = load_reaction_index(tmp_path / "reactions" / "index.jsonl")
+    definition = definitions[payload["reaction_id"]]
+    assert definition["valid"] is False
+    assert definition["folder"] == (
+        f"diagnostics/invalid_diffusion/{smiles_to_dirname('[O]')}/diff_iso1_lat2"
+    )
+
+
+def test_invalid_adsorption_record_writes_last_known_endpoint(tmp_path):
+    initial = Atoms("H", positions=[[0.0, 0.0, 0.0]])
+    failed = Atoms("H", positions=[[1.5, 0.0, 0.0]])
+    failed.calc = SinglePointCalculator(
+        failed,
+        energy=-0.75,
+        forces=[[0.2, 0.0, 0.0]],
+    )
+    site = SimpleNamespace(iso_class=2, reactant="[H]")
+    lateral = SimpleNamespace(
+        lateral_class=3,
+        invalid_reason="OptimisationFailedError: forced failure",
+        atoms_occupied_initial=initial,
+        atoms_occupied=failed,
+        atoms_unoccupied_initial=None,
+        atoms_unoccupied=None,
+        energy_occupied=None,
+        energy_unoccupied=None,
+    )
+
+    writer = ReactionWriter(tmp_path)
+    folder = writer.write_invalid_adsorption(site, lateral, step=6)
+    writer.close()
+
+    assert folder == (
+        tmp_path
+        / "diagnostics"
+        / "invalid_adsorption"
+        / smiles_to_dirname("[H]")
+        / "ads_iso2_lat3"
+    )
+    assert (folder / "occupied_initial.extxyz").is_file()
+    assert (folder / "occupied.extxyz").is_file()
+    restored = ase_read(folder / "occupied.extxyz")
+    assert restored.positions[0, 0] == pytest.approx(1.5)
+    assert restored.get_potential_energy() == pytest.approx(-0.75)
+    np.testing.assert_allclose(restored.get_forces(), [[0.2, 0.0, 0.0]])
+    assert ase_read(folder / "occupied_initial.extxyz").calc is None
+    payload = json.loads((folder / "diagnostic.json").read_text())
+    assert payload["discovery_step"] == 6
+    assert payload["structures"]["occupied"] == "occupied.extxyz"
+
+
+def test_invalid_bond_record_writes_failed_endpoint_and_neb_paths(tmp_path):
+    atoms = Atoms("H", positions=[[0.0, 0.0, 0.0]])
+    template = SimpleNamespace(
+        smiles_a="[H]",
+        smiles_b="[H]",
+        smiles_c="[H][H]",
+        bond_type="SINGLE",
+        source="coupling",
+    )
+    site = SimpleNamespace(
+        iso_class=3,
+        template=template,
+        gas_product=True,
+        gas_reactant=SimpleNamespace(energy=-1.2),
+    )
+    lateral = SimpleNamespace(
+        lateral_class=4,
+        stable=None,
+        invalid_reason=None,
+        last_failure_reason="BondNEBNotConvergedError: forced failure",
+        atoms_ab_initial=atoms.copy(),
+        atoms_c_initial=atoms.copy(),
+        atoms_ab=atoms.copy(),
+        atoms_c=atoms.copy(),
+        atoms_c_gas_reference=Atoms(
+            "Pt", positions=[[0.0, 0.0, 0.0]]
+        ),
+        atoms_gas_molecule=Atoms(
+            "H2", positions=[[0.0, 0.0, 0.0], [0.0, 0.0, 0.74]]
+        ),
+        energy_c_gas_reference=-3.0,
+        atoms_neb_path_initial=[atoms.copy(), atoms.copy(), atoms.copy()],
+        atoms_neb_path=[atoms.copy(), atoms.copy(), atoms.copy()],
+    )
+
+    writer = ReactionWriter(tmp_path)
+    folder = writer.write_invalid_bond(site, lateral, step=9)
+    writer.close()
+
+    assert folder.parent.parent == tmp_path / "diagnostics" / "invalid_bond"
+    assert folder.name == "bond_iso3_lat4"
+    for filename in (
+        "state_ab_initial.extxyz",
+        "state_c_initial.extxyz",
+        "state_ab.extxyz",
+        "state_c.extxyz",
+        "state_c_gas_reference.extxyz",
+        "gas_molecule.extxyz",
+        "neb_path_initial.extxyz",
+        "neb_path.extxyz",
+        "reaction.json",
+    ):
+        assert (folder / filename).is_file()
+    payload = json.loads((folder / "reaction.json").read_text())
+    assert payload["kind"] == "bond"
+    assert payload["valid"] is False
+    assert payload["stable"] is None
+    assert payload["diagnostic_status"] == "numerical_failure"
+    assert payload["retryable"] is False
+    assert payload["automatic_retry"] is False
+    assert payload["invalid_reason"] == (
+        "BondNEBNotConvergedError: forced failure"
+    )
+    assert payload["discovery_step"] == 9
+    assert payload["atoms"]["neb_path"] == "neb_path.extxyz"
+    assert payload["atoms"]["state_c_gas_reference"] == (
+        "state_c_gas_reference.extxyz"
+    )
+    assert payload["atoms"]["gas_molecule"] == "gas_molecule.extxyz"
+    assert len(ase_read(folder / "state_c_gas_reference.extxyz")) == 1
+    assert len(ase_read(folder / "gas_molecule.extxyz")) == 2
+    definitions = load_reaction_index(tmp_path / "reactions" / "index.jsonl")
+    assert definitions[payload["reaction_id"]]["folder"].startswith(
+        "diagnostics/invalid_bond/"
+    )
+
+
+def test_invalid_bond_backfills_structures_after_early_registration(tmp_path):
+    gas = Atoms(
+        "H2",
+        positions=[[0.0, 0.0, 0.0], [0.0, 0.0, 0.74]],
+    )
+    site = SimpleNamespace(
+        iso_class=8,
+        template=SimpleNamespace(
+            smiles_a="[H]",
+            smiles_b="[H]",
+            smiles_c="[H][H]",
+            bond_type="SINGLE",
+            source="test",
+        ),
+        gas_product=True,
+        gas_reactant=SimpleNamespace(atoms=gas, energy=-0.6),
+    )
+    lateral = SimpleNamespace(
+        lateral_class=2,
+        stable=None,
+        invalid_reason=None,
+        last_failure_reason="BondNEBNotConvergedError: early failure",
+        atoms_ab_initial=None,
+        atoms_c_initial=None,
+        atoms_ab=None,
+        atoms_c=None,
+        atoms_ts=None,
+        atoms_neb_path_initial=None,
+        atoms_neb_path=None,
+        energy_ab=None,
+        energy_c=None,
+        energy_ts=None,
+    )
+    writer = ReactionWriter(tmp_path)
+    folder = writer.write_invalid_bond(site, lateral, step=0)
+    assert (folder / "gas_molecule.extxyz").is_file()
+    assert not (folder / "state_c_gas_reference.extxyz").exists()
+    writer.close()
+
+    combined = Atoms(
+        "PtH2",
+        positions=[
+            [0.0, 0.0, 0.0],
+            [-0.37, 0.0, 3.0],
+            [0.37, 0.0, 3.0],
+        ],
+    )
+    lateral.atoms_ab = combined.copy()
+    lateral.atoms_c = combined.copy()
+    lateral.atoms_neb_path_initial = [combined.copy(), combined.copy()]
+    lateral.atoms_neb_path = [combined.copy(), combined.copy()]
+    lateral.energy_c = -4.6
+    resumed = ReactionWriter(
+        tmp_path,
+        append=True,
+        checkpoint_step=0,
+    )
+    resumed.write_invalid_bond(site, lateral, step=1)
+    resumed.close()
+
+    assert (folder / "state_ab.extxyz").is_file()
+    assert (folder / "state_c.extxyz").is_file()
+    assert (folder / "state_c_gas_reference.extxyz").is_file()
+    assert (folder / "neb_path_initial.extxyz").is_file()
+    assert (folder / "neb_path.extxyz").is_file()
+    assert len(ase_read(folder / "state_c_gas_reference.extxyz")) == 1
+    payload = json.loads((folder / "reaction.json").read_text())
+    assert payload["discovery_step"] == 0
+    assert payload["atoms"]["state_c_gas_reference"] == (
+        "state_c_gas_reference.extxyz"
+    )
 
 
 def test_reaction_writer_close_idempotent(tmp_path):

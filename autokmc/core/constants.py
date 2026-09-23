@@ -42,6 +42,11 @@ RANDOM_SEED: int = 69
 #: same answer everywhere.
 NL_MULT_DEFAULT: float = 0.90
 
+#: Per-atom skin (Å) passed explicitly to ASE ``NeighborList``.  Keeping this
+#: value centralized prevents direct distance checks from drifting if ASE
+#: changes its constructor default.
+NEIGHBORLIST_SKIN: float = 0.30
+
 #: Co-bonding cutoff scale used by
 #: :func:`autokmc.sites.anchors._build_co_bond_graph`: two surface atoms can
 #: simultaneously bind a single adsorbate when their separation is at most
@@ -69,14 +74,13 @@ CONTACT_FACTOR: float = 1.05
 
 #: Standoff-bond scale used by
 #: :func:`autokmc.sites.adsorbate.optimise_adsorbate_site_positions`.
-#: When ``STANDOFF_FACTOR > 0``, bonded anchors are restrained toward
+#: With the default ``0.90``, bonded anchors are restrained toward
 #: ``clique_centroid + STANDOFF_FACTOR*(r_cov_a + <r_cov_s>)*n_hat``.
-#: When ``0.0`` (default), the anchor-node position computed by
-#: :func:`autokmc.sites.anchors._optimise_position` (already placed at
-#: ``OPT_FACTOR*(r_cov_a+r_cov_s)`` from its clique) is used directly as the
-#: restraint target — no additional lift.  This ensures the adsorbate anchor
-#: sits exactly at the anchor-site position for both slabs and nanoparticles.
-STANDOFF_FACTOR: float = 0.0
+#: This target height is measured from the surface clique, not added to the
+#: optimized anchor height.  An explicit ``0.0`` instead uses the anchor-node
+#: position from :func:`autokmc.sites.anchors._optimise_position` directly as
+#: the restraint target.
+STANDOFF_FACTOR: float = 0.90
 
 #: Default number of rigid-body rotational restarts about the local
 #: outward surface normal used by
@@ -134,12 +138,12 @@ BOND_TOLERANCE: float = 0.4
 # Stability pruning
 # ---------------------------------------------------------------------------
 
-#: Force convergence threshold (eV/Å) for the ML-potential relaxation used by
+#: Force convergence threshold (eV/Å) for both ML-potential stages used by
 #: :func:`autokmc.sites.adsorbate.prune_unstable_adsorbate_sites` to
 #: decide whether a representative placement is stable.
 PRUNE_FMAX: float = 0.05
 
-#: Maximum LBFGS steps for the ML-potential relaxation used by
+#: Maximum optimizer steps per rigid or relaxed ML-potential stage used by
 #: :func:`autokmc.sites.adsorbate.prune_unstable_adsorbate_sites`.
 PRUNE_MAX_STEPS: int = 500
 
@@ -179,6 +183,13 @@ RAYCAST_N_DISC_SAMPLE: int = 10
 #: 6969 is plenty for any chemically meaningful symmetry group while
 #: still bounding pathological complete-graph blow-ups.
 KABSCH_MAX_MAPPINGS: int = 6969
+
+#: RMSD tolerance (Å) for deciding whether an improper substrate mapping can
+#: be represented by a proper rotation of the molecule.  Molecular geometries
+#: are force-converged rather than algebraically symmetrized, so symmetry-
+#: equivalent atoms can differ at the sub-hundredth-angstrom scale without
+#: representing a resolved chiral inversion.
+MOLECULAR_HANDEDNESS_RMSD_TOLERANCE: float = 1.0e-2
 
 # ---------------------------------------------------------------------------
 # Persistence / CLI / output (consumed by autokmc.io + autokmc.cli)
@@ -250,23 +261,82 @@ DIFFUSION_MAX_HOPS: int = 0
 #: :func:`autokmc.sites.stability.diffusion.check_diffusion_stability`.
 NEB_N_IMAGES: int = 10
 
+#: Target maximum displacement (Å) of any corresponding atom between
+#: adjacent linearly interpolated NEB frames.  ``None`` restores the fixed
+#: ``NEB_N_IMAGES`` policy.
+NEB_IMAGE_SPACING: float | None = 0.25
+
+#: Maximum allowed adjacent-image displacement during NEB optimisation,
+#: expressed as a multiple of ``NEB_IMAGE_SPACING``. A step crossing this
+#: geometric limit is rolled back to the lowest-force valid band.
+NEB_MAX_ADJACENT_IMAGE_SPACING_MULTIPLIER: float = 3.0
+
+#: Lower and upper bounds on the dynamically selected number of interior
+#: images.  The upper bound protects KMC campaigns from pathological atom
+#: mappings that would otherwise allocate an unbounded band.
+NEB_MIN_IMAGES: int = 6
+NEB_MAX_IMAGES: int = 8
+
 #: Force convergence threshold (eV/Å) for the NEB band relaxation in
 #: :func:`autokmc.sites.stability.diffusion.check_diffusion_stability`.
 NEB_FMAX: float = 0.01
 
+#: Number of ordinary-NEB optimizer steps without a lower interior-image
+#: electronic energy before the band is inspected for an intermediate minimum.
+NEB_INTERMEDIATE_STAGNATION_STEPS: int = 100
+
+#: Maximum number of successive highest-peak/minimum-bracket refinements in
+#: one NEB calculation.
+NEB_INTERMEDIATE_MAX_REFINEMENTS: int = 10
+
+#: Minimum decrease (eV) required to reset the interior-energy stagnation
+#: counter. This prevents calculator noise from postponing inspection forever.
+NEB_INTERMEDIATE_ENERGY_TOLERANCE: float = 1.0e-3
+
+#: Minimum energy prominence (eV) on both sides of an interior image before it
+#: is treated as a candidate minimum for highest-peak segment refinement.
+NEB_INTERMEDIATE_MINIMUM_PROMINENCE: float = 1.0e-2
+
+#: Versioned intermediate-refinement policy included in calculation-cache
+#: identities and persisted reaction metadata.
+NEB_INTERMEDIATE_REFINEMENT_POLICY: str = (
+    "highest_peak_nearest_minima_iterative_v4"
+)
+
 #: Maximum optimiser steps for the NEB band relaxation.
 NEB_MAX_STEPS: int = 200
 
-#: Use climbing-image NEB (CI-NEB) so the highest-energy image converges
-#: directly onto the saddle point.
+#: After ordinary NEB convergence, refine the highest-energy image with
+#: climbing-image NEB (CI-NEB) so it converges onto the saddle point.
 NEB_CLIMB: bool = True
 
+#: Minimum activation barrier used by reversible KMC rates.  The common
+#: effective TS level applies this floor while preserving detailed energy
+#: consistency between both directions.
+EA_MIN: float = 0.1
+
 #: NEB spring constant (eV / Å²).
-NEB_SPRING_K: float = 0.1
+NEB_SPRING_K: float = 5.0
 
 #: NEB initial-band interpolation method: ``"idpp"`` (image-dependent pair
 #: potential, ASE default for chemistry) or ``"linear"``.
 NEB_INTERPOLATION: str = "linear"
+
+#: ASE NEB force/tangent formulation. ``"improvedtangent"`` is the default;
+#: the other values map directly to ASE's ``NEB(method=...)`` choices.
+NEB_METHODS: frozenset[str] = frozenset(
+    {"aseneb", "eb", "improvedtangent", "spline", "string"}
+)
+NEB_METHOD: str = "improvedtangent"
+
+#: How NEB band images are evaluated each optimizer step: ``"images"``
+#: (per-image calculator calls — serial with a shared calculator, or pooled
+#: threads on a multi-worker CalculatorPool) or ``"batched"`` (the whole band
+#: in one stacked model forward, when the calculator supports it; falls back
+#: to ``"images"`` otherwise).  Physics is identical either way — only the
+#: force-evaluation access pattern changes.
+NEB_BAND_EVALS: frozenset[str] = frozenset({"images", "batched"})
+NEB_BAND_EVAL: str = "images"
 
 #: When ``True`` (default), :func:`autokmc.sites.diffusion.find_diffusion_sites`
 #: keeps only **one** :class:`~autokmc.sites.diffusion.DiffusionSite` per
@@ -324,19 +394,29 @@ BOND_PAIR_N_SHELLS: int = N_SHELLS_DEFAULT
 BOND_NEB_INTERPOLATION: str = "idpp"
 
 #: Atom-correspondence strategy for bond-reaction NEB endpoints.
-#: ``"auto"`` tries a small candidate set and keeps the lowest-displacement
-#: path; ``"hungarian"`` solves the global same-element assignment problem;
-#: ``"greedy"`` preserves the pre-existing nearest-neighbour behaviour; and
-#: ``"reactant_index"`` keeps C's reactant atom order when chemically valid.
+#: Every strategy preserves existing A/B bond connectivity.  ``"auto"`` tries
+#: a small candidate set and keeps the lowest-displacement valid path;
+#: ``"hungarian"`` starts from the global same-element assignment problem;
+#: ``"greedy"`` starts from nearest neighbours; and ``"reactant_index"``
+#: starts from C's reactant atom order when chemically valid.
 BOND_ATOM_MATCHING: str = "auto"
 
-#: Maximum number of same-element assignment candidates considered by
-#: ``BOND_ATOM_MATCHING == "auto"`` before the best pre-NEB path is chosen.
+#: Maximum number of connectivity-preserving assignment candidates considered
+#: before the best pre-NEB path is chosen.
 BOND_MATCHING_TRIALS: int = 8
 
 #: Default lift height (Å) used when the C endpoint of ``A + B ⇌ C`` is a
 #: gas-phase product rather than a materialised surface placement.
 BOND_GAS_LIFT_HEIGHT: float = 6.0
+
+#: Prepare gas-product bond NEBs from a relaxed, intact molecular precursor
+#: adsorbed above the reacting surface site.  The gas-phase asymptote remains
+#: the thermodynamic C-state reference used by KMC rates.
+BOND_GAS_PRECURSOR_RELAX: bool = True
+
+#: Initial minimum molecule-to-slab distance (Å) for the fixed-environment
+#: gas-precursor relaxation.
+BOND_GAS_PRECURSOR_DISTANCE: float = 2.5
 
 #: Folder-name format for bond reaction folders persisted by
 #: :class:`autokmc.io.persistence.ReactionWriter` (when enabled).

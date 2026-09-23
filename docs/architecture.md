@@ -7,7 +7,7 @@ One configuration drives the full workflow:
 ```mermaid
 flowchart TD
     A["Load and validate config"] --> B["Build calculator pool"]
-    B --> C["Build configured slab or nanoparticle"]
+    B --> C["Build or load configured catalyst"]
     C --> D["Tag surface atoms and build graph"]
     D --> E["Build gas reactants"]
     E --> F["Enumerate and prune adsorption sites"]
@@ -19,32 +19,116 @@ flowchart TD
     G -. "reuse/write" .-> K
 ```
 
-The CLI implementation is in `autokmc/cli/pipeline.py`. The main stages are:
+`autokmc/cli/pipeline.py` coordinates the workflow. The implementation is split
+across `autokmc/workflow`. First, `stages.py` prepares the calculator, structure,
+graph, reactants, and adsorption sites. Next, `network.py` constructs the
+optional diffusion and bond network, while `runtime.py` resolves the cache,
+channel, restart, and output collaborators. Finally, `simulation.py` launches
+KMC and finalizes the run. The complete sequence is:
 
 1. Build an ASE-compatible calculator or calculator pool.
-2. Construct and relax a periodic surface or nanoparticle. The supplied
-   production examples use platinum.
-3. classify surface atoms and build the atom-connectivity graph.
+2. Construct and relax a periodic surface or nanoparticle, or load a selected
+   frame from any ASE-readable catalyst file without rebuilding or relaxing
+   it. The supplied production examples use built platinum structures.
+3. Classify surface atoms and build the atom-connectivity graph.
 4. Build gas-phase reactants from SMILES. With `relax_in_gas: false`, AutoKMC
    skips geometry relaxation but still requires a finite single-point energy.
+   The final molecular graph must match the requested atom and bond inventory.
 5. Enumerate adsorption placements and optionally prune unstable classes.
-6. Derive diffusion and `A + B <=> C` bond-changing channels.
+6. Derive `A + B <=> C` bond-changing channels and materialize their fragment
+   and product adsorption placements, then enumerate diffusion for all species.
 7. Run rejection-free BKL/Gillespie KMC with local rate-index updates and
    on-the-fly network expansion.
 8. Persist cumulative outputs and, separately, post-process the event log.
 
+The internal KMC boundary accepts one `KMCRunRequest` and returns one
+`KMCRunResult`. Configured workflows construct the typed `KMCSession` directly.
+The public `autokmc.kmc.engine.run_kmc_steps` signature remains as a
+compatibility adapter. Separate KMC modules handle session initialization,
+local recomputation, dynamic network expansion, outputs, checkpoints, and the
+canonical RNG restart state. Each result also carries run-scoped counters,
+gauges, and accumulated wall-clock timings.
+
+The KMC system retains iterable reactant inputs, including generators, before
+reading their electronic energies, free energies, partial pressures, or
+checkpoint data. All consumers therefore use the same gas reservoir.
+
+When diffusion is enabled, both feed species and generated surface products
+receive a diffusion search. Runtime expansion performs this search even when
+a product yields no new bond templates, all proposed templates are filtered
+out, or its bond network was already expanded. A completed search with no
+legal hops is remembered. Newly discovered hops are evaluated and inserted
+into the KMC rate index; repeated expansion preserves existing channels and
+their rates. Setting `diffusion.enabled: false` disables these searches.
+
+Before accepting a gas reference, `build_reactant` compares the graph built
+from its final coordinates with the bonds specified by the input SMILES,
+using the same hydrogen policy and atom ordering as molecular construction.
+Missing or additional bonds, changed atom counts, elements, or isotope masses
+raise `ReactantConnectivityError` before thermochemistry or adsorption-site
+generation. This validation also applies to RDKit-generated structures when
+ASE relaxation is disabled or no calculator is supplied. The exception is a
+runtime geometry failure, so dynamic expansion retries and reports exhaustion
+without permanently classifying a valid molecular definition as invalid.
+
+The comparison uses the configured neighbor-list cutoff and the graph's
+undirected adjacency. It does not infer bond orders or stereochemistry from
+coordinates. Force convergence alone does not satisfy this connectivity check.
+
 ## Graph state
 
-The live NetworkX graph contains catalyst atoms, materialized adsorbate atoms,
-and site bookkeeping. Occupancy is attached to concrete adsorbate placements.
-Reverse indexes connect occupied surface cliques to affected adsorption,
-diffusion, and bond-reaction members so the KMC engine can update only the
-local rate neighborhood after an event.
+The live NetworkX graph contains the catalyst atoms, materialized adsorbate
+atoms, and site bookkeeping. Each concrete adsorbate placement stores its own
+occupancy. Reverse indexes then connect occupied surface cliques to the affected
+adsorption, diffusion, and bond-reaction members. After an event, the KMC engine
+uses these indexes to update the local rate neighborhood in electronic-only
+runs. Free-energy runs refresh all active reaction members because vibrations
+include the entire occupied surface.
 
-Run-local identifiers such as graph node ids, adsorption `iso_class`, and
-`lateral_class` are useful inside one simulation but are not stable scientific
-identifiers across independent runs. Portable database matching therefore
-uses labelled chemical topology rather than those counters.
+Each adsorption, diffusion, and bond site has a persisted `site_id`, and
+`(site_id, member_index)` identifies one concrete member. These stable in-run
+handles survive checkpoint copying and allow dynamic discovery to recognize a
+reconstructed site without using a Python object address. When the network
+expands, AutoKMC appends only new leaves to the reaction-rate index and retains
+the existing reaction objects and rates. The segment tree expands only when it
+runs out of capacity.
+
+Site membership becomes immutable when a site enters the reaction index. A new
+network discovery therefore adds a complete site instead of appending members
+to an indexed site. Common graph metadata is accessed through
+`autokmc/core/graph_state.py`, while the underlying NetworkX dictionaries remain
+inspectable for notebooks and checkpoint compatibility. Site-model cache
+attributes are declared for static checking and materialized only when needed.
+Keeping them out of dataclass serialization preserves older checkpoints and the
+established `asdict` and equality behavior.
+
+Run-local identifiers such as `site_id`, graph node ids, adsorption
+`iso_class`, and `lateral_class` are stable across restart and reconstruction
+within one simulation, but are not portable scientific identifiers across
+independently enumerated structures. Portable database matching therefore uses
+labelled chemical topology and geometry rather than those counters.
+
+Real atom nodes retain a copy of their per-atom ASE input arrays, including
+initial magnetic moments, initial charges, isotope masses, tags, and custom
+arrays. Calculation builders and trajectory snapshots restore those arrays in
+their exact atom order. Explicit isotope labels in SMILES, such as `[2H][2H]`,
+set the corresponding isotope masses; atoms without isotope labels retain
+ASE's elemental masses. Molecular and site symmetry, lateral classes, and
+portable reaction graphs distinguish these inputs. Bond-path atom matching
+also preserves isotope masses across endpoints. Old graphs that already lost
+this information need rebuilding from the original inputs.
+
+Adsorption enumeration reduces anchor subsets only when one molecular graph
+automorphism maps the entire selected subset onto another. Individual atom
+orbits serve as a preliminary grouping. For example, benzene's adjacent, meta,
+and opposite carbon pairs remain separate even though every carbon belongs to
+the same individual orbit. Retained placements still undergo the usual geometry
+and potential-based stability checks.
+
+Process graphs retain the actual intramolecular bonds from the live graph.
+The `siblings` attribute identifies all atoms in one placement; it does not
+declare bonds. Bond endpoint pruning likewise retains the original atom indices
+when checking surface attachments, including atoms with no surface bond.
 
 ## Reaction channels
 
@@ -53,14 +137,44 @@ uses labelled chemical topology rather than those counters.
 Adsorption and desorption share one lateral class. A gas reactant occupies or
 vacates a concrete surface placement. Adsorption propensities are multiplied
 by the configured partial pressure in bar.
+Lateral graph matching labels the reacting molecule separately from occupied
+neighbors, so removing different molecules cannot reuse one removal energy.
 
 ### Diffusion
 
-Diffusion connects two placements of the same species. Endpoint relaxation and
-CI-NEB populate state A, state B, and transition-state energies. Both forward
-and reverse barriers are derived from one effective transition-state level so
-detailed energy consistency is preserved when the minimum barrier floor is
-applied.
+Diffusion connects two placements of the same species. AutoKMC first relaxes
+state A and state B. It then optimizes an ordinary NEB band to obtain the
+transition-state energy. CI-NEB refines that transition only when both raw
+ordinary directional barriers are at least 0.1 eV. Finally, AutoKMC derives the
+forward and reverse rates from one effective transition-state level, preserving
+energy consistency when it applies the minimum barrier floor.
+Lateral graph matching preserves the ordered A/B endpoint roles of cached
+energies; each matched member still supports both firing directions.
+
+If the ordinary band goes 100 optimizer steps without lowering its least
+energetic interior image, AutoKMC inspects the electronic-energy profile for
+intermediate minima. It brackets the band's highest-energy image with the
+nearest minimum on each side, optimizes the selected interior state or states
+(already-optimized original endpoints are reused), and runs a fresh standard
+NEB between them. The replacement band is eligible for the same check, up to
+`optimization.neb_intermediate_max_refinements` times (default 10). Other
+minima and path segments are not refined. The final shortened band supplies
+the transition state, but diffusion rates remain referenced to the original A
+and B endpoint energies.
+
+The distance guard also triggers this check immediately after restoring the
+lowest-force geometrically valid band, including during CI-NEB. The restored
+profile, not the rejected geometry, supplies the minima. If none bracket the
+highest peak, normal reduced-step rollback continues. Once the configured
+refinement limit is reached, subsequent rollbacks only restore and restart the
+current replacement band.
+
+For a lateral environment containing neighboring adsorbates, the reaction
+evaluator first obtains an optimized band for the corresponding no-neighbor
+class. It calculates that bare class on demand when necessary. Next, it projects
+the bare-band curvature onto the lateral endpoints and performs the full NEB
+optimization. If the bare calculation fails or the projection is incompatible,
+the channel uses its configured interpolation.
 
 ### Bond changes
 
@@ -70,6 +184,114 @@ expand the network when a new surface species first appears. Calculator-based
 stability pruning runs before the one-representative-per-adsorption-triple
 prune, so a geometrically compact but unstable member cannot displace a stable
 candidate prematurely.
+
+Each feed reactant records the atom inventory selected by its
+`add_hydrogens` setting separately from its SMILES label. Initial template
+generation and later network expansion use that inventory for both coupling
+and dissociation. For example, `C=O` with implicit hydrogens added represents
+CH₂O, so coupling it with H retains all three product hydrogens. Feed labels
+and their pressure settings remain associated with the original species.
+
+Coupling assigns the connecting bond order before registering the product.
+Attachment markers retain the order of the broken bond; bare radical pairs
+use the smaller radical count, capped at a triple bond. Thus `[O] + [O]`
+reforms `O=O`, and `[N] + [N]` reforms `N#N`, allowing the coupling and
+dissociation templates to share the same reversible channel. A radical
+adding to a saturated atom still forms a single bond and reduces existing
+multiple bonds if needed, as in `H + O2 -> HO2`. Geometry relaxation does not
+rewrite the product SMILES. Previously saved species and templates retain
+their identities; rebuild the network from the inputs to remove erroneous
+products generated by older versions.
+
+All molecular entry points share one parser. It preserves indexed atom order,
+isotopes, stereochemistry, and explicit H atoms. Atom-map numbers are removed
+from chemical identity. Species must be single connected molecules; dummy
+attachment atoms are accepted only by fragment helpers. SMILES names and CXSMILES
+extensions are rejected instead of being silently ignored. Labels preserve
+implicit-H notation, while stored atom inventories contain exactly the atoms
+chosen by `add_hydrogens`, with unused implicit valence represented as radicals.
+Configuration validation detects duplicate labels and duplicate atom inventories.
+
+`[C-]#[O+]` is an explicit compatibility alias for the bond model's `[C]=O`,
+including isotopic variants. Canonicalization otherwise preserves formal charge
+and radical state: it does not equate arbitrary resonance structures, tautomers,
+or electronic states. The charge-free bond enumerator rejects other formally
+charged inputs before attempting chemistry. Reactant-object coupling reads the
+stored chemical inventory, retaining multiple bonds that coordinates alone
+cannot supply. ASE Atoms inputs still infer single bonds from connectivity;
+charged Atoms are rejected on that path.
+
+Generated products reuse registered feed labels through their complete atom
+inventory, retaining the feed's pressure. Checkpoint species deduplication uses
+that inventory too. Cache keys carry a SMILES identity version, and portable
+scientific fingerprints use the normalized labels and an updated schema, so
+old calculations with the earlier identity semantics cannot silently match.
+
+Species directories include a readable prefix and a digest of the complete
+label. This prevents slash/backslash stereochemistry, letter case, or long
+labels from colliding in reaction documents and vibration-cache directories.
+Append-mode output retains legacy paths by reading identity from their metadata;
+this does not migrate an old chemical network into the new identity policy.
+
+Bond NEBs use the same single highest-peak segment refinement. Its final
+transition state is still reported as the barrier for the original reversible
+`A + B <=> C` event, with electronic and free energetics referenced to the
+original A+B and C states rather than the selected intermediate minima.
+
+## Lateral interaction range
+
+Electronic and free-energy calculations use an intentional finite-range approximation for
+lateral interactions. `constants.lateral_shells` sets the number of
+surface-graph hops used to select surrounding occupied molecules. Molecules
+outside that neighborhood are omitted from the calculation, truncating their
+longer-range interactions with the reacting molecule and the retained
+environment. This approximation limits calculation cost and the number of
+distinct lateral environments.
+
+Once the shell selects a neighboring molecule, classification includes all of
+its atoms, molecular bonds, and surface attachments, including attachments
+outside the shell. This keeps cached energies specific to the complete
+molecules used in the calculation. Extra attachment nodes do not select
+additional neighboring molecules.
+
+The truncation can introduce small errors in reaction energies and small
+nonzero sums of energy changes around closed reaction cycles. Adsorption and
+desorption select neighbors around one placement, while diffusion selects
+neighbors around both endpoints. A surrounding molecule can therefore lie
+outside one channel's neighborhood but inside another's, giving slightly
+different energies for the same intended surface state. This is an intentional
+limitation of the local interaction range.
+
+### CO/Cu(111) example
+
+An electronic-energy calculation with UMA `uma-s-1p2` (`oc20`) used a four-layer,
+4×4 Cu(111) slab (64 Cu atoms, lattice constant 3.615 Å), three surrounding CO
+molecules, and one additional CO adsorbing at atop site A, moving to adjacent
+atop site B, then desorbing. The bottom two Cu layers were fixed; the remaining
+atoms were relaxed to forces below 0.005 eV/Å, with all CO retaining their atop
+coordination. One surrounding CO was two graph hops from A but one from B.
+
+| Lateral range | Adsorption energy at A (eV) | Energy sum for adsorption A → diffusion A–B → desorption B (meV) |
+| --- | ---: | ---: |
+| One hop | −0.362268 | −6.932 |
+| Two hops / all surrounding CO | −0.343179 | 0 |
+
+The one-hop adsorption energy differed from the all-neighbor result by
+19.1 meV. Holding coordinates fixed also gave a cycle residual of −4.11 meV,
+showing the contribution from neighbor selection independently of relaxation.
+These are small errors for this example, rather than universal error bounds.
+
+Increasing `constants.lateral_shells` extends the interaction range and can
+resolve the truncation error. In this 4×4 cell, two hops include every occupied
+molecule, so all channels use the same environment and the cycle closes.
+For other cells and coverages, increase the hop count until the relevant
+energies converge; two hops are not a universal cutoff. See the
+[range configuration](configuration.md#lateral-interaction-range).
+
+When `free_energy.enabled: true`, calculation structures already include all
+occupied adsorbates in the simulated cell, irrespective of the local shell
+setting. The finite-hop truncation described here applies to electronic-only
+local environments.
 
 ## Rates and free energy
 
@@ -86,11 +308,31 @@ or rates are errors and are never admitted into KMC.
 When `free_energy.enabled` is true:
 
 - gas species use ideal-gas thermochemistry,
-- adsorbed endpoints use harmonic thermochemistry over reactive atoms,
+- surface endpoints and transition states use a coupled Hessian over the
+  adsorbate atoms included in the calculation; catalyst atoms are not displaced,
+- adsorption empty endpoints retain the harmonic correction of surviving
+  adsorbates, and gas-product bond endpoints add that remaining-surface
+  correction to the gas molecule's ideal-gas correction,
+- with `kmc.lateral_interactions: true`, calculation structures, lateral class
+  identities, and vibrations include the reacting adsorbate plus complete
+  neighboring molecules selected within `constants.lateral_shells`; each event
+  refreshes rates that depend on the changed local environment,
+- with `kmc.lateral_interactions: false`, surrounding adsorbates are omitted
+  from structures, vibrations, and lateral classification; free energies remain
+  enabled for the reacting species and rate refresh follows local occupancy,
+- thermochemistry records the spectra and omits imaginary modes from the
+  default free-energy corrections,
 - diffusion and bond endpoints and transition states use their populated free
   energies when available,
 - vibration caches are separated by species, reaction class, iso-class, and
-  lateral class.
+  lateral class, then content-addressed by geometry, displacement settings, and
+  calculator identity,
+- independent finite-difference displacements and whole NEB calculations share
+  the configured calculator pool without sharing live calculator objects; each
+  NEB holds one calculator for its complete lifecycle,
+- broad initialization sweeps parallelize independent sites, while isolated
+  transition-state work evaluates one band per calculator and thermochemistry
+  may parallelize independent displacements; the two levels are never nested.
 
 When free-energy fields are absent, the corresponding channel uses electronic
 energies. See [Configuration](configuration.md#free_energy) for the controls.
@@ -99,12 +341,39 @@ energies. See [Configuration](configuration.md#free_energy) for the controls.
 
 Scientific and persistence failures are explicit:
 
-- failed gas, structure, endpoint, or NEB convergence raises or invalidates
-  only a reaction class when that invalidity is an expected stability result,
+- failed gas, structure, or endpoint stability invalidates only the affected
+  reaction class when that invalidity is an expected chemical result; numerical
+  NEB non-convergence preserves the band, omits that candidate from the current
+  rate-index sweep, and leaves it undecided for a later retry without stopping
+  other valid KMC events,
+- on-the-fly species/site/network expansion retries transient runtime failures
+  three times, records each stage under the checkpointed
+  `bond_registry.expansion_failures` diagnostics, and raises after exhaustion;
+  only invalid molecular definitions are permanently excluded,
 - unexpected calculator and thermochemistry exceptions propagate,
+- calculator failures during adsorption or bond endpoint pruning propagate
+  to the expansion retry mechanism instead of permanently discarding sites;
+  adsorption failure geometries are still saved before the error is raised,
 - requested event, trajectory, summary, and checkpoint writes must succeed,
 - JSON output rejects nonfinite numeric values,
-- an inconsistent event history is rejected by strict offline analysis.
+- an inconsistent event history is rejected by strict offline analysis,
+- checkpoint resume rejects scientific-configuration drift and reconciles the
+  event log to the checkpoint's committed count and byte offset before any
+  summary is reconstructed,
+- reaction folders carry an immutable discovery step, and resume moves
+  post-checkpoint discoveries outside the authoritative hierarchy,
+- trajectory resume validates a strictly increasing committed `kmc_step`
+  prefix and atomically removes frames beyond the checkpoint step before
+  append.
 
-This prevents a run from silently continuing with `NaN` energetics, incomplete
-provenance, or a checkpoint that was never written.
+File-backed catalysts are parsed during read-only preflight before calculator
+probing. Their resolved source path, selected frame, optional explicit format,
+and frozen-atom selection are retained with the resolved configuration and
+catalyst provenance, so an input-selection mistake is visible before expensive
+chemistry begins. A calculator serialized with the selected frame is detached
+in favor of the configured calculator. Cell and periodic-boundary metadata are
+therefore input responsibilities and must be suitable for surface
+classification.
+
+Together, these rules prevent a run from silently continuing with `NaN`
+energetics, incomplete provenance, or a checkpoint that was never written.
