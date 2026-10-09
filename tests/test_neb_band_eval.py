@@ -90,6 +90,7 @@ def _run(calculator, band_eval: str, *, frozen: list[int]):
     return run_neb(
         initial,
         final,
+        intermediate_check_interval=None,
         calculator=calculator,
         purpose="test NEB",
         n_images=3,

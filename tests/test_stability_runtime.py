@@ -83,6 +83,7 @@ def test_shared_neb_selects_transition_and_detaches_images(monkeypatch):
         result = neb_module.run_neb(
             images[0],
             images[-1],
+            intermediate_check_interval=None,
             calculator=object(),
             purpose="test NEB",
             n_images=2,
@@ -136,6 +137,7 @@ def test_shared_neb_runs_ci_after_every_converged_ordinary_stage(monkeypatch):
     result = neb_module.run_neb(
         images[0],
         images[-1],
+        intermediate_check_interval=None,
         calculator=object(),
         purpose="CI-NEB stage sequence",
         n_images=1,
@@ -226,6 +228,7 @@ def test_converged_profile_refines_before_advancing_to_ci(monkeypatch):
     result = neb_module.run_neb(
         Atoms("H", positions=[[0.0, 0.0, 0.0]]),
         Atoms("H", positions=[[6.0, 0.0, 0.0]]),
+        intermediate_check_interval=None,
         calculator=object(),
         purpose="final converged-profile intermediate check",
         n_images=5,
@@ -249,7 +252,7 @@ def test_converged_profile_refines_before_advancing_to_ci(monkeypatch):
     assert refinements[0][2]["trigger"] == "converged_profile"
     assert (
         refinements[0][2]["policy"]
-        == "highest_peak_nearest_minima_iterative_v4"
+        == "highest_peak_nearest_minima_iterative_v5_dynamic_checks"
     )
     assert result.intermediate_refinement_count == 1
     assert result.intermediate_trigger == "converged_profile"
@@ -322,6 +325,7 @@ def test_converged_ci_profile_is_refined_and_rerun(monkeypatch):
     result = neb_module.run_neb(
         Atoms("H", positions=[[0.0, 0.0, 0.0]]),
         Atoms("H", positions=[[6.0, 0.0, 0.0]]),
+        intermediate_check_interval=None,
         calculator=object(),
         purpose="final converged CI-profile intermediate check",
         n_images=5,
@@ -434,6 +438,7 @@ def test_stalled_neb_refines_only_highest_peak_segment(monkeypatch):
     result = neb_module.run_neb(
         stalled_images[0],
         stalled_images[-1],
+        intermediate_check_interval=None,
         calculator=object(),
         purpose="stalled highest-peak segment NEB",
         n_images=5,
@@ -561,6 +566,7 @@ def test_stalled_neb_honors_multiple_refinement_limit(monkeypatch):
     result = neb_module.run_neb(
         Atoms("H", positions=[[0.0, 0.0, 0.0]]),
         Atoms("H", positions=[[6.0, 0.0, 0.0]]),
+        intermediate_check_interval=None,
         calculator=object(),
         purpose="iterative stalled highest-peak segment NEB",
         n_images=5,
@@ -712,6 +718,7 @@ def test_rollback_refines_minima_from_lowest_force_valid_band(
     result = neb_module.run_neb(
         Atoms("H", positions=[[0.0, 0.0, 0.0]]),
         Atoms("H", positions=[[0.6, 0.0, 0.0]]),
+        intermediate_check_interval=None,
         calculator=object(),
         purpose="rollback minimum inspection",
         n_images=5,
@@ -969,6 +976,7 @@ def test_shared_neb_restores_best_valid_band_and_halves_fire_timestep(
         result = neb_module.run_neb(
             images[0],
             images[-1],
+            intermediate_check_interval=None,
             calculator=object(),
             purpose="geometry recovery NEB",
             n_images=1,
@@ -1026,6 +1034,7 @@ def test_shared_neb_uses_selected_optimizer(monkeypatch):
     result = neb_module.run_neb(
         images[0],
         images[-1],
+        intermediate_check_interval=None,
         calculator=object(),
         purpose="FIRE NEB",
         n_images=1,
@@ -1064,6 +1073,7 @@ def test_shared_neb_recovers_ordinary_fire_but_disables_ci_downhill(monkeypatch)
     neb_module.run_neb(
         images[0],
         images[-1],
+        intermediate_check_interval=None,
         calculator=object(),
         purpose="stable FIRE NEB",
         n_images=1,
@@ -1145,6 +1155,7 @@ def test_shared_neb_switches_off_downhill_after_fire_dt_collapse(monkeypatch, ca
     neb_module.run_neb(
         images[0],
         images[-1],
+        intermediate_check_interval=None,
         calculator=object(),
         purpose="plateau recovery NEB",
         n_images=1,
@@ -1192,6 +1203,7 @@ def test_shared_neb_uses_climbing_optimizer_override(monkeypatch):
     neb_module.run_neb(
         images[0],
         images[-1],
+        intermediate_check_interval=None,
         calculator=object(),
         purpose="stage-specific optimizer NEB",
         n_images=1,
@@ -1241,6 +1253,7 @@ def test_shared_neb_climbing_restart_skips_ordinary_stage(monkeypatch):
     neb_module.run_neb(
         images[0],
         images[-1],
+        intermediate_check_interval=None,
         calculator=object(),
         purpose="CI restart",
         n_images=1,
@@ -1310,6 +1323,7 @@ def test_shared_neb_stops_when_preclimb_stage_does_not_converge(monkeypatch):
         neb_module.run_neb(
             images[0],
             images[-1],
+            intermediate_check_interval=None,
             calculator=object(),
             purpose="test NEB",
             n_images=1,
@@ -1524,6 +1538,7 @@ def test_run_neb_can_capture_path_without_public_persistence(monkeypatch):
     result = neb_module.run_neb(
         images[0],
         images[-1],
+        intermediate_check_interval=None,
         calculator=object(),
         purpose="bare warm-start asset",
         n_images=1,
@@ -1905,6 +1920,7 @@ def test_neb_uses_only_one_pool_calculator_and_propagates_its_exception():
             neb_module.run_neb(
                 initial,
                 final,
+                intermediate_check_interval=None,
                 calculator=pool,
                 purpose="failing single-calculator NEB",
                 n_images=3,
@@ -1941,6 +1957,7 @@ def test_neb_uses_one_concrete_calculator_without_outer_batch(monkeypatch):
     result = neb_module.run_neb(
         images[0],
         images[-1],
+        intermediate_check_interval=None,
         calculator=pool,
         purpose="isolated NEB",
         n_images=2,
@@ -2000,6 +2017,7 @@ def test_independent_nebs_can_lease_distinct_calculators(monkeypatch):
         return neb_module.run_neb(
             initial,
             final,
+            intermediate_check_interval=None,
             calculator=pool,
             purpose=label,
             n_images=2,

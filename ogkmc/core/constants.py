@@ -285,6 +285,15 @@ NEB_FMAX: float = 0.01
 #: electronic energy before the band is inspected for an intermediate minimum.
 NEB_INTERMEDIATE_STAGNATION_STEPS: int = 100
 
+#: Inspect ordinary and climbing bands periodically, before stagnation.
+NEB_INTERMEDIATE_CHECK_INTERVAL: int = 10
+
+#: Maximum ordered MIC displacement (angstrom) that skips a checked pose.
+NEB_INTERMEDIATE_MINIMUM_RECHECK_TOLERANCE: float = 0.1
+
+#: Bound independent candidate relaxations within one NEB attempt.
+NEB_INTERMEDIATE_MINIMUM_MAX_CANDIDATES: int = 20
+
 #: Maximum number of successive highest-peak/minimum-bracket refinements in
 #: one NEB calculation.
 NEB_INTERMEDIATE_MAX_REFINEMENTS: int = 10
@@ -300,7 +309,7 @@ NEB_INTERMEDIATE_MINIMUM_PROMINENCE: float = 1.0e-2
 #: Versioned intermediate-refinement policy included in calculation-cache
 #: identities and persisted reaction metadata.
 NEB_INTERMEDIATE_REFINEMENT_POLICY: str = (
-    "highest_peak_nearest_minima_iterative_v4"
+    "highest_peak_nearest_minima_iterative_v5_dynamic_checks"
 )
 
 #: Maximum optimiser steps for the NEB band relaxation.

@@ -127,6 +127,9 @@ def build_diffusion_payload(
         "gas_product": False,
         "description": description,
         "neb_images": _neb_image_payload(lc),
+        "neb_minimum_checks": getattr(lc, "neb_minimum_checks", []),
+        "neb_minimum_check_count": getattr(lc, "neb_minimum_check_count", 0),
+        "neb_minimum_candidate_limit_reached": getattr(lc, "neb_minimum_candidate_limit_reached", False),
         "neb_intermediate_refinement": getattr(
             lc,
             "neb_intermediate_refinement",
@@ -272,6 +275,9 @@ def build_bond_payload(
         "gas_product": bool(getattr(reaction.site, "gas_product", False)),
         "description": description,
         "neb_images": _neb_image_payload(lc),
+        "neb_minimum_checks": getattr(lc, "neb_minimum_checks", []),
+        "neb_minimum_check_count": getattr(lc, "neb_minimum_check_count", 0),
+        "neb_minimum_candidate_limit_reached": getattr(lc, "neb_minimum_candidate_limit_reached", False),
         "neb_intermediate_refinement": getattr(
             lc,
             "neb_intermediate_refinement",

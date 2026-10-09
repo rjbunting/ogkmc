@@ -150,6 +150,13 @@ optimization:
   # this multiple of diffusion.image_spacing or bond.neb_image_spacing.
   neb_geometry_guard_multiplier: 3.0
 
+  # Search all resolved energy valleys in ordinary and CI-NEB while optimizing.
+  # Each new candidate is relaxed independently with the surface constraints.
+  # null disables periodic checks; 1 checks every optimizer step.
+  neb_intermediate_check_interval: 10
+  neb_intermediate_minimum_recheck_tolerance: 0.1
+  neb_intermediate_minimum_max_candidates: 20
+
   # If the lowest interior-image electronic energy does not improve by at
   # least this tolerance for this many ordinary NEB optimizer steps, inspect
   # the band for intermediate minima. OGKMC optimizes only the nearest

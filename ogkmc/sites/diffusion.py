@@ -192,6 +192,12 @@ class DiffusionLateral:
     direct_event_reason: str | None = None
     direct_event_certificate: dict[str, Any] | None = None
     direct_event_network_signature: str | None = None
+    neb_minimum_checks: list[dict[str, Any]] = field(default_factory=list)
+    atoms_neb_minimum_candidates: list[Any] = field(default_factory=list)
+    atoms_neb_minimum_relaxed: list[Any] = field(default_factory=list)
+    atoms_neb_minimum_source_bands: list[list[Any]] = field(default_factory=list)
+    neb_minimum_check_count: int = 0
+    neb_minimum_candidate_limit_reached: bool = False
     if TYPE_CHECKING:
         _fingerprint : tuple = field(init=False, repr=False, compare=False)
         _rate_cache : dict = field(init=False, repr=False, compare=False)

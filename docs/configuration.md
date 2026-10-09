@@ -144,6 +144,9 @@ optimization:
   neb_method: improvedtangent
   neb_band_eval: images
   neb_geometry_guard_multiplier: 3.0
+  neb_intermediate_check_interval: 10
+  neb_intermediate_minimum_recheck_tolerance: 0.1
+  neb_intermediate_minimum_max_candidates: 20
   neb_intermediate_stagnation_steps: 100
   neb_intermediate_max_refinements: 10
   neb_intermediate_energy_tolerance: 0.001
@@ -185,8 +188,48 @@ spacing. Changing this multiplier does not change the dynamically selected
 number of images. It must be finite and greater than zero, and it is included
 in calculation-cache identities.
 
-The `neb_intermediate_*` controls define a deliberately narrow stalled-path
-refinement. During the ordinary stage, OGKMC tracks the lowest
+`neb_intermediate_check_interval` inspects the initial band and every ten
+optimizer steps by default, during both ordinary NEB and CI-NEB. It is independent
+of stagnation and segment-refinement budgets. Set it to `1` for every step, or
+`null` to disable periodic inspection while keeping the established final-profile
+and recovery checks. The observer uses ASE's current band energy cache; the
+`aseneb` method additionally evaluates its unevaluated endpoint energies once.
+Every interior valley with at least `neb_intermediate_minimum_prominence` (0.01 eV)
+of topographic prominence is a candidate, including broad or flat valleys and
+valleys away from the highest peak. A valley in an unconverged band does not prove
+a stable minimum.
+
+Each new pose is copied and relaxed without NEB springs, using the ordinary
+`optimizer`, its settings, and the channel's force tolerance and step budget.
+The current calculator lease is reused sequentially, so a single-calculator pool
+can run this search without taking a second lease. The surface's PBC, frozen
+atoms, atom order and other constraints remain intact. The live band, optimizer
+velocities and adaptive controls are preserved. A finite relaxation that exhausts
+its budget is recorded as an unstable candidate and NEB continues. Calculator
+errors, invalid layouts and nonfinite results remain failures.
+
+Force-converged candidates immediately enter the existing registered-placement
+and component-event topology classifier. Only a proven composite suppresses the
+direct event; unmatched candidates leave the live band optimizing. Candidate
+relaxation by itself supplies neither a transition state nor a rate. The channel's
+existing transition-state topology and thermochemistry checks still govern rates.
+
+`neb_intermediate_minimum_recheck_tolerance` defaults to 0.1 angstrom maximum
+ordered displacement under the minimum-image convention. It skips repeated source
+or relaxed poses while allowing changed valleys to be reconsidered. It does not
+align or translate a surface-relative pose, which would erase changes in adsorption
+placement. `neb_intermediate_minimum_max_candidates` bounds these relaxations to
+20 per NEB attempt, separately from the segment-refinement budget. All three
+settings and the updated policy participate in calculation-cache identities.
+
+Periodic outcomes appear in `neb_minimum_checks` in reaction/diagnostic JSON and
+survive checkpoints. The `minimum_checks/` directory beside each reaction or
+diagnostic stores each candidate, relaxed pose, complete source band and JSON
+outcome, including unstable and failed candidates. Its `results.json` lists them.
+These diagnostic assets are retained regardless of `persist_neb_path`.
+
+The remaining `neb_intermediate_*` controls define a deliberately narrow
+stalled-path refinement. During the ordinary stage, OGKMC tracks the lowest
 interior-image electronic energy. After 100 consecutive optimizer steps
 without a decrease of at least `neb_intermediate_energy_tolerance`, it finds
 the highest-energy interior image and the nearest local minimum on each side.

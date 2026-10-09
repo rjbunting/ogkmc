@@ -19,6 +19,7 @@ from ase import Atoms
 from ase.neighborlist import NeighborList, natural_cutoffs
 
 from ogkmc.sites.identity import member_identifier
+from ogkmc.io.atoms import copy_atoms_with_results
 
 
 DIRECT_EVENT_ELEMENTARY = "elementary"
@@ -645,6 +646,27 @@ def retain_refinement_and_maybe_suppress(
     )
 
 
+def retain_periodic_minimum_check(
+    lateral_class: Any,
+    candidate: Atoms,
+    relaxed: Atoms,
+    source_band: list[Atoms],
+    metadata: dict[str, Any],
+) -> None:
+    """Retain force-converged, unstable and failed candidates without a rate."""
+    for attribute, value in (
+        ("neb_minimum_checks", dict(metadata)),
+        ("atoms_neb_minimum_candidates", copy_atoms_with_results(candidate)),
+        ("atoms_neb_minimum_relaxed", copy_atoms_with_results(relaxed)),
+        ("atoms_neb_minimum_source_bands", [copy_atoms_with_results(a) for a in source_band]),
+    ):
+        rows = getattr(lateral_class, attribute, None)
+        if rows is None:
+            rows = []
+            setattr(lateral_class, attribute, rows)
+        rows.append(value)
+
+
 __all__ = [
     "CompositeDirectEventDetected",
     "DIRECT_EVENT_COMPOSITE",
@@ -656,4 +678,5 @@ __all__ = [
     "intermediate_pruning_network_signature",
     "mark_composite_direct_event",
     "retain_refinement_and_maybe_suppress",
+    "retain_periodic_minimum_check",
 ]

@@ -391,6 +391,9 @@ def resolve_channel_runtime(cfg, frozen_indices: list[int] | None) -> ChannelRun
             neb_geometry_guard_multiplier=(
                 cfg.optimization.neb_geometry_guard_multiplier
             ),
+            neb_intermediate_check_interval=cfg.optimization.neb_intermediate_check_interval,
+            neb_intermediate_minimum_recheck_tolerance=cfg.optimization.neb_intermediate_minimum_recheck_tolerance,
+            neb_intermediate_minimum_max_candidates=cfg.optimization.neb_intermediate_minimum_max_candidates,
             neb_intermediate_stagnation_steps=(
                 cfg.optimization.neb_intermediate_stagnation_steps
             ),
@@ -439,6 +442,9 @@ def resolve_channel_runtime(cfg, frozen_indices: list[int] | None) -> ChannelRun
             neb_geometry_guard_multiplier=(
                 cfg.optimization.neb_geometry_guard_multiplier
             ),
+            neb_intermediate_check_interval=cfg.optimization.neb_intermediate_check_interval,
+            neb_intermediate_minimum_recheck_tolerance=cfg.optimization.neb_intermediate_minimum_recheck_tolerance,
+            neb_intermediate_minimum_max_candidates=cfg.optimization.neb_intermediate_minimum_max_candidates,
             neb_intermediate_stagnation_steps=(
                 cfg.optimization.neb_intermediate_stagnation_steps
             ),

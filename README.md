@@ -313,6 +313,13 @@ one common effective transition-state level, which preserves reversible energy
 consistency. These calculations are often among the most expensive parts of a
 run.
 
+Ordinary and climbing-image NEB now check for new energy valleys every ten
+optimizer steps. Each new candidate is relaxed without NEB springs while retaining
+the surface constraints and live optimizer state. Finite candidate nonconvergence
+is recorded as unstable; registered intermediate topology is checked immediately.
+The [configuration guide](docs/configuration.md#optimization) describes the interval,
+pose-recheck tolerance, candidate budget and retained diagnostics.
+
 If an ordinary NEB takes 100 optimizer steps without finding a lower
 interior-image electronic energy, OGKMC inspects that band's energy profile.
 It selects only the two nearest minima bracketing the highest-energy image,

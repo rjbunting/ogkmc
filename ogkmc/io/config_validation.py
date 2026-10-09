@@ -352,6 +352,22 @@ class _Validator:
             "optimization.neb_geometry_guard_multiplier",
             strictly_positive=True,
         )
+        if cfg.neb_intermediate_check_interval is not None:
+            self.integer(
+                cfg.neb_intermediate_check_interval,
+                "optimization.neb_intermediate_check_interval",
+                minimum=1,
+            )
+        self.number(
+            cfg.neb_intermediate_minimum_recheck_tolerance,
+            "optimization.neb_intermediate_minimum_recheck_tolerance",
+            minimum=0.0,
+        )
+        self.integer(
+            cfg.neb_intermediate_minimum_max_candidates,
+            "optimization.neb_intermediate_minimum_max_candidates",
+            minimum=1,
+        )
         self.integer(
             cfg.neb_intermediate_stagnation_steps,
             "optimization.neb_intermediate_stagnation_steps",

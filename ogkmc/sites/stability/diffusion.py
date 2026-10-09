@@ -93,6 +93,7 @@ from ogkmc.io.calculation_cache import (
     input_coordinate_frame_fingerprint,
     load_calculation_record,
     make_calculation_record,
+    minimum_check_geometry_records,
     state_payload,
     write_calculation_record,
 )
@@ -130,6 +131,7 @@ from ogkmc.sites.stability.intermediate_pruning import (
     classify_diffusion_intermediate,
     intermediate_pruning_network_signature,
     retain_refinement_and_maybe_suppress,
+    retain_periodic_minimum_check,
 )
 from ogkmc.core.constants import (
     LATERAL_SHELLS_DEFAULT,
@@ -140,6 +142,9 @@ from ogkmc.core.constants import (
     NEB_INTERMEDIATE_MAX_REFINEMENTS,
     NEB_INTERMEDIATE_MINIMUM_PROMINENCE,
     NEB_INTERMEDIATE_REFINEMENT_POLICY,
+    NEB_INTERMEDIATE_CHECK_INTERVAL,
+    NEB_INTERMEDIATE_MINIMUM_RECHECK_TOLERANCE,
+    NEB_INTERMEDIATE_MINIMUM_MAX_CANDIDATES,
     NEB_INTERMEDIATE_STAGNATION_STEPS,
     NEB_MAX_ADJACENT_IMAGE_SPACING_MULTIPLIER,
     NEB_MAX_IMAGES,
@@ -1078,7 +1083,11 @@ def _write_diffusion_calculation_cache(
         states=states,
         reaction_graph=cache_graph,
         neb=neb,
+        minimum_checks=minimum_check_geometry_records(lateral_class),
         lateral_attributes={
+            "neb_minimum_checks": getattr(lateral_class, "neb_minimum_checks", []),
+            "neb_minimum_check_count": getattr(lateral_class, "neb_minimum_check_count", 0),
+            "neb_minimum_candidate_limit_reached": getattr(lateral_class, "neb_minimum_candidate_limit_reached", False),
             "neb_initialization": getattr(
                 lateral_class,
                 "neb_initialization",
@@ -1185,6 +1194,9 @@ def check_diffusion_stability(
     neb_method: str = NEB_METHOD,
     neb_band_eval: str = NEB_BAND_EVAL,
     neb_geometry_guard_multiplier: float = (NEB_MAX_ADJACENT_IMAGE_SPACING_MULTIPLIER),
+    neb_intermediate_check_interval: int | None = NEB_INTERMEDIATE_CHECK_INTERVAL,
+    neb_intermediate_minimum_recheck_tolerance: float = NEB_INTERMEDIATE_MINIMUM_RECHECK_TOLERANCE,
+    neb_intermediate_minimum_max_candidates: int = NEB_INTERMEDIATE_MINIMUM_MAX_CANDIDATES,
     neb_intermediate_stagnation_steps: int = NEB_INTERMEDIATE_STAGNATION_STEPS,
     neb_intermediate_max_refinements: int = NEB_INTERMEDIATE_MAX_REFINEMENTS,
     neb_intermediate_energy_tolerance: float = NEB_INTERMEDIATE_ENERGY_TOLERANCE,
@@ -1348,6 +1360,9 @@ def check_diffusion_stability(
         ),
         "neb_method": str(neb_method).strip().lower(),
         "neb_geometry_guard_multiplier": float(neb_geometry_guard_multiplier),
+        "neb_intermediate_check_interval": neb_intermediate_check_interval,
+        "neb_intermediate_minimum_recheck_tolerance": neb_intermediate_minimum_recheck_tolerance,
+        "neb_intermediate_minimum_max_candidates": neb_intermediate_minimum_max_candidates,
         "neb_intermediate_stagnation_steps": int(
             neb_intermediate_stagnation_steps
         ),
@@ -1379,6 +1394,9 @@ def check_diffusion_stability(
         ),
         "neb_intermediate_refinement_policy": {
             "name": NEB_INTERMEDIATE_REFINEMENT_POLICY,
+            "check_interval": neb_intermediate_check_interval,
+            "minimum_recheck_tolerance": neb_intermediate_minimum_recheck_tolerance,
+            "minimum_max_candidates": neb_intermediate_minimum_max_candidates,
             "stagnation_steps": int(neb_intermediate_stagnation_steps),
             "max_refinements": int(neb_intermediate_max_refinements),
             "energy_tolerance_ev": float(neb_intermediate_energy_tolerance),
@@ -1855,6 +1873,9 @@ def check_diffusion_stability(
         band_eval=neb_band_eval,
         image_spacing=image_selection.target_spacing,
         geometry_guard_multiplier=neb_geometry_guard_multiplier,
+        intermediate_check_interval=neb_intermediate_check_interval,
+        intermediate_minimum_recheck_tolerance=neb_intermediate_minimum_recheck_tolerance,
+        intermediate_minimum_max_candidates=neb_intermediate_minimum_max_candidates,
         intermediate_stagnation_steps=neb_intermediate_stagnation_steps,
         intermediate_max_refinements=neb_intermediate_max_refinements,
         intermediate_energy_tolerance=neb_intermediate_energy_tolerance,
@@ -1864,6 +1885,11 @@ def check_diffusion_stability(
         intermediate_min_images=min_images,
         intermediate_max_images=max_images,
         intermediate_refinement_callback=retain_intermediate_refinement,
+        intermediate_minimum_callback=(
+            lambda candidate, relaxed, band, metadata: retain_periodic_minimum_check(
+                lateral_class, candidate, relaxed, band, metadata,
+            )
+        ),
         verbose=verbose,
         not_converged_error=NEBNotConvergedError,
         persist_path=persist_neb_path,
@@ -1888,6 +1914,8 @@ def check_diffusion_stability(
         ),
         logfile_factory=_neb_optimizer_logfile,
     )
+    lateral_class.neb_minimum_check_count = neb_result.minimum_check_count
+    lateral_class.neb_minimum_candidate_limit_reached = neb_result.minimum_candidate_limit_reached
     E_ts = neb_result.energy_ts
     atoms_ts = neb_result.atoms_ts
     k_ts = neb_result.transition_index

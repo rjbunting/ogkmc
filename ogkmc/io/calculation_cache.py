@@ -26,7 +26,7 @@ import warnings
 from dataclasses import dataclass
 from importlib import metadata as importlib_metadata
 from pathlib import Path
-from typing import Any, Iterator, Mapping
+from typing import Any, Iterator, Mapping, Sequence
 
 import networkx as nx
 import numpy as np
@@ -1049,6 +1049,7 @@ def make_calculation_record(
     reaction_graph: nx.Graph,
     neb: Mapping[str, Any] | None = None,
     lateral_attributes: Mapping[str, Any] | None = None,
+    minimum_checks: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Create the transient source object consumed by the ISAAC writer."""
     kind = str(kind)
@@ -1068,7 +1069,20 @@ def make_calculation_record(
         "reaction_graph": normalise_reaction_graph(reaction_graph),
         "neb": None if neb is None else dict(neb),
         "lateral_attributes": dict(lateral_attributes or {}),
+        "minimum_checks": list(minimum_checks or []),
     }
+
+
+def minimum_check_geometry_records(lateral_class: Any) -> list[dict[str, Any]]:
+    """Prepare complete periodic-minimum geometry groups for the immutable cache."""
+    groups = []
+    for candidate, relaxed, band in zip(
+        getattr(lateral_class, "atoms_neb_minimum_candidates", []),
+        getattr(lateral_class, "atoms_neb_minimum_relaxed", []),
+        getattr(lateral_class, "atoms_neb_minimum_source_bands", []),
+    ):
+        groups.append({"candidate": candidate, "relaxed": relaxed, "source_band": list(band)})
+    return groups
 
 
 def _normalise_smiles_fields(value: Any) -> Any:
@@ -1611,6 +1625,7 @@ def _build_isaac_record(
     state_assets: Mapping[str, str],
     neb_asset: str | None,
     run_id: str | None,
+    minimum_assets: Sequence[Mapping[str, str]] = (),
 ) -> dict[str, Any]:
     kind = str(source["kind"])
     operation = _metadata_jsonable(source["operation"])
@@ -1647,6 +1662,7 @@ def _build_isaac_record(
             for name, payload in states.items()
         },
         "neb_asset": neb_asset,
+        "minimum_check_assets": [dict(group) for group in minimum_assets],
         "neb_energies_ev": _jsonable((source.get("neb") or {}).get("energies_ev", [])),
         "lateral_attributes": lateral_attributes,
         "calculator": parameters.get("calculator", {}),
@@ -1856,6 +1872,31 @@ def write_calculation_record(
             )
         )
 
+    minimum_assets = []
+    for index, group in enumerate(record.get("minimum_checks", [])):
+        group_assets = {}
+        for suffix in ("candidate", "relaxed", "source_band"):
+            atoms = group[suffix]
+            if suffix == "source_band":
+                if not atoms or not all(isinstance(image, Atoms) for image in atoms):
+                    raise ValueError("Minimum-check source band must contain ase.Atoms")
+                snapshot = [_safe_atoms_copy(image) for image in atoms]
+            else:
+                if not isinstance(atoms, Atoms):
+                    raise ValueError("Minimum-check geometry must be ase.Atoms")
+                snapshot = _safe_atoms_copy(atoms)
+            filename = f"minimum_candidate_{index:04d}_{suffix}.extxyz"
+            target = record_dir / filename
+            target.parent.mkdir(exist_ok=True)
+            _atomic_extxyz(target, snapshot)
+            asset_id = f"structure_minimum_{index}_{suffix}"
+            group_assets[suffix] = asset_id
+            assets.append(_asset(
+                asset_id=asset_id, role="reduction_product", filename=filename, path=target,
+                media_type="chemical/x-xyz", notes="Periodic NEB minimum-search diagnostic.",
+            ))
+        minimum_assets.append(group_assets)
+
     isaac = _build_isaac_record(
         record,
         record_id=record_id,
@@ -1875,6 +1916,7 @@ def write_calculation_record(
         assets=assets,
         state_assets=state_assets,
         neb_asset=neb_asset,
+        minimum_assets=minimum_assets,
         run_id=_database_run_id(root_path),
     )
     record_path = record_dir / _RECORD_FILENAME
@@ -2033,6 +2075,18 @@ def _load_record_path(
                 "path": ase_read(neb_info[1], index=":", format="extxyz"),
                 "energies_ev": configuration.get("neb_energies_ev", []),
             }
+        groups = []
+        for group in configuration.get("minimum_check_assets", []):
+            geometries = {}
+            for suffix in ("candidate", "relaxed", "source_band"):
+                asset_info = assets_by_id.get(str(group[suffix]))
+                if asset_info is None:
+                    return None
+                geometries[suffix] = ase_read(
+                    asset_info[1], index=":" if suffix == "source_band" else 0, format="extxyz",
+                )
+            groups.append(geometries)
+        loaded["minimum_checks"] = groups
         return loaded
     except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
         _log.debug("Rejected invalid reaction database record %s", record_path, exc_info=True)
@@ -2433,6 +2487,18 @@ def apply_cached_states(
                 atoms_attr,
                 copy_atoms_with_results(state["atoms"]),
             )
+    minimum_groups = record.get("minimum_checks", [])
+    for suffix, attribute in (
+        ("candidate", "atoms_neb_minimum_candidates"),
+        ("relaxed", "atoms_neb_minimum_relaxed"),
+        ("source_band", "atoms_neb_minimum_source_bands"),
+    ):
+        snapshots = []
+        for group in minimum_groups:
+            atoms = group[suffix]
+            snapshots.append([copy_atoms_with_results(image) for image in atoms]
+                             if suffix == "source_band" else copy_atoms_with_results(atoms))
+        setattr(lateral_class, attribute, snapshots)
     for name, value in record.get("lateral_attributes", {}).items():
         if (
             value is not None

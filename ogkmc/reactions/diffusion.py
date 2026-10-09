@@ -85,6 +85,9 @@ from ogkmc.core.constants import (
     NEB_INTERMEDIATE_ENERGY_TOLERANCE,
     NEB_INTERMEDIATE_MAX_REFINEMENTS,
     NEB_INTERMEDIATE_MINIMUM_PROMINENCE,
+    NEB_INTERMEDIATE_CHECK_INTERVAL,
+    NEB_INTERMEDIATE_MINIMUM_RECHECK_TOLERANCE,
+    NEB_INTERMEDIATE_MINIMUM_MAX_CANDIDATES,
     NEB_INTERMEDIATE_STAGNATION_STEPS,
     NEB_MAX_ADJACENT_IMAGE_SPACING_MULTIPLIER,
     NEB_MAX_IMAGES,
@@ -481,6 +484,9 @@ def get_applicable_diffusion_for_member(
     neb_geometry_guard_multiplier: float = (
         NEB_MAX_ADJACENT_IMAGE_SPACING_MULTIPLIER
     ),
+    neb_intermediate_check_interval: int | None = NEB_INTERMEDIATE_CHECK_INTERVAL,
+    neb_intermediate_minimum_recheck_tolerance: float = NEB_INTERMEDIATE_MINIMUM_RECHECK_TOLERANCE,
+    neb_intermediate_minimum_max_candidates: int = NEB_INTERMEDIATE_MINIMUM_MAX_CANDIDATES,
     neb_intermediate_stagnation_steps: int = NEB_INTERMEDIATE_STAGNATION_STEPS,
     neb_intermediate_max_refinements: int = NEB_INTERMEDIATE_MAX_REFINEMENTS,
     neb_intermediate_energy_tolerance: float = NEB_INTERMEDIATE_ENERGY_TOLERANCE,
@@ -527,6 +533,9 @@ def get_applicable_diffusion_for_member(
             "neb_method": neb_method,
             "neb_band_eval": neb_band_eval,
             "neb_geometry_guard_multiplier": neb_geometry_guard_multiplier,
+            "neb_intermediate_check_interval": neb_intermediate_check_interval,
+            "neb_intermediate_minimum_recheck_tolerance": neb_intermediate_minimum_recheck_tolerance,
+            "neb_intermediate_minimum_max_candidates": neb_intermediate_minimum_max_candidates,
             "neb_intermediate_stagnation_steps": neb_intermediate_stagnation_steps,
             "neb_intermediate_max_refinements": neb_intermediate_max_refinements,
             "neb_intermediate_energy_tolerance": neb_intermediate_energy_tolerance,
@@ -836,6 +845,9 @@ def get_applicable_diffusions(
     neb_geometry_guard_multiplier: float = (
         NEB_MAX_ADJACENT_IMAGE_SPACING_MULTIPLIER
     ),
+    neb_intermediate_check_interval: int | None = NEB_INTERMEDIATE_CHECK_INTERVAL,
+    neb_intermediate_minimum_recheck_tolerance: float = NEB_INTERMEDIATE_MINIMUM_RECHECK_TOLERANCE,
+    neb_intermediate_minimum_max_candidates: int = NEB_INTERMEDIATE_MINIMUM_MAX_CANDIDATES,
     neb_intermediate_stagnation_steps: int = NEB_INTERMEDIATE_STAGNATION_STEPS,
     neb_intermediate_max_refinements: int = NEB_INTERMEDIATE_MAX_REFINEMENTS,
     neb_intermediate_energy_tolerance: float = NEB_INTERMEDIATE_ENERGY_TOLERANCE,
@@ -898,6 +910,9 @@ def get_applicable_diffusions(
                 neb_method=neb_method,
                 neb_band_eval=neb_band_eval,
                 neb_geometry_guard_multiplier=neb_geometry_guard_multiplier,
+                neb_intermediate_check_interval=neb_intermediate_check_interval,
+                neb_intermediate_minimum_recheck_tolerance=neb_intermediate_minimum_recheck_tolerance,
+                neb_intermediate_minimum_max_candidates=neb_intermediate_minimum_max_candidates,
                 neb_intermediate_stagnation_steps=neb_intermediate_stagnation_steps,
                 neb_intermediate_max_refinements=neb_intermediate_max_refinements,
                 neb_intermediate_energy_tolerance=neb_intermediate_energy_tolerance,
@@ -961,6 +976,9 @@ def compute_all_diffusions(
     neb_geometry_guard_multiplier: float = (
         NEB_MAX_ADJACENT_IMAGE_SPACING_MULTIPLIER
     ),
+    neb_intermediate_check_interval: int | None = NEB_INTERMEDIATE_CHECK_INTERVAL,
+    neb_intermediate_minimum_recheck_tolerance: float = NEB_INTERMEDIATE_MINIMUM_RECHECK_TOLERANCE,
+    neb_intermediate_minimum_max_candidates: int = NEB_INTERMEDIATE_MINIMUM_MAX_CANDIDATES,
     neb_intermediate_stagnation_steps: int = NEB_INTERMEDIATE_STAGNATION_STEPS,
     neb_intermediate_max_refinements: int = NEB_INTERMEDIATE_MAX_REFINEMENTS,
     neb_intermediate_energy_tolerance: float = NEB_INTERMEDIATE_ENERGY_TOLERANCE,
@@ -1012,6 +1030,9 @@ def compute_all_diffusions(
                     neb_geometry_guard_multiplier = (
                         neb_geometry_guard_multiplier
                     ),
+                    neb_intermediate_check_interval=neb_intermediate_check_interval,
+                    neb_intermediate_minimum_recheck_tolerance=neb_intermediate_minimum_recheck_tolerance,
+                    neb_intermediate_minimum_max_candidates=neb_intermediate_minimum_max_candidates,
                     neb_intermediate_stagnation_steps = (
                         neb_intermediate_stagnation_steps
                     ),
@@ -1069,6 +1090,9 @@ def compute_all_diffusions(
             neb_method                = neb_method,
             neb_band_eval             = neb_band_eval,
             neb_geometry_guard_multiplier = neb_geometry_guard_multiplier,
+            neb_intermediate_check_interval=neb_intermediate_check_interval,
+            neb_intermediate_minimum_recheck_tolerance=neb_intermediate_minimum_recheck_tolerance,
+            neb_intermediate_minimum_max_candidates=neb_intermediate_minimum_max_candidates,
             neb_intermediate_stagnation_steps = neb_intermediate_stagnation_steps,
             neb_intermediate_max_refinements = neb_intermediate_max_refinements,
             neb_intermediate_energy_tolerance = neb_intermediate_energy_tolerance,

@@ -24,11 +24,15 @@ from ase import Atoms
 from ase.constraints import FixAtoms
 from ase.geometry import find_mic
 from ase.optimize import BFGS, FIRE, MDMin
+from scipy.signal import find_peaks
 
 from ogkmc.core.constants import (
     NEB_BAND_EVAL as DEFAULT_NEB_BAND_EVAL,
     NEB_BAND_EVALS,
     NEB_INTERMEDIATE_ENERGY_TOLERANCE,
+    NEB_INTERMEDIATE_CHECK_INTERVAL,
+    NEB_INTERMEDIATE_MINIMUM_RECHECK_TOLERANCE,
+    NEB_INTERMEDIATE_MINIMUM_MAX_CANDIDATES,
     NEB_INTERMEDIATE_MAX_REFINEMENTS,
     NEB_INTERMEDIATE_MINIMUM_PROMINENCE,
     NEB_INTERMEDIATE_REFINEMENT_POLICY,
@@ -55,6 +59,7 @@ from ogkmc.utils.optimizers import (
     DEFAULT_NEB_OPTIMIZER,
     DEFAULT_OPTIMIZER,
     NEB_OPTIMIZERS,
+    REGULAR_OPTIMIZERS,
     normalize_optimizer_name,
     normalize_optimizer_kwargs,
 )
@@ -172,6 +177,9 @@ class NEBRunResult:
     refinement_target_image_spacing: float | None = None
     refinement_estimated_image_spacing: float | None = None
     refinement_image_count_limited_by: str | None = None
+    minimum_checks: list[dict[str, Any]] | None = None
+    minimum_check_count: int = 0
+    minimum_candidate_limit_reached: bool = False
 
 
 @dataclass(frozen=True)
@@ -273,6 +281,20 @@ def _highest_peak_minimum_bracket(
     if left_index == 0 and right_index == len(values) - 1:
         return None
     return peak_index, left_index, right_index
+
+
+def _minimum_pose_matches(first: Atoms, second: Atoms, tolerance: float) -> bool:
+    """Compare ordered MIC positions without moving a surface-relative pose."""
+    if (
+        not np.array_equal(first.numbers, second.numbers)
+        or not np.array_equal(first.pbc, second.pbc)
+        or not np.allclose(first.cell.array, second.cell.array, rtol=0, atol=1e-8)
+    ):
+        return False
+    delta = second.positions - first.positions
+    if np.asarray(first.pbc).any():
+        delta, _ = find_mic(delta, first.cell.array, pbc=first.pbc)
+    return bool(np.linalg.norm(delta, axis=1).max() <= tolerance)
 
 
 def _maximum_adjacent_image_displacement(
@@ -846,6 +868,9 @@ def run_neb(
     band_eval: str = DEFAULT_NEB_BAND_EVAL,
     image_spacing: float | None = None,
     geometry_guard_multiplier: float = (NEB_MAX_ADJACENT_IMAGE_SPACING_MULTIPLIER),
+    intermediate_check_interval: int | None = NEB_INTERMEDIATE_CHECK_INTERVAL,
+    intermediate_minimum_recheck_tolerance: float = NEB_INTERMEDIATE_MINIMUM_RECHECK_TOLERANCE,
+    intermediate_minimum_max_candidates: int = NEB_INTERMEDIATE_MINIMUM_MAX_CANDIDATES,
     intermediate_stagnation_steps: int | None = None,
     intermediate_max_refinements: int = NEB_INTERMEDIATE_MAX_REFINEMENTS,
     intermediate_energy_tolerance: float = NEB_INTERMEDIATE_ENERGY_TOLERANCE,
@@ -857,6 +882,9 @@ def run_neb(
     intermediate_max_images: int | None = None,
     intermediate_refinement_callback: (
         Callable[[Atoms, Atoms, dict[str, Any]], None] | None
+    ) = None,
+    intermediate_minimum_callback: (
+        Callable[[Atoms, Atoms, list[Atoms], dict[str, Any]], None] | None
     ) = None,
 ) -> NEBRunResult:
     """Optimize one NEB band and return a live-calculator-free result.
@@ -915,6 +943,14 @@ def run_neb(
     or CI stage receives one final profile inspection. A usable bracket restarts
     the shortened segment before the workflow advances or returns its result.
 
+    Periodic inspection runs on both ordinary and CI stages, independently of
+    stagnation/refinement budgets. Every resolved interior energy valley is
+    relaxed on a detached structure with the existing calculator lease and
+    surface constraints. The active band and optimizer state are preserved.
+    Unconverged finite candidates are recorded as unstable. Converged poses
+    enter the existing topology callback; only a proven composite stops NEB.
+    ``intermediate_minimum_callback`` retains every candidate's source band,
+    source/relaxed poses and outcome, including errors, before NEB proceeds.
     """
     build_band = band_factory or make_neb_band
     select_logfile = logfile_factory or neb_optimizer_logfile
@@ -934,6 +970,18 @@ def run_neb(
             raise ValueError("geometry_guard_multiplier must be finite and positive")
         spacing_limit = resolved_guard_multiplier * resolved_spacing
     resolved_stagnation_steps = None
+    if intermediate_check_interval is not None and (
+        type(intermediate_check_interval) is not int or intermediate_check_interval < 1
+    ):
+        raise ValueError("intermediate_check_interval must be a positive integer or None")
+    resolved_recheck_tolerance = float(intermediate_minimum_recheck_tolerance)
+    if not np.isfinite(resolved_recheck_tolerance) or resolved_recheck_tolerance < 0:
+        raise ValueError("intermediate_minimum_recheck_tolerance must be finite and non-negative")
+    if (
+        type(intermediate_minimum_max_candidates) is not int
+        or intermediate_minimum_max_candidates < 1
+    ):
+        raise ValueError("intermediate_minimum_max_candidates must be a positive integer")
     if intermediate_stagnation_steps is not None:
         if type(intermediate_stagnation_steps) is not int:
             raise ValueError("intermediate_stagnation_steps must be an integer or None")
@@ -1033,6 +1081,172 @@ def run_neb(
             refinement_target_image_spacing = None
             refinement_estimated_image_spacing = None
             refinement_image_count_limited_by = None
+            minimum_checks: list[dict[str, Any]] = []
+            minimum_check_count = 0
+            minimum_candidate_limit_reached = False
+            checked_minimum_poses: list[Atoms] = []
+            last_minimum_check = None
+            endpoint_energy_cache: dict[tuple[int, int], float] = {}
+
+            def _band_energy_profile() -> list[float]:
+                cached = np.asarray(getattr(neb, "energies", []), dtype=float)
+                if cached.shape == (len(images),):
+                    energies = cached.copy()
+                    # ASE's aseneb formulation evaluates interior energies only.
+                    if method_name == "aseneb":
+                        for index, endpoint in ((0, active_endpoint_results[0]),
+                                                (-1, active_endpoint_results[1])):
+                            key = (index, id(endpoint))
+                            if key not in endpoint_energy_cache:
+                                pose = endpoint.copy()
+                                pose.calc = endpoint.calc or neb_calculator
+                                endpoint_energy_cache[key] = float(pose.get_potential_energy())
+                            energies[index] = endpoint_energy_cache[key]
+                    if not np.isfinite(energies).all():
+                        raise ValueError("Periodic minimum inspection found non-finite energies")
+                    return energies.tolist()
+                # Legacy custom band factories need not expose ASE's force cache.
+                energies = [float(image.get_potential_energy()) for image in images]
+                if not np.isfinite(energies).all():
+                    raise ValueError("Periodic minimum inspection found non-finite energies")
+                return energies
+
+            def _inspect_periodic_minima(stage: str, step: int) -> None:
+                nonlocal minimum_check_count, last_minimum_check
+                nonlocal minimum_candidate_limit_reached
+                check = (intermediate_refinement_count, stage, step)
+                if (
+                    intermediate_check_interval is None
+                    or step % intermediate_check_interval
+                    or check == last_minimum_check
+                ):
+                    return
+                last_minimum_check = check
+                minimum_check_count += 1
+                energies = _band_energy_profile()
+                valleys, properties = find_peaks(
+                    -np.asarray(energies), prominence=resolved_minimum_prominence,
+                )
+                for index, prominence in zip(valleys, properties["prominences"]):
+                    index = int(index)
+                    if any(_minimum_pose_matches(images[index], previous, resolved_recheck_tolerance)
+                           for previous in checked_minimum_poses):
+                        continue
+                    if len(minimum_checks) >= intermediate_minimum_max_candidates:
+                        minimum_candidate_limit_reached = True
+                        break
+                    checked_minimum_poses.append(images[index].copy())
+                    raw_forces = getattr(neb, "real_forces", None)
+                    source_band = [copy_atoms_with_results(
+                        image, energy=energies[i],
+                        forces=(raw_forces[i] if raw_forces is not None
+                                and 0 < i < len(images) - 1 else None),
+                    ) for i, image in enumerate(images)]
+                    source = source_band[index]
+                    candidate = source.copy()
+                    candidate.calc = None
+                    row = {
+                        "policy": NEB_INTERMEDIATE_REFINEMENT_POLICY,
+                        "trigger": "periodic_minimum_check",
+                        "minimum_check_index": len(minimum_checks),
+                        "source_stage": stage,
+                        "optimizer_steps_at_detection": step,
+                        "refinement_index": intermediate_refinement_count,
+                        "peak_image_index": 1 + int(np.argmax(energies[1:-1])),
+                        "left_state_image_index": index,
+                        "right_state_image_index": len(images) - 1,
+                        "stalled_profile_energies_ev": list(energies),
+                        "prominence_ev": float(prominence),
+                        "other_segments_refined": False,
+                        "status": "running",
+                    }
+                    minimum_checks.append(row)
+                    optimized = source
+                    try:
+                        from ogkmc.structure.optimization import (
+                            StructureOptimisationError, _optimizer_class,
+                        )
+
+                        converged = True
+                        try:
+                            if intermediate_relaxer is not None:
+                                optimized, energy = intermediate_relaxer(
+                                    candidate, f"periodic minimum at image {index}",
+                                )
+                            else:
+                                # Preserve the slab's explicit PBC and constraints;
+                                # optimise_structure promotes nonzero cells to full PBC.
+                                candidate.calc = neb_calculator
+                                relaxation_cls = _optimizer_class(intermediate_optimizer)
+                                relaxation_kwargs = normalize_optimizer_kwargs(
+                                    intermediate_optimizer, intermediate_optimizer_kwargs,
+                                    allowed=REGULAR_OPTIMIZERS,
+                                    setting="intermediate_optimizer_kwargs",
+                                )
+                                with relaxation_cls(
+                                    candidate, logfile=select_logfile(verbose), **relaxation_kwargs,
+                                ) as relaxation:
+                                    converged = bool(relaxation.run(
+                                        fmax=float(fmax), steps=int(max_steps),
+                                    ))
+                                row["relaxation_steps"] = int(relaxation.nsteps)
+                                optimized = candidate
+                                energy = optimized.get_potential_energy()
+                        except StructureOptimisationError as exc:
+                            if exc.converged is not False:
+                                raise
+                            optimized = exc.atoms
+                            energy = optimized.get_potential_energy()
+                            converged = False
+                            row["relaxation_steps"] = exc.steps
+                        if not isinstance(optimized, Atoms):
+                            raise TypeError("intermediate relaxation must return ase.Atoms")
+                        if (
+                            not np.array_equal(optimized.numbers, source.numbers)
+                            or not np.array_equal(optimized.pbc, source.pbc)
+                            or not np.allclose(optimized.cell.array, source.cell.array,
+                                               rtol=0, atol=1e-8)
+                            or not np.isfinite(optimized.positions).all()
+                        ):
+                            raise ValueError("Dynamic minimum changed its ordered atom/cell layout")
+                        if frozen_indices and not np.allclose(
+                            optimized.positions[frozen_indices], source.positions[frozen_indices],
+                            rtol=0, atol=1e-8,
+                        ):
+                            raise ValueError("Dynamic minimum moved frozen surface atoms")
+                        forces = np.asarray(optimized.get_forces(), dtype=float)
+                        if (not np.isfinite(energy) or forces.shape != (len(source), 3)
+                                or not np.isfinite(forces).all()):
+                            raise ValueError("Dynamic minimum returned invalid energy/forces")
+                        force = float(np.linalg.norm(forces, axis=1).max())
+                        row.update(electronic_energy_ev=float(energy), max_force_ev_per_ang=force)
+                        optimized = copy_atoms_with_results(optimized, energy=float(energy),
+                                                            forces=forces)
+                        checked_minimum_poses.append(optimized.copy())
+                        if not converged:
+                            row.update(status="unstable", instability_code="optimization_not_converged")
+                        else:
+                            if force > float(fmax):
+                                raise ValueError("Dynamic minimum is not force-converged")
+                            row["status"] = "force_converged"
+                            if intermediate_refinement_callback is not None:
+                                intermediate_refinement_callback(
+                                    optimized, source_band[-1], dict(row),
+                                )
+                    except (KeyboardInterrupt, Exception) as exc:
+                        row.update(
+                            status="composite" if isinstance(exc, CompositeDirectEventDetected)
+                            else "interrupted" if isinstance(exc, KeyboardInterrupt) else "failed",
+                            reason=f"{type(exc).__name__}: {exc}",
+                        )
+                        if intermediate_minimum_callback is not None:
+                            intermediate_minimum_callback(
+                                source, optimized if isinstance(optimized, Atoms) else source,
+                                source_band, dict(row),
+                            )
+                        raise
+                    if intermediate_minimum_callback is not None:
+                        intermediate_minimum_callback(source, optimized, source_band, dict(row))
 
             def _current_neb_fmax() -> float:
                 forces = np.asarray(neb.get_forces(), dtype=float)
@@ -1162,7 +1376,8 @@ def run_neb(
                         and intermediate_refinement_count < resolved_max_refinements
                     )
                     monitor_intermediate = can_refine_intermediate and not climbing_stage
-                    if spacing_limit is not None or monitor_intermediate:
+                    if (spacing_limit is not None or monitor_intermediate
+                            or intermediate_check_interval is not None):
 
                         def monitor_band() -> None:
                             nonlocal best_fmax, best_positions
@@ -1192,6 +1407,9 @@ def run_neb(
                                         np.asarray(image.positions, dtype=float).copy()
                                         for image in images
                                     ]
+                            _inspect_periodic_minima(
+                                stage, optimizer_steps + int(stage_optimizer.nsteps),
+                            )
                             if not monitor_intermediate:
                                 return
                             energies = [
@@ -1667,6 +1885,9 @@ def run_neb(
                 refinement_image_count_limited_by=(
                     refinement_image_count_limited_by
                 ),
+                minimum_checks=minimum_checks,
+                minimum_check_count=minimum_check_count,
+                minimum_candidate_limit_reached=minimum_candidate_limit_reached,
                 path_energies=path_energies,
                 path_images=path_images,
             )

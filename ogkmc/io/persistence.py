@@ -522,7 +522,7 @@ def _write_missing_bond_result_assets(
 
 def _write_neb_refinement_assets(folder: Path, lateral_class) -> bool:
     """Write the optimized endpoints selected for a stalled-band restart."""
-    wrote = False
+    wrote = _write_neb_minimum_check_assets(folder, lateral_class)
     for filename, attribute in (
         ("neb_refinement_initial.extxyz", "atoms_neb_refinement_initial"),
         ("neb_refinement_final.extxyz", "atoms_neb_refinement_final"),
@@ -533,6 +533,33 @@ def _write_neb_refinement_assets(folder: Path, lateral_class) -> bool:
             _atomic_extxyz(path, _safe_atoms_copy(atoms))
             wrote = True
     return wrote
+
+
+def _write_neb_minimum_check_assets(folder: Path, lateral_class) -> bool:
+    """Retain each periodic candidate, relaxed pose and full source band."""
+    rows = getattr(lateral_class, "neb_minimum_checks", [])
+    if not rows:
+        return False
+    directory = folder / "minimum_checks"
+    ensure_directory(directory)
+    for index, metadata in enumerate(rows):
+        for suffix, attribute in (
+            ("candidate", "atoms_neb_minimum_candidates"),
+            ("relaxed", "atoms_neb_minimum_relaxed"),
+            ("source_band", "atoms_neb_minimum_source_bands"),
+        ):
+            geometries = getattr(lateral_class, attribute, [])
+            if index >= len(geometries):
+                continue
+            atoms = geometries[index]
+            snapshot = (_safe_atoms_copy(atoms) if isinstance(atoms, Atoms)
+                        else [_safe_atoms_copy(image) for image in atoms])
+            target = directory / f"candidate_{index:04d}_{suffix}.extxyz"
+            if not target.is_file():
+                _atomic_extxyz(target, snapshot)
+        _atomic_json(directory / f"candidate_{index:04d}.json", metadata)
+    _atomic_json(directory / "results.json", rows)
+    return True
 
 
 def _event_free_energetics(
@@ -1645,6 +1672,7 @@ class ReactionWriter:
                 else [_safe_atoms_copy(image) for image in atoms]
             )
             _atomic_extxyz(folder / f"{name}.extxyz", images)
+        _write_neb_minimum_check_assets(folder, lc)
         _atomic_json(metadata_path, {
             "artifact_type": "ogkmc-bare-neb-diagnostic",
             "schema_version": "1",
@@ -1664,6 +1692,9 @@ class ReactionWriter:
             "source_member_index": getattr(lc, "_warm_start_member_index", None),
             "energies_ev": energies,
             "neb_path_energies_ev": list(path_energies or []),
+            "neb_minimum_checks": getattr(lc, "neb_minimum_checks", []),
+            "neb_minimum_check_count": getattr(lc, "neb_minimum_check_count", 0),
+            "neb_minimum_candidate_limit_reached": getattr(lc, "neb_minimum_candidate_limit_reached", False),
             "neb_intermediate_refinement": getattr(lc, "neb_intermediate_refinement", None),
             "direct_event_certificate": getattr(lc, "direct_event_certificate", None),
             "ts_energy_diagnostic": getattr(lc, "ts_energy_diagnostic", None),
@@ -1793,6 +1824,9 @@ class ReactionWriter:
             ),
             "template": {"species": smiles},
             "gas_product": False,
+            "neb_minimum_checks": getattr(lc, "neb_minimum_checks", []),
+            "neb_minimum_check_count": getattr(lc, "neb_minimum_check_count", 0),
+            "neb_minimum_candidate_limit_reached": getattr(lc, "neb_minimum_candidate_limit_reached", False),
             "neb_intermediate_refinement": getattr(
                 lc,
                 "neb_intermediate_refinement",
@@ -1920,6 +1954,7 @@ class ReactionWriter:
         )
         folder = self._folder_paths.get(key, folder)
         ensure_directory(folder)
+        _write_neb_minimum_check_assets(folder, lc)
         _prepare_bond_gas_reference_assets(brs, lc)
         structure_specs = (
             ("state_ab_initial", "state_ab_initial.extxyz", getattr(lc, "atoms_ab_initial", None)),
@@ -2048,6 +2083,9 @@ class ReactionWriter:
                 "source": getattr(template, "source", None),
             },
             "gas_product": bool(getattr(brs, "gas_product", False)),
+            "neb_minimum_checks": getattr(lc, "neb_minimum_checks", []),
+            "neb_minimum_check_count": getattr(lc, "neb_minimum_check_count", 0),
+            "neb_minimum_candidate_limit_reached": getattr(lc, "neb_minimum_candidate_limit_reached", False),
             "neb_intermediate_refinement": getattr(
                 lc,
                 "neb_intermediate_refinement",

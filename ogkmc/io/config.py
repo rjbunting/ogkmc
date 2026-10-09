@@ -52,6 +52,9 @@ from ogkmc.core.constants import (
     NEB_INTERMEDIATE_ENERGY_TOLERANCE,
     NEB_INTERMEDIATE_MAX_REFINEMENTS,
     NEB_INTERMEDIATE_MINIMUM_PROMINENCE,
+    NEB_INTERMEDIATE_CHECK_INTERVAL,
+    NEB_INTERMEDIATE_MINIMUM_RECHECK_TOLERANCE,
+    NEB_INTERMEDIATE_MINIMUM_MAX_CANDIDATES,
     NEB_INTERMEDIATE_STAGNATION_STEPS,
     NEB_INTERPOLATION,
     NEB_MAX_ADJACENT_IMAGE_SPACING_MULTIPLIER,
@@ -154,8 +157,13 @@ class OptimizationCfg:
     neb_geometry_guard_multiplier: float = (
         NEB_MAX_ADJACENT_IMAGE_SPACING_MULTIPLIER
     )
-    #: Inspect a stalled ordinary band for intermediate minima after this many
-    #: steps without a lower interior-image electronic energy.
+    #: Inspect ordinary and climbing bands every N steps; None disables it.
+    neb_intermediate_check_interval: int | None = NEB_INTERMEDIATE_CHECK_INTERVAL
+    #: Ordered maximum MIC displacement (angstrom) that skips checked poses.
+    neb_intermediate_minimum_recheck_tolerance: float = NEB_INTERMEDIATE_MINIMUM_RECHECK_TOLERANCE
+    #: Bound independent candidate relaxations in one NEB attempt.
+    neb_intermediate_minimum_max_candidates: int = NEB_INTERMEDIATE_MINIMUM_MAX_CANDIDATES
+    #: Inspect a stalled ordinary band after this many steps without a lower energy.
     neb_intermediate_stagnation_steps: int = NEB_INTERMEDIATE_STAGNATION_STEPS
     #: Maximum number of successive minima-based replacement NEBs.
     neb_intermediate_max_refinements: int = NEB_INTERMEDIATE_MAX_REFINEMENTS
