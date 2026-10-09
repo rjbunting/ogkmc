@@ -2092,7 +2092,7 @@ def _molecular_mapping_preserves_handedness(
     molecular mapping when the resulting atom-ordered geometry can itself be
     superimposed on the representative by a proper rotation within
     ``rmsd_tol``. It is rejected when that test detects a resolved chiral
-    inversion. The default 0.01 Å tolerance accommodates molecular structures
+    inversion. The default 0.1 Å tolerance accommodates molecular structures
     converged against a force threshold rather than exact symmetry constraints.
     """
     rotation, translation = _kabsch(

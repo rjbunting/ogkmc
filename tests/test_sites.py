@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import networkx as nx
@@ -342,7 +343,7 @@ def test_reflected_mapping_accepts_achiral_geometry_but_rejects_chiral_inversion
 
 
 def test_handedness_default_tolerates_optimisation_scale_asymmetry():
-    """A small distortion of achiral benzene is below the 0.01 A resolution."""
+    """A small distortion of achiral benzene is below the 0.1 A resolution."""
     reactant = build_reactant(
         "C1=CC=CC=C1",
         add_hydrogens=True,
@@ -401,13 +402,6 @@ def test_handedness_default_rejects_resolved_chiral_molecules(smiles):
             np.zeros(3),
         )
         assert not _molecular_mapping_preserves_handedness(positions, reflected)
-        # These ordinary tetrahedral stereocentres remain well outside even a
-        # deliberately much looser tolerance than the 0.01 A package default.
-        assert not _molecular_mapping_preserves_handedness(
-            positions,
-            reflected,
-            rmsd_tol=0.1,
-        )
         n_tested += 1
     assert n_tested > 0
 
@@ -421,8 +415,8 @@ def test_handedness_default_defines_near_planar_resolution():
             [-1.0, -0.7, 0.0],
         ])
 
-    below_resolution = weakly_pyramidal(0.01)
-    resolved = weakly_pyramidal(0.02)
+    below_resolution = weakly_pyramidal(0.08)
+    resolved = weakly_pyramidal(0.12)
     reflection = np.array([-1.0, 1.0, 1.0])
 
     assert _molecular_mapping_preserves_handedness(
@@ -437,6 +431,53 @@ def test_handedness_default_defines_near_planar_resolution():
     assert not _molecular_mapping_preserves_handedness(
         resolved,
         resolved * reflection,
+    )
+
+
+def test_pd100_ho3_mirror_mapping_tolerates_gas_relaxation_distortion(monkeypatch):
+    """A captured UMA/oc20 HO3 mirror transfer passes without changing its bonds."""
+    import ogkmc.sites.adsorbate as adsorbate_module
+    from ogkmc.core.graph import build_graph
+    from ogkmc.species.reactant import Reactant
+    from ogkmc.sites.adsorbate import _geometry_connectivity_mismatch_for_cliques
+
+    data = json.loads(
+        (Path(__file__).parent / "data" / "pd100_ho3_mirror.json").read_text()
+    )
+    slab = Atoms("Pd64", positions=data["slab_positions_A"],
+                 cell=data["cell_A"], pbc=True)
+    slab.arrays["surface"] = np.asarray(data["slab_surface_tags"], dtype=np.int8)
+    graph = build_graph(slab)
+    molecule = Atoms("HO3", positions=data["gas_positions_A"])
+    molecule.arrays["surface"] = np.full(4, 2, dtype=np.int8)
+    reactant = Reactant("[H]OO[O]", molecule, build_graph(molecule))
+    representative = np.asarray(data["representative_positions_A"])
+    representative_cliques = [None if c is None else frozenset(c)
+                              for c in data["representative_cliques"]]
+    member_cliques = [None if c is None else frozenset(c)
+                      for c in data["member_cliques"]]
+    handedness_check = _molecular_mapping_preserves_handedness
+    with monkeypatch.context() as strict:
+        strict.setattr(adsorbate_module, "_molecular_mapping_preserves_handedness",
+                       lambda source, target: handedness_check(
+                           source, target, rmsd_tol=0.01))
+        with pytest.raises(RuntimeError, match="handedness_rejections=1"):
+            _propagate_adsorbate_member_positions(
+                graph, representative_cliques, member_cliques,
+                representative, reactant, n_shells=1,
+            )
+
+    member = _propagate_adsorbate_member_positions(
+        graph, representative_cliques, member_cliques,
+        representative, reactant, n_shells=1,
+    )
+    assert _adsorbate_pose_is_outward(graph, member_cliques, member, graph.graph["pbc"])
+    assert _geometry_connectivity_mismatch_for_cliques(
+        graph, member_cliques, reactant, member,
+    ) is None
+    np.testing.assert_allclose(
+        molecule.get_all_distances(), Atoms("HO3", positions=member).get_all_distances(),
+        atol=1e-7,
     )
 
 
